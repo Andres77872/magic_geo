@@ -1,0 +1,391 @@
+schema_version: 1
+name: geo_only_earth_and_diverse_planet_matrix_v1
+
+# Paired sensitivity checks use the same seed. The canonical reference preserves
+# the checked-in Earth configuration exactly, while a repeated smaller control
+# gates determinism and three additional seeds probe generative robustness.
+scenarios:
+  - id: earthlike_reference
+    description: Unmodified checked-in 4096-cell Earth-like configuration.
+    profile: earthlike
+    tags: [earth, canonical_reference]
+    empirical_calibration:
+      target_bundle: geo_validation_earth_empirical_targets.json
+      require_complete: true
+      require_all_passed: true
+    expectations:
+      applicable_realism_pass_fraction: {min: 1.0, max: 1.0}
+      calibration_pass_fraction: {min: 1.0, max: 1.0}
+
+  - id: earthlike_pair
+    description: Paired Earth-like control for diverse parameter sensitivity tests.
+    profile: earthlike
+    repeat: 2
+    tags: [earth, paired_control, determinism]
+    overrides:
+      mesh:
+        cell_count: 512
+      tectonics:
+        plate_count: 10
+      erosion:
+        iterations: 3
+    expectations:
+      ocean_fraction: {min: 0.50, max: 0.85}
+      global_mean_temperature_c: {min: 8.0, max: 22.0}
+      mean_land_precipitation_mm_y: {min: 350.0, max: 1800.0}
+
+  - id: earth_seed_1
+    description: Earth-like seed diversity member 1.
+    profile: earthlike
+    tags: [earth, seed_sweep]
+    overrides:
+      run: {seed: 1}
+      mesh: {cell_count: 512}
+      tectonics: {plate_count: 10}
+      erosion: {iterations: 3}
+
+  - id: earth_seed_2
+    description: Earth-like seed diversity member 2.
+    profile: earthlike
+    tags: [earth, seed_sweep]
+    overrides:
+      run: {seed: 2}
+      mesh: {cell_count: 512}
+      tectonics: {plate_count: 10}
+      erosion: {iterations: 3}
+
+  - id: earth_seed_3
+    description: Earth-like seed diversity member 3.
+    profile: earthlike
+    tags: [earth, seed_sweep]
+    overrides:
+      run: {seed: 3}
+      mesh: {cell_count: 512}
+      tectonics: {plate_count: 10}
+      erosion: {iterations: 3}
+
+  - id: arid_landworld
+    description: Zero-ocean, low-precipitation land world; absence of rivers is valid.
+    tags: [water_regime, arid, edge_case]
+    overrides:
+      mesh:
+        cell_count: 512
+      tectonics:
+        plate_count: 10
+      planet:
+        ocean_fraction_target: 0.0
+        ocean_water_inventory_km3: 0.0
+      climate:
+        precipitation_scale: 0.12
+      erosion:
+        iterations: 3
+    expectations:
+      ocean_fraction: {min: 0.0, max: 0.0}
+      mean_land_precipitation_mm_y: {max: 180.0}
+      mean_land_runoff_mm_y: {max: 100.0}
+      desert_land_fraction: {min: 0.40}
+      valid_river_sink_fraction: {min: 0.95, max: 1.0}
+
+  - id: waterworld
+    description: Deep global-ocean edge case with no required terrestrial phenomena.
+    tags: [water_regime, ocean, edge_case]
+    overrides:
+      mesh:
+        cell_count: 512
+      tectonics:
+        plate_count: 10
+      planet:
+        ocean_fraction_target: 0.95
+        ocean_water_inventory_km3: 5000000000.0
+      erosion:
+        iterations: 3
+    expectations:
+      ocean_fraction: {min: 0.98, max: 1.0}
+      land_area_fraction: {min: 0.0, max: 0.02}
+      river_cell_fraction: {min: 0.0, max: 0.002}
+
+  - id: snowball
+    description: Cold, weakly forced planet used to test temperature, moisture, and ice response.
+    tags: [climate_regime, cold]
+    overrides:
+      mesh:
+        cell_count: 512
+      tectonics:
+        plate_count: 10
+      planet:
+        stellar_luminosity: 0.55
+        greenhouse_factor: 0.50
+      climate:
+        base_temperature_c: -10.0
+      erosion:
+        iterations: 3
+    expectations:
+      global_mean_temperature_c: {max: -15.0}
+      ice_cell_fraction: {min: 0.15}
+
+  - id: hothouse
+    description: Hot, strongly forced planet used to test temperature and ice response.
+    tags: [climate_regime, hot]
+    overrides:
+      mesh:
+        cell_count: 512
+      tectonics:
+        plate_count: 10
+      planet:
+        stellar_luminosity: 1.60
+        greenhouse_factor: 1.70
+      climate:
+        base_temperature_c: 35.0
+      erosion:
+        iterations: 3
+    expectations:
+      global_mean_temperature_c: {min: 40.0}
+      ice_cell_fraction: {min: 0.0, max: 0.01}
+
+  - id: low_obliquity
+    description: Zero-obliquity seasonal control.
+    tags: [orbital, paired_control]
+    overrides:
+      mesh:
+        cell_count: 512
+      tectonics:
+        plate_count: 10
+      planet:
+        axial_tilt_deg: 0.0
+      erosion:
+        iterations: 3
+    expectations:
+      mean_land_seasonal_temperature_range_c: {min: 0.0, max: 0.1}
+
+  - id: high_obliquity
+    description: High-obliquity world requiring a materially larger seasonal cycle.
+    tags: [orbital, high_tilt]
+    overrides:
+      mesh:
+        cell_count: 512
+      tectonics:
+        plate_count: 10
+      planet:
+        axial_tilt_deg: 75.0
+      erosion:
+        iterations: 3
+    expectations:
+      mean_land_seasonal_temperature_range_c: {min: 35.0}
+
+  - id: thin_atmosphere
+    description: Low-gravity, thin-atmosphere climate and hydrology response.
+    tags: [atmosphere, low_gravity]
+    overrides:
+      mesh:
+        cell_count: 512
+      tectonics:
+        plate_count: 10
+      planet:
+        gravity_g: 0.40
+        atmosphere_pressure_bar: 0.05
+      erosion:
+        iterations: 3
+    expectations:
+      global_mean_temperature_c: {max: 5.0}
+      mean_land_precipitation_mm_y: {max: 650.0}
+
+  - id: small_planet
+    description: Radius and gravity scaling below Earth, with area-scaled ocean inventory.
+    tags: [planet_scale, small]
+    overrides:
+      mesh:
+        cell_count: 512
+      tectonics:
+        plate_count: 10
+      planet:
+        radius_km: 3000.0
+        gravity_g: 0.40
+        ocean_water_inventory_km3: 296600000.0
+      erosion:
+        iterations: 3
+
+  - id: super_earth
+    description: Radius and gravity scaling above Earth, with area-scaled ocean inventory.
+    tags: [planet_scale, large]
+    overrides:
+      mesh:
+        cell_count: 512
+      tectonics:
+        plate_count: 10
+      planet:
+        radius_km: 9500.0
+        gravity_g: 1.60
+        ocean_water_inventory_km3: 2975700000.0
+      erosion:
+        iterations: 3
+
+  - id: geodesic_backend
+    description: Nonuniform-area geodesic mesh contract and natural-system replay.
+    tags: [mesh_backend, geodesic]
+    overrides:
+      mesh:
+        backend: geodesic_icosahedron
+        cell_count: 642
+      tectonics:
+        plate_count: 10
+      erosion:
+        iterations: 3
+    expectations:
+      cell_count: {min: 642, max: 642}
+
+  - id: stagnant_surface
+    description: Zero plate motion and no iterative erosion control.
+    tags: [geodynamics, paired_control]
+    overrides:
+      mesh:
+        cell_count: 512
+      tectonics:
+        plate_count: 10
+        min_angular_speed: 0.0
+        max_angular_speed: 0.0
+        plate_motion_scale_deg_per_step: 0.0
+      erosion:
+        iterations: 0
+    expectations:
+      simulation_stage_count: {min: 2, max: 2}
+      plate_motion_transition_count: {min: 0, max: 0}
+
+  - id: active_surface
+    description: Young, hot-interior, rapidly moving and strongly eroding surface.
+    tags: [geodynamics, active]
+    overrides:
+      mesh:
+        cell_count: 512
+      tectonics:
+        plate_count: 10
+        plate_motion_scale_deg_per_step: 4.0
+      planet:
+        internal_heat: 1.8
+        geological_age_ga: 1.0
+      erosion:
+        iterations: 6
+        tectonic_uplift_scale: 1.5
+    expectations:
+      simulation_stage_count: {min: 8, max: 8}
+      plate_motion_transition_count: {min: 6, max: 6}
+      mountain_convergent_alignment: {min: 0.55, max: 1.0}
+
+relations:
+  - id: less_water_makes_less_ocean
+    left: arid_landworld
+    operator: lt
+    right: earthlike_pair
+    metric: ocean_fraction
+    minimum_difference: 0.40
+
+  - id: more_water_makes_more_ocean
+    left: waterworld
+    operator: gt
+    right: earthlike_pair
+    metric: ocean_fraction
+    minimum_difference: 0.10
+
+  - id: dry_forcing_reduces_precipitation
+    left: arid_landworld
+    operator: lt
+    right: earthlike_pair
+    metric: mean_land_precipitation_mm_y
+    minimum_difference: 300.0
+
+  - id: dry_forcing_reduces_runoff
+    left: arid_landworld
+    operator: lt
+    right: earthlike_pair
+    metric: mean_land_runoff_mm_y
+    minimum_difference: 150.0
+
+  - id: cold_forcing_reduces_temperature
+    left: snowball
+    operator: lt
+    right: earthlike_pair
+    metric: global_mean_temperature_c
+    minimum_difference: 20.0
+
+  - id: cold_forcing_reduces_precipitation
+    left: snowball
+    operator: lt
+    right: earthlike_pair
+    metric: mean_land_precipitation_mm_y
+    minimum_difference: 300.0
+
+  - id: cold_forcing_reduces_runoff
+    left: snowball
+    operator: lt
+    right: earthlike_pair
+    metric: mean_land_runoff_mm_y
+    minimum_difference: 150.0
+
+  - id: hot_forcing_raises_temperature
+    left: hothouse
+    operator: gt
+    right: earthlike_pair
+    metric: global_mean_temperature_c
+    minimum_difference: 25.0
+
+  - id: snowball_has_more_ice
+    left: snowball
+    operator: gt
+    right: earthlike_pair
+    metric: ice_cell_fraction
+    minimum_difference: 0.05
+
+  - id: hothouse_has_less_ice
+    left: hothouse
+    operator: lt
+    right: earthlike_pair
+    metric: ice_cell_fraction
+    minimum_difference: 0.02
+
+  - id: high_tilt_increases_seasonality
+    left: high_obliquity
+    operator: gt
+    right: low_obliquity
+    metric: mean_land_seasonal_temperature_range_c
+    minimum_difference: 30.0
+
+  - id: small_planet_has_less_surface_area
+    left: small_planet
+    operator: lt
+    right: earthlike_pair
+    metric: surface_area_km2
+    minimum_difference: 100000000.0
+
+  - id: super_earth_has_more_surface_area
+    left: super_earth
+    operator: gt
+    right: earthlike_pair
+    metric: surface_area_km2
+    minimum_difference: 300000000.0
+
+  - id: active_surface_has_more_stages
+    left: active_surface
+    operator: gt
+    right: stagnant_surface
+    metric: simulation_stage_count
+    minimum_difference: 6.0
+
+  - id: active_surface_has_more_plate_rotation
+    left: active_surface
+    operator: gt
+    right: stagnant_surface
+    metric: mean_plate_cumulative_rotation_deg
+    minimum_difference: 1.0
+
+  - id: active_surface_has_more_erosion_change
+    left: active_surface
+    operator: gt
+    right: stagnant_surface
+    metric: mean_erosion_iteration_elevation_change_m
+    minimum_difference: 1.0
+
+  - id: active_surface_mobilizes_more_sediment
+    left: active_surface
+    operator: gt
+    right: stagnant_surface
+    metric: sediment_gross_mobilization_volume_km3
+    minimum_difference: 1000000.0

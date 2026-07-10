@@ -1,0 +1,273 @@
+{
+  "derivation": {
+    "derived_on": "2026-07-09",
+    "runtime_requires_raw_sources": false,
+    "source_manifests": [
+      {
+        "path": "configs/calibration_sources.natural_earth_110m.json",
+        "sha256": "14c65b4fea2441d7ab61d540b52b078aad1664c291ed0f7e731307287ad90c09"
+      },
+      {
+        "path": "configs/calibration_sources.etopo_2022_1deg.json",
+        "sha256": "0c9d7ef9d0e444bf633bd77ee86f688831e3cbefdc65a9ec7869b7c0d8d33a82"
+      },
+      {
+        "path": "configs/calibration_sources.worldclim_2_1_10m.json",
+        "sha256": "778494bd423489ccaf0c71c63b1d4bb4fa52dd34e324c8112d02e8397228a9c9"
+      },
+      {
+        "path": "configs/calibration_sources.hydrobasins_level3.json",
+        "sha256": "6904025da39ddf45a7c85ba9376d178e066b9f3f4fdfd050fb709ce69c21f155"
+      },
+      {
+        "path": "configs/calibration_sources.hydrorivers_v10.json",
+        "sha256": "fc9ec2b55866a0196601dfa429952ef98986954245e81057440b6bcf8f44b6e2"
+      }
+    ],
+    "tool": "magic_geo.calibration.derive_calibration_targets"
+  },
+  "description": "Compact, precomputed Earth-reference target ranges derived from checksum-pinned Natural Earth, NOAA ETOPO 2022, WorldClim 2.1, HydroBASINS v1.c, and HydroRIVERS v1.0 sources. Raw source data are not required to evaluate these targets.",
+  "name": "canonical_earth_empirical_targets_v1",
+  "schema_version": 1,
+  "sources": {
+    "etopo_2022": {
+      "dataset": "NOAA ETOPO 2022",
+      "layer": "ice_surface_elevation_1deg_stride",
+      "source": "calibration_data/etopo_2022_1deg/ETOPO_2022_v1_1deg_surface.dap.txt",
+      "source_acquired_on": "2026-07-09",
+      "source_citation": "NOAA National Centers for Environmental Information. 2022: ETOPO 2022 15 Arc-Second Global Relief Model.",
+      "source_doi": "10.25921/fd45-gt74",
+      "source_format": "opendap_ascii_grid",
+      "source_horizontal_crs": "WGS 84 (EPSG:4326)",
+      "source_license": "Produced by NOAA NCEI; not subject to copyright protection within the United States.",
+      "source_license_url": "https://www.ncei.noaa.gov/access/metadata/landing-page/bin/iso?id=gov.noaa.ngdc.mgg.dem%3Aetopo_2022",
+      "source_native_resolution": "60 arc-second global surface grid; 1-degree center-point stride response",
+      "source_sha256": "b7d411642f8cf91de8c4c4d2fe630d5250a7d650cfc4b267e85b3af48306180b",
+      "source_url": "https://www.ngdc.noaa.gov/thredds/dodsC/global/ETOPO2022/60s/60s_surface_elev_netcdf/ETOPO_2022_v1_60s_N90W180_surface.nc.ascii?z[30:60:10770][30:60:21570]",
+      "source_version": "ETOPO 2022 v1",
+      "source_vertical_datum": "EGM2008 height (EPSG:3855)"
+    },
+    "hydrobasins_level3": {
+      "dataset": "HydroBASINS",
+      "layer": "standard_pfafstetter_level_3",
+      "source": "configs/hydrobasins_level3_catalog.json",
+      "source_acquired_on": "2026-07-09",
+      "source_citation": "Lehner, B. and Grill, G. (2013). Global river hydrography and network routing: baseline data and new approaches to study the world's large river systems.",
+      "source_doi": "10.1002/hyp.9740",
+      "source_format": "hydrobasins_archive_catalog",
+      "source_geographic_coverage": "All nine HydroBASINS v1.c regions; near-global non-Antarctic land coverage",
+      "source_horizontal_crs": "WGS 84 geographic coordinates",
+      "source_license": "Freely available for scientific, educational, and commercial use under the HydroSHEDS license agreement; attribution and license terms apply.",
+      "source_license_url": "https://data.hydrosheds.org/file/technical-documentation/HydroSHEDS_TechDoc_v1_4.pdf",
+      "source_native_resolution": "HydroBASINS standard Pfafstetter level 3, derived from HydroSHEDS 15 arc-second hydrography",
+      "source_sha256": "6f555c6df336e72161f01d91027cddbd8438dc14cc694404c4638b3a0d980a48",
+      "source_url": "https://www.hydrosheds.org/products/hydrobasins",
+      "source_version": "HydroBASINS v1.c"
+    },
+    "hydrorivers_v10": {
+      "dataset": "HydroRIVERS",
+      "layer": "global_terminal_networks_ge_1000000_km2",
+      "source": "calibration_data/hydrorivers_v10/HydroRIVERS_v10_shp.zip",
+      "source_acquired_on": "2026-07-09",
+      "source_archive_url": "https://data.hydrosheds.org/file/HydroRIVERS/HydroRIVERS_v10_shp.zip",
+      "source_citation": "Lehner, B. and Grill, G. (2013). Global river hydrography and network routing: baseline data and new approaches to study the world's large river systems.",
+      "source_doi": "10.1002/hyp.9740",
+      "source_format": "hydrorivers_shapefile_zip",
+      "source_geographic_coverage": "Near-global land excluding Antarctica; source quality is lower north of 60 degrees north",
+      "source_horizontal_crs": "WGS 84 geographic coordinates",
+      "source_license": "Freely available for scientific, educational, and commercial use under the HydroSHEDS license agreement; attribution and license terms apply.",
+      "source_license_url": "https://data.hydrosheds.org/file/technical-documentation/HydroSHEDS_TechDoc_v1_4.pdf",
+      "source_native_resolution": "River reaches extracted from HydroSHEDS 15 arc-second hydrography with 10 km2 upstream-area or 0.1 m3/s discharge initiation",
+      "source_sha256": "0cf9e363e4b48ede535787f9e2eecbcff43eb53acad4b9cbf048c9e12453e5b5",
+      "source_url": "https://www.hydrosheds.org/products/hydrorivers",
+      "source_version": "HydroRIVERS v1.0"
+    },
+    "natural_earth_110m": {
+      "dataset": "Natural Earth",
+      "layer": "ne_110m_land",
+      "source": "calibration_data/natural_earth_110m/ne_110m_land.shp",
+      "source_acquired_on": "2026-07-09",
+      "source_archive_sha256": "1926c621afd6ac67c3f36639bb1236134a48d82226dc675d3e3df53d02d2a3de",
+      "source_archive_url": "https://naciscdn.org/naturalearth/110m/physical/ne_110m_land.zip",
+      "source_format": "shapefile",
+      "source_license": "Public domain",
+      "source_license_url": "https://www.naturalearthdata.com/about/terms-of-use/",
+      "source_sha256": "8689e6932b8e370e2ca4587cf3ba21e460b1235db37b6ed3c172c35b4a6088de",
+      "source_url": "https://www.naturalearthdata.com/downloads/110m-physical-vectors/110m-land/",
+      "source_version": "4.1.0"
+    },
+    "worldclim_prec": {
+      "dataset": "WorldClim 2.1",
+      "layer": "monthly_precipitation_1970_2000_10m",
+      "source": "calibration_data/worldclim_2_1_10m/wc2.1_10m_prec.zip",
+      "source_acquired_on": "2026-07-09",
+      "source_citation": "Fick, S.E. and R.J. Hijmans, 2017. WorldClim 2: new 1-km spatial resolution climate surfaces for global land areas.",
+      "source_format": "worldclim_geotiff_zip",
+      "source_horizontal_crs": "WGS 84 geographic coordinates",
+      "source_license": "Academic and other non-commercial use; redistribution and commercial use require prior permission.",
+      "source_license_url": "https://www.worldclim.org/about.html",
+      "source_native_resolution": "10 arc-minute monthly GeoTIFF normals",
+      "source_sha256": "1090f578f6402672a2b6438e252156f6cf867a25002a8ad6ffcbfa19e516ddc6",
+      "source_url": "https://geodata.ucdavis.edu/climate/worldclim/2_1/base/wc2.1_10m_prec.zip",
+      "source_version": "WorldClim 2.1 (January 2020)"
+    },
+    "worldclim_tavg": {
+      "dataset": "WorldClim 2.1",
+      "layer": "monthly_average_temperature_1970_2000_10m",
+      "source": "calibration_data/worldclim_2_1_10m/wc2.1_10m_tavg.zip",
+      "source_acquired_on": "2026-07-09",
+      "source_citation": "Fick, S.E. and R.J. Hijmans, 2017. WorldClim 2: new 1-km spatial resolution climate surfaces for global land areas.",
+      "source_format": "worldclim_geotiff_zip",
+      "source_horizontal_crs": "WGS 84 geographic coordinates",
+      "source_license": "Academic and other non-commercial use; redistribution and commercial use require prior permission.",
+      "source_license_url": "https://www.worldclim.org/about.html",
+      "source_native_resolution": "10 arc-minute monthly GeoTIFF normals",
+      "source_sha256": "5e567dcfe94379b94229492849ce91078b1c6e5210aaf435fba449fae6b95405",
+      "source_url": "https://geodata.ucdavis.edu/climate/worldclim/2_1/base/wc2.1_10m_tavg.zip",
+      "source_version": "WorldClim 2.1 (January 2020)"
+    }
+  },
+  "targets": [
+    {
+      "metric": "coastal_land_fraction",
+      "source_id": "natural_earth_110m",
+      "source_metric": "fibonacci_4096_coastal_land_fraction",
+      "source_sample_cell_count": 4096,
+      "source_sample_neighbor_count": 7,
+      "source_statistic": "fibonacci_coastal_land_fraction",
+      "source_value": 0.484033613445,
+      "target_max": 0.534033613445,
+      "target_min": 0.434033613445,
+      "tolerance_basis": "Absolute Earth-like model-fit tolerance for generated coast variability; not a statistical confidence interval."
+    },
+    {
+      "metric": "below_sea_level_surface_fraction",
+      "source_id": "etopo_2022",
+      "source_metric": "fibonacci_ocean_fraction",
+      "source_processing": "OPeNDAP z[30:60:10770][30:60:21570], then nearest-coordinate sampling at 4096 native Fibonacci centers",
+      "source_sample_cell_count": 4096,
+      "source_statistic": "fibonacci_ocean_fraction",
+      "source_value": 0.708984375,
+      "target_max": 0.728984375,
+      "target_min": 0.688984375,
+      "tolerance_basis": "Absolute Earth-like model-fit tolerance; not a statistical confidence interval."
+    },
+    {
+      "metric": "mean_nonnegative_surface_elevation_m",
+      "source_id": "etopo_2022",
+      "source_metric": "fibonacci_mean_land_elevation_m",
+      "source_processing": "OPeNDAP z[30:60:10770][30:60:21570], then nearest-coordinate sampling at 4096 native Fibonacci centers",
+      "source_sample_cell_count": 4096,
+      "source_statistic": "fibonacci_mean_land_elevation_m",
+      "source_value": 796.973802769295,
+      "target_max": 956.368563323154,
+      "target_min": 637.579042215436,
+      "tolerance_basis": "Twenty-percent Earth-like model-fit tolerance; not a statistical confidence interval."
+    },
+    {
+      "metric": "surface_elevation_span_m",
+      "source_id": "etopo_2022",
+      "source_metric": "fibonacci_hypsometric_span_m",
+      "source_processing": "OPeNDAP z[30:60:10770][30:60:21570], then nearest-coordinate sampling at 4096 native Fibonacci centers",
+      "source_sample_cell_count": 4096,
+      "source_statistic": "fibonacci_hypsometric_span_m",
+      "source_value": 14354.6447,
+      "target_max": 16507.841405,
+      "target_min": 12201.447995,
+      "tolerance_basis": "Fifteen-percent Earth-like model-fit tolerance; not a statistical confidence interval."
+    },
+    {
+      "metric": "non_antarctic_endorheic_watershed_fraction",
+      "source_id": "hydrobasins_level3",
+      "source_metric": "hydrobasins_endorheic_basin_fraction",
+      "source_processing": "Nine checksum-pinned regional DBF tables aggregated globally; ENDO values 1 or 2 counted as endorheic",
+      "source_sample_record_count": 292,
+      "source_statistic": "hydrobasins_endorheic_basin_fraction",
+      "source_value": 0.119863013699,
+      "source_variable_units": "fraction of level-3 basin polygons with ENDO > 0",
+      "target_max": 0.169863013699,
+      "target_min": 0.069863013699,
+      "tolerance_basis": "Five-percentage-point coarse terminal-basin model-fit tolerance. Generated coverage includes whole resolution-dependent watersheds with centroid latitude at or north of 60 degrees south to exclude Antarctica; generated units are not a Pfafstetter hierarchy and this is not a statistical confidence interval."
+    },
+    {
+      "metric": "non_antarctic_endorheic_watershed_area_fraction",
+      "source_id": "hydrobasins_level3",
+      "source_metric": "hydrobasins_endorheic_area_fraction",
+      "source_processing": "Nine checksum-pinned regional DBF tables aggregated globally; SUB_AREA summed for ENDO values 1 or 2",
+      "source_sample_record_count": 292,
+      "source_statistic": "hydrobasins_endorheic_area_fraction",
+      "source_value": 0.174952444749,
+      "source_variable_units": "SUB_AREA-weighted fraction of level-3 basin polygons with ENDO > 0",
+      "target_max": 0.254952444749,
+      "target_min": 0.094952444749,
+      "tolerance_basis": "Eight-percentage-point endorheic-area model-fit tolerance. Summed terminal-watershed area is compared over generated coverage with centroid latitude at or north of 60 degrees south; HydroBASINS lumping and virtual endorheic connections remain semantic limitations, and this is not a statistical confidence interval."
+    },
+    {
+      "metric": "watershed_hack_fitted_exponent",
+      "source_id": "hydrorivers_v10",
+      "source_metric": "hydrorivers_hack_fitted_exponent",
+      "source_minimum_upstream_area_km2": 1000000.0,
+      "source_processing": "Stream global DBF; select NEXT_DOWN = 0 and UPLAND_SKM >= 1000000; ordinary least-squares fit of log(DIST_UP_KM) on log(UPLAND_SKM)",
+      "source_sample_record_count": 17,
+      "source_statistic": "hydrorivers_hack_fitted_exponent",
+      "source_value": 0.455213509131,
+      "source_variable_units": "dimensionless exponent from log main-channel length versus log upstream area",
+      "target_max": 0.655213509131,
+      "target_min": 0.255213509131,
+      "tolerance_basis": "Absolute coarse-network Hack-exponent model-fit tolerance. Source and generated fits use terminal networks/basins above the same one-million-km2 floor; not a statistical confidence interval."
+    },
+    {
+      "metric": "watershed_hack_fitted_log_rmse",
+      "source_id": "hydrorivers_v10",
+      "source_metric": "hydrorivers_hack_fitted_log_rmse",
+      "source_minimum_upstream_area_km2": 1000000.0,
+      "source_processing": "Stream global DBF; select NEXT_DOWN = 0 and UPLAND_SKM >= 1000000; ordinary least-squares fit of log(DIST_UP_KM) on log(UPLAND_SKM)",
+      "source_sample_record_count": 17,
+      "source_statistic": "hydrorivers_hack_fitted_log_rmse",
+      "source_value": 0.155416679619,
+      "source_variable_units": "natural-log root-mean-square residual around the fitted Hack relation",
+      "target_max": 0.405416679619,
+      "target_min": 0.0,
+      "tolerance_basis": "Physical-floor interval from zero to the HydroRIVERS natural-log RMSE plus 0.25, allowing coarse generated drainage paths more multiplicative scatter while retaining a bounded comparison; not a statistical confidence interval."
+    },
+    {
+      "metric": "mean_land_annual_temperature_c",
+      "source_id": "worldclim_tavg",
+      "source_metric": "fibonacci_mean_land_annual_temperature_c",
+      "source_processing": "Twelve GeoTIFF months sampled at 4096 native Fibonacci centers; complete land samples only; monthly values averaged per cell then across land",
+      "source_sample_cell_count": 4096,
+      "source_statistic": "fibonacci_mean_land_annual_temperature_c",
+      "source_value": 9.365324663961,
+      "source_variable_units": "degrees Celsius",
+      "target_max": 12.365324663961,
+      "target_min": 6.365324663961,
+      "tolerance_basis": "Three-degree Earth-like land-climate model-fit tolerance; not a statistical confidence interval."
+    },
+    {
+      "metric": "mean_land_annual_temperature_range_c",
+      "source_id": "worldclim_tavg",
+      "source_metric": "fibonacci_mean_land_annual_temperature_range_c",
+      "source_processing": "Twelve GeoTIFF months sampled at 4096 native Fibonacci centers; complete land samples only; per-cell monthly maximum minus minimum averaged across land",
+      "source_sample_cell_count": 4096,
+      "source_statistic": "fibonacci_mean_land_annual_temperature_range_c",
+      "source_value": 19.542444335321,
+      "source_variable_units": "degrees Celsius",
+      "target_max": 23.542444335321,
+      "target_min": 15.542444335321,
+      "tolerance_basis": "Four-degree Earth-like seasonal-range model-fit tolerance; not a statistical confidence interval."
+    },
+    {
+      "metric": "mean_land_precipitation_mm_y",
+      "source_id": "worldclim_prec",
+      "source_metric": "fibonacci_mean_land_annual_precipitation_mm",
+      "source_processing": "Twelve GeoTIFF months sampled at 4096 native Fibonacci centers; complete land samples only; monthly precipitation summed per cell then averaged across land",
+      "source_sample_cell_count": 4096,
+      "source_statistic": "fibonacci_mean_land_annual_precipitation_mm",
+      "source_value": 774.665594855305,
+      "source_variable_units": "millimeters per month",
+      "target_max": 968.331993569132,
+      "target_min": 580.999196141479,
+      "tolerance_basis": "Twenty-five-percent Earth-like land-precipitation model-fit tolerance; not a statistical confidence interval."
+    }
+  ]
+}
