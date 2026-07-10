@@ -3,14 +3,14 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .planet_parameters import planet_radius_km
 from .scaling import HACK_FIT_MINIMUM_BASIN_AREA_KM2, fit_power_law
 
 
 HACK_EXPONENT = 0.6
 
 
-def _great_circle_km(a: dict[str, Any], b: dict[str, Any]) -> float:
-    radius_km = 6371.0
+def _great_circle_km(a: dict[str, Any], b: dict[str, Any], radius_km: float) -> float:
     lat_a = math.radians(float(a.get("lat_deg", 0.0)))
     lat_b = math.radians(float(b.get("lat_deg", 0.0)))
     dlat = lat_b - lat_a
@@ -42,13 +42,13 @@ def _trace_downstream_path(
     return path
 
 
-def _path_length(path: list[int], cells_by_id: dict[int, dict[str, Any]]) -> float:
+def _path_length(path: list[int], cells_by_id: dict[int, dict[str, Any]], radius_km: float) -> float:
     length = 0.0
     for first_id, second_id in zip(path, path[1:]):
         first = cells_by_id.get(first_id)
         second = cells_by_id.get(second_id)
         if first is not None and second is not None:
-            length += _great_circle_km(first, second)
+            length += _great_circle_km(first, second, radius_km)
     return length
 
 
@@ -76,13 +76,18 @@ def _path_drop(path: list[int], cells_by_id: dict[int, dict[str, Any]]) -> float
     )
 
 
-def _basin_river_length(river_cells: list[dict[str, Any]], basin_id: int, cells_by_id: dict[int, dict[str, Any]]) -> float:
+def _basin_river_length(
+    river_cells: list[dict[str, Any]],
+    basin_id: int,
+    cells_by_id: dict[int, dict[str, Any]],
+    radius_km: float,
+) -> float:
     total = 0.0
     for cell in river_cells:
         next_cell = cells_by_id.get(int(cell.get("flow_to", -1)))
         if next_cell is None or int(next_cell.get("basin_id", -1)) != basin_id:
             continue
-        total += _great_circle_km(cell, next_cell)
+        total += _great_circle_km(cell, next_cell, radius_km)
     return total
 
 
@@ -92,6 +97,7 @@ def enrich_world_with_watershed_diagnostics(world: dict[str, Any]) -> dict[str, 
     if not isinstance(cells, list) or not isinstance(watersheds, list):
         return world
 
+    radius_km = planet_radius_km(world)
     cells_by_id = {int(cell.get("id", index)): cell for index, cell in enumerate(cells)}
     basin_cells: dict[int, list[dict[str, Any]]] = {}
     for cell in cells:
@@ -113,7 +119,7 @@ def enrich_world_with_watershed_diagnostics(world: dict[str, Any]) -> dict[str, 
 
         for cell in drainage_cells:
             path = _trace_downstream_path(cell, basin_id, cells_by_id, max_steps)
-            length = _path_length(path, cells_by_id)
+            length = _path_length(path, cells_by_id, radius_km)
             accumulation = float(cell.get("flow_accumulation", 0.0))
             if (
                 not best_path
@@ -129,7 +135,7 @@ def enrich_world_with_watershed_diagnostics(world: dict[str, Any]) -> dict[str, 
             best_path = [int(outlet_candidate.get("id", -1))]
             best_accumulation = float(outlet_candidate.get("flow_accumulation", 0.0))
 
-        total_river_length = _basin_river_length(river_cells, basin_id, cells_by_id)
+        total_river_length = _basin_river_length(river_cells, basin_id, cells_by_id, radius_km)
         area_km2 = max(0.0, float(watershed.get("area_km2", 0.0)))
         drainage_density = total_river_length / max(1.0, area_km2) * 1000.0
         hack_denominator = area_km2 ** HACK_EXPONENT if area_km2 > 0.0 else 0.0
@@ -139,7 +145,7 @@ def enrich_world_with_watershed_diagnostics(world: dict[str, Any]) -> dict[str, 
             first = cells_by_id.get(best_path[0])
             last = cells_by_id.get(best_path[-1])
             if first is not None and last is not None:
-                direct_length = _great_circle_km(first, last)
+                direct_length = _great_circle_km(first, last, radius_km)
         sinuosity = best_length / max(1.0, direct_length) if best_length > 0.0 and direct_length > 0.0 else 1.0
         channel_drop = _path_drop(best_path, cells_by_id)
         channel_gradient = channel_drop / max(1.0, best_length * 1000.0)

@@ -3,12 +3,25 @@ from __future__ import annotations
 from typing import Any
 
 
-VALID_DRAINAGE_OUTLETS = {
+VALID_TERMINAL_WATER_BODY_TYPES = {
     "ocean",
     "continental_shelf",
     "inland_sea",
     "fresh_lake",
     "saline_basin",
+}
+
+# Watersheds use a deliberately different vocabulary from cell water bodies.
+# Keep both schemas explicit so a valid closed basin is not rejected merely
+# because its terminal land cell is neither a lake nor marked is_closed_basin.
+VALID_WATERSHED_OUTLET_TYPES = {
+    "ocean",
+    "lake",
+    "saline_basin",
+    "inland_sea",
+    "closed_land",
+    # Backward-compatible aliases used by older world snapshots.
+    "fresh_lake",
     "endorheic",
 }
 
@@ -38,12 +51,31 @@ def _cell_elevation(cell: dict[str, Any]) -> float:
     )
 
 
-def _is_coastal(cell: dict[str, Any], cells_by_id: dict[int, dict[str, Any]]) -> bool:
+def _has_marine_neighbor(
+    cell: dict[str, Any],
+    cells_by_id: dict[int, dict[str, Any]],
+) -> bool:
     return any(
         bool(cells_by_id[int(neighbor_id)].get("is_water", False))
         for neighbor_id in cell.get("neighbors", [])
         if int(neighbor_id) in cells_by_id
     )
+
+
+def _delta_terminal_environment(
+    cell: dict[str, Any],
+    cells_by_id: dict[int, dict[str, Any]],
+) -> str:
+    """Classify the terminal water setting recognized by derive_landforms."""
+    downstream = cells_by_id.get(int(cell.get("flow_to", -1)))
+    if downstream is not None:
+        if bool(downstream.get("is_lake", False)):
+            return "lacustrine"
+        if bool(downstream.get("is_water", False)):
+            return "marine"
+    if _has_marine_neighbor(cell, cells_by_id):
+        return "marine"
+    return "unrecognized"
 
 
 def _trace_terminal(
@@ -68,19 +100,25 @@ def _trace_terminal(
     return path, current, True
 
 
-def _has_valid_sink(
+def _valid_sink_reason(
     terminal_cell: dict[str, Any],
-    watershed_outlets_by_basin_id: dict[int, str],
-) -> bool:
+    watersheds_by_basin_id: dict[int, dict[str, Any]],
+) -> str | None:
     water_body_type = str(terminal_cell.get("water_body_type", ""))
     basin_id = int(terminal_cell.get("basin_id", -1))
-    outlet_type = watershed_outlets_by_basin_id.get(basin_id, "")
-    return (
-        water_body_type in VALID_DRAINAGE_OUTLETS
-        or outlet_type in VALID_DRAINAGE_OUTLETS
-        or bool(terminal_cell.get("is_lake", False))
-        or bool(terminal_cell.get("is_closed_basin", False))
-    )
+    watershed = watersheds_by_basin_id.get(basin_id, {})
+    outlet_type = str(watershed.get("outlet_type", ""))
+    if water_body_type in VALID_TERMINAL_WATER_BODY_TYPES:
+        return f"terminal_water_body:{water_body_type}"
+    if bool(terminal_cell.get("is_lake", False)):
+        return "terminal_cell:is_lake"
+    if outlet_type in VALID_WATERSHED_OUTLET_TYPES:
+        return f"watershed_outlet:{outlet_type}"
+    if bool(watershed.get("is_endorheic", False)):
+        return "watershed:is_endorheic"
+    if bool(terminal_cell.get("is_closed_basin", False)):
+        return "terminal_cell:is_closed_basin"
+    return None
 
 
 def _check_record(
@@ -122,8 +160,8 @@ def enrich_world_with_hydrology_realism(world: dict[str, Any]) -> dict[str, Any]
     if not isinstance(watersheds, list):
         watersheds = []
     cells_by_id = {int(cell.get("id", index)): cell for index, cell in enumerate(cells)}
-    watershed_outlets_by_basin_id = {
-        int(watershed.get("basin_id", -1)): str(watershed.get("outlet_type", "unknown"))
+    watersheds_by_basin_id = {
+        int(watershed.get("basin_id", -1)): watershed
         for watershed in watersheds
     }
 
@@ -132,17 +170,29 @@ def enrich_world_with_hydrology_realism(world: dict[str, Any]) -> dict[str, Any]
     valid_sink_count = 0
     terminal_cycle_count = 0
     terminal_types: dict[str, int] = {}
+    valid_sink_reasons: dict[str, int] = {}
     for river_cell in river_cells:
-        _path, terminal_cell, has_cycle = _trace_terminal(river_cell, cells_by_id, max_trace_steps)
+        _path, terminal_cell, has_cycle = _trace_terminal(
+            river_cell,
+            cells_by_id,
+            max_trace_steps,
+        )
         terminal_cycle_count += 1 if has_cycle else 0
         basin_id = int(terminal_cell.get("basin_id", -1))
-        terminal_type = watershed_outlets_by_basin_id.get(
-            basin_id,
-            str(terminal_cell.get("water_body_type", "unknown")),
+        terminal_watershed = watersheds_by_basin_id.get(basin_id, {})
+        terminal_type = str(
+            terminal_watershed.get(
+                "outlet_type",
+                str(terminal_cell.get("water_body_type", "unknown")),
+            )
         )
         terminal_types[terminal_type] = terminal_types.get(terminal_type, 0) + 1
-        if not has_cycle and _has_valid_sink(terminal_cell, watershed_outlets_by_basin_id):
+        valid_sink_reason = _valid_sink_reason(terminal_cell, watersheds_by_basin_id)
+        if not has_cycle and valid_sink_reason is not None:
             valid_sink_count += 1
+            valid_sink_reasons[valid_sink_reason] = (
+                valid_sink_reasons.get(valid_sink_reason, 0) + 1
+            )
     valid_river_sink_fraction = valid_sink_count / len(river_cells) if river_cells else 1.0
 
     river_edges: list[tuple[dict[str, Any], dict[str, Any]]] = []
@@ -160,26 +210,44 @@ def enrich_world_with_hydrology_realism(world: dict[str, Any]) -> dict[str, Any]
     monotonic_accumulation_count = sum(
         1
         for current, downstream in river_edges
-        if float(downstream.get("flow_accumulation", 0.0)) >= float(current.get("flow_accumulation", 0.0))
+        if (
+            float(downstream.get("flow_accumulation", 0.0))
+            >= float(current.get("flow_accumulation", 0.0))
+        )
     )
     accumulation_coherence = monotonic_accumulation_count / len(river_edges) if river_edges else 1.0
     no_cycle_fraction = 1.0 - (terminal_cycle_count / len(river_cells) if river_cells else 0.0)
     tributary_merge_coherence = _clamp(accumulation_coherence * 0.75 + no_cycle_fraction * 0.25)
 
     delta_cells = [cell for cell in cells if str(cell.get("landform", "")) == "delta"]
-    lowland_sediment_coastal_deltas = [
+    delta_terminal_environments = {
+        int(cell.get("id", -1)): _delta_terminal_environment(cell, cells_by_id)
+        for cell in delta_cells
+    }
+    lowland_sediment_terminal_water_deltas = [
         cell
         for cell in delta_cells
-        if _is_coastal(cell, cells_by_id)
-        and float(cell.get("elevation_m", 0.0)) <= 300.0
-        and (
-            float(cell.get("sediment_thickness_m", 0.0)) >= 0.5
-            or float(cell.get("sediment_deposition_m", 0.0)) >= 0.5
+        if (
+            delta_terminal_environments[int(cell.get("id", -1))]
+            in {"marine", "lacustrine"}
+            and float(cell.get("elevation_m", 0.0)) <= 300.0
+            and (
+                float(cell.get("sediment_thickness_m", 0.0)) >= 0.5
+                or float(cell.get("sediment_deposition_m", 0.0)) >= 0.5
+            )
+            and (
+                bool(cell.get("is_river", False))
+                or float(cell.get("runoff_mm_y", 0.0)) > 0.0
+            )
         )
-        and (bool(cell.get("is_river", False)) or float(cell.get("runoff_mm_y", 0.0)) > 0.0)
     ]
-    delta_lowland_sediment_coast = (
-        len(lowland_sediment_coastal_deltas) / len(delta_cells) if delta_cells else 1.0
+    qualifying_delta_ids = {
+        int(cell.get("id", -1)) for cell in lowland_sediment_terminal_water_deltas
+    }
+    delta_lowland_sediment_terminal_water = (
+        len(lowland_sediment_terminal_water_deltas) / len(delta_cells)
+        if delta_cells
+        else 1.0
     )
 
     basin_cells: dict[int, list[dict[str, Any]]] = {}
@@ -226,6 +294,7 @@ def enrich_world_with_hydrology_realism(world: dict[str, Any]) -> dict[str, Any]
             "valid_sink_river_cell_count": valid_sink_count,
             "terminal_cycle_count": terminal_cycle_count,
             "terminal_type_counts": dict(sorted(terminal_types.items())),
+            "valid_sink_reason_counts": dict(sorted(valid_sink_reasons.items())),
         },
     )
     _check_record(
@@ -258,15 +327,40 @@ def enrich_world_with_hydrology_realism(world: dict[str, Any]) -> dict[str, Any]
     )
     _check_record(
         checks,
-        name="delta_lowland_sediment_coast",
-        question="Do deltas appear only in low coastal sediment-rich river zones?",
-        metric="fraction_delta_cells_low_coastal_sediment_river",
-        value=delta_lowland_sediment_coast,
+        name="delta_lowland_sediment_terminal_water",
+        question=(
+            "Do deltas appear only in low, sediment-rich river zones terminating "
+            "at a marine coast or lake?"
+        ),
+        metric="fraction_delta_cells_low_sediment_river_at_marine_or_lacustrine_terminal",
+        value=delta_lowland_sediment_terminal_water,
         target_min=0.75,
         target_max=1.0,
         evidence={
             "delta_cell_count": len(delta_cells),
-            "lowland_sediment_coastal_delta_count": len(lowland_sediment_coastal_deltas),
+            "marine_terminal_delta_count": sum(
+                environment == "marine"
+                for environment in delta_terminal_environments.values()
+            ),
+            "lacustrine_terminal_delta_count": sum(
+                environment == "lacustrine"
+                for environment in delta_terminal_environments.values()
+            ),
+            "unrecognized_terminal_delta_count": sum(
+                environment == "unrecognized"
+                for environment in delta_terminal_environments.values()
+            ),
+            "lowland_sediment_terminal_water_delta_count": len(
+                lowland_sediment_terminal_water_deltas
+            ),
+            "qualifying_marine_terminal_delta_count": sum(
+                cell_id in qualifying_delta_ids and environment == "marine"
+                for cell_id, environment in delta_terminal_environments.items()
+            ),
+            "qualifying_lacustrine_terminal_delta_count": sum(
+                cell_id in qualifying_delta_ids and environment == "lacustrine"
+                for cell_id, environment in delta_terminal_environments.items()
+            ),
         },
     )
     _check_record(
@@ -291,7 +385,10 @@ def enrich_world_with_hydrology_realism(world: dict[str, Any]) -> dict[str, Any]
     summary["valid_river_sink_fraction"] = round(valid_river_sink_fraction, 6)
     summary["river_downhill_realism_index"] = round(downhill_fraction, 6)
     summary["tributary_merge_coherence_index"] = round(tributary_merge_coherence, 6)
-    summary["delta_lowland_sediment_coast_index"] = round(delta_lowland_sediment_coast, 6)
+    summary["delta_lowland_sediment_terminal_water_index"] = round(
+        delta_lowland_sediment_terminal_water,
+        6,
+    )
     summary["watershed_divide_alignment_index"] = round(watershed_divide_alignment, 6)
     summary["hydrology_realism_check_count"] = len(checks)
     summary["hydrology_realism_pass_count"] = pass_count

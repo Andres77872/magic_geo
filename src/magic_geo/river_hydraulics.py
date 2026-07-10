@@ -3,8 +3,8 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+from .planet_parameters import surface_gravity_m_s2
 
-GRAVITY_M_S2 = 9.80665
 WATER_DENSITY_KG_M3 = 1000.0
 HYDRAULIC_NAVIGABILITY_THRESHOLD = 0.55
 HIGH_SHEAR_STRESS_PA = 120.0
@@ -113,6 +113,7 @@ def enrich_world_with_river_hydraulics(world: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(cells, list) or not cells:
         return world
 
+    gravity_m_s2 = surface_gravity_m_s2(world)
     channel_cells: list[dict[str, Any]] = []
     velocity_sum = 0.0
     froude_sum = 0.0
@@ -152,8 +153,8 @@ def enrich_world_with_river_hydraulics(world: dict[str, Any]) -> dict[str, Any]:
         discharge_velocity = discharge / area_m2
         manning_velocity = (hydraulic_radius ** (2.0 / 3.0)) * (slope ** 0.5) / roughness
         velocity = max(0.0, min(12.0, discharge_velocity * 0.55 + manning_velocity * 0.45))
-        froude = velocity / max(0.001, (GRAVITY_M_S2 * max(0.001, depth)) ** 0.5)
-        shear = WATER_DENSITY_KG_M3 * GRAVITY_M_S2 * hydraulic_radius * slope
+        froude = velocity / max(0.001, (gravity_m_s2 * max(0.001, depth)) ** 0.5)
+        shear = WATER_DENSITY_KG_M3 * gravity_m_s2 * hydraulic_radius * slope
         capacity = _clamp((area_m2 / 450.0) * 0.38 + (discharge / 2400.0) * 0.34 + hydraulic_radius / 4.5 * 0.16 + velocity / 4.0 * 0.12)
         ice = _clamp(float(cell.get("ice_thickness_m", 0.0)) / 300.0)
         hydraulic_nav = _hydraulic_navigability(width, depth, velocity, froude, slope_index, ice)
@@ -210,7 +211,7 @@ def enrich_world_with_river_hydraulics(world: dict[str, Any]) -> dict[str, Any]:
         "navigability_model": "depth_width_velocity_froude_slope_ice_index_v1",
         "regime_model": "froude_velocity_shear_threshold_tree_v1",
         "reach_model": "one_reach_per_river_channel_system_v1",
-        "gravity_m_s2": GRAVITY_M_S2,
+        "gravity_m_s2": gravity_m_s2,
         "water_density_kg_m3": WATER_DENSITY_KG_M3,
         "maximum_velocity_m_s": 12.0,
         "hydraulic_navigability_threshold": HYDRAULIC_NAVIGABILITY_THRESHOLD,

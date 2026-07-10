@@ -5,6 +5,8 @@ import math
 from collections import Counter
 from typing import Any
 
+from .planet_parameters import planet_radius_km
+
 
 SOURCE_ROCK_THRESHOLD = 0.42
 MATURE_SOURCE_THRESHOLD = 0.42
@@ -35,7 +37,7 @@ def _primary_key(counter: Counter[str], fallback: str) -> str:
     return sorted(counter.items(), key=lambda item: (-item[1], item[0]))[0][0]
 
 
-def _cell_distance_km(a: dict[str, Any], b: dict[str, Any]) -> float:
+def _cell_distance_km(a: dict[str, Any], b: dict[str, Any], radius_km: float) -> float:
     lat_a = math.radians(float(a.get("lat_deg", 0.0)))
     lat_b = math.radians(float(b.get("lat_deg", 0.0)))
     lon_a = math.radians(float(a.get("lon_deg", 0.0)))
@@ -47,13 +49,17 @@ def _cell_distance_km(a: dict[str, Any], b: dict[str, Any]) -> float:
         dlon += math.tau
     dlat = lat_b - lat_a
     hav = math.sin(dlat * 0.5) ** 2 + math.cos(lat_a) * math.cos(lat_b) * math.sin(dlon * 0.5) ** 2
-    return 6371.0 * 2.0 * math.asin(min(1.0, math.sqrt(hav)))
+    return radius_km * 2.0 * math.asin(min(1.0, math.sqrt(hav)))
 
 
-def _path_distance_km(path: list[int], cells_by_id: dict[int, dict[str, Any]]) -> float:
+def _path_distance_km(
+    path: list[int],
+    cells_by_id: dict[int, dict[str, Any]],
+    radius_km: float,
+) -> float:
     total = 0.0
     for left, right in zip(path, path[1:]):
-        total += _cell_distance_km(cells_by_id[left], cells_by_id[right])
+        total += _cell_distance_km(cells_by_id[left], cells_by_id[right], radius_km)
     return total
 
 
@@ -225,6 +231,7 @@ def _step_record(
     cells_by_id: dict[int, dict[str, Any]],
     metrics_by_id: dict[int, dict[str, float]],
     system: dict[str, Any],
+    radius_km: float,
 ) -> dict[str, Any]:
     path_metrics = [metrics_by_id[cell_id] for cell_id in path]
     path_cells = [cells_by_id[cell_id] for cell_id in path]
@@ -248,7 +255,7 @@ def _step_record(
         "target_trap_cell_id": trap_id,
         "path_cell_ids": path,
         "path_length_cell_count": len(path),
-        "migration_distance_km": _round(_path_distance_km(path, cells_by_id)),
+        "migration_distance_km": _round(_path_distance_km(path, cells_by_id, radius_km)),
         "mean_path_migration_index": _round(mean_migration),
         "mean_path_trap_integrity_index": _round(mean_trap),
         "hydrocarbon_charge_index": _round(charge),
@@ -272,6 +279,7 @@ def _system_type(system: dict[str, Any], mean_source: float, mean_maturation: fl
 
 
 def enrich_world_with_petroleum_migration(world: dict[str, Any]) -> dict[str, Any]:
+    radius_km = planet_radius_km(world)
     cells_by_id = _cells_by_id(world)
     if not cells_by_id:
         return world
@@ -355,7 +363,16 @@ def enrich_world_with_petroleum_migration(world: dict[str, Any]) -> dict[str, An
                 path = _best_path(source_id, trap_id, allowed_ids, cells_by_id, metrics_by_id)
                 if not path:
                     continue
-                step = _step_record(len(steps), source_id, trap_id, path, cells_by_id, metrics_by_id, system)
+                step = _step_record(
+                    len(steps),
+                    source_id,
+                    trap_id,
+                    path,
+                    cells_by_id,
+                    metrics_by_id,
+                    system,
+                    radius_km,
+                )
                 if float(step["accumulation_probability_index"]) < 0.34 and max_hydrocarbon_potential < 0.48:
                     continue
                 steps.append(step)

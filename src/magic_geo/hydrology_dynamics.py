@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .planet_parameters import planet_radius_km
+
 
 def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
@@ -24,8 +26,7 @@ def _overflow_stage(spill_volume_km3: float, annual_runoff_km3: float, stage_cou
     return min(stage_count, max(1, int(math.ceil(pressure * stage_count))))
 
 
-def _great_circle_km(a: dict[str, Any], b: dict[str, Any]) -> float:
-    radius_km = 6371.0
+def _great_circle_km(a: dict[str, Any], b: dict[str, Any], radius_km: float) -> float:
     lat_a = math.radians(float(a.get("lat_deg", 0.0)))
     lat_b = math.radians(float(b.get("lat_deg", 0.0)))
     dlat = lat_b - lat_a
@@ -34,13 +35,18 @@ def _great_circle_km(a: dict[str, Any], b: dict[str, Any]) -> float:
     return 2.0 * radius_km * math.asin(min(1.0, math.sqrt(hav)))
 
 
-def _path_length_km(path_cell_ids: list[int], cells_by_id: dict[int, dict[str, Any]], fallback_km: float) -> float:
+def _path_length_km(
+    path_cell_ids: list[int],
+    cells_by_id: dict[int, dict[str, Any]],
+    fallback_km: float,
+    radius_km: float,
+) -> float:
     length_km = 0.0
     for first_id, second_id in zip(path_cell_ids, path_cell_ids[1:]):
         first = cells_by_id.get(int(first_id))
         second = cells_by_id.get(int(second_id))
         if first is not None and second is not None:
-            length_km += _great_circle_km(first, second)
+            length_km += _great_circle_km(first, second, radius_km)
     return length_km if length_km > 0.0 else max(0.0, fallback_km)
 
 
@@ -63,6 +69,7 @@ def _enrich_world_with_overflow_channel_history(
     cells = world.get("cells", [])
     if not isinstance(cells, list):
         cells = []
+    radius_km = planet_radius_km(world)
     cells_by_id = {int(cell.get("id", index)): cell for index, cell in enumerate(cells)}
     for cell in cells:
         cell["overflow_channel_active"] = False
@@ -96,6 +103,7 @@ def _enrich_world_with_overflow_channel_history(
             path_cell_ids,
             cells_by_id,
             float(basin.get("overflow_path_length_km", 0.0)),
+            radius_km,
         )
         head_cell = cells_by_id.get(path_cell_ids[0])
         tail_cell = cells_by_id.get(path_cell_ids[-1])

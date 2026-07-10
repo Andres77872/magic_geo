@@ -510,7 +510,10 @@ def _build_political_region_graph(world: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def enrich_world_with_graph_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
+def enrich_world_with_physical_graph_diagnostics(
+    world: dict[str, Any],
+) -> dict[str, Any]:
+    """Add graph products derived only from the planet's physical systems."""
     cells = world.get("cells", [])
     if not isinstance(cells, list) or not cells:
         return world
@@ -518,14 +521,10 @@ def enrich_world_with_graph_diagnostics(world: dict[str, Any]) -> dict[str, Any]
     plate_graph = _build_plate_graph(world, cells_by_id)
     river_graph = _build_river_graph(world, cells_by_id)
     watershed_graph = _build_watershed_graph(world, cells_by_id)
-    trade_route_graph = _build_trade_route_graph(world)
-    political_region_graph = _build_political_region_graph(world)
 
     world["plate_graph"] = plate_graph
     world["river_graph"] = river_graph
     world["watershed_graph"] = watershed_graph
-    world["trade_route_graph"] = trade_route_graph
-    world["political_region_graph"] = political_region_graph
 
     summary = world.setdefault("summary", {})
     summary["plate_graph_node_count"] = plate_graph["node_count"]
@@ -542,6 +541,22 @@ def enrich_world_with_graph_diagnostics(world: dict[str, Any]) -> dict[str, Any]
     summary["watershed_graph_component_count"] = watershed_graph["connected_component_count"]
     summary["watershed_graph_boundary_edge_count"] = watershed_graph["boundary_edge_count"]
     summary["watershed_graph_total_boundary_length_km"] = watershed_graph["total_boundary_length_km"]
+    return world
+
+
+def enrich_world_with_graph_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
+    cells = world.get("cells", [])
+    if not isinstance(cells, list) or not cells:
+        return world
+
+    enrich_world_with_physical_graph_diagnostics(world)
+    trade_route_graph = _build_trade_route_graph(world)
+    political_region_graph = _build_political_region_graph(world)
+
+    world["trade_route_graph"] = trade_route_graph
+    world["political_region_graph"] = political_region_graph
+
+    summary = world.setdefault("summary", {})
     summary["trade_route_graph_node_count"] = trade_route_graph["node_count"]
     summary["trade_route_graph_edge_count"] = trade_route_graph["edge_count"]
     summary["trade_route_graph_component_count"] = trade_route_graph["connected_component_count"]

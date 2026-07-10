@@ -3,13 +3,14 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .planet_parameters import planet_radius_km
+
 
 def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
 
 
-def _great_circle_km(a: dict[str, Any], b: dict[str, Any]) -> float:
-    radius_km = 6371.0
+def _great_circle_km(a: dict[str, Any], b: dict[str, Any], radius_km: float) -> float:
     lat_a = math.radians(float(a.get("lat_deg", 0.0)))
     lat_b = math.radians(float(b.get("lat_deg", 0.0)))
     dlat = lat_b - lat_a
@@ -87,6 +88,7 @@ def enrich_world_with_sediment_routing_history(
     if not isinstance(cells, list) or not cells:
         return world
 
+    radius_km = planet_radius_km(world)
     cells_by_id = {int(cell.get("id", index)): cell for index, cell in enumerate(cells)}
     for cell in cells:
         cell["sediment_routing_load_m"] = 0.0
@@ -119,7 +121,7 @@ def enrich_world_with_sediment_routing_history(
         for index, cell in enumerate(path):
             cell_id = int(cell.get("id", -1))
             next_cell = path[index + 1] if index + 1 < len(path) else None
-            segment_length_km = _great_circle_km(cell, next_cell) if next_cell is not None else 0.0
+            segment_length_km = _great_circle_km(cell, next_cell, radius_km) if next_cell is not None else 0.0
             path_length_km += segment_length_km
             start_load_m = load_m
             local_supply_m = max(0.0, float(cell.get("fluvial_sediment_local_source_m", 0.0)))

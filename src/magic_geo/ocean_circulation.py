@@ -4,13 +4,14 @@ import math
 from collections import Counter, deque
 from typing import Any
 
+from .planet_parameters import planet_radius_km
+
 
 MARINE_WATER_TYPES = {"ocean", "continental_shelf", "inland_sea"}
 WARM_CURRENT_THRESHOLD_C = 0.5
 COLD_CURRENT_THRESHOLD_C = -0.5
 MERIDIONAL_CURRENT_THRESHOLD = 0.08
 HIGH_UPWELLING_THRESHOLD = 0.55
-EARTH_RADIUS_KM = 6371.0
 
 
 def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
@@ -51,14 +52,15 @@ def _normalize(vector: tuple[float, float, float]) -> tuple[float, float, float]
     return vector[0] / length, vector[1] / length, vector[2] / length
 
 
-def _distance_km(a: dict[str, Any], b: dict[str, Any]) -> float:
+def _distance_km(a: dict[str, Any], b: dict[str, Any], radius_km: float) -> float:
     cosine = _clamp(_dot(_xyz(a), _xyz(b)), -1.0, 1.0)
-    return math.acos(cosine) * EARTH_RADIUS_KM
+    return math.acos(cosine) * radius_km
 
 
 def _transport_target(
     cell: dict[str, Any],
     cells_by_id: dict[int, dict[str, Any]],
+    radius_km: float,
 ) -> tuple[int, float, float]:
     lat = math.radians(float(cell.get("lat_deg", 0.0)))
     lon = math.radians(float(cell.get("lon_deg", 0.0)))
@@ -95,7 +97,7 @@ def _transport_target(
             best_alignment = alignment
     if best_target < 0 or best_alignment <= 0.0:
         return -1, 0.0, 0.0
-    return best_target, _clamp(best_alignment), _distance_km(cell, cells_by_id[best_target])
+    return best_target, _clamp(best_alignment), _distance_km(cell, cells_by_id[best_target], radius_km)
 
 
 def _regime(temperature_anomaly_c: float, poleward_index: float) -> str:
@@ -221,6 +223,7 @@ def enrich_world_with_ocean_circulation(world: dict[str, Any]) -> dict[str, Any]
     if not isinstance(cells, list) or not cells:
         return world
 
+    radius_km = planet_radius_km(world)
     cells_by_id = {_cell_id(cell): cell for cell in cells}
     marine_cells = [cell for cell in cells if _is_marine(cell)]
     incoming_counts: Counter[int] = Counter()
@@ -246,7 +249,7 @@ def enrich_world_with_ocean_circulation(world: dict[str, Any]) -> dict[str, Any]
         poleward = _clamp((current_north / max(1.0e-9, speed)) * hemisphere_sign, -1.0, 1.0)
         temperature_anomaly = float(cell.get("ocean_current_temperature_c", 0.0))
         heat_transport = _clamp((temperature_anomaly / 4.5) * poleward, -1.0, 1.0)
-        target_id, alignment, distance_km = _transport_target(cell, cells_by_id)
+        target_id, alignment, distance_km = _transport_target(cell, cells_by_id, radius_km)
 
         cell["ocean_current_speed_index"] = _round(speed)
         cell["ocean_current_poleward_index"] = _round(poleward)

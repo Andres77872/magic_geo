@@ -860,7 +860,7 @@ def write_summary_markdown(path: Path, world: dict[str, Any]) -> None:
         "valid_river_sink_fraction",
         "river_downhill_realism_index",
         "tributary_merge_coherence_index",
-        "delta_lowland_sediment_coast_index",
+        "delta_lowland_sediment_terminal_water_index",
         "watershed_divide_alignment_index",
         "hydrology_realism_check_count",
         "hydrology_realism_pass_count",

@@ -3,8 +3,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-
-EARTH_RADIUS_KM = 6371.0
+from .planet_parameters import planet_radius_km
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:
@@ -141,11 +140,16 @@ def _vertex_angles_from_bearings(bearings: list[float], fallback_count: int) -> 
     return angles
 
 
-def _target_radius_rad(area_km2: float, vertex_count: int, neighbor_distances: list[float]) -> float:
+def _target_radius_rad(
+    area_km2: float,
+    vertex_count: int,
+    neighbor_distances: list[float],
+    radius_km: float,
+) -> float:
     vertex_count = max(3, vertex_count)
     planar_factor = max(0.001, vertex_count * math.sin(2.0 * math.pi / vertex_count))
     circumradius_km = math.sqrt(max(1.0, 2.0 * area_km2 / planar_factor))
-    radius_rad = circumradius_km / EARTH_RADIUS_KM
+    radius_rad = circumradius_km / radius_km
     if neighbor_distances:
         sorted_distances = sorted(distance for distance in neighbor_distances if distance > 0.0)
         if sorted_distances:
@@ -169,28 +173,35 @@ def _ring_points(
     return points
 
 
-def _ring_perimeter_km(points: list[tuple[float, float, float]]) -> float:
+def _ring_perimeter_km(points: list[tuple[float, float, float]], radius_km: float) -> float:
     if len(points) < 2:
         return 0.0
     perimeter = 0.0
     for index, point in enumerate(points):
-        perimeter += _central_angle(point, points[(index + 1) % len(points)]) * EARTH_RADIUS_KM
+        perimeter += _central_angle(point, points[(index + 1) % len(points)]) * radius_km
     return perimeter
 
 
-def _ring_area_km2(center: tuple[float, float, float], points: list[tuple[float, float, float]]) -> float:
+def _ring_area_km2(
+    center: tuple[float, float, float],
+    points: list[tuple[float, float, float]],
+    radius_km: float,
+) -> float:
     if len(points) < 3:
         return 0.0
     area_steradians = 0.0
     for index, point in enumerate(points):
         area_steradians += _triangle_area_steradians(center, point, points[(index + 1) % len(points)])
-    return area_steradians * EARTH_RADIUS_KM * EARTH_RADIUS_KM
+    return area_steradians * radius_km * radius_km
 
 
-def _segment_length_km(segment: tuple[tuple[float, float, float], tuple[float, float, float]] | None) -> float:
+def _segment_length_km(
+    segment: tuple[tuple[float, float, float], tuple[float, float, float]] | None,
+    radius_km: float,
+) -> float:
     if segment is None:
         return 0.0
-    return _central_angle(segment[0], segment[1]) * EARTH_RADIUS_KM
+    return _central_angle(segment[0], segment[1]) * radius_km
 
 
 def _fallback_boundary_segment(
@@ -211,6 +222,7 @@ def _shared_boundary_segment(
     segment_b: tuple[tuple[float, float, float], tuple[float, float, float]] | None,
     cell_a_xyz: tuple[float, float, float],
     cell_b_xyz: tuple[float, float, float],
+    radius_km: float,
 ) -> tuple[tuple[float, float, float], tuple[float, float, float], float]:
     if segment_a is None and segment_b is None:
         start, end = _fallback_boundary_segment(cell_a_xyz, cell_b_xyz)
@@ -230,7 +242,7 @@ def _shared_boundary_segment(
     return (
         _normalize(_add(segment_a[0], segment_b[0])),
         _normalize(_add(segment_a[1], segment_b[1])),
-        endpoint_mismatch_rad * EARTH_RADIUS_KM,
+        endpoint_mismatch_rad * radius_km,
     )
 
 
@@ -239,6 +251,7 @@ def enrich_world_with_cell_geometry(world: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(cells, list) or not cells:
         return world
 
+    radius_km = planet_radius_km(world)
     cells_by_id = {int(cell.get("id", index)): cell for index, cell in enumerate(cells)}
     total_area_km2 = 0.0
     total_polygon_area_km2 = 0.0
@@ -278,11 +291,11 @@ def enrich_world_with_cell_geometry(world: dict[str, Any]) -> dict[str, Any]:
         distances = [float(record["distance"]) for record in neighbor_records]
         vertex_angles = _vertex_angles_from_bearings(bearings, fallback_count=max(5, len(cell.get("neighbors", [])) or 6))
         area_km2 = max(1.0, float(cell.get("area_km2", 0.0)))
-        radius_rad = _target_radius_rad(area_km2, len(vertex_angles), distances)
+        radius_rad = _target_radius_rad(area_km2, len(vertex_angles), distances, radius_km)
         ring_xyz = _ring_points(center, east, north, vertex_angles, radius_rad)
         boundary_ring = [[round(lat, 6), round(lon, 6)] for lat, lon in (_lat_lon_from_xyz(point) for point in ring_xyz)]
-        polygon_area_km2 = _ring_area_km2(center, ring_xyz)
-        perimeter_km = _ring_perimeter_km(ring_xyz)
+        polygon_area_km2 = _ring_area_km2(center, ring_xyz, radius_km)
+        perimeter_km = _ring_perimeter_km(ring_xyz, radius_km)
         area_error_fraction = abs(polygon_area_km2 - area_km2) / area_km2 if area_km2 > 0.0 else 0.0
         compactness = _clamp(4.0 * math.pi * polygon_area_km2 / max(1.0, perimeter_km * perimeter_km), 0.0, 1.0)
         geometry_quality = _clamp((1.0 - min(1.0, area_error_fraction)) * 0.72 + compactness * 0.28, 0.0, 1.0)
@@ -338,7 +351,7 @@ def enrich_world_with_cell_geometry(world: dict[str, Any]) -> dict[str, Any]:
             seen_edges.add(edge_key)
             neighbor_xyz = _xyz_from_lat_lon(float(neighbor.get("lat_deg", 0.0)), float(neighbor.get("lon_deg", 0.0)))
             neighbor_east, neighbor_north = _local_basis(float(neighbor.get("lat_deg", 0.0)), float(neighbor.get("lon_deg", 0.0)))
-            edge_length_km = _central_angle(cell_xyz, neighbor_xyz) * EARTH_RADIUS_KM
+            edge_length_km = _central_angle(cell_xyz, neighbor_xyz) * radius_km
             midpoint_lat, midpoint_lon = _lat_lon_from_xyz(_add(cell_xyz, neighbor_xyz))
             edge_type = _edge_class(cell, neighbor)
             elevation_delta = float(neighbor.get("elevation_m", 0.0)) - float(cell.get("elevation_m", 0.0))
@@ -351,10 +364,11 @@ def enrich_world_with_cell_geometry(world: dict[str, Any]) -> dict[str, Any]:
                 cell_b_segment,
                 cell_a_xyz,
                 cell_b_xyz,
+                radius_km,
             )
-            boundary_segment_length_km = _central_angle(boundary_start, boundary_end) * EARTH_RADIUS_KM
-            cell_a_segment_length_km = _segment_length_km(cell_a_segment)
-            cell_b_segment_length_km = _segment_length_km(cell_b_segment)
+            boundary_segment_length_km = _central_angle(boundary_start, boundary_end) * radius_km
+            cell_a_segment_length_km = _segment_length_km(cell_a_segment, radius_km)
+            cell_b_segment_length_km = _segment_length_km(cell_b_segment, radius_km)
             if cell_a_segment is None:
                 cell_a_segment_length_km = boundary_segment_length_km
             if cell_b_segment is None:

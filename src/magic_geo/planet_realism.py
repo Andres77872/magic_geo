@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .planet_parameters import planet_parameter_snapshot
+
 
 PLANET_PARAMETER_KEYS = (
     "radius_km",
@@ -26,19 +28,6 @@ def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
 
 def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
-
-
-def _planet_value(planet: Any | None, key: str, default: float) -> float:
-    if planet is None:
-        return default
-    if isinstance(planet, dict):
-        raw = planet.get(key, default)
-    else:
-        raw = getattr(planet, key, default)
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return default
 
 
 def _score_range(value: float, target_min: float, target_max: float) -> float:
@@ -87,33 +76,12 @@ def _range_score(value: float, lower: float, upper: float, outer_lower: float, o
     return _clamp((outer_upper - value) / max(1.0e-9, outer_upper - upper))
 
 
-def _parameter_snapshot(planet: Any | None) -> dict[str, float]:
-    defaults = {
-        "radius_km": 6371.0,
-        "gravity_g": 1.0,
-        "day_length_hours": 24.0,
-        "axial_tilt_deg": 23.5,
-        "orbital_eccentricity": 0.016,
-        "stellar_luminosity": 1.0,
-        "atmosphere_pressure_bar": 1.0,
-        "greenhouse_factor": 1.0,
-        "ocean_fraction_target": 0.70,
-        "ocean_water_inventory_km3": 1_338_000_000.0,
-        "internal_heat": 1.0,
-        "geological_age_ga": 4.5,
-    }
-    return {
-        key: round(_planet_value(planet, key, default), 6)
-        for key, default in defaults.items()
-    }
-
-
 def enrich_world_with_planet_realism(world: dict[str, Any], planet: Any | None = None) -> dict[str, Any]:
     cells = world.get("cells", [])
     if not isinstance(cells, list) or not cells:
         return world
 
-    parameters = _parameter_snapshot(planet)
+    parameters = planet_parameter_snapshot(planet)
     world["planet_parameters"] = parameters
     summary = world.setdefault("summary", {})
 

@@ -4,6 +4,8 @@ import math
 from collections import Counter, deque
 from typing import Any
 
+from .planet_parameters import planet_radius_km
+
 
 LOWLAND_FORMS = {"delta", "floodplain", "river_valley", "coastal_plain", "lacustrine_basin"}
 RIVER_CHANNEL_MORPHOLOGY_MODEL = (
@@ -33,8 +35,7 @@ def _area(cell: dict[str, Any]) -> float:
     return max(0.0, float(cell.get("area_km2", 0.0)))
 
 
-def _great_circle_km(a: dict[str, Any], b: dict[str, Any]) -> float:
-    radius_km = 6371.0
+def _great_circle_km(a: dict[str, Any], b: dict[str, Any], radius_km: float) -> float:
     lat_a = math.radians(float(a.get("lat_deg", 0.0)))
     lat_b = math.radians(float(b.get("lat_deg", 0.0)))
     dlat = lat_b - lat_a
@@ -43,11 +44,15 @@ def _great_circle_km(a: dict[str, Any], b: dict[str, Any]) -> float:
     return 2.0 * radius_km * math.asin(min(1.0, math.sqrt(hav)))
 
 
-def _downstream_slope(cell: dict[str, Any], cells_by_id: dict[int, dict[str, Any]]) -> tuple[float, float]:
+def _downstream_slope(
+    cell: dict[str, Any],
+    cells_by_id: dict[int, dict[str, Any]],
+    radius_km: float,
+) -> tuple[float, float]:
     next_cell = cells_by_id.get(int(cell.get("flow_to", -1)))
     if next_cell is None:
         return 0.0, 0.0
-    length_km = _great_circle_km(cell, next_cell)
+    length_km = _great_circle_km(cell, next_cell, radius_km)
     if length_km <= 0.0:
         return 0.0, 0.0
     source_elevation = float(
@@ -120,14 +125,19 @@ def _primary_key(counter: Counter[str], fallback: str) -> str:
     return sorted(counter.items(), key=lambda item: (-item[1], item[0]))[0][0]
 
 
-def _system_length(component: list[dict[str, Any]], member_ids: set[int], cells_by_id: dict[int, dict[str, Any]]) -> float:
+def _system_length(
+    component: list[dict[str, Any]],
+    member_ids: set[int],
+    cells_by_id: dict[int, dict[str, Any]],
+    radius_km: float,
+) -> float:
     total = 0.0
     for cell in component:
         next_id = int(cell.get("flow_to", -1))
         if next_id in member_ids:
             next_cell = cells_by_id.get(next_id)
             if next_cell is not None:
-                total += _great_circle_km(cell, next_cell)
+                total += _great_circle_km(cell, next_cell, radius_km)
     return total
 
 
@@ -136,6 +146,7 @@ def enrich_world_with_river_channel_morphology(world: dict[str, Any]) -> dict[st
     if not isinstance(cells, list) or not cells:
         return world
 
+    radius_km = planet_radius_km(world)
     cells_by_id = {_cell_id(cell): cell for cell in cells}
     max_flow = max((max(0.0, float(cell.get("flow_accumulation", 0.0))) for cell in cells), default=1.0)
     river_ids: set[int] = set()
@@ -166,7 +177,7 @@ def enrich_world_with_river_channel_morphology(world: dict[str, Any]) -> dict[st
         river_ids.add(cell_id)
         flow_norm = _clamp(float(cell.get("flow_accumulation", 0.0)) / max(1.0, max_flow))
         runoff_norm = _clamp(float(cell.get("runoff_mm_y", 0.0)) / 2200.0)
-        slope, _ = _downstream_slope(cell, cells_by_id)
+        slope, _ = _downstream_slope(cell, cells_by_id, radius_km)
         slope_index = _clamp(slope / 0.028)
         routed_sediment = float(
             cell.get(
@@ -256,7 +267,7 @@ def enrich_world_with_river_channel_morphology(world: dict[str, Any]) -> dict[st
         )
         outlet_cell = max(outlet_candidates, key=lambda item: (float(item.get("flow_accumulation", 0.0)), -_cell_id(item)))
         group_count = len(component)
-        length_km = _system_length(component, member_ids, cells_by_id)
+        length_km = _system_length(component, member_ids, cells_by_id, radius_km)
         systems.append(
             {
                 "id": system_id,
@@ -300,7 +311,7 @@ def enrich_world_with_river_channel_morphology(world: dict[str, Any]) -> dict[st
         "runoff_normalization_mm_y": 2200.0,
         "slope_model": "downstream_conditioned_surface_drop_over_great_circle_distance_v1",
         "slope_normalization": 0.028,
-        "planet_radius_km": 6371.0,
+        "planet_radius_km": radius_km,
         "sediment_model": "routed_outgoing_deposition_and_mobile_thickness_v1",
         "floodplain_model": "lowland_slope_sediment_wetland_baseflow_index_v1",
         "geometry_model": "flow_runoff_floodplain_sediment_slope_baseflow_aridity_ice_v1",

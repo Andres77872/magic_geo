@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .planet_parameters import planet_radius_km
+
 
 HIGH_RISK_THRESHOLD = 0.65
 EVENT_RISK_THRESHOLD = 0.25
@@ -23,8 +25,7 @@ def _elevation(cell: dict[str, Any]) -> float:
     )
 
 
-def _great_circle_km(a: dict[str, Any], b: dict[str, Any]) -> float:
-    radius_km = 6371.0
+def _great_circle_km(a: dict[str, Any], b: dict[str, Any], radius_km: float) -> float:
     lat_a = math.radians(float(a.get("lat_deg", 0.0)))
     lat_b = math.radians(float(b.get("lat_deg", 0.0)))
     dlat = lat_b - lat_a
@@ -39,12 +40,16 @@ def _accumulation_index(cell: dict[str, Any], max_accumulation: float) -> float:
     return _clamp(math.log1p(max(0.0, float(cell.get("flow_accumulation", 0.0)))) / math.log1p(max_accumulation))
 
 
-def _downstream_gradient(cell: dict[str, Any], cells_by_id: dict[int, dict[str, Any]]) -> tuple[float, int]:
+def _downstream_gradient(
+    cell: dict[str, Any],
+    cells_by_id: dict[int, dict[str, Any]],
+    radius_km: float,
+) -> tuple[float, int]:
     next_id = int(cell.get("flow_to", -1))
     next_cell = cells_by_id.get(next_id)
     if next_cell is None:
         return 0.0, -1
-    distance_km = max(0.001, _great_circle_km(cell, next_cell))
+    distance_km = max(0.001, _great_circle_km(cell, next_cell, radius_km))
     drop_m = max(0.0, _elevation(cell) - _elevation(next_cell))
     return drop_m / (distance_km * 1000.0), next_id
 
@@ -214,6 +219,7 @@ def enrich_world_with_river_network_evolution(world: dict[str, Any]) -> dict[str
     if not isinstance(cells, list):
         return world
 
+    radius_km = planet_radius_km(world)
     cells_by_id = {int(cell.get("id", index)): cell for index, cell in enumerate(cells)}
     max_accumulation = max((max(0.0, float(cell.get("flow_accumulation", 0.0))) for cell in cells), default=0.0)
     max_sediment_signal = max(
@@ -264,7 +270,7 @@ def enrich_world_with_river_network_evolution(world: dict[str, Any]) -> dict[str
         basin_id = int(cell.get("basin_id", -1))
         current_elevation = _elevation(cell)
         accumulation_index = _accumulation_index(cell, max_accumulation)
-        gradient, downstream_id = _downstream_gradient(cell, cells_by_id)
+        gradient, downstream_id = _downstream_gradient(cell, cells_by_id, radius_km)
         low_gradient_index = _clamp(1.0 - gradient / 0.018)
         sediment_index = _sediment_signal(cell, max_sediment_signal)
         water_index = _water_adjacency(cell, cells_by_id)
@@ -290,7 +296,7 @@ def enrich_world_with_river_network_evolution(world: dict[str, Any]) -> dict[str
                     continue
 
                 target_elevation = _elevation(neighbor)
-                distance_km = max(0.001, _great_circle_km(cell, neighbor))
+                distance_km = max(0.001, _great_circle_km(cell, neighbor, radius_km))
                 divide_relief = abs(current_elevation - target_elevation)
                 low_divide_index = _clamp(1.0 - divide_relief / 750.0)
                 downhill_pull = _clamp((current_elevation - target_elevation + 75.0) / 650.0)

@@ -14,10 +14,11 @@ from magic_geo.calibration import (
     evaluate_calibration_targets,
     load_calibration_sources,
 )
-from magic_geo.config import load_config
+from magic_geo.config import config_to_native, load_config
 from magic_geo.cli import app
 from magic_geo.io import write_cells_csv, write_raster_map, write_summary_markdown, write_svg_map
 from magic_geo.navigability_diagnostics import enrich_world_with_navigability_diagnostics
+from magic_geo.native import generate_world as generate_native_world
 from magic_geo.port_sites import enrich_world_with_port_sites
 from magic_geo.river_channel_morphology import enrich_world_with_river_channel_morphology
 from magic_geo.river_hydraulics import enrich_world_with_river_hydraulics
@@ -666,6 +667,18 @@ class GenerationSmokeTests(TestCase):
             self.assertNotEqual(invalid_result.exit_code, 0)
             self.assertIn("climate model metadata invalid", invalid_result.output)
             world["climate_model"]["marine_annual_temperature_offset_c"] = 0.0
+
+            original_thermal_moisture_factor = world["climate_model"][
+                "thermal_moisture_capacity_factor"
+            ]
+            world["climate_model"]["thermal_moisture_capacity_factor"] += 0.1
+            world_path.write_text(json.dumps(world), encoding="utf-8")
+            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
+            self.assertNotEqual(invalid_result.exit_code, 0)
+            self.assertIn("climate model metadata invalid", invalid_result.output)
+            world["climate_model"][
+                "thermal_moisture_capacity_factor"
+            ] = original_thermal_moisture_factor
 
             original_fitted_hack_exponent = world["summary"]["watershed_hack_fitted_exponent"]
             world["summary"]["watershed_hack_fitted_exponent"] += 0.1
@@ -3670,7 +3683,7 @@ class GenerationSmokeTests(TestCase):
         climate_model = world["climate_model"]
         self.assertEqual(
             climate_model["model_type"],
-            "equilibrium_latitude_circulation_climate_v3",
+            "equilibrium_latitude_circulation_climate_v4",
         )
         self.assertEqual(climate_model["marine_annual_temperature_offset_c"], 0.0)
         self.assertTrue(climate_model["latitude_temperature_area_normalized"])
@@ -3685,6 +3698,11 @@ class GenerationSmokeTests(TestCase):
         )
         self.assertEqual(climate_model["subtropical_drying_strength"], 0.65)
         self.assertEqual(climate_model["seasonal_monsoon_precipitation_strength"], 1.6)
+        self.assertEqual(climate_model["thermal_moisture_capacity_factor"], 1.0)
+        self.assertEqual(
+            climate_model["thermal_moisture_capacity_temperature_anomaly_c"],
+            0.0,
+        )
 
         sea_level_model = world["sea_level_model"]
         self.assertEqual(
@@ -4752,7 +4770,7 @@ class GenerationSmokeTests(TestCase):
             "valid_river_sink_fraction",
             "river_downhill_realism_index",
             "tributary_merge_coherence_index",
-            "delta_lowland_sediment_coast_index",
+            "delta_lowland_sediment_terminal_water_index",
             "watershed_divide_alignment_index",
         ]:
             self.assertIn(key, summary)
@@ -4764,7 +4782,7 @@ class GenerationSmokeTests(TestCase):
                 "river_terminal_sink_validity",
                 "river_downhill_flow",
                 "tributary_merge_coherence",
-                "delta_lowland_sediment_coast",
+                "delta_lowland_sediment_terminal_water",
                 "watershed_divide_alignment",
             }.issubset(hydrology_names)
         )
@@ -11487,6 +11505,96 @@ class GenerationSmokeTests(TestCase):
         )
         self.assertAlmostEqual(circular_world["climate_energy_balance_records"][0]["orbital_eccentricity"], 0.0, delta=0.001)
         self.assertAlmostEqual(eccentric_world["climate_energy_balance_records"][0]["orbital_eccentricity"], 0.20, delta=0.001)
+
+    def test_native_thermal_forcing_scales_moisture_temperature_and_runoff(self) -> None:
+        config = load_config(Path("configs/earthlike_seed.yaml"))
+
+        def forced_world(stellar_luminosity: float, greenhouse_factor: float) -> dict:
+            data = config.model_dump(mode="python")
+            data["mesh"]["cell_count"] = 128
+            data["tectonics"]["plate_count"] = 8
+            data["erosion"]["iterations"] = 0
+            data["planet"]["stellar_luminosity"] = stellar_luminosity
+            data["planet"]["greenhouse_factor"] = greenhouse_factor
+            forced = type(config).model_validate(data)
+            return generate_native_world(config_to_native(forced))
+
+        cold_world = forced_world(0.55, 0.55)
+        earth_world = forced_world(1.0, 1.0)
+        hot_world = forced_world(1.45, 1.45)
+        minimum_capacity_world = forced_world(0.011, 0.0)
+        maximum_capacity_world = forced_world(100.0, 10.0)
+
+        def area_mean(world: dict, field: str, *, land_only: bool = False) -> float:
+            cells = [
+                cell
+                for cell in world["cells"]
+                if not land_only or not cell["is_water"]
+            ]
+            total_area = sum(cell["area_km2"] for cell in cells)
+            return sum(cell[field] * cell["area_km2"] for cell in cells) / total_area
+
+        cold_temperature = area_mean(cold_world, "temperature_c")
+        earth_temperature = area_mean(earth_world, "temperature_c")
+        hot_temperature = area_mean(hot_world, "temperature_c")
+        cold_precipitation = area_mean(
+            cold_world, "precipitation_mm_y", land_only=True
+        )
+        earth_precipitation = area_mean(
+            earth_world, "precipitation_mm_y", land_only=True
+        )
+        hot_precipitation = area_mean(
+            hot_world, "precipitation_mm_y", land_only=True
+        )
+        cold_runoff = area_mean(cold_world, "runoff_mm_y", land_only=True)
+        earth_runoff = area_mean(earth_world, "runoff_mm_y", land_only=True)
+
+        self.assertLess(cold_temperature, earth_temperature - 8.0)
+        self.assertGreater(hot_temperature, earth_temperature + 7.0)
+        self.assertLess(cold_precipitation, earth_precipitation * 0.80)
+        self.assertGreater(hot_precipitation, earth_precipitation * 1.20)
+        self.assertLess(cold_runoff, earth_runoff * 0.85)
+
+        cold_model = cold_world["climate_model"]
+        earth_model = earth_world["climate_model"]
+        hot_model = hot_world["climate_model"]
+        self.assertEqual(
+            earth_model["thermal_moisture_capacity_model"],
+            "bounded_exponential_global_temperature_anomaly_v1",
+        )
+        self.assertEqual(earth_model["thermal_moisture_capacity_factor"], 1.0)
+        self.assertLess(
+            cold_model["thermal_moisture_capacity_factor"],
+            earth_model["thermal_moisture_capacity_factor"],
+        )
+        self.assertGreater(
+            hot_model["thermal_moisture_capacity_factor"],
+            earth_model["thermal_moisture_capacity_factor"],
+        )
+        self.assertEqual(
+            minimum_capacity_world["climate_model"]["thermal_moisture_capacity_factor"],
+            earth_model["thermal_moisture_capacity_min_factor"],
+        )
+        self.assertEqual(
+            maximum_capacity_world["climate_model"]["thermal_moisture_capacity_factor"],
+            earth_model["thermal_moisture_capacity_max_factor"],
+        )
+        for world in (cold_world, earth_world, hot_world):
+            model = world["climate_model"]
+            self.assertGreaterEqual(
+                model["thermal_moisture_capacity_factor"],
+                model["thermal_moisture_capacity_min_factor"],
+            )
+            self.assertLessEqual(
+                model["thermal_moisture_capacity_factor"],
+                model["thermal_moisture_capacity_max_factor"],
+            )
+            for cell in world["cells"]:
+                self.assertAlmostEqual(
+                    cell["precipitation_mm_y"],
+                    sum(cell["precipitation_monthly_mm"]),
+                    delta=0.002,
+                )
 
     def test_native_uses_atmosphere_pressure_parameter(self) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))

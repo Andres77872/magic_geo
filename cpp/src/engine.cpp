@@ -34,6 +34,15 @@ constexpr double CLIMATE_MARINE_ANNUAL_TEMPERATURE_OFFSET_C = 0.0;
 constexpr double CLIMATE_SEASONAL_MONSOON_PRECIPITATION_STRENGTH = 1.60;
 constexpr double CLIMATE_SEASONAL_MONSOON_PRECIPITATION_MIN_FACTOR = 0.08;
 constexpr double CLIMATE_SEASONAL_MONSOON_PRECIPITATION_MAX_FACTOR = 1.92;
+constexpr double CLIMATE_STELLAR_TEMPERATURE_RESPONSE_C = 38.0;
+constexpr double CLIMATE_GREENHOUSE_TEMPERATURE_RESPONSE_C = 11.0;
+constexpr double CLIMATE_THERMAL_MOISTURE_REFERENCE_BASE_TEMPERATURE_C = 15.0;
+// A 4%/C diagnostic response is deliberately weaker than saturation-vapor-pressure
+// scaling because global precipitation is also energy and circulation limited.
+// Bounds keep extreme configured worlds finite without erasing cold/hot ordering.
+constexpr double CLIMATE_THERMAL_MOISTURE_RESPONSE_PER_C = 0.04;
+constexpr double CLIMATE_THERMAL_MOISTURE_MIN_FACTOR = 0.35;
+constexpr double CLIMATE_THERMAL_MOISTURE_MAX_FACTOR = 2.25;
 constexpr int INITIAL_CRUST_COHERENCE_SMOOTHING_STEPS = 1;
 constexpr double INITIAL_CRUST_COHERENCE_SELF_WEIGHT = 0.77;
 constexpr int SECONDARY_RELIEF_SMOOTHING_STEPS = 4;
@@ -1296,6 +1305,41 @@ T clamp(T value, T low, T high) {
     return std::max(low, std::min(high, value));
 }
 
+double climate_stellar_temperature_forcing_c(const Params& params) {
+    return CLIMATE_STELLAR_TEMPERATURE_RESPONSE_C *
+        (std::pow(params.stellar_luminosity, 0.25) - 1.0);
+}
+
+double climate_greenhouse_temperature_forcing_c(const Params& params) {
+    return CLIMATE_GREENHOUSE_TEMPERATURE_RESPONSE_C *
+        (params.greenhouse_factor - 1.0);
+}
+
+double climate_thermal_moisture_temperature_anomaly_c(const Params& params) {
+    return params.base_temperature_c -
+        CLIMATE_THERMAL_MOISTURE_REFERENCE_BASE_TEMPERATURE_C +
+        climate_stellar_temperature_forcing_c(params) +
+        climate_greenhouse_temperature_forcing_c(params);
+}
+
+double climate_thermal_moisture_capacity_factor(const Params& params) {
+    const double bounded_exponent = clamp(
+        CLIMATE_THERMAL_MOISTURE_RESPONSE_PER_C *
+            climate_thermal_moisture_temperature_anomaly_c(params),
+        std::log(CLIMATE_THERMAL_MOISTURE_MIN_FACTOR),
+        std::log(CLIMATE_THERMAL_MOISTURE_MAX_FACTOR)
+    );
+    return clamp(
+        std::exp(bounded_exponent),
+        CLIMATE_THERMAL_MOISTURE_MIN_FACTOR,
+        CLIMATE_THERMAL_MOISTURE_MAX_FACTOR
+    );
+}
+
+double crust_age_ceiling_ma(const Params& params, double model_ceiling_ma) {
+    return std::max(0.0, std::min(model_ceiling_ma, params.geological_age_ga * 1000.0));
+}
+
 Vec3 add(Vec3 a, Vec3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
 Vec3 sub(Vec3 a, Vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 Vec3 mul(Vec3 a, double s) { return {a.x * s, a.y * s, a.z * s}; }
@@ -1958,9 +2002,20 @@ void derive_crust_and_topography(const Params& params, const std::vector<Plate>&
             }
         }
         const bool oceanic = cell.crust_type == 0 || cell.crust_type == 2 || cell.crust_type == 3;
+        const double initial_age_ceiling_ma = crust_age_ceiling_ma(
+            params, oceanic ? 260.0 : 4200.0
+        );
         cell.crust_age_ma = oceanic
-            ? clamp(8.0 + 190.0 * (1.0 - div) + 25.0 * n1, 0.0, 260.0)
-            : clamp(450.0 + 900.0 * params.geological_age_ga * hash01(params.seed, i, 41), 120.0, 4200.0);
+            ? clamp(
+                8.0 + 190.0 * (1.0 - div) + 25.0 * n1,
+                0.0,
+                initial_age_ceiling_ma
+            )
+            : clamp(
+                450.0 + 900.0 * params.geological_age_ga * hash01(params.seed, i, 41),
+                std::min(120.0, initial_age_ceiling_ma),
+                initial_age_ceiling_ma
+            );
         cell.crust_thickness_km = oceanic
             ? clamp(6.5 + 3.0 * conv + 1.5 * n2, 4.5, 14.0)
             : clamp(29.0 + 17.0 * conv - 8.0 * div + 5.0 * n2, 18.0, 72.0);
@@ -2398,7 +2453,11 @@ std::vector<double> advance_plate_motion_and_crust(
         const bool new_oceanic = is_oceanic_crust_state(
             crust_type, crust_age, crust_thickness, crust_density
         );
-        crust_age = clamp(crust_age, 0.0, new_oceanic ? 320.0 : 4200.0);
+        crust_age = clamp(
+            crust_age,
+            0.0,
+            crust_age_ceiling_ma(params, new_oceanic ? 320.0 : 4200.0)
+        );
         crust_thickness = clamp(crust_thickness, new_oceanic ? 4.5 : 16.0, new_oceanic ? 18.0 : 76.0);
         crust_density = clamp(crust_density, 2.58, 3.08);
 
@@ -2572,7 +2631,9 @@ void summarize_plates(const Params& params, const std::vector<Cell>& cells, std:
         if (plate.area_km2 <= 0.0) {
             plate.mean_crust_density = plate.crust_density;
             plate.mean_crust_thickness_km = plate.crust_thickness_km;
-            plate.mean_crust_age_ma = plate.kind == 0 ? 120.0 : 1600.0;
+            plate.mean_crust_age_ma = crust_age_ceiling_ma(
+                params, plate.kind == 0 ? 120.0 : 1600.0
+            );
             plate.mean_heat_flow_mw_m2 = plate.kind == 0 ? 62.0 : 54.0;
         }
     }
@@ -3060,6 +3121,12 @@ void compute_climate(const Params& params, std::vector<Cell>& cells) {
     const double pressure_temp_adj = 4.5 * std::log(pressure);
     const double pressure_precip_factor = clamp(std::pow(pressure, 0.35), 0.35, 1.85);
     const double gravity_precip_factor = clamp(1.08 - 0.10 * (params.gravity_g - 1.0), 0.65, 1.35);
+    const double stellar_temperature_forcing_c =
+        climate_stellar_temperature_forcing_c(params);
+    const double greenhouse_temperature_forcing_c =
+        climate_greenhouse_temperature_forcing_c(params);
+    const double thermal_moisture_capacity_factor =
+        climate_thermal_moisture_capacity_factor(params);
     const double rotation_band_shift = clamp((params.day_length_hours - 24.0) / 24.0 * 5.0, -7.0, 9.0);
     const double eccentricity_season_factor = 1.0 + 1.8 * clamp(params.orbital_eccentricity, 0.0, 0.8);
     double local_temperature_adjustment_area_sum = 0.0;
@@ -3160,8 +3227,8 @@ void compute_climate(const Params& params, std::vector<Cell>& cells) {
             0.72,
             1.28
         );
-        const double lum_adj = 38.0 * (std::pow(params.stellar_luminosity, 0.25) - 1.0);
-        const double greenhouse_adj = 11.0 * (params.greenhouse_factor - 1.0);
+        const double lum_adj = stellar_temperature_forcing_c;
+        const double greenhouse_adj = greenhouse_temperature_forcing_c;
         const double latitude_temperature_area_mean_offset_c =
             CLIMATE_LATITUDE_TEMPERATURE_GRADIENT_C /
             (CLIMATE_LATITUDE_TEMPERATURE_EXPONENT + 1.0);
@@ -3240,7 +3307,13 @@ void compute_climate(const Params& params, std::vector<Cell>& cells) {
                 cell.orographic_factor * cell.rain_shadow_factor * cell.ocean_current_moisture_factor *
                 cell.advected_moisture_factor * circulation_precip_factor *
                 subtropical_drying_factor * monsoon_precipitation_factor;
-            const double monthly_precip = std::max(20.0, annual) / static_cast<double>(params.months);
+            double monthly_precip = std::max(20.0, annual) / static_cast<double>(params.months);
+            // Preserve the exact Earth-reference arithmetic path while applying the
+            // configured moisture capacity to every monthly value, including the
+            // diagnostic minimum-rainfall branch.
+            if (thermal_moisture_capacity_factor != 1.0) {
+                monthly_precip *= thermal_moisture_capacity_factor;
+            }
             cell.temperature_monthly_c[static_cast<std::size_t>(month)] = temp;
             cell.precipitation_monthly_mm[static_cast<std::size_t>(month)] = monthly_precip;
             annual_precip += monthly_precip;
@@ -12037,11 +12110,16 @@ std::string climate_model_json(const Params& params) {
     const double latitude_temperature_area_mean_offset_c =
         CLIMATE_LATITUDE_TEMPERATURE_GRADIENT_C /
         (CLIMATE_LATITUDE_TEMPERATURE_EXPONENT + 1.0);
+    const double thermal_moisture_temperature_anomaly_c =
+        climate_thermal_moisture_temperature_anomaly_c(params);
+    const double thermal_moisture_capacity_factor =
+        climate_thermal_moisture_capacity_factor(params);
     std::string out = "{";
     bool first = true;
-    add_str(out, first, "model_type", "equilibrium_latitude_circulation_climate_v3");
+    add_str(out, first, "model_type", "equilibrium_latitude_circulation_climate_v4");
     add_str(out, first, "temperature_model", "area_mean_normalized_latitude_centered_local_adjustments_v3");
-    add_str(out, first, "precipitation_model", "circulation_orography_wind_transport_subtropical_drying_v1");
+    add_str(out, first, "precipitation_model",
+        "bounded_thermal_moisture_circulation_orography_wind_transport_v2");
     add_str(out, first, "base_temperature_interpretation", "post_centered_local_adjustment_global_area_mean_c");
     add_double(out, first, "base_temperature_c", params.base_temperature_c, precision);
     add_double(out, first, "latitude_temperature_gradient_c",
@@ -12064,6 +12142,34 @@ std::string climate_model_json(const Params& params) {
         CLIMATE_SEASONAL_MONSOON_PRECIPITATION_MIN_FACTOR, precision);
     add_double(out, first, "seasonal_monsoon_precipitation_max_factor",
         CLIMATE_SEASONAL_MONSOON_PRECIPITATION_MAX_FACTOR, precision);
+    add_str(out, first, "thermal_moisture_capacity_model",
+        "bounded_exponential_global_temperature_anomaly_v1");
+    add_str(out, first, "thermal_moisture_capacity_scope",
+        "global_monthly_precipitation_multiplier");
+    add_str(out, first, "thermal_moisture_capacity_temperature_anomaly_basis",
+        "base_temperature_plus_stellar_and_greenhouse_forcing_relative_to_earth_reference");
+    add_double(out, first, "thermal_moisture_capacity_reference_base_temperature_c",
+        CLIMATE_THERMAL_MOISTURE_REFERENCE_BASE_TEMPERATURE_C, precision);
+    add_double(out, first, "thermal_moisture_capacity_reference_stellar_luminosity",
+        1.0, precision);
+    add_double(out, first, "thermal_moisture_capacity_reference_greenhouse_factor",
+        1.0, precision);
+    add_double(out, first, "thermal_moisture_capacity_stellar_temperature_response_c",
+        CLIMATE_STELLAR_TEMPERATURE_RESPONSE_C, precision);
+    add_double(out, first, "thermal_moisture_capacity_greenhouse_temperature_response_c",
+        CLIMATE_GREENHOUSE_TEMPERATURE_RESPONSE_C, precision);
+    add_double(out, first, "thermal_moisture_capacity_temperature_response_per_c",
+        CLIMATE_THERMAL_MOISTURE_RESPONSE_PER_C, precision);
+    add_double(out, first, "thermal_moisture_capacity_min_factor",
+        CLIMATE_THERMAL_MOISTURE_MIN_FACTOR, precision);
+    add_double(out, first, "thermal_moisture_capacity_max_factor",
+        CLIMATE_THERMAL_MOISTURE_MAX_FACTOR, precision);
+    add_double(out, first, "thermal_moisture_capacity_temperature_anomaly_c",
+        thermal_moisture_temperature_anomaly_c, precision);
+    add_double(out, first, "thermal_moisture_capacity_factor",
+        thermal_moisture_capacity_factor, precision);
+    add_str(out, first, "thermal_moisture_capacity_limitation",
+        "diagnostic_global_scaling_without_explicit_atmospheric_water_mass_or_energy_balance");
     add_int(out, first, "configured_month_count", params.months);
     add_bool(out, first, "latitude_temperature_area_normalized", true);
     add_bool(out, first, "local_temperature_adjustments_area_centered", true);

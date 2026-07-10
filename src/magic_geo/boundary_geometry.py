@@ -258,7 +258,10 @@ def _annotate_territorial_snapshots(
     summary["mean_snapshot_cell_edge_boundary_quality"] = _round(total_quality / quality_count) if quality_count else 0.0
 
 
-def enrich_world_with_boundary_geometry(world: dict[str, Any]) -> dict[str, Any]:
+def enrich_world_with_physical_boundary_geometry(
+    world: dict[str, Any],
+) -> dict[str, Any]:
+    """Add boundary geometry for natural drainage partitions only."""
     cells = world.get("cells", [])
     if not isinstance(cells, list) or not cells:
         return world
@@ -266,6 +269,16 @@ def enrich_world_with_boundary_geometry(world: dict[str, Any]) -> dict[str, Any]
 
     watershed_segments = _build_watershed_segments(world, cells_by_id)
     _annotate_watersheds(world, watershed_segments)
+    return world
+
+
+def enrich_world_with_boundary_geometry(world: dict[str, Any]) -> dict[str, Any]:
+    cells = world.get("cells", [])
+    if not isinstance(cells, list) or not cells:
+        return world
+
+    enrich_world_with_physical_boundary_geometry(world)
+    cells_by_id = {int(cell.get("id", -1)): cell for cell in cells if isinstance(cell, dict)}
 
     territorial_segments = _build_territorial_segments(world, cells_by_id)
     _annotate_territorial_snapshots(world, cells_by_id, territorial_segments)

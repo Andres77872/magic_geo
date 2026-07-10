@@ -3,13 +3,18 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .planet_parameters import (
+    LEGACY_ICE_FLOW_EARTH_GRAVITY_M_S2,
+    planet_radius_km,
+    surface_gravity_m_s2,
+)
+
 
 def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
 
 
-def _great_circle_km(a: dict[str, Any], b: dict[str, Any]) -> float:
-    radius_km = 6371.0
+def _great_circle_km(a: dict[str, Any], b: dict[str, Any], radius_km: float) -> float:
     lat_a = math.radians(float(a.get("lat_deg", 0.0)))
     lat_b = math.radians(float(b.get("lat_deg", 0.0)))
     dlat = lat_b - lat_a
@@ -88,6 +93,11 @@ def enrich_world_with_ice_flowline_history(
     if not isinstance(cells, list) or not cells:
         return world
 
+    radius_km = planet_radius_km(world)
+    gravity_m_s2 = surface_gravity_m_s2(
+        world,
+        earth_reference_m_s2=LEGACY_ICE_FLOW_EARTH_GRAVITY_M_S2,
+    )
     cells_by_id = {int(cell.get("id", index)): cell for index, cell in enumerate(cells)}
     for cell in cells:
         cell["ice_flowline_flux_km3_y"] = 0.0
@@ -123,7 +133,7 @@ def enrich_world_with_ice_flowline_history(
 
         for index, cell in enumerate(path):
             next_cell = path[index + 1] if index + 1 < len(path) else None
-            segment_length_km = _great_circle_km(cell, next_cell) if next_cell is not None else 0.0
+            segment_length_km = _great_circle_km(cell, next_cell, radius_km) if next_cell is not None else 0.0
             path_length_km += segment_length_km
             thickness_m = max(0.0, float(cell.get("ice_thickness_m", 0.0)))
             area_km2 = max(1.0, float(cell.get("area_km2", 1.0)))
@@ -134,7 +144,7 @@ def enrich_world_with_ice_flowline_history(
             slope = 0.0
             if next_cell is not None and segment_length_km > 0.0:
                 slope = max(0.0, (float(cell.get("elevation_m", 0.0)) - float(next_cell.get("elevation_m", 0.0))) / (segment_length_km * 1000.0))
-            driving_stress_kpa = 917.0 * 9.81 * thickness_m * max(0.0002, slope) / 1000.0
+            driving_stress_kpa = 917.0 * gravity_m_s2 * thickness_m * max(0.0002, slope) / 1000.0
             accumulation_flux_km3_y = max(0.0, smb_m_y) * area_km2 / 1000.0
             ablation_loss_km3_y = max(0.0, -smb_m_y) * area_km2 / 1000.0
             dynamic_capacity_km3_y = velocity_m_y * thickness_m * math.sqrt(area_km2) / 1_000_000.0 * (0.55 + basal_sliding)

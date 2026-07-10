@@ -141,7 +141,8 @@ def enrich_world_with_geology_realism(world: dict[str, Any]) -> dict[str, Any]:
     mountain_aligned = [
         cell
         for cell in mountain_cells
-        if _boundary(cell, "boundary_convergent") > 0.20 or str(cell.get("crust_type", "")) == "orogen"
+        if _near_convergent(cell, cells_by_id)
+        or str(cell.get("crust_type", "")) == "orogen"
     ]
     mountain_alignment = len(mountain_aligned) / len(mountain_cells) if mountain_cells else 1.0
 
@@ -221,6 +222,7 @@ def enrich_world_with_geology_realism(world: dict[str, Any]) -> dict[str, Any]:
         target_min=0.55,
         target_max=1.0,
         evidence={
+            "alignment_definition": "cell_or_one_hop_neighbor_convergence_at_least_0.25_or_orogen_crust",
             "mountain_threshold_m": round(mountain_threshold, 6),
             "high_mountain_cell_count": len(mountain_cells),
             "aligned_high_mountain_cell_count": len(mountain_aligned),

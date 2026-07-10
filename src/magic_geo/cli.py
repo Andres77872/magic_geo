@@ -41,8 +41,19 @@ from .ensemble_calibration import (
 from .human_geography_validation import validate_human_geography_replay
 from .historical_geography_validation import validate_historical_geography_replay
 from .history_economy_validation import validate_history_economy_replay
+from .geo_validation import validate_geo_world
+from .geo_validation_suite import (
+    GeoValidationSuiteError,
+    evaluate_geo_validation_suite,
+    load_geo_validation_manifest,
+    write_geo_validation_suite_markdown,
+)
 from .logistics_exchange_validation import validate_logistics_exchange_replay
 from .market_clearing_validation import validate_market_clearing_replay
+from .planet_parameters import (
+    planet_radius_km as configured_planet_radius_km,
+    surface_gravity_m_s2,
+)
 from .phonology_history_validation import validate_phonology_history_replay
 from .io import write_cells_csv, write_json, write_raster_map, write_summary_markdown, write_svg_map
 from .scaling import HACK_FIT_MINIMUM_BASIN_AREA_KM2, fit_power_law
@@ -174,7 +185,6 @@ RIVER_CHANNEL_CLASSES = {
     "glacial_outwash_channel",
 }
 RIVER_HYDRAULICS_MODEL = "manning_blended_diagnostic_river_hydraulics_v1"
-RIVER_HYDRAULICS_GRAVITY_M_S2 = 9.80665
 RIVER_HYDRAULICS_WATER_DENSITY_KG_M3 = 1000.0
 RIVER_HYDRAULICS_NAVIGABILITY_THRESHOLD = 0.55
 RIVER_HYDRAULICS_HIGH_SHEAR_STRESS_PA = 120.0
@@ -1703,6 +1713,7 @@ def _validate_river_channel_morphology(
     failure = ["river channel morphology model or causal replay invalid"]
     model = payload.get("river_channel_morphology_model", {})
     systems = payload.get("river_channel_systems", [])
+    configured_radius_km = configured_planet_radius_km(payload)
     try:
         metadata_invalid = (
             not isinstance(model, dict)
@@ -1715,7 +1726,8 @@ def _validate_river_channel_morphology(
             or model.get("slope_model")
             != "downstream_conditioned_surface_drop_over_great_circle_distance_v1"
             or float(model.get("slope_normalization", -1.0)) != 0.028
-            or float(model.get("planet_radius_km", -1.0)) != 6371.0
+            or abs(float(model.get("planet_radius_km", -1.0)) - configured_radius_km)
+            > 1.0e-12
             or model.get("sediment_model")
             != "routed_outgoing_deposition_and_mobile_thickness_v1"
             or model.get("floodplain_model")
@@ -1765,7 +1777,7 @@ def _validate_river_channel_morphology(
             * math.cos(lat_b)
             * math.sin(dlon / 2.0) ** 2
         )
-        return 2.0 * 6371.0 * math.asin(
+        return 2.0 * configured_radius_km * math.asin(
             min(1.0, math.sqrt(haversine))
         )
 
@@ -2195,6 +2207,7 @@ def _validate_river_hydraulics(
     model = payload.get("river_hydraulics_model", {})
     channel_systems = payload.get("river_channel_systems", [])
     reaches = payload.get("river_hydraulic_reaches", [])
+    configured_gravity_m_s2 = surface_gravity_m_s2(payload)
     try:
         metadata_invalid = (
             not isinstance(model, dict)
@@ -2226,7 +2239,7 @@ def _validate_river_hydraulics(
             != "one_reach_per_river_channel_system_v1"
             or abs(
                 float(model.get("gravity_m_s2", -1.0))
-                - RIVER_HYDRAULICS_GRAVITY_M_S2
+                - configured_gravity_m_s2
             )
             > 1.0e-12
             or abs(
@@ -2365,14 +2378,14 @@ def _validate_river_hydraulics(
                 froude = velocity / max(
                     0.001,
                     (
-                        RIVER_HYDRAULICS_GRAVITY_M_S2
+                        configured_gravity_m_s2
                         * max(0.001, depth)
                     )
                     ** 0.5,
                 )
                 shear = (
                     RIVER_HYDRAULICS_WATER_DENSITY_KG_M3
-                    * RIVER_HYDRAULICS_GRAVITY_M_S2
+                    * configured_gravity_m_s2
                     * radius
                     * slope
                 )
@@ -9212,6 +9225,152 @@ def generate(
     )
 
 
+@app.command("validate-geo")
+def validate_geo(
+    world: Annotated[
+        Path,
+        typer.Option("--world", "-w", exists=True, help="Generated world JSON."),
+    ],
+    profile: Annotated[
+        str,
+        typer.Option(
+            "--profile",
+            help="Natural-system validation profile: generic or earthlike.",
+        ),
+    ] = "generic",
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Optional machine-readable validation report."),
+    ] = None,
+    fail_on_warnings: Annotated[
+        bool,
+        typer.Option(
+            "--fail-on-warnings/--allow-warnings",
+            help="Treat failed evidence-backed realism diagnostics as fatal.",
+        ),
+    ] = False,
+) -> None:
+    """Validate only natural geography, conservation, and selected realism gates."""
+    try:
+        payload = json.loads(world.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        typer.echo(f"Invalid world JSON: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    if profile not in {"generic", "earthlike"}:
+        typer.echo("--profile must be generic or earthlike", err=True)
+        raise typer.Exit(2)
+    report = validate_geo_world(payload, profile=profile)
+    report_summary = report["summary"]
+    failed_checks = [
+        check
+        for check in report["checks"]
+        if check["status"] == "failed"
+        and (check["severity"] == "error" or fail_on_warnings)
+    ]
+    policy_passed = not failed_checks
+    report["requested_policy"] = {
+        "fail_on_warnings": fail_on_warnings,
+        "policy_passed": policy_passed,
+    }
+    if output is not None:
+        write_json(output, report)
+    typer.echo(
+        f"{'OK' if policy_passed else 'FAIL'} geo | "
+        f"checks={report_summary['check_count']} "
+        f"errors={report_summary['error_failure_count']} "
+        f"warnings={report_summary['warning_failure_count']} "
+        f"not_applicable={report_summary['not_applicable_count']}"
+    )
+    for check in failed_checks:
+        typer.echo(
+            f"FAIL {check['domain']}.{check['name']}: {check['message']}",
+            err=True,
+        )
+    if failed_checks:
+        raise typer.Exit(1)
+
+
+@app.command("validate-geo-suite")
+def validate_geo_suite(
+    config: Annotated[
+        Path,
+        typer.Option("--config", "-c", exists=True, help="Base YAML config path."),
+    ] = Path("configs/earthlike_seed.yaml"),
+    matrix: Annotated[
+        Path,
+        typer.Option(
+            "--matrix",
+            "-m",
+            exists=True,
+            help="Geo scenario matrix with nested config overrides and paired gates.",
+        ),
+    ] = Path("configs/geo_validation_matrix.yaml"),
+    output: Annotated[
+        Path,
+        typer.Option("--output", "-o", help="Machine-readable suite report."),
+    ] = Path("runs/geo_validation.json"),
+    summary: Annotated[
+        Path | None,
+        typer.Option("--summary", help="Optional Markdown suite report."),
+    ] = None,
+) -> None:
+    """Run geo-only replays, diverse response gates, and configured empirical fit."""
+    try:
+        base_config = load_config(config)
+        manifest = load_geo_validation_manifest(matrix)
+
+        def report_progress(index: int, count: int, scenario: dict[str, Any]) -> None:
+            typer.echo(f"[{index + 1}/{count}] {scenario['id']}")
+
+        report = evaluate_geo_validation_suite(
+            base_config,
+            manifest,
+            progress=report_progress,
+        )
+    except (GeoValidationSuiteError, ValidationError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+    write_json(output, report)
+    if summary is not None:
+        write_geo_validation_suite_markdown(summary, report)
+    report_summary = report["summary"]
+    typer.echo(
+        f"Wrote {output} | scenarios={report_summary['scenario_pass_count']}/"
+        f"{report_summary['scenario_count']} relations={report_summary['relation_pass_count']}/"
+        f"{report_summary['relation_count']} empirical_fit="
+        + (
+            "not-configured"
+            if report_summary["empirical_calibration_scenario_count"] == 0
+            else (
+                f"{report_summary['empirical_calibration_pass_count']}/"
+                f"{report_summary['empirical_calibration_check_count']} "
+                f"coverage={report_summary['empirical_calibration_evaluated_metric_count']}/"
+                f"{report_summary['empirical_calibration_check_count']}"
+            )
+        )
+    )
+    if not report["passed"]:
+        failed_members = [member["id"] for member in report["members"] if not member["passed"]]
+        failed_relations = [relation["id"] for relation in report["relations"] if not relation["passed"]]
+        if failed_members:
+            typer.echo(f"Failed scenarios: {', '.join(failed_members)}", err=True)
+        if failed_relations:
+            typer.echo(f"Failed relations: {', '.join(failed_relations)}", err=True)
+        failed_empirical_metrics = [
+            f"{check['scenario_id']}:{check['metric']}"
+            for check in report.get("empirical_calibration", {}).get(
+                "failed_checks", []
+            )
+        ]
+        if failed_empirical_metrics:
+            typer.echo(
+                "Failed external empirical metrics: "
+                + ", ".join(failed_empirical_metrics),
+                err=True,
+            )
+        raise typer.Exit(1)
+
+
 @app.command("validate")
 def validate(
     world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated world JSON.")]
@@ -9241,6 +9400,32 @@ def validate(
         failures.append("cell_count does not match cells length")
     cell_ids = {int(cell.get("id", -1)) for cell in cells_payload}
     cells_by_id = {int(cell.get("id", -1)): cell for cell in cells_payload}
+
+    try:
+        maximum_crust_age_ma = (
+            float(payload.get("planet_parameters", {}).get("geological_age_ga", -1.0))
+            * 1000.0
+        )
+    except (TypeError, ValueError):
+        maximum_crust_age_ma = -1.0
+    crust_age_invalid = (
+        not math.isfinite(maximum_crust_age_ma) or maximum_crust_age_ma <= 0.0
+    )
+    for cell in cells_payload:
+        try:
+            initial_crust_age = float(cell["initial_crust_age_ma"])
+            final_crust_age = float(cell["crust_age_ma"])
+        except (KeyError, TypeError, ValueError):
+            crust_age_invalid = True
+            break
+        if (
+            not math.isfinite(initial_crust_age)
+            or not math.isfinite(final_crust_age)
+            or not 0.0 <= initial_crust_age <= maximum_crust_age_ma + 0.0001
+            or not 0.0 <= final_crust_age <= maximum_crust_age_ma + 0.0001
+        ):
+            crust_age_invalid = True
+            break
 
     sea_level_model = payload.get("sea_level_model", {})
     sea_level_model_keys = {
@@ -11858,6 +12043,20 @@ def validate(
         "seasonal_monsoon_precipitation_strength",
         "seasonal_monsoon_precipitation_min_factor",
         "seasonal_monsoon_precipitation_max_factor",
+        "thermal_moisture_capacity_model",
+        "thermal_moisture_capacity_scope",
+        "thermal_moisture_capacity_temperature_anomaly_basis",
+        "thermal_moisture_capacity_reference_base_temperature_c",
+        "thermal_moisture_capacity_reference_stellar_luminosity",
+        "thermal_moisture_capacity_reference_greenhouse_factor",
+        "thermal_moisture_capacity_stellar_temperature_response_c",
+        "thermal_moisture_capacity_greenhouse_temperature_response_c",
+        "thermal_moisture_capacity_temperature_response_per_c",
+        "thermal_moisture_capacity_min_factor",
+        "thermal_moisture_capacity_max_factor",
+        "thermal_moisture_capacity_temperature_anomaly_c",
+        "thermal_moisture_capacity_factor",
+        "thermal_moisture_capacity_limitation",
         "configured_month_count",
         "latitude_temperature_area_normalized",
         "local_temperature_adjustments_area_centered",
@@ -11895,6 +12094,36 @@ def validate(
             seasonal_monsoon_max_factor = float(
                 climate_model["seasonal_monsoon_precipitation_max_factor"]
             )
+            thermal_moisture_reference_base_temperature = float(
+                climate_model["thermal_moisture_capacity_reference_base_temperature_c"]
+            )
+            thermal_moisture_reference_stellar_luminosity = float(
+                climate_model["thermal_moisture_capacity_reference_stellar_luminosity"]
+            )
+            thermal_moisture_reference_greenhouse_factor = float(
+                climate_model["thermal_moisture_capacity_reference_greenhouse_factor"]
+            )
+            thermal_moisture_stellar_temperature_response = float(
+                climate_model["thermal_moisture_capacity_stellar_temperature_response_c"]
+            )
+            thermal_moisture_greenhouse_temperature_response = float(
+                climate_model["thermal_moisture_capacity_greenhouse_temperature_response_c"]
+            )
+            thermal_moisture_temperature_response_per_c = float(
+                climate_model["thermal_moisture_capacity_temperature_response_per_c"]
+            )
+            thermal_moisture_min_factor = float(
+                climate_model["thermal_moisture_capacity_min_factor"]
+            )
+            thermal_moisture_max_factor = float(
+                climate_model["thermal_moisture_capacity_max_factor"]
+            )
+            thermal_moisture_temperature_anomaly = float(
+                climate_model["thermal_moisture_capacity_temperature_anomaly_c"]
+            )
+            thermal_moisture_capacity_factor = float(
+                climate_model["thermal_moisture_capacity_factor"]
+            )
             configured_month_count = int(climate_model["configured_month_count"])
         except (TypeError, ValueError):
             climate_model_invalid = True
@@ -11912,15 +12141,25 @@ def validate(
                 seasonal_monsoon_strength,
                 seasonal_monsoon_min_factor,
                 seasonal_monsoon_max_factor,
+                thermal_moisture_reference_base_temperature,
+                thermal_moisture_reference_stellar_luminosity,
+                thermal_moisture_reference_greenhouse_factor,
+                thermal_moisture_stellar_temperature_response,
+                thermal_moisture_greenhouse_temperature_response,
+                thermal_moisture_temperature_response_per_c,
+                thermal_moisture_min_factor,
+                thermal_moisture_max_factor,
+                thermal_moisture_temperature_anomaly,
+                thermal_moisture_capacity_factor,
             )
             expected_area_mean_offset = latitude_gradient / (latitude_exponent + 1.0)
             climate_model_invalid = (
                 climate_model.get("model_type")
-                != "equilibrium_latitude_circulation_climate_v3"
+                != "equilibrium_latitude_circulation_climate_v4"
                 or climate_model.get("temperature_model")
                 != "area_mean_normalized_latitude_centered_local_adjustments_v3"
                 or climate_model.get("precipitation_model")
-                != "circulation_orography_wind_transport_subtropical_drying_v1"
+                != "bounded_thermal_moisture_circulation_orography_wind_transport_v2"
                 or climate_model.get("base_temperature_interpretation")
                 != "post_centered_local_adjustment_global_area_mean_c"
                 or climate_model.get("latitude_temperature_area_normalized") is not True
@@ -11931,6 +12170,14 @@ def validate(
                 or climate_model.get("transient_climate_resolved") is not False
                 or climate_model.get("model_limitation")
                 != "equilibrium_diagnostic_climate_without_mass_conserving_three_dimensional_atmosphere"
+                or climate_model.get("thermal_moisture_capacity_model")
+                != "bounded_exponential_global_temperature_anomaly_v1"
+                or climate_model.get("thermal_moisture_capacity_scope")
+                != "global_monthly_precipitation_multiplier"
+                or climate_model.get("thermal_moisture_capacity_temperature_anomaly_basis")
+                != "base_temperature_plus_stellar_and_greenhouse_forcing_relative_to_earth_reference"
+                or climate_model.get("thermal_moisture_capacity_limitation")
+                != "diagnostic_global_scaling_without_explicit_atmospheric_water_mass_or_energy_balance"
                 or any(not math.isfinite(value) for value in numeric_values)
                 or not -100.0 <= base_temperature <= 100.0
                 or abs(latitude_gradient - 47.0) > 0.000001
@@ -11944,6 +12191,17 @@ def validate(
                 or abs(seasonal_monsoon_strength - 1.6) > 0.000001
                 or abs(seasonal_monsoon_min_factor - 0.08) > 0.000001
                 or abs(seasonal_monsoon_max_factor - 1.92) > 0.000001
+                or abs(thermal_moisture_reference_base_temperature - 15.0) > 0.000001
+                or abs(thermal_moisture_reference_stellar_luminosity - 1.0) > 0.000001
+                or abs(thermal_moisture_reference_greenhouse_factor - 1.0) > 0.000001
+                or abs(thermal_moisture_stellar_temperature_response - 38.0) > 0.000001
+                or abs(thermal_moisture_greenhouse_temperature_response - 11.0) > 0.000001
+                or abs(thermal_moisture_temperature_response_per_c - 0.04) > 0.000001
+                or abs(thermal_moisture_min_factor - 0.35) > 0.000001
+                or abs(thermal_moisture_max_factor - 2.25) > 0.000001
+                or not thermal_moisture_min_factor
+                <= thermal_moisture_capacity_factor
+                <= thermal_moisture_max_factor
                 or configured_month_count != 12
             )
     if not climate_model_invalid:
@@ -11981,9 +12239,43 @@ def validate(
             expected_temperature_area_mean = (
                 base_temperature
                 + discrete_latitude_area_mean
-                + 38.0 * (stellar_luminosity**0.25 - 1.0)
-                + 11.0 * (greenhouse_factor - 1.0)
+                + thermal_moisture_stellar_temperature_response
+                * (
+                    (stellar_luminosity / thermal_moisture_reference_stellar_luminosity)
+                    ** 0.25
+                    - 1.0
+                )
+                + thermal_moisture_greenhouse_temperature_response
+                * (greenhouse_factor - thermal_moisture_reference_greenhouse_factor)
                 + 4.5 * math.log(max(0.01, atmosphere_pressure_bar))
+            )
+            expected_thermal_moisture_temperature_anomaly = (
+                base_temperature
+                - thermal_moisture_reference_base_temperature
+                + thermal_moisture_stellar_temperature_response
+                * (
+                    (stellar_luminosity / thermal_moisture_reference_stellar_luminosity)
+                    ** 0.25
+                    - 1.0
+                )
+                + thermal_moisture_greenhouse_temperature_response
+                * (greenhouse_factor - thermal_moisture_reference_greenhouse_factor)
+            )
+            expected_thermal_moisture_capacity_factor = min(
+                thermal_moisture_max_factor,
+                max(
+                    thermal_moisture_min_factor,
+                    math.exp(
+                        max(
+                            math.log(thermal_moisture_min_factor),
+                            min(
+                                math.log(thermal_moisture_max_factor),
+                                thermal_moisture_temperature_response_per_c
+                                * expected_thermal_moisture_temperature_anomaly,
+                            ),
+                        )
+                    ),
+                ),
             )
         except (KeyError, TypeError, ValueError, ZeroDivisionError):
             climate_model_invalid = True
@@ -11998,6 +12290,8 @@ def validate(
                         generated_temperature_area_mean,
                         discrete_latitude_area_mean,
                         expected_temperature_area_mean,
+                        expected_thermal_moisture_temperature_anomaly,
+                        expected_thermal_moisture_capacity_factor,
                     )
                 )
                 or stellar_luminosity <= 0.0
@@ -12007,6 +12301,16 @@ def validate(
                     generated_temperature_area_mean,
                     expected_temperature_area_mean,
                     abs_tol=0.01,
+                )
+                or not math.isclose(
+                    thermal_moisture_temperature_anomaly,
+                    expected_thermal_moisture_temperature_anomaly,
+                    abs_tol=0.0001,
+                )
+                or not math.isclose(
+                    thermal_moisture_capacity_factor,
+                    expected_thermal_moisture_capacity_factor,
+                    abs_tol=0.000005,
                 )
             ):
                 climate_model_invalid = True
@@ -13292,6 +13596,7 @@ def validate(
             center = plate.get("center", [])
             center_values = [float(component) for component in center]
             cumulative_rotation = float(plate.get("cumulative_rotation_deg", -1.0))
+            mean_crust_age = float(plate.get("mean_crust_age_ma", -1.0))
             heat_flow = float(plate.get("mean_heat_flow_mw_m2", -1.0))
             boundary_activity = float(plate.get("mean_boundary_activity", -1.0))
             plate_area = float(plate.get("area_km2", -1.0))
@@ -13318,6 +13623,8 @@ def validate(
             or abs(math.sqrt(sum(component * component for component in center_values)) - 1.0) > 0.01
             or not math.isfinite(cumulative_rotation)
             or cumulative_rotation < 0.0
+            or not math.isfinite(mean_crust_age)
+            or not 0.0 <= mean_crust_age <= maximum_crust_age_ma + 0.0001
             or float(plate.get("angular_speed", 0.0)) <= 0.0
             or float(plate.get("crust_density", 0.0)) <= 0.0
             or float(plate.get("crust_thickness_km", 0.0)) <= 0.0
@@ -13875,6 +14182,12 @@ def validate(
         previous_assignments = history_assignments[-1] if history_assignments else assignments
         if history_index == 0:
             current_ages = [float(cell.get("initial_crust_age_ma", -1.0)) for cell in cells_payload]
+            if any(
+                not math.isfinite(age)
+                or not 0.0 <= age <= maximum_crust_age_ma + 0.0001
+                for age in current_ages
+            ):
+                crust_age_invalid = True
             current_thicknesses = [
                 float(cell.get("initial_crust_thickness_km", -1.0)) for cell in cells_payload
             ]
@@ -13888,6 +14201,12 @@ def validate(
                 previous_ages[cell_index] + age_changes[cell_index]
                 for cell_index in range(cell_count)
             ]
+            if any(
+                not math.isfinite(age)
+                or not 0.0 <= age <= maximum_crust_age_ma + 0.0001
+                for age in current_ages
+            ):
+                crust_age_invalid = True
             current_thicknesses = [
                 previous_thicknesses[cell_index] + thickness_changes[cell_index]
                 for cell_index in range(cell_count)
@@ -14333,7 +14652,8 @@ def validate(
                         cumulative_transport_distance,
                     )
                 )
-                or not 0.0 <= final_age <= 4200.0001
+                or not 0.0 <= initial_age <= maximum_crust_age_ma + 0.0001
+                or not 0.0 <= final_age <= maximum_crust_age_ma + 0.0001
                 or not 4.5 <= final_thickness <= 76.0001
                 or not 2.58 <= final_density <= 3.0801
                 or abs(initial_age + age_change_sums[cell_index] - final_age) > 0.001
@@ -14483,6 +14803,8 @@ def validate(
             motion_invalid = True
     if motion_invalid:
         failures.append("plate kinematic model or motion history invalid")
+    if crust_age_invalid:
+        failures.append("crust ages exceed configured geological age")
 
     initial_relief_keys = {
         "initial_isostatic_elevation_m",
@@ -15008,6 +15330,18 @@ def validate(
     per_cell_tectonic_count: dict[int, int] = {cell_id: 0 for cell_id in cell_ids}
     per_cell_land_water_count: dict[int, int] = {cell_id: 0 for cell_id in cell_ids}
     per_cell_biome_transition_count: dict[int, int] = {cell_id: 0 for cell_id in cell_ids}
+    cell_geometry_radius_km = configured_planet_radius_km(payload)
+
+    def cell_geometry_xyz(cell: dict[str, Any]) -> tuple[float, float, float]:
+        latitude = math.radians(float(cell.get("lat_deg", 0.0)))
+        longitude = math.radians(float(cell.get("lon_deg", 0.0)))
+        cos_latitude = math.cos(latitude)
+        return (
+            cos_latitude * math.cos(longitude),
+            cos_latitude * math.sin(longitude),
+            math.sin(latitude),
+        )
+
     edge_record_keys = {
         "id",
         "cell_a_id",
@@ -15060,6 +15394,22 @@ def validate(
         biome_transition = bool(edge.get("biome_transition", False))
         cell_a = cells_by_id.get(cell_a_id)
         cell_b = cells_by_id.get(cell_b_id)
+        expected_edge_length_km = 0.0
+        if cell_a is not None and cell_b is not None:
+            cell_a_xyz = cell_geometry_xyz(cell_a)
+            cell_b_xyz = cell_geometry_xyz(cell_b)
+            expected_edge_length_km = math.acos(
+                max(
+                    -1.0,
+                    min(
+                        1.0,
+                        sum(
+                            first * second
+                            for first, second in zip(cell_a_xyz, cell_b_xyz)
+                        ),
+                    ),
+                )
+            ) * cell_geometry_radius_km
         if (
             edge_id != index
             or cell_a is None
@@ -15068,6 +15418,8 @@ def validate(
             or edge_pair not in expected_edge_pairs
             or not edge_class
             or length_km <= 0.0
+            or abs(length_km - expected_edge_length_km)
+            > max(0.001, expected_edge_length_km * 0.0001)
             or not -90.0 <= midpoint_lat <= 90.0
             or not -180.0 <= midpoint_lon <= 180.0
             or not 0.0 <= bearing_ab <= 360.0
@@ -16243,7 +16595,7 @@ def validate(
         "valid_river_sink_fraction",
         "river_downhill_realism_index",
         "tributary_merge_coherence_index",
-        "delta_lowland_sediment_coast_index",
+        "delta_lowland_sediment_terminal_water_index",
         "watershed_divide_alignment_index",
         "hydrology_realism_pass_fraction",
         "mean_hydrology_realism_score",
@@ -16305,7 +16657,9 @@ def validate(
         "river_terminal_sink_validity": "valid_river_sink_fraction",
         "river_downhill_flow": "river_downhill_realism_index",
         "tributary_merge_coherence": "tributary_merge_coherence_index",
-        "delta_lowland_sediment_coast": "delta_lowland_sediment_coast_index",
+        "delta_lowland_sediment_terminal_water": (
+            "delta_lowland_sediment_terminal_water_index"
+        ),
         "watershed_divide_alignment": "watershed_divide_alignment_index",
     }
     for check_name, summary_key in hydrology_realism_expected_summary.items():
@@ -19657,6 +20011,7 @@ def validate(
     if cells_payload and not ocean_current_cell_keys.issubset(cells_payload[0]):
         failures.append("ocean circulation cell fields missing")
     marine_water_types_for_currents = {"ocean", "continental_shelf", "inland_sea"}
+    ocean_current_radius_km = configured_planet_radius_km(payload)
     current_thermal_classes = ("warm", "cold", "neutral")
     current_direction_classes = ("poleward", "equatorward", "zonal")
     allowed_current_regimes = {
@@ -19724,7 +20079,10 @@ def validate(
         if best_target_id < 0 or best_alignment <= 0.0:
             return -1, 0.0, 0.0
         target_xyz = current_xyz(cells_by_id[best_target_id])
-        distance_km = math.acos(max(-1.0, min(1.0, current_dot(center, target_xyz)))) * 6371.0
+        distance_km = (
+            math.acos(max(-1.0, min(1.0, current_dot(center, target_xyz))))
+            * ocean_current_radius_km
+        )
         return best_target_id, max(0.0, min(1.0, best_alignment)), distance_km
 
     marine_current_ids: set[int] = set()
@@ -25239,6 +25597,29 @@ def validate(
         "immature_source_basin",
         "breached_trap_complex",
     }
+    petroleum_radius_km = configured_planet_radius_km(payload)
+
+    def petroleum_cell_distance_km(
+        first: dict[str, Any],
+        second: dict[str, Any],
+    ) -> float:
+        first_lat = math.radians(float(first.get("lat_deg", 0.0)))
+        second_lat = math.radians(float(second.get("lat_deg", 0.0)))
+        delta_lat = second_lat - first_lat
+        delta_lon = math.radians(
+            float(second.get("lon_deg", 0.0))
+            - float(first.get("lon_deg", 0.0))
+        )
+        haversine = (
+            math.sin(delta_lat * 0.5) ** 2
+            + math.cos(first_lat)
+            * math.cos(second_lat)
+            * math.sin(delta_lon * 0.5) ** 2
+        )
+        return 2.0 * petroleum_radius_km * math.asin(
+            min(1.0, math.sqrt(max(0.0, haversine)))
+        )
+
     petroleum_migration_ids: set[int] = set()
     petroleum_system_ids_by_cell_from_records: dict[int, int] = {}
     petroleum_migration_type_counts: dict[str, int] = {}
@@ -25417,10 +25798,16 @@ def validate(
                 break
             path_cells = [cells_by_id[cell_id] for cell_id in path_ids]
             path_divisor = float(len(path_cells))
+            expected_path_distance = sum(
+                petroleum_cell_distance_km(left, right)
+                for left, right in zip(path_cells, path_cells[1:])
+            )
             expected_path_migration = sum(float(cell.get("petroleum_migration_path_index", 0.0)) for cell in path_cells) / path_divisor
             expected_path_trap = sum(float(cell.get("petroleum_trap_integrity_index", 0.0)) for cell in path_cells) / path_divisor
             if (
-                abs(mean_path_migration - expected_path_migration) > 0.001
+                abs(path_distance - expected_path_distance)
+                > max(0.001, expected_path_distance * 0.0001)
+                or abs(mean_path_migration - expected_path_migration) > 0.001
                 or abs(mean_path_trap - expected_path_trap) > 0.001
             ):
                 petroleum_migration_invalid = True
