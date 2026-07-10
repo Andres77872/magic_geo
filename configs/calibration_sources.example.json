@@ -1,0 +1,45 @@
+{
+  "description": "Synthetic contract fixtures only; replace these grids with real ETOPO, WorldClim, HydroSHEDS, and Natural Earth-derived artifacts for empirical calibration.",
+  "sources": [
+    {
+      "dataset": "contract_fixture_etopo",
+      "layer": "ocean_mask",
+      "metric": "mean_ocean_mask_fraction",
+      "world_metric": "ocean_fraction",
+      "path": "calibration_fixtures/etopo_ocean_mask.asc",
+      "format": "esri_ascii_grid",
+      "statistic": "mean",
+      "tolerance_abs": 0.1
+    },
+    {
+      "dataset": "contract_fixture_worldclim",
+      "layer": "annual_temperature",
+      "metric": "mean_temperature_c",
+      "world_metric": "global_mean_temperature_c",
+      "path": "calibration_fixtures/worldclim_temperature.asc",
+      "format": "esri_ascii_grid",
+      "statistic": "mean",
+      "tolerance_abs": 1.0
+    },
+    {
+      "dataset": "contract_fixture_hydrosheds",
+      "layer": "river_mask",
+      "metric": "mean_river_mask_fraction",
+      "world_metric": "river_cell_fraction",
+      "path": "calibration_fixtures/hydrosheds_river_mask.asc",
+      "format": "esri_ascii_grid",
+      "statistic": "mean",
+      "tolerance_abs": 0.03
+    },
+    {
+      "dataset": "contract_fixture_natural_earth",
+      "layer": "coastal_land_mask",
+      "metric": "mean_coastal_land_mask_fraction",
+      "world_metric": "coastal_land_fraction",
+      "path": "calibration_fixtures/natural_earth_coastal_land_mask.asc",
+      "format": "esri_ascii_grid",
+      "statistic": "mean",
+      "tolerance_abs": 0.1
+    }
+  ]
+}

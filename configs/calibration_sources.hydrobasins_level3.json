@@ -1,0 +1,53 @@
+{
+  "description": "Empirical endorheic-basin targets from all nine non-Antarctic HydroBASINS v1.c standard Pfafstetter level-3 regions. Level 3 has 292 manually seeded terminal basin polygons. Generated terminal watersheds are resolution-dependent and are not a fully equivalent Pfafstetter hierarchy; the count comparison is therefore a coarse model-fit diagnostic, while the summed-area fraction is less sensitive to polygon subdivision.",
+  "sources": [
+    {
+      "dataset": "HydroBASINS",
+      "layer": "standard_pfafstetter_level_3",
+      "metric": "hydrobasins_endorheic_basin_fraction",
+      "world_metric": "non_antarctic_endorheic_watershed_fraction",
+      "path": "hydrobasins_level3_catalog.json",
+      "format": "hydrobasins_archive_catalog",
+      "statistic": "hydrobasins_endorheic_basin_fraction",
+      "tolerance_abs": 0.05,
+      "tolerance_basis": "Five-percentage-point coarse terminal-basin model-fit tolerance. Generated coverage includes whole resolution-dependent watersheds with centroid latitude at or north of 60 degrees south to exclude Antarctica; generated units are not a Pfafstetter hierarchy and this is not a statistical confidence interval.",
+      "source_url": "https://www.hydrosheds.org/products/hydrobasins",
+      "source_version": "HydroBASINS v1.c",
+      "source_license": "Freely available for scientific, educational, and commercial use under the HydroSHEDS license agreement; attribution and license terms apply.",
+      "source_license_url": "https://data.hydrosheds.org/file/technical-documentation/HydroSHEDS_TechDoc_v1_4.pdf",
+      "source_acquired_on": "2026-07-09",
+      "source_citation": "Lehner, B. and Grill, G. (2013). Global river hydrography and network routing: baseline data and new approaches to study the world's large river systems.",
+      "source_doi": "10.1002/hyp.9740",
+      "source_horizontal_crs": "WGS 84 geographic coordinates",
+      "source_geographic_coverage": "All nine HydroBASINS v1.c regions; near-global non-Antarctic land coverage",
+      "source_native_resolution": "HydroBASINS standard Pfafstetter level 3, derived from HydroSHEDS 15 arc-second hydrography",
+      "source_variable_units": "fraction of level-3 basin polygons with ENDO > 0",
+      "source_processing": "Nine checksum-pinned regional DBF tables aggregated globally; ENDO values 1 or 2 counted as endorheic",
+      "source_sha256": "6f555c6df336e72161f01d91027cddbd8438dc14cc694404c4638b3a0d980a48"
+    },
+    {
+      "dataset": "HydroBASINS",
+      "layer": "standard_pfafstetter_level_3",
+      "metric": "hydrobasins_endorheic_area_fraction",
+      "world_metric": "non_antarctic_endorheic_watershed_area_fraction",
+      "path": "hydrobasins_level3_catalog.json",
+      "format": "hydrobasins_archive_catalog",
+      "statistic": "hydrobasins_endorheic_area_fraction",
+      "tolerance_abs": 0.08,
+      "tolerance_basis": "Eight-percentage-point endorheic-area model-fit tolerance. Summed terminal-watershed area is compared over generated coverage with centroid latitude at or north of 60 degrees south; HydroBASINS lumping and virtual endorheic connections remain semantic limitations, and this is not a statistical confidence interval.",
+      "source_url": "https://www.hydrosheds.org/products/hydrobasins",
+      "source_version": "HydroBASINS v1.c",
+      "source_license": "Freely available for scientific, educational, and commercial use under the HydroSHEDS license agreement; attribution and license terms apply.",
+      "source_license_url": "https://data.hydrosheds.org/file/technical-documentation/HydroSHEDS_TechDoc_v1_4.pdf",
+      "source_acquired_on": "2026-07-09",
+      "source_citation": "Lehner, B. and Grill, G. (2013). Global river hydrography and network routing: baseline data and new approaches to study the world's large river systems.",
+      "source_doi": "10.1002/hyp.9740",
+      "source_horizontal_crs": "WGS 84 geographic coordinates",
+      "source_geographic_coverage": "All nine HydroBASINS v1.c regions; near-global non-Antarctic land coverage",
+      "source_native_resolution": "HydroBASINS standard Pfafstetter level 3, derived from HydroSHEDS 15 arc-second hydrography",
+      "source_variable_units": "SUB_AREA-weighted fraction of level-3 basin polygons with ENDO > 0",
+      "source_processing": "Nine checksum-pinned regional DBF tables aggregated globally; SUB_AREA summed for ENDO values 1 or 2",
+      "source_sha256": "6f555c6df336e72161f01d91027cddbd8438dc14cc694404c4638b3a0d980a48"
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+{
+  "dataset": "HydroBASINS",
+  "version": "1.c",
+  "format": "standard_without_lakes",
+  "pfafstetter_level": 3,
+  "archives": [
+    {
+      "region": "af",
+      "path": "../calibration_data/hydrobasins_level3/hybas_af_lev03_v1c.zip",
+      "url": "https://data.hydrosheds.org/file/hydrobasins/standard/hybas_af_lev03_v1c.zip",
+      "sha256": "2a21ec9b349499afa5fe60666ce0395a5658969fd9995f5c0cbf7ed61bb70a5c"
+    },
+    {
+      "region": "ar",
+      "path": "../calibration_data/hydrobasins_level3/hybas_ar_lev03_v1c.zip",
+      "url": "https://data.hydrosheds.org/file/hydrobasins/standard/hybas_ar_lev03_v1c.zip",
+      "sha256": "9856e9eed6424a5a7d10a261925ccbdb9fdf9b51ca45cd61a803de87e0b4bfe9"
+    },
+    {
+      "region": "as",
+      "path": "../calibration_data/hydrobasins_level3/hybas_as_lev03_v1c.zip",
+      "url": "https://data.hydrosheds.org/file/hydrobasins/standard/hybas_as_lev03_v1c.zip",
+      "sha256": "8685de538821bbfdd3aaa8d215abc93b8ad77ae9d10f909c6bc03a93d80c3e8d"
+    },
+    {
+      "region": "au",
+      "path": "../calibration_data/hydrobasins_level3/hybas_au_lev03_v1c.zip",
+      "url": "https://data.hydrosheds.org/file/hydrobasins/standard/hybas_au_lev03_v1c.zip",
+      "sha256": "1b76e59db5e46433e481da4a05b480ab7c11db53870d3c0f23c68474c7a7f0a3"
+    },
+    {
+      "region": "eu",
+      "path": "../calibration_data/hydrobasins_level3/hybas_eu_lev03_v1c.zip",
+      "url": "https://data.hydrosheds.org/file/hydrobasins/standard/hybas_eu_lev03_v1c.zip",
+      "sha256": "418df2b925e5774ec64445267de1d3813f807b72b9eb0e90fbbbe809bd98260b"
+    },
+    {
+      "region": "gr",
+      "path": "../calibration_data/hydrobasins_level3/hybas_gr_lev03_v1c.zip",
+      "url": "https://data.hydrosheds.org/file/hydrobasins/standard/hybas_gr_lev03_v1c.zip",
+      "sha256": "329cb5bdc911e7890ac6bd5c84336d66337d325fe72ceab218106d0d4fffe830"
+    },
+    {
+      "region": "na",
+      "path": "../calibration_data/hydrobasins_level3/hybas_na_lev03_v1c.zip",
+      "url": "https://data.hydrosheds.org/file/hydrobasins/standard/hybas_na_lev03_v1c.zip",
+      "sha256": "9c0a26757743500643fe4c50e4cb6fb23efbe31d212027f2c5a2d38f78e2ded8"
+    },
+    {
+      "region": "sa",
+      "path": "../calibration_data/hydrobasins_level3/hybas_sa_lev03_v1c.zip",
+      "url": "https://data.hydrosheds.org/file/hydrobasins/standard/hybas_sa_lev03_v1c.zip",
+      "sha256": "9eedb5240e9c2c77a55586c8b7b736ff34e067798e4a6d0bc1211549af2fe2aa"
+    },
+    {
+      "region": "si",
+      "path": "../calibration_data/hydrobasins_level3/hybas_si_lev03_v1c.zip",
+      "url": "https://data.hydrosheds.org/file/hydrobasins/standard/hybas_si_lev03_v1c.zip",
+      "sha256": "af0f99dfce4e5965db3e6e97b9256c2f1f7a341ad0d100fde4803a08c611571b"
+    }
+  ]
+}

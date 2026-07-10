@@ -1,0 +1,27 @@
+{
+  "description": "Empirical, scale-matched coastline target derived from Natural Earth 110m land polygons. Fetch the pinned source with scripts/fetch_natural_earth_110m.sh.",
+  "sources": [
+    {
+      "dataset": "Natural Earth",
+      "layer": "ne_110m_land",
+      "metric": "fibonacci_4096_coastal_land_fraction",
+      "world_metric": "coastal_land_fraction",
+      "path": "../calibration_data/natural_earth_110m/ne_110m_land.shp",
+      "format": "shapefile",
+      "coordinate_system": "geographic",
+      "statistic": "fibonacci_coastal_land_fraction",
+      "sample_cell_count": 4096,
+      "sample_neighbor_count": 7,
+      "tolerance_abs": 0.05,
+      "tolerance_basis": "Absolute Earth-like model-fit tolerance for generated coast variability; not a statistical confidence interval.",
+      "source_url": "https://www.naturalearthdata.com/downloads/110m-physical-vectors/110m-land/",
+      "source_archive_url": "https://naciscdn.org/naturalearth/110m/physical/ne_110m_land.zip",
+      "source_version": "4.1.0",
+      "source_license": "Public domain",
+      "source_license_url": "https://www.naturalearthdata.com/about/terms-of-use/",
+      "source_acquired_on": "2026-07-09",
+      "source_sha256": "8689e6932b8e370e2ca4587cf3ba21e460b1235db37b6ed3c172c35b4a6088de",
+      "source_archive_sha256": "1926c621afd6ac67c3f36639bb1236134a48d82226dc675d3e3df53d02d2a3de"
+    }
+  ]
+}

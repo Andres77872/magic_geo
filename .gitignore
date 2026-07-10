@@ -1,0 +1,18 @@
+.venv/
+build/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Generated world outputs are intentionally easy to recreate.
+runs/
+
+# Downloaded empirical calibration datasets are fetched on demand.
+calibration_data/
+
+# Native library produced by CMake.
+src/magic_geo/libmagic_geo_native.so
+.agents
+.codex
+.idea
+.claude
