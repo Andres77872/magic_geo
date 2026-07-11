@@ -41,6 +41,21 @@ std::pair<double, double> prevailing_wind_components(double lat, double day_leng
     return {east / len, north / len};
 }
 
+constexpr int PREVAILING_WIND_REGIME_COUNT = 6;
+constexpr int MAX_HUMIDITY_TRANSPORT_STEPS = 34;
+
+int prevailing_wind_regime(double lat) {
+    const double lat_abs_deg = std::abs(lat * DEG);
+    int band = 0;
+    if (lat_abs_deg >= 30.0 && lat_abs_deg < 60.0) {
+        band = 1;
+    } else if (lat_abs_deg >= 60.0) {
+        band = 2;
+    }
+    const int hemisphere = lat >= 0.0 ? 0 : 1;
+    return 2 * band + hemisphere;
+}
+
 std::pair<int, double> upwind_neighbor_for_wind(const std::vector<Cell>& cells, int i, double wind_east, double wind_north) {
     const Cell& cell = cells[i];
     int upwind = -1;
@@ -62,9 +77,68 @@ std::pair<int, double> upwind_neighbor_for_wind(const std::vector<Cell>& cells, 
     return {upwind, best_alignment};
 }
 
-std::pair<double, double> orographic_and_shadow_factors(const std::vector<Cell>& cells, int i, double wind_east, double wind_north) {
+struct PrevailingWindUpwindCache {
+    std::size_t cell_count = 0;
+    std::array<std::pair<double, double>, PREVAILING_WIND_REGIME_COUNT> winds{};
+    std::array<bool, PREVAILING_WIND_REGIME_COUNT> active_regimes{};
+    std::vector<std::pair<int, double>> upwind_by_regime;
+
+    const std::pair<int, double>& upwind(int regime, int cell_id) const {
+        return upwind_by_regime[
+            static_cast<std::size_t>(regime) * cell_count +
+            static_cast<std::size_t>(cell_id)
+        ];
+    }
+};
+
+PrevailingWindUpwindCache build_prevailing_wind_upwind_cache(
+    const Params& params,
+    const std::vector<Cell>& cells
+) {
+    PrevailingWindUpwindCache cache;
+    cache.cell_count = cells.size();
+    cache.upwind_by_regime.resize(
+        static_cast<std::size_t>(PREVAILING_WIND_REGIME_COUNT) * cells.size()
+    );
+
+    // Prevailing wind has three latitude bands and two hemispheres. Capture the
+    // exact normalized pair produced for every regime present in this mesh.
+    for (const Cell& cell : cells) {
+        const int regime = prevailing_wind_regime(cell.lat);
+        if (!cache.active_regimes[static_cast<std::size_t>(regime)]) {
+            cache.winds[static_cast<std::size_t>(regime)] =
+                prevailing_wind_components(cell.lat, params.day_length_hours);
+            cache.active_regimes[static_cast<std::size_t>(regime)] = true;
+        }
+    }
+
+    // Geometry is immutable during compute_climate. Reusing this strict-`>`
+    // result preserves neighbor-order ties while avoiding a rescan per path step.
+    const int cell_count = static_cast<int>(cells.size());
+#pragma omp parallel for collapse(2) schedule(static)
+    for (int regime = 0; regime < PREVAILING_WIND_REGIME_COUNT; ++regime) {
+        for (int i = 0; i < cell_count; ++i) {
+            if (!cache.active_regimes[static_cast<std::size_t>(regime)]) {
+                continue;
+            }
+            const auto [wind_east, wind_north] =
+                cache.winds[static_cast<std::size_t>(regime)];
+            cache.upwind_by_regime[
+                static_cast<std::size_t>(regime) * cache.cell_count +
+                static_cast<std::size_t>(i)
+            ] = upwind_neighbor_for_wind(cells, i, wind_east, wind_north);
+        }
+    }
+    return cache;
+}
+
+std::pair<double, double> orographic_and_shadow_factors(
+    const std::vector<Cell>& cells,
+    int i,
+    const std::pair<int, double>& upwind_neighbor
+) {
     const Cell& cell = cells[i];
-    const auto [upwind, best_alignment] = upwind_neighbor_for_wind(cells, i, wind_east, wind_north);
+    const auto [upwind, best_alignment] = upwind_neighbor;
     if (upwind < 0 || best_alignment < 0.12) {
         return {1.0, 1.0};
     }
@@ -86,21 +160,38 @@ HumidityTransport humidity_transport_along_wind(
     const Params& params,
     const std::vector<Cell>& cells,
     int start,
-    double wind_east,
-    double wind_north
+    int wind_regime,
+    const PrevailingWindUpwindCache& upwind_cache
 ) {
-    const int max_steps = clamp(static_cast<int>(cells.size()) / 256 + 10, 10, 34);
+    const int max_steps = clamp(
+        static_cast<int>(cells.size()) / 256 + 10,
+        10,
+        MAX_HUMIDITY_TRANSPORT_STEPS
+    );
     int current = start;
     double parcel = cells[start].is_water ? 0.72 : 0.08;
     double fetch_km = cells[start].is_water ? 120.0 : 0.0;
     double rainout = 0.0;
     double decay = 1.0;
-    std::set<int> visited;
-    visited.insert(start);
+    // One slot for the start plus one for every possible successful path step.
+    std::array<int, MAX_HUMIDITY_TRANSPORT_STEPS + 1> visited;
+    int visited_count = 1;
+    visited[0] = start;
 
     for (int step = 0; step < max_steps; ++step) {
-        const auto [source_id, alignment] = upwind_neighbor_for_wind(cells, current, wind_east, wind_north);
-        if (source_id < 0 || alignment < 0.10 || visited.count(source_id) > 0) {
+        const auto [source_id, alignment] =
+            upwind_cache.upwind(wind_regime, current);
+        if (source_id < 0 || alignment < 0.10) {
+            break;
+        }
+        bool already_visited = false;
+        for (int visited_index = 0; visited_index < visited_count; ++visited_index) {
+            if (visited[static_cast<std::size_t>(visited_index)] == source_id) {
+                already_visited = true;
+                break;
+            }
+        }
+        if (already_visited) {
             break;
         }
         const Cell& source = cells[source_id];
@@ -123,7 +214,7 @@ HumidityTransport humidity_transport_along_wind(
         parcel *= 1.0 - 0.04 * clamp(descent / 2200.0, 0.0, 1.0);
 
         current = source_id;
-        visited.insert(source_id);
+        visited[static_cast<std::size_t>(visited_count++)] = source_id;
         decay *= 0.88;
     }
 
@@ -160,6 +251,8 @@ std::pair<double, double> ocean_current_components(double lat, double lon, doubl
 void compute_climate(const Params& params, std::vector<Cell>& cells) {
     const std::vector<int> dist = ocean_distance(cells);
     const int n = static_cast<int>(cells.size());
+    const PrevailingWindUpwindCache prevailing_wind_cache =
+        build_prevailing_wind_upwind_cache(params, cells);
     const double pressure = std::max(0.01, params.atmosphere_pressure_bar);
     const double pressure_temp_adj = 4.5 * std::log(pressure);
     const double pressure_precip_factor = clamp(std::pow(pressure, 0.35), 0.35, 1.85);
@@ -203,13 +296,27 @@ void compute_climate(const Params& params, std::vector<Cell>& cells) {
         cell.precipitation_monthly_mm.fill(0.0);
         cell.wind_monthly_east.fill(0.0);
         cell.wind_monthly_north.fill(0.0);
-        const auto wind = prevailing_wind_components(cell.lat, params.day_length_hours);
+        const int wind_regime = prevailing_wind_regime(cell.lat);
+        const auto wind = prevailing_wind_components(
+            cell.lat,
+            params.day_length_hours
+        );
         cell.wind_east = wind.first;
         cell.wind_north = wind.second;
-        const auto moisture_factors = orographic_and_shadow_factors(cells, i, cell.wind_east, cell.wind_north);
+        const auto moisture_factors = orographic_and_shadow_factors(
+            cells,
+            i,
+            prevailing_wind_cache.upwind(wind_regime, i)
+        );
         cell.orographic_factor = moisture_factors.first;
         cell.rain_shadow_factor = moisture_factors.second;
-        const HumidityTransport humidity = humidity_transport_along_wind(params, cells, i, cell.wind_east, cell.wind_north);
+        const HumidityTransport humidity = humidity_transport_along_wind(
+            params,
+            cells,
+            i,
+            wind_regime,
+            prevailing_wind_cache
+        );
         cell.humidity_transport_index = humidity.index;
         cell.upwind_ocean_fetch_km = humidity.upwind_ocean_fetch_km;
         cell.advected_moisture_factor = humidity.factor;

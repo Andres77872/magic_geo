@@ -9,6 +9,7 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from './vendor/OrbitControls.js';
+import { layerDoc, layerTooltip, searchTerms, helpHtml } from './docs.js';
 
 const MISSING_SENTINEL = 3.0e38;   // NaN replacement survives every GPU driver
 const PLANE_SCALE = new THREE.Vector2(2.0, 1.0); // equirect/mollweide plane half-extent
@@ -198,11 +199,14 @@ const state = {
   projection: 'globe',      // 'globe' | 'equirect' | 'mollweide'
   morph: { value: 0, target: 0, proj2D: 0, proj2DTarget: 0 },
   values: null,             // Float32Array currently displayed
+  layerRequest: 0,          // monotonic token: only the newest fetch may upload
   layerCache: new Map(),    // key -> Float32Array (LRU)
   overlays: { wireframe: false, plates: false, graticule: false },
   pickDirty: true,
   hoverCell: -1,
   selectedCell: -1,
+  docCard: localStorage.getItem('magicGeoDocCard') === '1',
+  helpOpen: false,
 };
 
 const three = {};
@@ -225,12 +229,16 @@ async function fetchJson(url) {
   return response.json();
 }
 
-function layerCacheKey(layerId, stage, month) {
-  return `${layerId}|${stage}|${month}`;
+function layerCacheKey(layer, stage, month) {
+  // Key only on the axis the layer actually varies over, so prefetch and
+  // activation agree regardless of leftover state.stage / state.month.
+  const s = layer.kind === 'numeric_stage' ? stage : 0;
+  const m = layer.kind === 'numeric_monthly' ? month : 0;
+  return `${layer.id}|${s}|${m}`;
 }
 
 async function fetchLayerValues(layer, stage, month) {
-  const key = layerCacheKey(layer.id, stage, month);
+  const key = layerCacheKey(layer, stage, month);
   if (state.layerCache.has(key)) {
     const cached = state.layerCache.get(key);
     state.layerCache.delete(key);
@@ -258,7 +266,7 @@ function prefetchNeighborStages(layer, stage) {
   const count = layer.stage_count || 1;
   for (const delta of [1, -1, 2, -2]) {
     const neighbor = stage + delta;
-    if (neighbor >= 0 && neighbor < count && !state.layerCache.has(layerCacheKey(layer.id, neighbor, 0))) {
+    if (neighbor >= 0 && neighbor < count && !state.layerCache.has(layerCacheKey(layer, neighbor, 0))) {
       fetchLayerValues(layer, neighbor, 0).catch(() => {});
     }
   }
@@ -550,6 +558,54 @@ function updateLegend(layer) {
   $('#legend-max').textContent = formatValue(hi);
 }
 
+// ---------------------------------------------------------------------------
+// Docs helper: per-layer doc card + help overlay (content from docs.js)
+
+function renderLayerDoc(layer) {
+  const card = $('#layer-doc');
+  card.classList.toggle('hidden', !state.docCard || !layer);
+  $('#legend-info').classList.toggle('active', state.docCard);
+  if (!state.docCard || !layer) return;
+  const doc = layerDoc(layer);
+  const parts = [];
+  parts.push(`<h4>${escapeHtml(doc.id)}</h4>`);
+  const topicBits = [doc.topic, doc.kindLabel].filter(Boolean);
+  if (doc.unit) topicBits.push(`unit: <span class="doc-unit">${escapeHtml(doc.unit)}</span>`);
+  parts.push(`<div class="doc-topic">${topicBits.join(' · ')}</div>`);
+  if (doc.summary) parts.push(`<p>${escapeHtml(doc.summary)}</p>`);
+  else if (doc.unitMeaning) parts.push(`<p class="doc-dim">${escapeHtml(doc.unitMeaning)}.</p>`);
+  if (layer.stats) {
+    const stats = layer.stats;
+    parts.push('<table>'
+      + `<tr><td>min / max</td><td>${formatValue(stats.min)} … ${formatValue(stats.max)}</td></tr>`
+      + `<tr><td>legend (p2 / p98)</td><td>${formatValue(stats.p2)} … ${formatValue(stats.p98)}</td></tr>`
+      + '</table>');
+  }
+  if (layer.kind === 'categorical') {
+    parts.push(`<p class="doc-dim">${layer.categories.length} categories — see legend chips.</p>`);
+  }
+  if (doc.topicDoc) parts.push(`<p class="doc-dim">${escapeHtml(doc.topicDoc)}</p>`);
+  if (doc.sourceDoc) parts.push(`<p class="doc-dim">${escapeHtml(doc.sourceDoc)}</p>`);
+  card.innerHTML = parts.join('');
+}
+
+function toggleDocCard(force) {
+  state.docCard = force !== undefined ? force : !state.docCard;
+  localStorage.setItem('magicGeoDocCard', state.docCard ? '1' : '0');
+  renderLayerDoc(state.activeLayer);
+}
+
+function toggleHelp(force) {
+  state.helpOpen = force !== undefined ? force : !state.helpOpen;
+  const overlay = $('#help-overlay');
+  if (state.helpOpen && !overlay.dataset.built) {
+    $('#help-body').innerHTML = helpHtml(state.manifest);
+    overlay.dataset.built = '1';
+  }
+  overlay.classList.toggle('hidden', !state.helpOpen);
+  $('#toggle-help').classList.toggle('active', state.helpOpen);
+}
+
 function layerRange(layer) {
   const stats = layer.stats || {};
   let lo = stats.p2 ?? stats.min ?? 0;
@@ -570,8 +626,11 @@ async function activateLayer(layer, { stage = null, month = null } = {}) {
     item.classList.toggle('active', item.dataset.layerId === layer.id);
   });
 
+  const token = ++state.layerRequest;
   const values = await fetchLayerValues(layer, state.stage, state.month);
-  if (state.activeLayer !== layer) return;   // superseded while fetching
+  // Bail if any newer activation (different layer, stage or month) was issued
+  // while this fetch was in flight — otherwise a late response overwrites it.
+  if (state.layerRequest !== token) return;
   uploadValues(values);
 
   const [lo, hi] = layerRange(layer);
@@ -579,6 +638,7 @@ async function activateLayer(layer, { stage = null, month = null } = {}) {
   three.fillMaterial.uniforms.uMax.value = hi;
   three.fillMaterial.uniforms.uCategorical.value = layer.kind === 'categorical' ? 1 : 0;
   updateLegend(layer);
+  renderLayerDoc(layer);
   updateStageBar();
   prefetchNeighborStages(layer, state.stage);
   updateStatus();
@@ -655,15 +715,20 @@ function buildLayerList() {
     title.textContent = `${source} (${layers.length})`;
     container.appendChild(title);
     const body = document.createElement('div');
+    body.className = 'layer-group-body';
+    body.dataset.collapsed = '0';
+    body._title = title;   // link back for search-aware filtering
     container.appendChild(body);
     title.addEventListener('click', () => {
-      body.style.display = body.style.display === 'none' ? '' : 'none';
+      body.dataset.collapsed = body.dataset.collapsed === '1' ? '0' : '1';
+      filterLayerList($('#layer-search').value);   // reapply search + collapse together
     });
     for (const layer of layers) {
       const item = document.createElement('div');
       item.className = 'layer-item';
       item.dataset.layerId = layer.id;
-      item.dataset.search = `${layer.source} ${layer.name}`.toLowerCase();
+      item.dataset.search = `${layer.source} ${layer.name} ${searchTerms(layer)}`.toLowerCase();
+      item.title = layerTooltip(layer);
       item.textContent = layer.name;
       if (kindBadge[layer.kind]) {
         const badge = document.createElement('span');
@@ -679,8 +744,18 @@ function buildLayerList() {
 
 function filterLayerList(query) {
   const needle = query.trim().toLowerCase();
-  document.querySelectorAll('.layer-item').forEach((item) => {
-    item.style.display = !needle || item.dataset.search.includes(needle) ? '' : 'none';
+  document.querySelectorAll('#layer-list .layer-group-body').forEach((body) => {
+    let anyVisible = false;
+    body.querySelectorAll('.layer-item').forEach((item) => {
+      const match = !needle || item.dataset.search.includes(needle);
+      item.style.display = match ? '' : 'none';
+      if (match) anyVisible = true;
+    });
+    const collapsed = body.dataset.collapsed === '1';
+    // A search expands collapsed groups that contain matches (so results are
+    // never hidden); clearing the search restores the group's collapse state.
+    body.style.display = needle ? (anyVisible ? '' : 'none') : (collapsed ? 'none' : '');
+    if (body._title) body._title.style.display = anyVisible ? '' : 'none';
   });
 }
 
@@ -867,6 +942,13 @@ function wireEvents() {
 
   $('#layer-search').addEventListener('input', (event) => filterLayerList(event.target.value));
 
+  $('#toggle-help').addEventListener('click', () => toggleHelp());
+  $('#help-close').addEventListener('click', () => toggleHelp(false));
+  $('#help-overlay').addEventListener('click', (event) => {
+    if (event.target === $('#help-overlay')) toggleHelp(false);
+  });
+  $('#legend-info').addEventListener('click', () => toggleDocCard());
+
   const slider = $('#stage-slider');
   const number = $('#stage-number');
   slider.addEventListener('input', () => {
@@ -919,6 +1001,13 @@ function wireEvents() {
       case 'w': $('#toggle-wireframe').click(); break;
       case 'b': $('#toggle-plates').click(); break;
       case 'g': $('#toggle-graticule').click(); break;
+      case 'i': toggleDocCard(); break;
+      case '?': case 'h': toggleHelp(); break;
+      case 'Escape':
+        if (state.helpOpen) { toggleHelp(false); break; }
+        if (state.docCard) { toggleDocCard(false); break; }
+        if (state.selectedCell >= 0) $('#inspector-close').click();
+        break;
       case '/': event.preventDefault(); $('#layer-search').focus(); break;
       default: break;
     }

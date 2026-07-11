@@ -76,6 +76,10 @@ class ConfigTests(TestCase):
         self.assertEqual(NativeConfigV2.compute_backend.offset, 304)
         self.assertEqual(NativeConfigV2.opencl_prefer_gpu.offset, 308)
 
+        data["compute"]["backend"] = "cuda"
+        cuda_native = _native_config(data)
+        self.assertEqual(cuda_native.compute_backend, 3)
+
         expected_v1_offsets = {
             "seed": 0,
             "name": 8,

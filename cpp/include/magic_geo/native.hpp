@@ -64,9 +64,11 @@ struct Params {
 // Compute policy is intentionally separate from Params so the original public
 // C++ parameter layout remains ABI-compatible. The legacy one-argument
 // generate_world_json overload always uses the CPU; callers must opt into
-// automatic or OpenCL execution through the two-argument overload.
+// automatic, OpenCL, or CUDA execution through the two-argument overload.
 struct ComputeOptions {
     int compute_backend = 0;
+    // Retained for ABI compatibility and OpenCL device ranking. Automatic
+    // mode tries a qualifying native CUDA device before OpenCL.
     bool opencl_prefer_gpu = true;
 };
 

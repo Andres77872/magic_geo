@@ -54,14 +54,14 @@ std::vector<int> choose_plate_seeds(const Params& params, int cell_count) {
 
 void assign_plates(const std::vector<Vec3>& centers, std::vector<Cell>& cells) {
     const int n = static_cast<int>(cells.size());
-    std::vector<int> opencl_plate_ids;
-    if (try_opencl_assign_plates(centers, cells, opencl_plate_ids)) {
-        if (opencl_plate_ids.size() != cells.size()) {
-            throw std::runtime_error("OpenCL plate assignment result size mismatch");
+    std::vector<int> accelerated_plate_ids;
+    if (try_accelerated_assign_plates(centers, cells, accelerated_plate_ids)) {
+        if (accelerated_plate_ids.size() != cells.size()) {
+            throw std::runtime_error("accelerated plate assignment result size mismatch");
         }
         for (int i = 0; i < n; ++i) {
             cells[static_cast<std::size_t>(i)].plate_id =
-                opencl_plate_ids[static_cast<std::size_t>(i)];
+                accelerated_plate_ids[static_cast<std::size_t>(i)];
         }
     } else {
 #pragma omp parallel for schedule(static)
@@ -100,11 +100,11 @@ std::vector<double> smooth_field(const std::vector<Cell>& cells, const std::vect
     if (steps <= 0) {
         return input;
     }
-    std::vector<double> opencl_output;
-    if (try_opencl_smooth_field(
-            cells, input, steps, self_weight, opencl_output
+    std::vector<double> accelerated_output;
+    if (try_accelerated_smooth_field(
+            cells, input, steps, self_weight, accelerated_output
         )) {
-        return opencl_output;
+        return accelerated_output;
     }
     std::vector<double> current = input;
     std::vector<double> next(input.size(), 0.0);
@@ -160,7 +160,7 @@ void classify_boundaries(const Params& params, const std::vector<Plate>& plates,
     std::vector<double> smoothed_conv;
     std::vector<double> smoothed_div;
     std::vector<double> smoothed_trans;
-    if (try_opencl_smooth_three_fields(
+    if (try_accelerated_smooth_three_fields(
             cells,
             conv,
             div,
@@ -667,7 +667,7 @@ std::vector<double> advance_plate_motion_and_crust(
             cells[index].p, plate.axis, -rotation_rad
         );
     }
-    if (!try_opencl_remap_crust_sources(
+    if (!try_accelerated_remap_crust_sources(
             cells,
             backtraced_positions,
             previous_cells_by_plate,

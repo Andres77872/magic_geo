@@ -51,13 +51,19 @@ touching the exporter, and skipped fields are recorded in the manifest instead o
 
 ## Frontend (system browser, no build step)
 
+Full UI reference: [debug_ui_guide.md](debug_ui_guide.md). Pipeline review with known
+issues: [layers_pipeline_review.md](layers_pipeline_review.md).
+
 One merged indexed `BufferGeometry` (fan per cell around its site, per-vertex `cell_id`), per-cell
 values in an R32F `DataTexture` fetched by cell id in the vertex shader, viridis/categorical
 colormap in the fragment shader. Layer switch and stage scrub swap one `Float32Array` — no
 geometry rebuild. Vendored three.js 0.185 (`debug_ui/vendor/`), loaded via import map.
 
-- Layer panel: grouped by record family, search filter (`/`), numeric + categorical + monthly +
-  per-stage layers (446 layers on the default earthlike run).
+- Layer panel: grouped by record family, search filter (`/`) that also matches layer docs and
+  units, doc tooltips, numeric + categorical + monthly + per-stage layers (446 layers on the
+  default earthlike run).
+- Docs helper (`debug_ui/docs.js`): help overlay (`?`/`h`), per-layer doc card (`i` or legend ⓘ)
+  with curated summaries, unit/subsystem inference from field-name conventions, and stats.
 - Stage control: slider + exact-value field + step buttons (`,` / `.`), ±2-stage prefetch.
 - Projections: globe / equirectangular / Mollweide with animated vertex-shader morph (`1`/`2`/`3`);
   every overlay follows the morph via a shared shader chunk.

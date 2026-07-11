@@ -37,11 +37,13 @@ stages must not depend on JSON serializers.
 - `civilization.cpp`: regions, borders, trade, cultures, languages, and sites.
 - `history.cpp`: history, population, conflict, dynasties, snapshots, and calibration checks.
 - `pipeline.cpp`: the only complete simulation-stage ordering.
-- `opencl_compute.cpp`: dynamic OpenCL capability discovery, per-generation
-  backend selection/resources/telemetry, and FP64 plate-assignment,
-  fixed-order scalar/fused-three-field neighbor-smoothing, and crust-remap
-  kernels. CPU execution remains the reference path; explicit OpenCL failures
-  are fatal and only `auto` may fall back.
+- `opencl_compute.cpp`: generation-scoped CPU/OpenCL/CUDA orchestration,
+  dynamic OpenCL discovery/resources, automatic fallback, and unified
+  telemetry. `cuda_compute.cu` owns native NVIDIA discovery, persistent
+  CUDA buffers/stream/events, FP64 kernels, and the warp-cooperative
+  deterministic crust remap; `cuda_compute_stub.cpp` preserves builds without
+  a CUDA toolchain. CPU execution remains the reference path; explicit
+  OpenCL/CUDA failures are fatal and only `auto` may fall back.
 - `summary.cpp`, `entity_serialization.cpp`, and `process_serialization.cpp`: read-only JSON fragments.
 - `world_serialization.cpp`: top-level schema ordering and assembly.
 
@@ -63,13 +65,14 @@ the shared library.
   via `ctypes`.
 - Keep all declared legacy public symbols visible and all `magic_geo::detail`
   symbols hidden.
-- Preserve backend truthfulness: `cpu` must not initialize or probe OpenCL,
-  below-threshold `auto` CPU selection is not a fallback, explicit `opencl`
-  must never silently fall back, and `auto` must never select a CPU OpenCL
-  device. Qualifying FP64 devices must report denorm, INF/NAN, and
-  round-to-nearest support. Serialized telemetry must identify actual dispatch
-  counts, work sizes, transfer bytes, device capabilities, and any automatic
-  fallback reason.
+- Preserve backend truthfulness: `cpu` must not initialize or probe CUDA or
+  OpenCL, below-threshold `auto` CPU selection is not a fallback, explicit
+  `opencl`/`cuda` must never silently fall back, and `auto` must never select a
+  CPU OpenCL device. Automatic eligibility uses the generated mesh size, not
+  only the requested size. Qualifying FP64 devices must expose the required
+  numerical/runtime behavior. Serialized telemetry must identify actual
+  dispatch counts, work sizes, transfer bytes/timings, allocations, device
+  capabilities, and any automatic fallback reason.
 - Explicit OpenMP thread counts are generation-scoped and restore the calling
   thread's prior ICV on every exit; `threads=0` leaves host policy untouched.
 - New domain stages belong before `serialize_world`; serializers must be

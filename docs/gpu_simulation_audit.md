@@ -1,3 +1,10 @@
+> **Historical / superseded backend status**
+>
+> This document preserves the original CPU/OpenCL pipeline audit and
+> determinism analysis. Its backend inventory, automatic-selection policy,
+> thresholds, and latest benchmark results are superseded by the
+> [RTX 5090 CUDA optimization audit](cuda_rtx5090_optimization.md).
+
 # GPU simulation audit and architecture guide
 
 This document records the repository-specific performance audit, the current

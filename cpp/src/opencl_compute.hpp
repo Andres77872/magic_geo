@@ -8,9 +8,10 @@
 
 namespace magic_geo::detail {
 
-// Owns one generation's backend selection and OpenCL resources. The active
-// session is thread-local so the existing simulation signatures remain stable;
-// every accelerated operation still receives and returns ordinary host data.
+// Owns one generation's CPU/OpenCL/CUDA selection and accelerator resources.
+// The active session is thread-local so the existing simulation signatures
+// remain stable; every accelerated operation still receives and returns
+// ordinary host data.
 class ComputeSession {
 public:
     struct Impl;
@@ -27,17 +28,17 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-// Return true only when OpenCL produced a complete host result. In auto mode a
-// runtime failure atomically disables OpenCL for the rest of the generation and
-// returns false so the caller can execute its unchanged CPU implementation.
-// Explicit OpenCL requests throw instead of silently falling back.
-bool try_opencl_assign_plates(
+// Return true only when the selected accelerator produced a complete host
+// result. In auto mode a runtime failure atomically disables acceleration for
+// the rest of the generation and returns false so the caller can execute its
+// unchanged CPU implementation. Explicit OpenCL/CUDA requests throw instead.
+bool try_accelerated_assign_plates(
     const std::vector<Vec3>& centers,
     const std::vector<Cell>& cells,
     std::vector<int>& plate_ids
 );
 
-bool try_opencl_smooth_field(
+bool try_accelerated_smooth_field(
     const std::vector<Cell>& cells,
     const std::vector<double>& input,
     int steps,
@@ -45,7 +46,7 @@ bool try_opencl_smooth_field(
     std::vector<double>& output
 );
 
-bool try_opencl_smooth_three_fields(
+bool try_accelerated_smooth_three_fields(
     const std::vector<Cell>& cells,
     const std::vector<double>& input_a,
     const std::vector<double>& input_b,
@@ -59,7 +60,7 @@ bool try_opencl_smooth_three_fields(
     std::vector<double>& output_c
 );
 
-bool try_opencl_remap_crust_sources(
+bool try_accelerated_remap_crust_sources(
     const std::vector<Cell>& cells,
     const std::vector<Vec3>& backtraced_positions,
     const std::vector<std::vector<int>>& previous_cells_by_plate,

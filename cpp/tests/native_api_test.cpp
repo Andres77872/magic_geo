@@ -179,6 +179,7 @@ bool public_api_is_usable() {
     CHECK(generated.find("\"cells\":[]") != std::string::npos);
     CHECK(generated.find("\"requested_backend\":\"cpu\"") != std::string::npos);
     CHECK(generated.find("\"opencl_probe_performed\":false") != std::string::npos);
+    CHECK(generated.find("\"cuda_probe_performed\":false") != std::string::npos);
 
     magic_geo::ComputeOptions cpu_options;
     cpu_options.compute_backend = 1;
@@ -204,7 +205,7 @@ bool public_api_is_usable() {
     magic_geo::CConfigV2 invalid_v2 = test_config_v2();
     invalid_v2.compute_backend = 99;
     const std::string invalid_backend_error = consume(magic_geo_generate_json_v2(&invalid_v2));
-    CHECK(invalid_backend_error.find("compute_backend must be auto, cpu, or opencl") !=
+    CHECK(invalid_backend_error.find("compute_backend must be auto, cpu, opencl, or cuda") !=
           std::string::npos);
 
     invalid = cfg;
@@ -356,9 +357,13 @@ bool backend_selection_fallback_and_opencl_parity() {
     CHECK(cpu_world.find("\"requested_backend\":\"cpu\"") != std::string::npos);
     CHECK(cpu_world.find("\"selected_backend\":\"cpu\"") != std::string::npos);
     CHECK(!json_bool(cpu_world, "opencl_probe_performed"));
+    CHECK(!json_bool(cpu_world, "cuda_probe_performed"));
     CHECK(cpu_world.find("\"opencl_capability_status\":\"not_probed\"") !=
           std::string::npos);
+    CHECK(cpu_world.find("\"cuda_capability_status\":\"not_probed\"") !=
+          std::string::npos);
     CHECK(json_int(cpu_world, "opencl_kernel_dispatch_count") == 0);
+    CHECK(json_int(cpu_world, "cuda_kernel_dispatch_count") == 0);
 
     magic_geo::CConfigV2 auto_cfg = test_config_v2();
     auto_cfg.compute_backend = 0;
@@ -368,8 +373,11 @@ bool backend_selection_fallback_and_opencl_parity() {
     CHECK(!json_bool(auto_world, "opencl_auto_offload_eligible"));
     CHECK(!json_bool(auto_world, "backend_fallback_used"));
     CHECK(!json_bool(auto_world, "opencl_probe_performed"));
+    CHECK(!json_bool(auto_world, "cuda_probe_performed"));
     CHECK(auto_world.find("\"selected_backend\":\"cpu\"") != std::string::npos);
+    CHECK(json_int(auto_world, "automatic_planning_cell_count") == 128);
     CHECK(json_int(auto_world, "opencl_kernel_dispatch_count") == 0);
+    CHECK(json_int(auto_world, "cuda_kernel_dispatch_count") == 0);
 
     magic_geo::CConfigV2 opencl_cfg = test_config_v2();
     opencl_cfg.compute_backend = 2;
@@ -422,6 +430,78 @@ bool backend_selection_fallback_and_opencl_parity() {
     CHECK(
         normalize_backend_object(remap_cpu_world) ==
         normalize_backend_object(remap_opencl_world)
+    );
+    return true;
+}
+
+bool cuda_backend_failure_and_parity() {
+    const std::string capability = magic_geo::backend_info_json();
+    const bool cuda_compiled = json_bool(capability, "cuda_compiled");
+    const bool cuda_available = json_bool(capability, "cuda_available");
+    CHECK(capability.find("\"cuda_capability_status\":") != std::string::npos);
+    CHECK(json_bool(capability, "cuda_probe_performed"));
+    if (cuda_available) {
+        CHECK(cuda_compiled);
+        CHECK(json_bool(capability, "cuda_nvidia_device"));
+        CHECK(json_bool(capability, "cuda_fp64_supported"));
+        CHECK(json_int(capability, "cuda_compute_capability_major") >= 2);
+    }
+
+    magic_geo::CConfigV2 cpu_cfg = test_config_v2();
+    cpu_cfg.compute_backend = 1;
+    const std::string cpu_world = consume(magic_geo_generate_json_v2(&cpu_cfg));
+    CHECK(cpu_world.find("\"error\"") == std::string::npos);
+
+    magic_geo::CConfigV2 cuda_cfg = cpu_cfg;
+    cuda_cfg.compute_backend = 3;
+    const std::string cuda_world = consume(magic_geo_generate_json_v2(&cuda_cfg));
+    if (!cuda_available) {
+        CHECK(cuda_world.find("\"error\"") != std::string::npos);
+        CHECK(cuda_world.find("explicit CUDA backend requested") != std::string::npos);
+        return true;
+    }
+
+    CHECK(cuda_world.find("\"error\"") == std::string::npos);
+    CHECK(cuda_world.find("\"requested_backend\":\"cuda\"") != std::string::npos);
+    CHECK(cuda_world.find("\"selected_backend\":\"cuda\"") != std::string::npos);
+    CHECK(cuda_world.find("\"active_backend\":\"cuda\"") != std::string::npos);
+    CHECK(json_bool(cuda_world, "cuda_runtime_initialized"));
+    CHECK(json_bool(cuda_world, "cuda_nvidia_device"));
+    CHECK(json_bool(cuda_world, "cuda_fp64_supported"));
+    CHECK(json_int(cuda_world, "cuda_plate_assignment_dispatch_count") > 0);
+    CHECK(json_int(cuda_world, "cuda_smoothing_kernel_dispatch_count") > 0);
+    CHECK(json_int(cuda_world, "cuda_batched_smoothing_operation_count") > 0);
+    CHECK(json_int(cuda_world, "cuda_batched_smoothing_kernel_dispatch_count") > 0);
+    CHECK(json_int(cuda_world, "cuda_last_threads_per_block") == 256);
+    CHECK(normalize_backend_object(cpu_world) == normalize_backend_object(cuda_world));
+
+    magic_geo::CConfigV2 remap_cpu_cfg = cpu_cfg;
+    remap_cpu_cfg.base.cell_count = 129;
+    remap_cpu_cfg.base.plate_count = 4;
+    remap_cpu_cfg.base.erosion_iterations = 2;
+    remap_cpu_cfg.base.include_cells = 1;
+    remap_cpu_cfg.base.float_precision = 8;
+    const std::string remap_cpu_world = consume(
+        magic_geo_generate_json_v2(&remap_cpu_cfg)
+    );
+    magic_geo::CConfigV2 remap_cuda_cfg = remap_cpu_cfg;
+    remap_cuda_cfg.compute_backend = 3;
+    const std::string remap_cuda_world = consume(
+        magic_geo_generate_json_v2(&remap_cuda_cfg)
+    );
+    CHECK(remap_cuda_world.find("\"error\"") == std::string::npos);
+    CHECK(
+        json_int(remap_cuda_world, "cuda_crust_source_remap_dispatch_count") == 2
+    );
+    CHECK(
+        json_int(
+            remap_cuda_world,
+            "cuda_batched_smoothing_kernel_dispatch_count"
+        ) == 9
+    );
+    CHECK(
+        normalize_backend_object(remap_cpu_world) ==
+        normalize_backend_object(remap_cuda_world)
     );
     return true;
 }
@@ -484,9 +564,9 @@ bool geodesic_physics_uses_actual_mesh_size() {
 }
 
 bool concurrent_generation_sessions_are_isolated() {
-    const bool opencl_available = json_bool(
-        magic_geo::backend_info_json(), "opencl_available"
-    );
+    const std::string capability = magic_geo::backend_info_json();
+    const bool cuda_available = json_bool(capability, "cuda_available");
+    const bool opencl_available = json_bool(capability, "opencl_available");
     magic_geo::CConfigV2 cpu_cfg = test_config_v2();
     cpu_cfg.base.mesh_backend = 1;
     cpu_cfg.base.cell_count = 512;
@@ -499,7 +579,7 @@ bool concurrent_generation_sessions_are_isolated() {
 
     magic_geo::CConfigV2 peer_cfg = cpu_cfg;
     peer_cfg.base.threads = 2;
-    peer_cfg.compute_backend = opencl_available ? 2 : 1;
+    peer_cfg.compute_backend = cuda_available ? 3 : (opencl_available ? 2 : 1);
 
     auto cpu_future = std::async(std::launch::async, [cpu_cfg]() {
         return consume(magic_geo_generate_json_v2(&cpu_cfg));
@@ -511,7 +591,10 @@ bool concurrent_generation_sessions_are_isolated() {
     const std::string peer_world = peer_future.get();
     CHECK(cpu_world.find("\"error\"") == std::string::npos);
     CHECK(peer_world.find("\"error\"") == std::string::npos);
-    if (opencl_available) {
+    if (cuda_available) {
+        CHECK(peer_world.find("\"selected_backend\":\"cuda\"") != std::string::npos);
+        CHECK(json_bool(peer_world, "cuda_nvidia_device"));
+    } else if (opencl_available) {
         CHECK(peer_world.find("\"selected_backend\":\"opencl\"") != std::string::npos);
         CHECK(json_bool(peer_world, "opencl_device_fp64_denorm"));
     }
@@ -526,7 +609,8 @@ int main() {
         !conversion_preserves_every_field() || !public_api_is_usable() ||
         !geodesic_physics_uses_actual_mesh_size() ||
         !concurrent_generation_sessions_are_isolated() ||
-        !backend_selection_fallback_and_opencl_parity()) {
+        !backend_selection_fallback_and_opencl_parity() ||
+        !cuda_backend_failure_and_parity()) {
         return 1;
     }
     return 0;
