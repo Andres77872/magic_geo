@@ -3,6 +3,18 @@
 #include <cstdint>
 #include <string>
 
+#if defined(_WIN32)
+#if defined(magic_geo_native_EXPORTS)
+#define MAGIC_GEO_API __declspec(dllexport)
+#else
+#define MAGIC_GEO_API __declspec(dllimport)
+#endif
+#elif defined(__GNUC__) || defined(__clang__)
+#define MAGIC_GEO_API __attribute__((visibility("default")))
+#else
+#define MAGIC_GEO_API
+#endif
+
 namespace magic_geo {
 
 struct Params {
@@ -93,14 +105,16 @@ struct CConfig {
     int float_precision;
 };
 
-std::string backend_info_json();
-std::string generate_world_json(const Params& params);
-Params params_from_c_config(const CConfig& cfg);
+MAGIC_GEO_API std::string backend_info_json();
+MAGIC_GEO_API std::string generate_world_json(const Params& params);
+MAGIC_GEO_API Params params_from_c_config(const CConfig& cfg);
 
 }  // namespace magic_geo
 
 extern "C" {
-const char* magic_geo_backend_info_json();
-const char* magic_geo_generate_json(const magic_geo::CConfig* cfg);
-void magic_geo_free_string(const char* ptr);
+MAGIC_GEO_API const char* magic_geo_backend_info_json();
+MAGIC_GEO_API const char* magic_geo_generate_json(const magic_geo::CConfig* cfg);
+MAGIC_GEO_API void magic_geo_free_string(const char* ptr);
 }
+
+#undef MAGIC_GEO_API

@@ -79,6 +79,11 @@ YAML config
 
 The internal world is a spherical cell mesh, not a rectangular image. Current generation uses a Fibonacci sphere point set with neighbor links as the default dependency-free v0 mesh, and also supports `mesh.backend: geodesic_icosahedron` for subdivided icosahedral graphs. Fibonacci cells use the closed `equal_area_fibonacci_quadrature_v1` surface weights implied by their equal-area sampling. Geodesic cells use `spherical_barycentric_dual_v1`: the exact spherical solid angle of every native triangular face is split among its three incident vertices, yielding nonuniform per-cell areas that close to `4*pi*radius^2`. Generated worlds include high-precision per-cell `position_3d`/`normal_3d` vectors, explicit area-model and area-distribution summaries, a dependency-free `cube_quadtree_v0` mesh LOD index with per-cell tile paths and occupied tile summaries for coarse queries/render sampling, and v0 `healpix_s2_compat_v0` metadata with equal-area HEALPix-inspired pixel IDs and S2-inspired cube-face tokens. They also export approximate per-cell boundary rings with area/perimeter quality metrics, shared boundary-segment diagnostics for adjacency edges, and downstream watershed/territorial cell-edge boundary ledgers. Strict validation reconstructs geodesic face areas from the exported graph. Native HEALPix/S2 simulation backends and exact native polygon edge geometry remain future work.
 
+The C++ simulation is split into private domain translation units with an
+explicit simulation/result/serialization boundary. See
+[`cpp/src/engine/README.md`](cpp/src/engine/README.md) for module ownership,
+dependency flow, and invariants.
+
 OpenCL is probed at runtime. This machine currently exposes an OpenCL loader, but the runtime reports no platform and `nvidia-smi` could not communicate with the NVIDIA driver. The engine therefore defaults to the CPU/OpenMP C++ backend and records OpenCL availability in generated metadata.
 
 ## Outputs
