@@ -613,6 +613,7 @@ CulturalLayers generate_cultural_layers(
     const std::vector<BorderSegment>& borders,
     const std::vector<TradeFlow>& trade_flows
 ) {
+    (void)params;
     for (Cell& cell : cells) {
         cell.culture_region_id = -1;
         cell.language_region_id = -1;
@@ -894,7 +895,9 @@ CulturalLayers generate_cultural_layers(
         return a.first > b.first;
     });
     const int sacred_target = clamp(static_cast<int>(layers.cultures.size()) * 2, 2, 24);
-    const double site_min_sep = 1.4 * std::sqrt(4.0 * PI / static_cast<double>(std::max(1, params.cell_count)));
+    const double site_min_sep = 1.4 * std::sqrt(
+        4.0 * PI / static_cast<double>(std::max<std::size_t>(1, cells.size()))
+    );
     for (const auto& [significance, cell_id] : sacred_candidates) {
         bool too_close = false;
         for (const SacredArea& site : layers.sacred_areas) {

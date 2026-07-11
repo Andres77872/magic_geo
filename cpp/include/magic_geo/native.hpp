@@ -61,6 +61,15 @@ struct Params {
     int float_precision = 4;
 };
 
+// Compute policy is intentionally separate from Params so the original public
+// C++ parameter layout remains ABI-compatible. The legacy one-argument
+// generate_world_json overload always uses the CPU; callers must opt into
+// automatic or OpenCL execution through the two-argument overload.
+struct ComputeOptions {
+    int compute_backend = 0;
+    bool opencl_prefer_gpu = true;
+};
+
 struct CConfig {
     std::uint64_t seed;
     const char* name;
@@ -105,15 +114,30 @@ struct CConfig {
     int float_precision;
 };
 
+// Versioned extension of the stable v1 C ABI. Keep CConfig byte-for-byte
+// unchanged so callers compiled against the original 304-byte structure stay
+// safe when loaded with a newer shared library.
+struct CConfigV2 {
+    CConfig base;
+    int compute_backend;
+    int opencl_prefer_gpu;
+};
+
 MAGIC_GEO_API std::string backend_info_json();
 MAGIC_GEO_API std::string generate_world_json(const Params& params);
+MAGIC_GEO_API std::string generate_world_json(
+    const Params& params,
+    const ComputeOptions& compute_options
+);
 MAGIC_GEO_API Params params_from_c_config(const CConfig& cfg);
+MAGIC_GEO_API ComputeOptions compute_options_from_c_config(const CConfigV2& cfg);
 
 }  // namespace magic_geo
 
 extern "C" {
 MAGIC_GEO_API const char* magic_geo_backend_info_json();
 MAGIC_GEO_API const char* magic_geo_generate_json(const magic_geo::CConfig* cfg);
+MAGIC_GEO_API const char* magic_geo_generate_json_v2(const magic_geo::CConfigV2* cfg);
 MAGIC_GEO_API void magic_geo_free_string(const char* ptr);
 }
 

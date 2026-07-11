@@ -14,6 +14,14 @@ dependencies = [
   "typer>=0.16.0",
 ]
 
+[project.optional-dependencies]
+debug = [
+  "pyarrow>=19",
+  "duckdb>=1.2",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.34",
+]
+
 [project.scripts]
 magic-geo = "magic_geo.cli:main"
 

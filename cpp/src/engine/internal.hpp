@@ -52,7 +52,21 @@ void add_int(std::string& out, bool& first, const char* key, int value);
 void add_u64(std::string& out, bool& first, const char* key, std::uint64_t value);
 void add_double(std::string& out, bool& first, const char* key, double value, int precision);
 void add_bool(std::string& out, bool& first, const char* key, bool value);
-void configure_threads(const Params& params);
+
+class ScopedThreadConfiguration {
+public:
+    explicit ScopedThreadConfiguration(int requested_threads);
+    ~ScopedThreadConfiguration();
+
+    ScopedThreadConfiguration(const ScopedThreadConfiguration&) = delete;
+    ScopedThreadConfiguration& operator=(const ScopedThreadConfiguration&) = delete;
+
+private:
+    int previous_max_threads_ = 0;
+    bool restore_on_destruction_ = false;
+};
+
+void validate_compute_options(const ComputeOptions& compute_options);
 void validate_params(const Params& params);
 std::vector<Cell> build_mesh(const Params& params);
 
@@ -300,6 +314,21 @@ std::string summary_json(
 std::string plates_json(const std::vector<Plate>& plates, int precision);
 std::string int_array_json(const std::vector<int>& values);
 std::string double_array_json(const std::vector<double>& values, int precision);
+template <std::size_t Size>
+std::string double_array_json(
+    const std::array<double, Size>& values,
+    int precision
+) {
+    std::string out = "[";
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        if (index > 0) {
+            out += ",";
+        }
+        out += num(values[index], precision);
+    }
+    out += "]";
+    return out;
+}
 std::string vec3_json(Vec3 value, int precision);
 std::string latlon_ring_json(const std::vector<LatLon>& ring, int precision);
 std::string cells_json(const std::vector<Cell>& cells, int precision);

@@ -7,8 +7,8 @@ the C ABI remains in `cpp/src/c_api.cpp`.
 ## Data flow
 
 ```text
-public generate_world_json
-  -> validate/configure
+public generate_world_json(params[, compute_options])
+  -> validate options/params -> scoped thread policy -> per-generation ComputeSession
   -> simulate_world
        mesh -> tectonics -> ocean/climate/hydrology
        -> erosion and earth-system feedback
@@ -24,7 +24,7 @@ stages must not depend on JSON serializers.
 
 ## Source responsibilities
 
-- `core.cpp`: math, hashing, JSON primitives, parameter checks, and thread setup.
+- `core.cpp`: math, hashing, JSON primitives, parameter checks, and scoped thread policy.
 - `mesh.cpp`: Fibonacci and geodesic mesh construction.
 - `tectonics.cpp`: plates, crust, topography, and plate motion.
 - `ocean.cpp`: volume-constrained sea level and marine connectivity.
@@ -37,6 +37,11 @@ stages must not depend on JSON serializers.
 - `civilization.cpp`: regions, borders, trade, cultures, languages, and sites.
 - `history.cpp`: history, population, conflict, dynasties, snapshots, and calibration checks.
 - `pipeline.cpp`: the only complete simulation-stage ordering.
+- `opencl_compute.cpp`: dynamic OpenCL capability discovery, per-generation
+  backend selection/resources/telemetry, and FP64 plate-assignment,
+  fixed-order scalar/fused-three-field neighbor-smoothing, and crust-remap
+  kernels. CPU execution remains the reference path; explicit OpenCL failures
+  are fatal and only `auto` may fall back.
 - `summary.cpp`, `entity_serialization.cpp`, and `process_serialization.cpp`: read-only JSON fragments.
 - `world_serialization.cpp`: top-level schema ordering and assembly.
 
@@ -51,12 +56,26 @@ the shared library.
   state, and later stages consume those fields.
 - Preserve RNG consumption, OpenMP schedules, floating-point expression order,
   serializer key order, and precision unless a schema/behavior change is intended.
-- Keep `CConfig` field order and types stable; Python mirrors this structure via
-  `ctypes`.
-- Keep the six declared public symbols visible and all `magic_geo::detail`
+- Keep the original `Params` and v1 `CConfig` field order, types, and 64-bit
+  sizes stable. The legacy C++ overload and v1 C entry point always use CPU.
+  New compute controls belong to `ComputeOptions`, the nested `CConfigV2`
+  extension, and `magic_geo_generate_json_v2`; Python mirrors both C layouts
+  via `ctypes`.
+- Keep all declared legacy public symbols visible and all `magic_geo::detail`
   symbols hidden.
+- Preserve backend truthfulness: `cpu` must not initialize or probe OpenCL,
+  below-threshold `auto` CPU selection is not a fallback, explicit `opencl`
+  must never silently fall back, and `auto` must never select a CPU OpenCL
+  device. Qualifying FP64 devices must report denorm, INF/NAN, and
+  round-to-nearest support. Serialized telemetry must identify actual dispatch
+  counts, work sizes, transfer bytes, device capabilities, and any automatic
+  fallback reason.
+- Explicit OpenMP thread counts are generation-scoped and restore the calling
+  thread's prior ICV on every exit; `threads=0` leaves host policy untouched.
 - New domain stages belong before `serialize_world`; serializers must be
   read-only over `GeneratedWorld`.
 
-`cpp/tests/native_api_test.cpp` protects the public boundary. The Python suite
-provides the end-to-end physics, replay, schema, and mutation-rejection gates.
+`cpp/tests/native_api_test.cpp` protects the public boundary and concurrent
+session behavior. `legacy_v1_client_test.cpp` compiles against a frozen layout
+without including the current header. The Python suite provides the end-to-end
+physics, replay, schema, and mutation-rejection gates.

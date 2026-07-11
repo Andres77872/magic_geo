@@ -5,6 +5,8 @@ import math
 from collections import Counter
 from typing import Any
 
+from .planet_parameters import planet_radius_km
+
 
 MARINE_WATER_TYPES = {"ocean", "continental_shelf", "inland_sea"}
 ROUTE_CORRIDOR_MODEL = "causal_feature_weighted_dijkstra_route_corridors_v1"
@@ -21,7 +23,11 @@ def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
     return max(lower, min(upper, value))
 
 
-def _cell_distance_km(first: dict[str, Any], second: dict[str, Any]) -> float:
+def _cell_distance_km(
+    first: dict[str, Any],
+    second: dict[str, Any],
+    radius_km: float,
+) -> float:
     first_lat = math.radians(float(first.get("lat_deg", 0.0)))
     first_lon = math.radians(float(first.get("lon_deg", 0.0)))
     second_lat = math.radians(float(second.get("lat_deg", 0.0)))
@@ -31,7 +37,12 @@ def _cell_distance_km(first: dict[str, Any], second: dict[str, Any]) -> float:
     sin_lat = math.sin(delta_lat * 0.5)
     sin_lon = math.sin(delta_lon * 0.5)
     haversine = sin_lat * sin_lat + math.cos(first_lat) * math.cos(second_lat) * sin_lon * sin_lon
-    return max(0.001, 6371.0 * 2.0 * math.asin(min(1.0, math.sqrt(max(0.0, haversine)))))
+    return max(
+        0.001,
+        radius_km
+        * 2.0
+        * math.asin(min(1.0, math.sqrt(max(0.0, haversine)))),
+    )
 
 
 def _marine_neighbors(cell: dict[str, Any], cells_by_id: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -158,8 +169,9 @@ def _movement_cost(
     neighbor: dict[str, Any],
     route_type: str,
     cells_by_id: dict[int, dict[str, Any]],
+    radius_km: float,
 ) -> float:
-    distance = _cell_distance_km(current, neighbor)
+    distance = _cell_distance_km(current, neighbor, radius_km)
     route_type = str(route_type)
     water_body = str(neighbor.get("water_body_type", "land"))
     is_water = bool(neighbor.get("is_water", False))
@@ -197,6 +209,7 @@ def _shortest_route_path(
     end_cell_id: int,
     route_type: str,
     cells_by_id: dict[int, dict[str, Any]],
+    radius_km: float,
 ) -> list[int]:
     if start_cell_id == end_cell_id and start_cell_id in cells_by_id:
         return [start_cell_id]
@@ -221,7 +234,13 @@ def _shortest_route_path(
             neighbor = cells_by_id.get(neighbor_id)
             if neighbor is None:
                 continue
-            next_cost = cost + _movement_cost(cell, neighbor, route_type, cells_by_id)
+            next_cost = cost + _movement_cost(
+                cell,
+                neighbor,
+                route_type,
+                cells_by_id,
+                radius_km,
+            )
             if next_cost < best_cost.get(neighbor_id, float("inf")):
                 best_cost[neighbor_id] = next_cost
                 previous[neighbor_id] = cell_id
@@ -238,13 +257,17 @@ def _shortest_route_path(
     return path
 
 
-def _path_length_km(path_cell_ids: list[int], cells_by_id: dict[int, dict[str, Any]]) -> float:
+def _path_length_km(
+    path_cell_ids: list[int],
+    cells_by_id: dict[int, dict[str, Any]],
+    radius_km: float,
+) -> float:
     length = 0.0
     for first_id, second_id in zip(path_cell_ids, path_cell_ids[1:]):
         first = cells_by_id.get(first_id)
         second = cells_by_id.get(second_id)
         if first is not None and second is not None:
-            length += _cell_distance_km(first, second)
+            length += _cell_distance_km(first, second, radius_km)
     return length
 
 
@@ -271,11 +294,12 @@ def _route_record(
     settlements_by_id: dict[int, dict[str, Any]],
     path_cell_ids: list[int],
     cells_by_id: dict[int, dict[str, Any]],
+    radius_km: float,
 ) -> dict[str, Any]:
     path_cells = [cells_by_id[cell_id] for cell_id in path_cell_ids if cell_id in cells_by_id]
     route_type = str(route.get("type", "overland"))
     corridor_type = _primary_corridor_type(path_cells, route_type)
-    path_length = _path_length_km(path_cell_ids, cells_by_id)
+    path_length = _path_length_km(path_cell_ids, cells_by_id, radius_km)
     straight_distance = max(0.001, float(route.get("distance_km", 0.0)))
     mountain_count = sum(1 for cell in path_cells if float(cell.get("mountain_pass_route_index", 0.0)) >= MOUNTAIN_PASS_THRESHOLD)
     river_count = sum(1 for cell in path_cells if float(cell.get("river_valley_route_index", 0.0)) >= RIVER_VALLEY_THRESHOLD)
@@ -363,6 +387,7 @@ def enrich_world_with_route_corridors(world: dict[str, Any]) -> dict[str, Any]:
         routes = []
     if not isinstance(settlements, list):
         settlements = []
+    radius_km = planet_radius_km(world)
     cells_by_id = {int(cell.get("id", -1)): cell for cell in cells if isinstance(cell, dict)}
     settlements_by_id = {
         int(settlement.get("id", -1)): settlement
@@ -402,7 +427,13 @@ def enrich_world_with_route_corridors(world: dict[str, Any]) -> dict[str, Any]:
             continue
         start_cell_id = int(source.get("cell_id", -1))
         end_cell_id = int(target.get("cell_id", -1))
-        path_cell_ids = _shortest_route_path(start_cell_id, end_cell_id, str(route.get("type", "overland")), cells_by_id)
+        path_cell_ids = _shortest_route_path(
+            start_cell_id,
+            end_cell_id,
+            str(route.get("type", "overland")),
+            cells_by_id,
+            radius_km,
+        )
         if not path_cell_ids:
             route["route_corridor_id"] = -1
             route["route_corridor_type"] = "none"
@@ -421,7 +452,16 @@ def enrich_world_with_route_corridors(world: dict[str, Any]) -> dict[str, Any]:
         route["route_corridor_id"] = corridor_id
         route["route_corridor_type"] = corridor_type
         route["path_cell_ids"] = path_cell_ids
-        records.append(_route_record(corridor_id, route, settlements_by_id, path_cell_ids, cells_by_id))
+        records.append(
+            _route_record(
+                corridor_id,
+                route,
+                settlements_by_id,
+                path_cell_ids,
+                cells_by_id,
+                radius_km,
+            )
+        )
 
     corridor_cell_ids = {int(cell.get("id", -1)) for cell in cells if int(cell.get("route_corridor_id", -1)) >= 0}
     type_counts = Counter(str(record.get("corridor_type", "overland_corridor")) for record in records)
@@ -442,7 +482,7 @@ def enrich_world_with_route_corridors(world: dict[str, Any]) -> dict[str, Any]:
         "corridor_classification_model": "route_type_preference_then_feature_count_lexical_tie_v1",
         "cell_assignment_model": "maximum_membership_with_later_route_winning_equal_ties_v1",
         "record_order": "ascending_route_id_for_valid_endpoints_and_paths",
-        "planet_radius_km": 6371.0,
+        "planet_radius_km": radius_km,
         "feature_threshold": MOUNTAIN_PASS_THRESHOLD,
         "threshold_semantics": "serialized_feature_indices",
         "deterministic": True,

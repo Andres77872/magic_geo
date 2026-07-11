@@ -5226,6 +5226,9 @@ def _validate_route_corridors(
     corridors = payload.get("route_corridors", [])
     routes = payload.get("routes", [])
     settlements = payload.get("settlements", [])
+    # Worlds created before planet_parameters were recorded used Earth radius;
+    # configured_planet_radius_km retains that replay-compatible fallback.
+    radius_km = configured_planet_radius_km(payload)
     try:
         metadata_invalid = (
             not isinstance(model, dict)
@@ -5256,7 +5259,8 @@ def _validate_route_corridors(
             != "maximum_membership_with_later_route_winning_equal_ties_v1"
             or model.get("record_order")
             != "ascending_route_id_for_valid_endpoints_and_paths"
-            or float(model.get("planet_radius_km", -1.0)) != 6371.0
+            or abs(float(model.get("planet_radius_km", -1.0)) - radius_km)
+            > 1.0e-9
             or abs(
                 float(model.get("feature_threshold", -1.0))
                 - ROUTE_FEATURE_THRESHOLD
@@ -5292,7 +5296,7 @@ def _validate_route_corridors(
         )
         return max(
             0.001,
-            6371.0
+            radius_km
             * 2.0
             * math.asin(min(1.0, math.sqrt(max(0.0, haversine)))),
         )
@@ -26586,6 +26590,7 @@ def validate(
     routes = payload.get("routes", [])
     if int(summary.get("route_count", -1)) != len(routes):
         failures.append("route_count does not match routes length")
+    route_radius_km = configured_planet_radius_km(payload)
 
     def _validator_route_distance_km(first: dict[str, Any], second: dict[str, Any]) -> float:
         first_lat = math.radians(float(first.get("lat_deg", 0.0)))
@@ -26597,7 +26602,12 @@ def validate(
         sin_lat = math.sin(delta_lat * 0.5)
         sin_lon = math.sin(delta_lon * 0.5)
         haversine = sin_lat * sin_lat + math.cos(first_lat) * math.cos(second_lat) * sin_lon * sin_lon
-        return max(0.001, 6371.0 * 2.0 * math.asin(min(1.0, math.sqrt(max(0.0, haversine)))))
+        return max(
+            0.001,
+            route_radius_km
+            * 2.0
+            * math.asin(min(1.0, math.sqrt(max(0.0, haversine)))),
+        )
 
     failures.extend(_validate_route_corridors(payload, summary, cells_by_id))
 
@@ -31226,6 +31236,109 @@ def render_raster(
         typer.echo(str(exc), err=True)
         raise typer.Exit(2) from exc
     typer.echo(f"Wrote {output}")
+
+
+@app.command("export-debug")
+def export_debug(
+    world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated world JSON.")],
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Debug cache directory (default: <world dir>/debug)."),
+    ] = None,
+    vtu: Annotated[
+        bool,
+        typer.Option("--vtu/--no-vtu", help="Also emit ParaView .vtu stage files and world.pvd."),
+    ] = True,
+    elevation_exaggeration: Annotated[
+        float,
+        typer.Option("--elevation-exaggeration", min=1.0, help="Radial elevation exaggeration for .vtu geometry."),
+    ] = 30.0,
+) -> None:
+    """Export a columnar debug cache (Parquet/JSONL/mesh/VTU) for the GUI debugger."""
+    try:
+        from .debug_export import export_debug_cache
+    except ImportError as exc:
+        typer.echo(f"Debug export requires the optional debug dependencies: pip install 'magic-geo[debug]' ({exc})", err=True)
+        raise typer.Exit(2) from exc
+    try:
+        payload = json.loads(world.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        typer.echo(f"Invalid world JSON: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    out_dir = output if output is not None else world.parent / "debug"
+    try:
+        manifest = export_debug_cache(
+            payload,
+            out_dir,
+            source_path=world,
+            include_vtu=vtu,
+            elevation_exaggeration=elevation_exaggeration,
+        )
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+    mesh = manifest.get("mesh", {})
+    typer.echo(
+        f"Wrote {out_dir} | layers={len(manifest.get('layers', []))} "
+        f"stage_histories={len(manifest.get('stage_histories', {}))} "
+        f"families={len(manifest.get('families', {}))} "
+        f"mesh_vertices={mesh.get('vertex_count', 0)} mesh_triangles={mesh.get('triangle_count', 0)}"
+    )
+
+
+@app.command("export-rerun")
+def export_rerun(
+    world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated world JSON.")],
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Rerun recording path (default: <world dir>/world.rrd)."),
+    ] = None,
+) -> None:
+    """Export a Rerun (.rrd) recording with stage-scrubbable mesh and feedback ledgers."""
+    try:
+        from .debug_rerun import export_rerun_recording
+    except ImportError as exc:
+        typer.echo(f"Rerun export requires the rerun-sdk package: pip install rerun-sdk ({exc})", err=True)
+        raise typer.Exit(2) from exc
+    try:
+        payload = json.loads(world.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        typer.echo(f"Invalid world JSON: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    target = output if output is not None else world.parent / "world.rrd"
+    try:
+        stats = export_rerun_recording(payload, target)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(
+        f"Wrote {target} | stages={stats['stages']} vertices={stats['vertices']} "
+        f"feedback_scalars={stats['feedback_scalars']} plate_segments={stats['plate_boundary_segments']}"
+    )
+
+
+@app.command("serve")
+def serve(
+    debug_dir: Annotated[
+        Path,
+        typer.Option("--debug-dir", "-d", exists=True, help="Debug cache directory from export-debug."),
+    ],
+    host: Annotated[str, typer.Option("--host", help="Bind address.")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", min=1, max=65535, help="Bind port.")] = 8642,
+) -> None:
+    """Serve the GUI debugger (FastAPI + DuckDB) over a debug cache directory."""
+    try:
+        import uvicorn
+
+        from .debug_server import create_app
+    except ImportError as exc:
+        typer.echo(f"Serving requires the optional debug dependencies: pip install 'magic-geo[debug]' ({exc})", err=True)
+        raise typer.Exit(2) from exc
+    if not (debug_dir / "manifest.json").exists():
+        typer.echo(f"No manifest.json in {debug_dir}; run export-debug first.", err=True)
+        raise typer.Exit(2)
+    typer.echo(f"Serving debug cache {debug_dir} at http://{host}:{port}")
+    uvicorn.run(create_app(debug_dir), host=host, port=port, log_level="warning")
 
 
 def main() -> None:

@@ -23,6 +23,7 @@ int settlement_type_for_cell(const std::vector<Cell>& cells, const Cell& cell) {
 }
 
 std::vector<Settlement> generate_settlements(const Params& params, const std::vector<Cell>& cells) {
+    (void)params;
     std::vector<int> candidates;
     candidates.reserve(cells.size() / 8);
     for (const Cell& cell : cells) {
@@ -48,7 +49,9 @@ std::vector<Settlement> generate_settlements(const Params& params, const std::ve
     });
 
     const int target = clamp(static_cast<int>(cells.size()) / 180, 8, 64);
-    const double min_sep = 2.4 * std::sqrt(4.0 * PI / static_cast<double>(std::max(1, params.cell_count)));
+    const double min_sep = 2.4 * std::sqrt(
+        4.0 * PI / static_cast<double>(std::max<std::size_t>(1, cells.size()))
+    );
     std::vector<Settlement> settlements;
     for (int cell_id : candidates) {
         bool too_close = false;
