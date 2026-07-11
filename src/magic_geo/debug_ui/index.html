@@ -18,6 +18,16 @@
     </header>
     <input id="layer-search" type="search" placeholder="Filter layers… ( / )" autocomplete="off">
     <nav id="layer-list"></nav>
+    <section id="docs-card" class="hidden">
+      <div id="docs-card-head">
+        <span id="docs-card-title">Layer docs</span>
+        <div id="docs-card-actions">
+          <button id="docs-help-open" title="Open full help (?)">?</button>
+          <button id="docs-card-toggle" title="Hide docs (d)">▾</button>
+        </div>
+      </div>
+      <div id="docs-card-body"></div>
+    </section>
   </aside>
 
   <main id="viewport">
@@ -63,6 +73,7 @@
       <span id="stage-label"></span>
     </div>
     <div id="status"></div>
+    <button id="help-fab" title="Help (?)">?</button>
   </main>
 
   <aside id="inspector" class="hidden">
@@ -73,6 +84,17 @@
     <div id="inspector-body"></div>
   </aside>
 </div>
+
+<div id="help-overlay" class="hidden">
+  <div id="help-panel">
+    <header id="help-header">
+      <h2>magic-geo debugger — help</h2>
+      <button id="help-close" title="Close (Esc)">×</button>
+    </header>
+    <div id="help-body"></div>
+  </div>
+</div>
+
 <script type="module" src="./app.js"></script>
 </body>
 </html>
