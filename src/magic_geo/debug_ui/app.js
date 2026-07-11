@@ -199,7 +199,6 @@ const state = {
   projection: 'globe',      // 'globe' | 'equirect' | 'mollweide'
   morph: { value: 0, target: 0, proj2D: 0, proj2DTarget: 0 },
   values: null,             // Float32Array currently displayed
-  layerRequest: 0,          // monotonic token: only the newest fetch may upload
   layerCache: new Map(),    // key -> Float32Array (LRU)
   overlays: { wireframe: false, plates: false, graticule: false },
   pickDirty: true,
@@ -229,16 +228,12 @@ async function fetchJson(url) {
   return response.json();
 }
 
-function layerCacheKey(layer, stage, month) {
-  // Key only on the axis the layer actually varies over, so prefetch and
-  // activation agree regardless of leftover state.stage / state.month.
-  const s = layer.kind === 'numeric_stage' ? stage : 0;
-  const m = layer.kind === 'numeric_monthly' ? month : 0;
-  return `${layer.id}|${s}|${m}`;
+function layerCacheKey(layerId, stage, month) {
+  return `${layerId}|${stage}|${month}`;
 }
 
 async function fetchLayerValues(layer, stage, month) {
-  const key = layerCacheKey(layer, stage, month);
+  const key = layerCacheKey(layer.id, stage, month);
   if (state.layerCache.has(key)) {
     const cached = state.layerCache.get(key);
     state.layerCache.delete(key);
@@ -266,7 +261,7 @@ function prefetchNeighborStages(layer, stage) {
   const count = layer.stage_count || 1;
   for (const delta of [1, -1, 2, -2]) {
     const neighbor = stage + delta;
-    if (neighbor >= 0 && neighbor < count && !state.layerCache.has(layerCacheKey(layer, neighbor, 0))) {
+    if (neighbor >= 0 && neighbor < count && !state.layerCache.has(layerCacheKey(layer.id, neighbor, 0))) {
       fetchLayerValues(layer, neighbor, 0).catch(() => {});
     }
   }
@@ -626,11 +621,8 @@ async function activateLayer(layer, { stage = null, month = null } = {}) {
     item.classList.toggle('active', item.dataset.layerId === layer.id);
   });
 
-  const token = ++state.layerRequest;
   const values = await fetchLayerValues(layer, state.stage, state.month);
-  // Bail if any newer activation (different layer, stage or month) was issued
-  // while this fetch was in flight — otherwise a late response overwrites it.
-  if (state.layerRequest !== token) return;
+  if (state.activeLayer !== layer) return;   // superseded while fetching
   uploadValues(values);
 
   const [lo, hi] = layerRange(layer);
@@ -715,13 +707,9 @@ function buildLayerList() {
     title.textContent = `${source} (${layers.length})`;
     container.appendChild(title);
     const body = document.createElement('div');
-    body.className = 'layer-group-body';
-    body.dataset.collapsed = '0';
-    body._title = title;   // link back for search-aware filtering
     container.appendChild(body);
     title.addEventListener('click', () => {
-      body.dataset.collapsed = body.dataset.collapsed === '1' ? '0' : '1';
-      filterLayerList($('#layer-search').value);   // reapply search + collapse together
+      body.style.display = body.style.display === 'none' ? '' : 'none';
     });
     for (const layer of layers) {
       const item = document.createElement('div');
@@ -744,18 +732,8 @@ function buildLayerList() {
 
 function filterLayerList(query) {
   const needle = query.trim().toLowerCase();
-  document.querySelectorAll('#layer-list .layer-group-body').forEach((body) => {
-    let anyVisible = false;
-    body.querySelectorAll('.layer-item').forEach((item) => {
-      const match = !needle || item.dataset.search.includes(needle);
-      item.style.display = match ? '' : 'none';
-      if (match) anyVisible = true;
-    });
-    const collapsed = body.dataset.collapsed === '1';
-    // A search expands collapsed groups that contain matches (so results are
-    // never hidden); clearing the search restores the group's collapse state.
-    body.style.display = needle ? (anyVisible ? '' : 'none') : (collapsed ? 'none' : '');
-    if (body._title) body._title.style.display = anyVisible ? '' : 'none';
+  document.querySelectorAll('.layer-item').forEach((item) => {
+    item.style.display = !needle || item.dataset.search.includes(needle) ? '' : 'none';
   });
 }
 
