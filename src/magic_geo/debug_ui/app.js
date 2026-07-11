@@ -9,6 +9,7 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from './vendor/OrbitControls.js';
+import { describeLayer, docsCoverage, UI_GUIDE, KEY_REFERENCE } from './layer_docs.js';
 
 const MISSING_SENTINEL = 3.0e38;   // NaN replacement survives every GPU driver
 const PLANE_SCALE = new THREE.Vector2(2.0, 1.0); // equirect/mollweide plane half-extent
@@ -203,6 +204,8 @@ const state = {
   pickDirty: true,
   hoverCell: -1,
   selectedCell: -1,
+  docsVisible: true,       // docs card under the layer panel
+  docsCollapsed: false,    // card body collapsed but header shown
 };
 
 const three = {};
@@ -546,8 +549,18 @@ function updateLegend(layer) {
     context.fillRect(x, 0, 1, ramp.height);
   }
   const [lo, hi] = layerRange(layer);
-  $('#legend-min').textContent = formatValue(lo);
-  $('#legend-max').textContent = formatValue(hi);
+  const stats = layer.stats || {};
+  // Mark ends that clip data: the ramp normalises to p2–p98, so a true min/max
+  // beyond the ramp end is compressed into the end colour. Without this cue a
+  // heavy-tailed layer (e.g. flow_accumulation) looks like it tops out at p98.
+  const loClip = stats.min !== undefined && stats.min < lo - Math.abs(lo) * 1e-6;
+  const hiClip = stats.max !== undefined && stats.max > hi + Math.abs(hi) * 1e-6;
+  const minEl = $('#legend-min');
+  const maxEl = $('#legend-max');
+  minEl.textContent = (loClip ? '≤ ' : '') + formatValue(lo);
+  maxEl.textContent = (hiClip ? '≥ ' : '') + formatValue(hi);
+  minEl.title = loClip ? `clipped — true min ${formatValue(stats.min)}` : '';
+  maxEl.title = hiClip ? `clipped — true max ${formatValue(stats.max)}` : '';
 }
 
 function layerRange(layer) {
@@ -557,6 +570,121 @@ function layerRange(layer) {
   if (lo === hi) { lo = stats.min ?? 0; hi = stats.max ?? lo + 1; }
   if (lo === hi) hi = lo + 1;
   return [lo, hi];
+}
+
+// ---------------------------------------------------------------------------
+// Layer docs card
+
+function updateDocsCard(layer) {
+  const card = $('#docs-card');
+  card.classList.toggle('hidden', !state.docsVisible);
+  card.classList.toggle('collapsed', state.docsCollapsed);
+  $('#docs-card-toggle').textContent = state.docsCollapsed ? '▸' : '▾';
+  if (!state.docsVisible) return;
+
+  const doc = describeLayer(layer);
+  const body = $('#docs-card-body');
+  if (!doc) {
+    body.innerHTML = '<div class="docs-desc">Select a layer to see its documentation.</div>';
+    return;
+  }
+
+  const parts = [];
+  parts.push(`<div class="docs-name">${escapeHtml(doc.title)}</div>`);
+
+  const pills = [];
+  if (doc.roleBadge) {
+    pills.push(`<span class="docs-pill role" title="${escapeHtml(doc.roleBadge.hint)}">${escapeHtml(doc.roleBadge.label)}</span>`);
+  }
+  if (doc.unit) pills.push(`<span class="docs-pill unit">${escapeHtml(doc.unit)}</span>`);
+  const kindLabel = {
+    numeric: 'numeric', categorical: 'categorical',
+    numeric_stage: 'per-stage', numeric_monthly: 'monthly',
+  }[doc.kind] || doc.kind;
+  pills.push(`<span class="docs-pill kind">${escapeHtml(kindLabel)}</span>`);
+  parts.push(`<div class="docs-meta">${pills.join('')}</div>`);
+
+  parts.push(`<div class="docs-desc">${escapeHtml(doc.description)}</div>`);
+
+  if (doc.stats) {
+    parts.push('<div class="docs-range">'
+      + `<span class="rk">min / max</span><span class="rv">${escapeHtml(doc.stats.min)} … ${escapeHtml(doc.stats.max)}</span>`
+      + `<span class="rk">colour scale</span><span class="rv">${escapeHtml(doc.stats.p2)} … ${escapeHtml(doc.stats.p98)} (p2–p98)</span>`
+      + '</div>');
+  }
+
+  if (doc.categories) {
+    parts.push('<div class="docs-cats">');
+    doc.categories.forEach((category, index) => {
+      const [r, g, b] = categoryColor(index);
+      parts.push(`<span class="docs-cat"><i style="background: rgb(${r * 255 | 0},${g * 255 | 0},${b * 255 | 0})"></i>${escapeHtml(category)}</span>`);
+    });
+    parts.push('</div>');
+  }
+
+  for (const note of doc.notes) {
+    parts.push(`<div class="docs-note">${escapeHtml(note)}</div>`);
+  }
+
+  if (doc.familyDoc) {
+    parts.push(`<div class="docs-family"><b>${escapeHtml(doc.family)}</b> — ${escapeHtml(doc.familyDoc)}</div>`);
+  }
+
+  body.innerHTML = parts.join('');
+}
+
+function setDocsVisible(visible) {
+  state.docsVisible = visible;
+  if (visible) state.docsCollapsed = false;
+  updateDocsCard(state.activeLayer);
+}
+
+// ---------------------------------------------------------------------------
+// Help overlay
+
+function buildHelpOverlay() {
+  const body = $('#help-body');
+  const parts = [];
+
+  parts.push('<h3>Keyboard</h3><div class="help-keygrid">');
+  for (const [key, description] of KEY_REFERENCE) {
+    const keys = key.split(' / ').map((k) => `<kbd>${escapeHtml(k)}</kbd>`).join(' / ');
+    parts.push(`<div class="help-row"><span class="hk">${keys}</span><span class="hv">${escapeHtml(description)}</span></div>`);
+  }
+  parts.push('</div>');
+
+  for (const section of UI_GUIDE) {
+    parts.push(`<h3>${escapeHtml(section.title)}</h3><div class="help-cols">`);
+    for (const [label, text] of section.items) {
+      // `text` intentionally carries inline <kbd>/<code> markup from layer_docs.
+      parts.push(`<div class="help-row"><span class="hk">${escapeHtml(label)}</span><span class="hv">${text}</span></div>`);
+    }
+    parts.push('</div>');
+  }
+
+  if (state.manifest) {
+    const { counts, byRole } = docsCoverage(state.manifest.layers);
+    const kindBits = Object.entries(byRole)
+      .map(([kind, n]) => `${n}&nbsp;${escapeHtml(kind)}`)
+      .join(' · ');
+    parts.push('<h3>Docs coverage</h3>');
+    parts.push('<div class="help-cov">'
+      + `<b>${counts.total}</b> layers documented — `
+      + `<b>${counts.curated}</b> curated, `
+      + `<b>${counts.pattern}</b> by naming convention, `
+      + `<b>${counts.unit}</b> by unit inference, `
+      + `<b>${counts.generated}</b> generated fallback.<br>`
+      + `Layer kinds: ${kindBits}.`
+      + '</div>');
+  }
+
+  body.innerHTML = parts.join('');
+}
+
+function setHelpVisible(visible) {
+  const overlay = $('#help-overlay');
+  if (visible) buildHelpOverlay();
+  overlay.classList.toggle('hidden', !visible);
 }
 
 async function activateLayer(layer, { stage = null, month = null } = {}) {
@@ -579,6 +707,7 @@ async function activateLayer(layer, { stage = null, month = null } = {}) {
   three.fillMaterial.uniforms.uMax.value = hi;
   three.fillMaterial.uniforms.uCategorical.value = layer.kind === 'categorical' ? 1 : 0;
   updateLegend(layer);
+  updateDocsCard(layer);
   updateStageBar();
   prefetchNeighborStages(layer, state.stage);
   updateStatus();
@@ -886,6 +1015,22 @@ function wireEvents() {
     resizeRenderer();
   });
 
+  $('#docs-card-head').addEventListener('click', (event) => {
+    if (event.target.closest('#docs-card-actions')) return;
+    state.docsCollapsed = !state.docsCollapsed;
+    updateDocsCard(state.activeLayer);
+  });
+  $('#docs-card-toggle').addEventListener('click', () => {
+    state.docsCollapsed = !state.docsCollapsed;
+    updateDocsCard(state.activeLayer);
+  });
+  $('#docs-help-open').addEventListener('click', () => setHelpVisible(true));
+  $('#help-fab').addEventListener('click', () => setHelpVisible(true));
+  $('#help-close').addEventListener('click', () => setHelpVisible(false));
+  $('#help-overlay').addEventListener('click', (event) => {
+    if (event.target === $('#help-overlay')) setHelpVisible(false);
+  });
+
   const canvas = three.renderer.domElement;
   let lastMove = 0;
   let downAt = null;
@@ -909,7 +1054,17 @@ function wireEvents() {
   three.controls.addEventListener('change', () => { state.pickDirty = true; });
 
   window.addEventListener('keydown', (event) => {
+    // Esc closes overlays even from within an input.
+    if (event.key === 'Escape') {
+      if (!$('#help-overlay').classList.contains('hidden')) { setHelpVisible(false); return; }
+      if (!$('#inspector').classList.contains('hidden')) { $('#inspector-close').click(); return; }
+      if (event.target.tagName === 'INPUT') event.target.blur();
+      return;
+    }
     if (event.target.tagName === 'INPUT') return;
+    // `?` toggles help regardless of the other single-key bindings.
+    if (event.key === '?') { event.preventDefault(); setHelpVisible($('#help-overlay').classList.contains('hidden')); return; }
+    if (!$('#help-overlay').classList.contains('hidden')) return;   // help open: swallow shortcuts
     switch (event.key) {
       case ',': stepStage(-1); break;
       case '.': stepStage(1); break;
@@ -919,6 +1074,7 @@ function wireEvents() {
       case 'w': $('#toggle-wireframe').click(); break;
       case 'b': $('#toggle-plates').click(); break;
       case 'g': $('#toggle-graticule').click(); break;
+      case 'd': setDocsVisible(!state.docsVisible); break;
       case '/': event.preventDefault(); $('#layer-search').focus(); break;
       default: break;
     }
@@ -941,6 +1097,7 @@ async function main() {
   await buildScene();
   buildLayerList();
   wireEvents();
+  updateDocsCard(null);
   animate();
 
   const initial = state.manifest.layers.find((layer) => layer.id === 'cells/elevation_m')
