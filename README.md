@@ -84,7 +84,18 @@ explicit simulation/result/serialization boundary. See
 [`cpp/src/engine/README.md`](cpp/src/engine/README.md) for module ownership,
 dependency flow, and invariants.
 
-OpenCL is probed at runtime. This machine currently exposes an OpenCL loader, but the runtime reports no platform and `nvidia-smi` could not communicate with the NVIDIA driver. The engine therefore defaults to the CPU/OpenMP C++ backend and records OpenCL availability in generated metadata.
+The native compute backend is configurable as `auto`, `cpu`, or `opencl`. CPU
+is the deterministic reference and does not probe OpenCL. Explicit OpenCL
+dynamically selects a qualifying IEEE-FP64 device and fails if it cannot run;
+`auto` stays on native OpenMP below 32,768 requested cells and never substitutes
+a CPU OpenCL runtime for that path. Current kernels cover plate assignment,
+fixed-order scalar/fused boundary smoothing, and same-plate crust remapping.
+On the audited RTX 5090, the 32,768-cell erosion-6 native case was 1.12x faster
+than CPU and exactly matched its physical payload after backend telemetry was
+removed. The threshold is a device-dependent heuristic, not a universal GPU
+guarantee. See [the GPU simulation audit](docs/gpu_simulation_audit.md) for the
+pipeline analysis, benchmarks, determinism contract, validation matrix, and
+remaining structural bottlenecks.
 
 ## Outputs
 
@@ -168,7 +179,9 @@ The generated JSON contains:
 - `natural_frontiers`: generated frontier records governed by the explicit border/terrain component contract above.
 - `mesh_lod`: v0 cube-face quadtree hierarchy over cell centroids, with occupied tile records, parent links, representative cells, and area summaries.
 - `spherical_spatial_index`: v0 HEALPix-inspired equal-area pixel records and S2-inspired cube-face cell records over generated centroids, with occupied IDs, representative cells, area/centroid summaries, and six-face totals; this is compatibility metadata, not a native HEALPix/S2 backend.
-- `backend`: native backend and OpenCL probe information.
+- `backend`: requested/selected/active compute backend, OpenCL capability and
+  fallback state, device qualification, kernel/operation counts, work sizes,
+  and host/device transfer totals.
 - `settlements` and `routes`: generated human-geography records governed by the explicit selection and base-network contracts above; route records are subsequently enriched with route-corridor IDs and path cell IDs.
 - `political_regions`: generated human-geography records governed by the explicit capital/barrier partition contract above.
 - `cultures` and native `language_regions`: generated records governed by the explicit homeland and trade/lineage contracts above. `phonology_history_model` independently replays all downstream sound rules, era histories, lexical correspondences, diffusion ledgers, speaker-population histories, language back-references, and summaries. These remain synthetic linguistic diagnostics rather than empirical historical linguistics or individual speech simulation.

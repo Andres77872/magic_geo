@@ -5,6 +5,7 @@ import math
 from typing import Any
 
 from .logistics_exchange_validation import _expected_logistics_exchanges
+from .planet_parameters import planet_radius_km
 
 
 CAMPAIGN_OPERATIONS_MODEL = (
@@ -70,7 +71,11 @@ def _index_records(records: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
     return indexed
 
 
-def _cell_distance_km(first: dict[str, Any], second: dict[str, Any]) -> float:
+def _cell_distance_km(
+    first: dict[str, Any],
+    second: dict[str, Any],
+    radius_km: float,
+) -> float:
     first_lat = math.radians(float(first.get("lat_deg", 0.0)))
     first_lon = math.radians(float(first.get("lon_deg", 0.0)))
     second_lat = math.radians(float(second.get("lat_deg", 0.0)))
@@ -85,7 +90,9 @@ def _cell_distance_km(first: dict[str, Any], second: dict[str, Any]) -> float:
     )
     return max(
         0.001,
-        6371.0 * 2.0 * math.asin(min(1.0, math.sqrt(max(0.0, haversine)))),
+        radius_km
+        * 2.0
+        * math.asin(min(1.0, math.sqrt(max(0.0, haversine)))),
     )
 
 
@@ -124,9 +131,12 @@ def _campaign_terrain_cost(
 
 
 def _movement_step_cost(
-    cell: dict[str, Any], next_cell: dict[str, Any], route_type: str
+    cell: dict[str, Any],
+    next_cell: dict[str, Any],
+    route_type: str,
+    radius_km: float,
 ) -> float:
-    distance = _cell_distance_km(cell, next_cell)
+    distance = _cell_distance_km(cell, next_cell, radius_km)
     terrain = _campaign_terrain_cost(cell, next_cell, route_type)
     water_penalty = 0.0
     if bool(next_cell.get("is_water", False)) and route_type not in {
@@ -143,6 +153,7 @@ def _shortest_campaign_path(
     target_cell_id: int,
     cells_by_id: dict[int, dict[str, Any]],
     route_type: str,
+    radius_km: float,
 ) -> list[int]:
     if start_cell_id == target_cell_id and start_cell_id in cells_by_id:
         return [start_cell_id]
@@ -167,7 +178,12 @@ def _shortest_campaign_path(
             neighbor = cells_by_id.get(neighbor_id)
             if neighbor is None:
                 continue
-            next_cost = cost + _movement_step_cost(cell, neighbor, route_type)
+            next_cost = cost + _movement_step_cost(
+                cell,
+                neighbor,
+                route_type,
+                radius_km,
+            )
             if next_cost < best_cost.get(neighbor_id, float("inf")):
                 best_cost[neighbor_id] = next_cost
                 previous[neighbor_id] = cell_id
@@ -221,6 +237,7 @@ def _campaign_endpoint_cells(
     settlements_by_id: dict[int, dict[str, Any]],
     settlement_regions: dict[int, int],
     cells_by_id: dict[int, dict[str, Any]],
+    radius_km: float,
 ) -> tuple[int, int]:
     start_cell_id = -1
     for settlement_key in ("from", "to"):
@@ -282,7 +299,11 @@ def _campaign_endpoint_cells(
         if target_region_cells:
             target_cell_id = min(
                 target_region_cells,
-                key=lambda item: _cell_distance_km(start_cell, item[1]),
+                key=lambda item: _cell_distance_km(
+                    start_cell,
+                    item[1],
+                    radius_km,
+                ),
             )[0]
             _append_campaign_target_candidate(
                 target_candidates, target_cell_id, start_cell_id, cells_by_id
@@ -808,6 +829,9 @@ def _expected_campaign_operations(
         conflict.pop("tactical_engagement_id", None)
         conflict.pop("strategic_campaign_plan_id", None)
     cells = payload["cells"]
+    # Legacy artifacts predate planet_parameters and were generated at Earth
+    # scale; planet_radius_km preserves that replay behavior only for them.
+    radius_km = planet_radius_km(payload)
     settlement_regions = _settlement_regions(payload)
     borders_by_pair = _border_by_pair(payload)
     route_by_id = _index_records(routes)
@@ -905,9 +929,14 @@ def _expected_campaign_operations(
             settlements_by_id,
             settlement_regions,
             cells_by_id,
+            radius_km,
         )
         path_cell_ids = _shortest_campaign_path(
-            origin_cell_id, target_cell_id, cells_by_id, route_type
+            origin_cell_id,
+            target_cell_id,
+            cells_by_id,
+            route_type,
+            radius_km,
         )
         if len(path_cell_ids) < 2:
             path_cell_ids = []
@@ -927,7 +956,7 @@ def _expected_campaign_operations(
             first_cell = cells_by_id.get(first_id, {})
             second_cell = cells_by_id.get(second_id, {})
             segment_distance = (
-                _cell_distance_km(first_cell, second_cell)
+                _cell_distance_km(first_cell, second_cell, radius_km)
                 if first_cell and second_cell
                 else 0.0
             )

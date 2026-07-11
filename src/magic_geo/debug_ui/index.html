@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>magic-geo debugger</title>
+<link rel="stylesheet" href="./style.css">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.js" } }
+</script>
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <header id="world-info">
+      <h1>magic-geo debugger</h1>
+      <div id="world-meta"></div>
+    </header>
+    <input id="layer-search" type="search" placeholder="Filter layers… ( / )" autocomplete="off">
+    <nav id="layer-list"></nav>
+  </aside>
+
+  <main id="viewport">
+    <canvas id="globe"></canvas>
+    <div id="topbar">
+      <div class="control-group" id="projection-controls">
+        <button data-proj="globe" class="active" title="Globe (1)">Globe</button>
+        <button data-proj="equirect" title="Equirectangular (2)">Equirect</button>
+        <button data-proj="mollweide" title="Mollweide (3)">Mollweide</button>
+      </div>
+      <div class="control-group" id="overlay-controls">
+        <button id="toggle-wireframe" title="Mesh wireframe (w)">Wire</button>
+        <button id="toggle-plates" title="Plate boundaries (b)">Plates</button>
+        <button id="toggle-graticule" title="Graticule (g)">Grid</button>
+      </div>
+      <div id="legend">
+        <div id="legend-title"></div>
+        <canvas id="legend-ramp" width="160" height="10"></canvas>
+        <div id="legend-labels"><span id="legend-min"></span><span id="legend-max"></span></div>
+        <div id="legend-categories"></div>
+      </div>
+    </div>
+    <div id="stagebar" class="hidden">
+      <button id="stage-back" title="Previous stage (,)">◀</button>
+      <input id="stage-slider" type="range" min="0" max="0" value="0" step="1">
+      <input id="stage-number" type="number" min="0" max="0" value="0">
+      <button id="stage-fwd" title="Next stage (.)">▶</button>
+      <span id="stage-label"></span>
+    </div>
+    <div id="status"></div>
+  </main>
+
+  <aside id="inspector" class="hidden">
+    <header>
+      <h2 id="inspector-title">Cell</h2>
+      <button id="inspector-close">×</button>
+    </header>
+    <div id="inspector-body"></div>
+  </aside>
+</div>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

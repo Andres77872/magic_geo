@@ -4,11 +4,17 @@ project(magic_geo VERSION 0.1.0 LANGUAGES CXX)
 
 include(CTest)
 
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type (default Release)" FORCE)
+  set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(OpenMP)
+find_package(Threads REQUIRED)
 
 set(
   MAGIC_GEO_LIBRARY_OUTPUT_DIRECTORY
@@ -38,11 +44,18 @@ add_library(
   cpp/src/engine/tectonics.cpp
   cpp/src/engine/water_features.cpp
   cpp/src/engine/world_serialization.cpp
-  cpp/src/opencl_probe.cpp
+  cpp/src/opencl_compute.cpp
 )
 
 target_include_directories(magic_geo_native PRIVATE cpp/include)
 target_compile_features(magic_geo_native PRIVATE cxx_std_20)
+
+# Keep contraction policy stable in optimized CPU code. This prevents FMA from
+# introducing avoidable backend drift; cross-compiler/GPU parity is validated
+# with numeric tolerances and physical invariants rather than byte hashes.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(magic_geo_native PRIVATE -ffp-contract=off)
+endif()
 set_target_properties(
   magic_geo_native
   PROPERTIES
@@ -64,7 +77,33 @@ install(TARGETS magic_geo_native LIBRARY DESTINATION magic_geo)
 if(BUILD_TESTING)
   add_executable(magic_geo_native_api_test cpp/tests/native_api_test.cpp)
   target_include_directories(magic_geo_native_api_test PRIVATE cpp/include)
-  target_link_libraries(magic_geo_native_api_test PRIVATE magic_geo_native)
+  target_link_libraries(
+    magic_geo_native_api_test
+    PRIVATE magic_geo_native Threads::Threads
+  )
+  if(OpenMP_CXX_FOUND)
+    target_link_libraries(magic_geo_native_api_test PRIVATE OpenMP::OpenMP_CXX)
+  endif()
   target_compile_features(magic_geo_native_api_test PRIVATE cxx_std_20)
   add_test(NAME magic_geo_native_api COMMAND magic_geo_native_api_test)
+  add_test(NAME magic_geo_fibonacci_knn_reference COMMAND magic_geo_native_api_test)
+  set_tests_properties(
+    magic_geo_fibonacci_knn_reference
+    PROPERTIES ENVIRONMENT "MAGIC_GEO_VALIDATE_FIBONACCI_KNN=1"
+  )
+  if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    add_executable(
+      magic_geo_legacy_v1_client_test
+      cpp/tests/legacy_v1_client_test.cpp
+    )
+    target_link_libraries(
+      magic_geo_legacy_v1_client_test
+      PRIVATE magic_geo_native
+    )
+    target_compile_features(magic_geo_legacy_v1_client_test PRIVATE cxx_std_20)
+    add_test(
+      NAME magic_geo_legacy_v1_client
+      COMMAND magic_geo_legacy_v1_client_test
+    )
+  endif()
 endif()

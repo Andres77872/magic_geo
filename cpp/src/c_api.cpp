@@ -53,6 +53,13 @@ Params params_from_c_config(const CConfig& cfg) {
     return params;
 }
 
+ComputeOptions compute_options_from_c_config(const CConfigV2& cfg) {
+    ComputeOptions options;
+    options.compute_backend = cfg.compute_backend;
+    options.opencl_prefer_gpu = cfg.opencl_prefer_gpu != 0;
+    return options;
+}
+
 }  // namespace magic_geo
 
 namespace {
@@ -95,6 +102,22 @@ extern "C" const char* magic_geo_generate_json(const magic_geo::CConfig* cfg) {
             return copy_string(error_json("null config pointer"));
         }
         return copy_string(magic_geo::generate_world_json(magic_geo::params_from_c_config(*cfg)));
+    } catch (const std::exception& exc) {
+        return copy_string(error_json(exc.what()));
+    } catch (...) {
+        return copy_string(error_json("unknown generation failure"));
+    }
+}
+
+extern "C" const char* magic_geo_generate_json_v2(const magic_geo::CConfigV2* cfg) {
+    try {
+        if (cfg == nullptr) {
+            return copy_string(error_json("null config pointer"));
+        }
+        return copy_string(magic_geo::generate_world_json(
+            magic_geo::params_from_c_config(cfg->base),
+            magic_geo::compute_options_from_c_config(*cfg)
+        ));
     } catch (const std::exception& exc) {
         return copy_string(error_json(exc.what()));
     } catch (...) {

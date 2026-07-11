@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "../opencl_compute.hpp"
 
 namespace magic_geo::detail {
 
@@ -53,18 +54,29 @@ std::vector<int> choose_plate_seeds(const Params& params, int cell_count) {
 
 void assign_plates(const std::vector<Vec3>& centers, std::vector<Cell>& cells) {
     const int n = static_cast<int>(cells.size());
-#pragma omp parallel for schedule(static)
-    for (int i = 0; i < n; ++i) {
-        double best = -2.0;
-        int best_plate = 0;
-        for (int p = 0; p < static_cast<int>(centers.size()); ++p) {
-            const double score = dot(cells[i].p, centers[static_cast<std::size_t>(p)]);
-            if (score > best) {
-                best = score;
-                best_plate = p;
-            }
+    std::vector<int> opencl_plate_ids;
+    if (try_opencl_assign_plates(centers, cells, opencl_plate_ids)) {
+        if (opencl_plate_ids.size() != cells.size()) {
+            throw std::runtime_error("OpenCL plate assignment result size mismatch");
         }
-        cells[i].plate_id = best_plate;
+        for (int i = 0; i < n; ++i) {
+            cells[static_cast<std::size_t>(i)].plate_id =
+                opencl_plate_ids[static_cast<std::size_t>(i)];
+        }
+    } else {
+#pragma omp parallel for schedule(static)
+        for (int i = 0; i < n; ++i) {
+            double best = -2.0;
+            int best_plate = 0;
+            for (int p = 0; p < static_cast<int>(centers.size()); ++p) {
+                const double score = dot(cells[i].p, centers[static_cast<std::size_t>(p)]);
+                if (score > best) {
+                    best = score;
+                    best_plate = p;
+                }
+            }
+            cells[i].plate_id = best_plate;
+        }
     }
     std::vector<int> assigned_counts(centers.size(), 0);
     for (const Cell& cell : cells) {
@@ -85,6 +97,15 @@ Vec3 plate_velocity(const Plate& plate, Vec3 pos) {
 }
 
 std::vector<double> smooth_field(const std::vector<Cell>& cells, const std::vector<double>& input, int steps, double self_weight) {
+    if (steps <= 0) {
+        return input;
+    }
+    std::vector<double> opencl_output;
+    if (try_opencl_smooth_field(
+            cells, input, steps, self_weight, opencl_output
+        )) {
+        return opencl_output;
+    }
     std::vector<double> current = input;
     std::vector<double> next(input.size(), 0.0);
     for (int step = 0; step < steps; ++step) {
@@ -136,9 +157,30 @@ void classify_boundaries(const Params& params, const std::vector<Plate>& plates,
         div[i] = clamp(div[i] / degree * 3.2, 0.0, 1.0);
         trans[i] = clamp(trans[i] / degree * 3.2, 0.0, 1.0);
     }
-    conv = smooth_field(cells, conv, params.boundary_smoothing_steps, 0.58);
-    div = smooth_field(cells, div, params.boundary_smoothing_steps, 0.58);
-    trans = smooth_field(cells, trans, params.boundary_smoothing_steps, 0.62);
+    std::vector<double> smoothed_conv;
+    std::vector<double> smoothed_div;
+    std::vector<double> smoothed_trans;
+    if (try_opencl_smooth_three_fields(
+            cells,
+            conv,
+            div,
+            trans,
+            params.boundary_smoothing_steps,
+            0.58,
+            0.58,
+            0.62,
+            smoothed_conv,
+            smoothed_div,
+            smoothed_trans
+        )) {
+        conv = std::move(smoothed_conv);
+        div = std::move(smoothed_div);
+        trans = std::move(smoothed_trans);
+    } else {
+        conv = smooth_field(cells, conv, params.boundary_smoothing_steps, 0.58);
+        div = smooth_field(cells, div, params.boundary_smoothing_steps, 0.58);
+        trans = smooth_field(cells, trans, params.boundary_smoothing_steps, 0.62);
+    }
 #pragma omp parallel for schedule(static)
     for (int i = 0; i < n; ++i) {
         cells[i].boundary_convergent = clamp(conv[i], 0.0, 1.0);
@@ -614,25 +656,52 @@ std::vector<double> advance_plate_motion_and_crust(
     crust_motion.age_process_change_ma_by_cell.assign(static_cast<std::size_t>(n), 0.0);
     crust_motion.thickness_process_change_km_by_cell.assign(static_cast<std::size_t>(n), 0.0);
     crust_motion.density_process_change_by_cell.assign(static_cast<std::size_t>(n), 0.0);
+    std::vector<Vec3> backtraced_positions(static_cast<std::size_t>(n));
 #pragma omp parallel for schedule(static)
     for (int i = 0; i < n; ++i) {
         const std::size_t index = static_cast<std::size_t>(i);
         const int plate_id = cells[index].plate_id;
         const Plate& plate = plates[static_cast<std::size_t>(plate_id)];
         const double rotation_rad = step_rotation_deg[static_cast<std::size_t>(plate_id)] / DEG;
-        const Vec3 backtraced_position = rotate_about_axis(cells[index].p, plate.axis, -rotation_rad);
-        int best_source = i;
-        double best_score = -2.0;
-        const std::vector<int>& candidates = previous_cells_by_plate[static_cast<std::size_t>(plate_id)];
-        for (int candidate : candidates) {
-            const double score = dot(backtraced_position, cells[static_cast<std::size_t>(candidate)].p);
-            if (score > best_score) {
-                best_score = score;
-                best_source = candidate;
+        backtraced_positions[index] = rotate_about_axis(
+            cells[index].p, plate.axis, -rotation_rad
+        );
+    }
+    if (!try_opencl_remap_crust_sources(
+            cells,
+            backtraced_positions,
+            previous_cells_by_plate,
+            crust_motion.source_cell_ids
+        )) {
+#pragma omp parallel for schedule(static)
+        for (int i = 0; i < n; ++i) {
+            const std::size_t index = static_cast<std::size_t>(i);
+            const int plate_id = cells[index].plate_id;
+            const Vec3 backtraced_position = backtraced_positions[index];
+            int best_source = i;
+            double best_score = -2.0;
+            const std::vector<int>& candidates =
+                previous_cells_by_plate[static_cast<std::size_t>(plate_id)];
+            for (int candidate : candidates) {
+                const double score = dot(
+                    backtraced_position,
+                    cells[static_cast<std::size_t>(candidate)].p
+                );
+                if (score > best_score) {
+                    best_score = score;
+                    best_source = candidate;
+                }
             }
+            crust_motion.source_cell_ids[index] = best_source;
         }
-        const std::size_t source_index = static_cast<std::size_t>(best_source);
-        crust_motion.source_cell_ids[index] = best_source;
+    }
+#pragma omp parallel for schedule(static)
+    for (int i = 0; i < n; ++i) {
+        const std::size_t index = static_cast<std::size_t>(i);
+        const Vec3 backtraced_position = backtraced_positions[index];
+        const std::size_t source_index = static_cast<std::size_t>(
+            crust_motion.source_cell_ids[index]
+        );
         crust_motion.transport_distance_km_by_cell[index] =
             angular_distance(backtraced_position, cells[index].p) * params.radius_km;
         crust_motion.age_transport_change_ma_by_cell[index] =

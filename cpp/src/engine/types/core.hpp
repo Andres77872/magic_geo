@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <vector>
 
 namespace magic_geo::detail {
@@ -89,12 +90,12 @@ struct Cell {
     bool is_lake = false;
     double temperature_c = 0.0;
     double precipitation_mm_y = 0.0;
-    std::vector<double> temperature_monthly_c;
-    std::vector<double> precipitation_monthly_mm;
+    std::array<double, 12> temperature_monthly_c{};
+    std::array<double, 12> precipitation_monthly_mm{};
     double wind_east = 0.0;
     double wind_north = 0.0;
-    std::vector<double> wind_monthly_east;
-    std::vector<double> wind_monthly_north;
+    std::array<double, 12> wind_monthly_east{};
+    std::array<double, 12> wind_monthly_north{};
     double mean_seasonal_wind_speed = 0.0;
     double seasonal_wind_reversal_index = 0.0;
     int atmospheric_cell = 0;

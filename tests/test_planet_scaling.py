@@ -9,11 +9,14 @@ from unittest.mock import patch
 from typer.testing import CliRunner
 
 from magic_geo.api import generate_world
+from magic_geo.campaign_operations_validation import validate_campaign_operations_replay
 from magic_geo.cell_geometry import enrich_world_with_cell_geometry
-from magic_geo.cli import app
+from magic_geo.cli import _validate_route_corridors, app
 from magic_geo.config import WorldConfig, load_config
+from magic_geo.logistics_history import enrich_world_with_logistics_history
 from magic_geo.planet_parameters import EARTH_RADIUS_KM, EARTH_STANDARD_GRAVITY_M_S2
 from magic_geo.river_hydraulics import enrich_world_with_river_hydraulics
+from magic_geo.route_corridors import enrich_world_with_route_corridors
 
 
 class PlanetScalingTests(TestCase):
@@ -88,6 +91,201 @@ class PlanetScalingTests(TestCase):
         self.assertEqual(
             legacy["summary"]["cell_geometry_total_area_km2"],
             explicit_earth["summary"]["cell_geometry_total_area_km2"],
+        )
+
+    def test_route_corridors_scale_from_small_to_super_earth_and_replay(self) -> None:
+        def world_for_radius(
+            radius_km: float,
+            *,
+            expose_parameters: bool = True,
+        ) -> dict:
+            angular_distance = math.radians(12.0)
+            world = {
+                "cells": [
+                    {
+                        "id": 0,
+                        "lat_deg": 0.0,
+                        "lon_deg": 0.0,
+                        "neighbors": [1],
+                        "is_water": False,
+                        "water_body_type": "land",
+                    },
+                    {
+                        "id": 1,
+                        "lat_deg": 0.0,
+                        "lon_deg": 12.0,
+                        "neighbors": [0],
+                        "is_water": False,
+                        "water_body_type": "land",
+                    },
+                ],
+                "settlements": [
+                    {"id": 0, "cell_id": 0, "region_id": 0},
+                    {"id": 1, "cell_id": 1, "region_id": 1},
+                ],
+                "routes": [
+                    {
+                        "id": 0,
+                        "from": 0,
+                        "to": 1,
+                        "type": "overland",
+                        "distance_km": radius_km * angular_distance,
+                    }
+                ],
+                "summary": {},
+            }
+            if expose_parameters:
+                world["planet_parameters"] = {"radius_km": radius_km}
+            return world
+
+        small = world_for_radius(3000.0)
+        super_earth = world_for_radius(9000.0)
+        legacy = world_for_radius(EARTH_RADIUS_KM, expose_parameters=False)
+        explicit_earth = world_for_radius(EARTH_RADIUS_KM)
+        for world in (small, super_earth, legacy, explicit_earth):
+            enrich_world_with_route_corridors(world)
+            cells_by_id = {cell["id"]: cell for cell in world["cells"]}
+            self.assertEqual(
+                _validate_route_corridors(world, world["summary"], cells_by_id),
+                [],
+            )
+
+        self.assertEqual(small["route_corridor_model"]["planet_radius_km"], 3000.0)
+        self.assertEqual(
+            super_earth["route_corridor_model"]["planet_radius_km"],
+            9000.0,
+        )
+        self.assertAlmostEqual(
+            super_earth["route_corridors"][0]["path_length_km"]
+            / small["route_corridors"][0]["path_length_km"],
+            3.0,
+            places=5,
+        )
+        self.assertEqual(legacy["route_corridors"], explicit_earth["route_corridors"])
+        self.assertEqual(
+            legacy["route_corridor_model"],
+            explicit_earth["route_corridor_model"],
+        )
+
+    def test_campaign_distances_scale_from_small_to_super_earth_and_replay(
+        self,
+    ) -> None:
+        def world_for_radius(
+            radius_km: float,
+            *,
+            expose_parameters: bool = True,
+        ) -> dict:
+            angular_distance = math.radians(12.0)
+            distance_km = radius_km * angular_distance
+            world = {
+                "political_regions": [
+                    {"id": 0, "capital_settlement_id": 0},
+                    {"id": 1, "capital_settlement_id": 1},
+                ],
+                "settlements": [
+                    {"id": 0, "cell_id": 0, "region_id": 0},
+                    {"id": 1, "cell_id": 1, "region_id": 1},
+                ],
+                "routes": [
+                    {
+                        "id": 0,
+                        "from": 0,
+                        "to": 1,
+                        "type": "overland",
+                        "distance_km": distance_km,
+                        "cost": distance_km * 1.2,
+                    }
+                ],
+                "trade_flows": [
+                    {
+                        "id": 0,
+                        "route_id": 0,
+                        "from": 0,
+                        "to": 1,
+                        "region_from": 0,
+                        "region_to": 1,
+                        "distance_km": distance_km,
+                        "volume_index": 20.0,
+                        "friction": 0.2,
+                        "interregional": True,
+                    }
+                ],
+                "conflicts": [
+                    {
+                        "id": 0,
+                        "region_a": 0,
+                        "region_b": 1,
+                        "region_a_force_estimate": 12000.0,
+                        "region_b_force_estimate": 9000.0,
+                        "outcome": "region_a_victory",
+                        "contested_cell_id": 1,
+                        "intensity": 0.4,
+                        "war_duration_years": 2.0,
+                    }
+                ],
+                "cells": [
+                    {
+                        "id": 0,
+                        "lat_deg": 0.0,
+                        "lon_deg": 0.0,
+                        "neighbors": [1],
+                        "political_region_id": 0,
+                        "is_water": False,
+                        "elevation_m": 100.0,
+                    },
+                    {
+                        "id": 1,
+                        "lat_deg": 0.0,
+                        "lon_deg": 12.0,
+                        "neighbors": [0],
+                        "political_region_id": 1,
+                        "is_water": False,
+                        "elevation_m": 100.0,
+                    },
+                ],
+                "borders": [
+                    {
+                        "id": 0,
+                        "region_a": 0,
+                        "region_b": 1,
+                        "barrier_score": 0.2,
+                        "length_km": distance_km,
+                    }
+                ],
+                "economy_histories": [],
+                "summary": {},
+            }
+            if expose_parameters:
+                world["planet_parameters"] = {"radius_km": radius_km}
+            return world
+
+        small = world_for_radius(3000.0)
+        super_earth = world_for_radius(9000.0)
+        legacy = world_for_radius(EARTH_RADIUS_KM, expose_parameters=False)
+        explicit_earth = world_for_radius(EARTH_RADIUS_KM)
+        for world in (small, super_earth, legacy, explicit_earth):
+            enrich_world_with_logistics_history(world)
+            self.assertEqual(validate_campaign_operations_replay(world), [])
+
+        self.assertAlmostEqual(
+            super_earth["campaign_movements"][0]["path_length_km"]
+            / small["campaign_movements"][0]["path_length_km"],
+            3.0,
+            places=5,
+        )
+        self.assertAlmostEqual(
+            super_earth["campaign_path_segments"][0]["distance_km"]
+            / small["campaign_path_segments"][0]["distance_km"],
+            3.0,
+            places=5,
+        )
+        self.assertEqual(
+            legacy["campaign_movements"],
+            explicit_earth["campaign_movements"],
+        )
+        self.assertEqual(
+            legacy["campaign_path_segments"],
+            explicit_earth["campaign_path_segments"],
         )
 
     def test_river_hydraulics_uses_configured_gravity_and_legacy_defaults_to_earth(

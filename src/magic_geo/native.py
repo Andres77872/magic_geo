@@ -11,8 +11,14 @@ MESH_BACKEND_IDS = {
     "geodesic_icosahedron": 1,
 }
 
+COMPUTE_BACKEND_IDS = {
+    "auto": 0,
+    "cpu": 1,
+    "opencl": 2,
+}
 
-class NativeConfig(ctypes.Structure):
+
+class NativeConfigV1(ctypes.Structure):
     _fields_ = [
         ("seed", ctypes.c_uint64),
         ("name", ctypes.c_char_p),
@@ -58,6 +64,19 @@ class NativeConfig(ctypes.Structure):
     ]
 
 
+class NativeConfigV2(ctypes.Structure):
+    _fields_ = [
+        ("base", NativeConfigV1),
+        ("compute_backend", ctypes.c_int),
+        ("opencl_prefer_gpu", ctypes.c_int),
+    ]
+
+
+# Internal compatibility alias for code that imported the previous private
+# class name while V2 was being introduced.
+NativeConfig = NativeConfigV2
+
+
 def _library_path() -> Path:
     suffixes = ["libmagic_geo_native.so", "magic_geo_native.dll", "libmagic_geo_native.dylib"]
     package_dir = Path(__file__).resolve().parent
@@ -75,8 +94,10 @@ def _load_library() -> ctypes.CDLL:
     lib = ctypes.CDLL(str(_library_path()))
     lib.magic_geo_backend_info_json.argtypes = []
     lib.magic_geo_backend_info_json.restype = ctypes.c_void_p
-    lib.magic_geo_generate_json.argtypes = [ctypes.POINTER(NativeConfig)]
+    lib.magic_geo_generate_json.argtypes = [ctypes.POINTER(NativeConfigV1)]
     lib.magic_geo_generate_json.restype = ctypes.c_void_p
+    lib.magic_geo_generate_json_v2.argtypes = [ctypes.POINTER(NativeConfigV2)]
+    lib.magic_geo_generate_json_v2.restype = ctypes.c_void_p
     lib.magic_geo_free_string.argtypes = [ctypes.c_void_p]
     lib.magic_geo_free_string.restype = None
     return lib
@@ -97,7 +118,7 @@ def _consume_json_pointer(lib: ctypes.CDLL, ptr: int) -> dict[str, Any]:
     return payload
 
 
-def _native_config(data: dict[str, Any]) -> NativeConfig:
+def _native_config(data: dict[str, Any]) -> NativeConfigV2:
     run = data["run"]
     planet = data["planet"]
     mesh = data["mesh"]
@@ -107,7 +128,7 @@ def _native_config(data: dict[str, Any]) -> NativeConfig:
     erosion = data["erosion"]
     compute = data["compute"]
     output = data["output"]
-    return NativeConfig(
+    base = NativeConfigV1(
         int(run["seed"]),
         str(run["name"]).encode("utf-8"),
         float(planet["radius_km"]),
@@ -150,6 +171,11 @@ def _native_config(data: dict[str, Any]) -> NativeConfig:
         1 if output["include_cells"] else 0,
         int(output["float_precision"]),
     )
+    return NativeConfigV2(
+        base,
+        int(COMPUTE_BACKEND_IDS[str(compute["backend"])]),
+        1 if compute["opencl_prefer_gpu"] else 0,
+    )
 
 
 def backend_info() -> dict[str, Any]:
@@ -160,4 +186,4 @@ def backend_info() -> dict[str, Any]:
 def generate_world(data: dict[str, Any]) -> dict[str, Any]:
     lib = _load_library()
     native_config = _native_config(data)
-    return _consume_json_pointer(lib, lib.magic_geo_generate_json(ctypes.byref(native_config)))
+    return _consume_json_pointer(lib, lib.magic_geo_generate_json_v2(ctypes.byref(native_config)))

@@ -89,7 +89,7 @@ HumidityTransport humidity_transport_along_wind(
     double wind_east,
     double wind_north
 ) {
-    const int max_steps = clamp(params.cell_count / 256 + 10, 10, 34);
+    const int max_steps = clamp(static_cast<int>(cells.size()) / 256 + 10, 10, 34);
     int current = start;
     double parcel = cells[start].is_water ? 0.72 : 0.08;
     double fetch_km = cells[start].is_water ? 120.0 : 0.0;
@@ -199,10 +199,10 @@ void compute_climate(const Params& params, std::vector<Cell>& cells) {
 #pragma omp parallel for schedule(static)
     for (int i = 0; i < n; ++i) {
         Cell& cell = cells[i];
-        cell.temperature_monthly_c.assign(static_cast<std::size_t>(params.months), 0.0);
-        cell.precipitation_monthly_mm.assign(static_cast<std::size_t>(params.months), 0.0);
-        cell.wind_monthly_east.assign(static_cast<std::size_t>(params.months), 0.0);
-        cell.wind_monthly_north.assign(static_cast<std::size_t>(params.months), 0.0);
+        cell.temperature_monthly_c.fill(0.0);
+        cell.precipitation_monthly_mm.fill(0.0);
+        cell.wind_monthly_east.fill(0.0);
+        cell.wind_monthly_north.fill(0.0);
         const auto wind = prevailing_wind_components(cell.lat, params.day_length_hours);
         cell.wind_east = wind.first;
         cell.wind_north = wind.second;
@@ -301,7 +301,11 @@ void compute_climate(const Params& params, std::vector<Cell>& cells) {
                 local_temperature_adjustment_area_mean;
             annual_temp += temp;
             const double equator = std::exp(-(lat_abs_deg * lat_abs_deg) / (2.0 * 18.0 * 18.0));
-            const double subtropic = std::exp(-std::pow(lat_abs_deg - (30.0 + rotation_band_shift), 2.0) / (2.0 * 10.0 * 10.0));
+            const double subtropic_delta =
+                lat_abs_deg - (30.0 + rotation_band_shift);
+            const double subtropic = std::exp(
+                -(subtropic_delta * subtropic_delta) / (2.0 * 10.0 * 10.0)
+            );
             const double mid = std::exp(-std::pow(lat_abs_deg - (55.0 + 0.5 * rotation_band_shift), 2.0) / (2.0 * 13.0 * 13.0));
             const double relief = clamp(local_relief(cells, i) / 2200.0, 0.0, 1.0);
             const double hemisphere_season = season * (cell.lat >= 0.0 ? 1.0 : -1.0);
