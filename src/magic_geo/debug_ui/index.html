@@ -43,11 +43,26 @@
         <button id="toggle-plates" title="Plate boundaries (b)">Plates</button>
         <button id="toggle-graticule" title="Graticule (g)">Grid</button>
       </div>
-      <div id="legend">
-        <div id="legend-title"></div>
-        <canvas id="legend-ramp" width="160" height="10"></canvas>
-        <div id="legend-labels"><span id="legend-min"></span><span id="legend-max"></span></div>
-        <div id="legend-categories"></div>
+      <div class="control-group" id="help-controls">
+        <button id="toggle-help" title="Help &amp; docs (?)">?</button>
+      </div>
+      <div id="topbar-right">
+        <div id="legend">
+          <div id="legend-head">
+            <div id="legend-title"></div>
+            <button id="legend-info" title="Layer docs (i)">ⓘ</button>
+          </div>
+          <canvas id="legend-ramp" width="160" height="10"></canvas>
+          <div id="legend-labels"><span id="legend-min"></span><span id="legend-max"></span></div>
+          <div id="legend-categories"></div>
+        </div>
+        <div id="layer-doc" class="hidden"></div>
+      </div>
+    </div>
+    <div id="help-overlay" class="hidden">
+      <div id="help-panel">
+        <button id="help-close" title="Close (Esc)">×</button>
+        <div id="help-body"></div>
       </div>
     </div>
     <div id="stagebar" class="hidden">

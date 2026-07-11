@@ -4,6 +4,70 @@ project(magic_geo VERSION 0.1.0 LANGUAGES CXX)
 
 include(CTest)
 
+option(
+  MAGIC_GEO_ENABLE_CUDA
+  "Build the native CUDA backend when a CUDA 12.8+ compiler is available"
+  ON
+)
+set(
+  MAGIC_GEO_CUDA_ARCHITECTURES
+  "75-real;75-virtual;80-real;86-real;89-real;90-real;120-real;120-virtual"
+  CACHE STRING
+  "CUDA architectures for magic-geo (modern NVIDIA SASS, baseline forward PTX, native RTX 50 SASS, and Blackwell PTX)"
+)
+
+set(MAGIC_GEO_CUDA_SOURCE cpp/src/cuda_compute_stub.cpp)
+set(MAGIC_GEO_CUDA_ENABLED OFF)
+if(MAGIC_GEO_ENABLE_CUDA)
+  # CUDA 13.1 must see this during compiler identification (before any target
+  # exists) on glibc 2.43, whose GNU feature set exposes new C23 rsqrt symbols
+  # that collide with CUDA's device declarations. Retain the default, POSIX,
+  # and X/Open declarations required by libstdc++ while disabling only GNU
+  # extensions for CUDA translation units.
+  set(
+    CMAKE_CUDA_FLAGS_INIT
+    "${CMAKE_CUDA_FLAGS_INIT} -U_GNU_SOURCE -D_DEFAULT_SOURCE=1 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700"
+  )
+  include(CheckLanguage)
+  check_language(CUDA)
+  if(CMAKE_CUDA_COMPILER)
+    enable_language(CUDA)
+    if(
+      CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA" AND
+      CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8
+    )
+      find_package(CUDAToolkit 12.8 QUIET)
+      if(CUDAToolkit_FOUND)
+        set(MAGIC_GEO_CUDA_SOURCE cpp/src/cuda_compute.cu)
+        set(MAGIC_GEO_CUDA_ENABLED ON)
+        message(
+          STATUS
+          "magic-geo CUDA backend: ${CMAKE_CUDA_COMPILER_VERSION}; architectures=${MAGIC_GEO_CUDA_ARCHITECTURES}"
+        )
+      else()
+        message(
+          WARNING
+          "magic-geo CUDA backend disabled: CUDA runtime development files were not found; building runtime stub"
+        )
+      endif()
+    elseif(CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
+      message(
+        WARNING
+        "magic-geo CUDA backend disabled: CUDA ${CMAKE_CUDA_COMPILER_VERSION} cannot compile sm_120; CUDA 12.8+ is required"
+      )
+    else()
+      message(
+        WARNING
+        "magic-geo CUDA backend disabled: compiler '${CMAKE_CUDA_COMPILER_ID}' is not supported; NVIDIA nvcc 12.8+ is required"
+      )
+    endif()
+  else()
+    message(STATUS "magic-geo CUDA backend: compiler not found; building runtime stub")
+  endif()
+else()
+  message(STATUS "magic-geo CUDA backend: disabled by MAGIC_GEO_ENABLE_CUDA=OFF")
+endif()
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type (default Release)" FORCE)
   set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
@@ -44,6 +108,7 @@ add_library(
   cpp/src/engine/tectonics.cpp
   cpp/src/engine/water_features.cpp
   cpp/src/engine/world_serialization.cpp
+  ${MAGIC_GEO_CUDA_SOURCE}
   cpp/src/opencl_compute.cpp
 )
 
@@ -54,7 +119,10 @@ target_compile_features(magic_geo_native PRIVATE cxx_std_20)
 # introducing avoidable backend drift; cross-compiler/GPU parity is validated
 # with numeric tolerances and physical invariants rather than byte hashes.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  target_compile_options(magic_geo_native PRIVATE -ffp-contract=off)
+  target_compile_options(
+    magic_geo_native
+    PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-ffp-contract=off>
+  )
 endif()
 set_target_properties(
   magic_geo_native
@@ -71,6 +139,28 @@ if(OpenMP_CXX_FOUND)
 endif()
 
 target_link_libraries(magic_geo_native PRIVATE ${CMAKE_DL_LIBS})
+
+if(MAGIC_GEO_CUDA_ENABLED)
+  target_compile_definitions(magic_geo_native PRIVATE MAGIC_GEO_HAS_CUDA=1)
+  target_compile_options(
+    magic_geo_native
+    PRIVATE
+      $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false;--ftz=false;--prec-div=true;--prec-sqrt=true;-lineinfo>
+  )
+  # Embed the small runtime support layer so a CUDA-enabled wheel can still
+  # load and use CPU/OpenCL on a host without a separately installed cudart.
+  # libcuda itself remains driver-provided and is discovered by the runtime.
+  set_target_properties(
+    magic_geo_native
+    PROPERTIES
+      CUDA_ARCHITECTURES "${MAGIC_GEO_CUDA_ARCHITECTURES}"
+      CUDA_RUNTIME_LIBRARY Static
+      CUDA_SEPARABLE_COMPILATION OFF
+      CUDA_STANDARD 20
+      CUDA_STANDARD_REQUIRED ON
+      CUDA_VISIBILITY_PRESET hidden
+  )
+endif()
 
 install(TARGETS magic_geo_native LIBRARY DESTINATION magic_geo)
 
@@ -91,6 +181,43 @@ if(BUILD_TESTING)
     magic_geo_fibonacci_knn_reference
     PROPERTIES ENVIRONMENT "MAGIC_GEO_VALIDATE_FIBONACCI_KNN=1"
   )
+  if(MAGIC_GEO_CUDA_ENABLED)
+    add_executable(
+      magic_geo_cuda_compute_test
+      cpp/tests/cuda_compute_test.cpp
+      cpp/src/cuda_compute.cu
+    )
+    target_include_directories(
+      magic_geo_cuda_compute_test
+      PRIVATE cpp/include cpp/src ${CUDAToolkit_INCLUDE_DIRS}
+    )
+    target_compile_features(magic_geo_cuda_compute_test PRIVATE cxx_std_20)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+      target_compile_options(
+        magic_geo_cuda_compute_test
+        PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-ffp-contract=off>
+      )
+    endif()
+    target_compile_options(
+      magic_geo_cuda_compute_test
+      PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false;--ftz=false;--prec-div=true;--prec-sqrt=true;-lineinfo>
+    )
+    set_target_properties(
+      magic_geo_cuda_compute_test
+      PROPERTIES
+        CUDA_ARCHITECTURES "${MAGIC_GEO_CUDA_ARCHITECTURES}"
+        CUDA_RUNTIME_LIBRARY Static
+        CUDA_SEPARABLE_COMPILATION OFF
+        CUDA_STANDARD 20
+        CUDA_STANDARD_REQUIRED ON
+    )
+    add_test(NAME magic_geo_cuda_compute COMMAND magic_geo_cuda_compute_test)
+    set_tests_properties(
+      magic_geo_cuda_compute
+      PROPERTIES SKIP_RETURN_CODE 77
+    )
+  endif()
   if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     add_executable(
       magic_geo_legacy_v1_client_test

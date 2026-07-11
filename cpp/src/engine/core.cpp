@@ -193,8 +193,8 @@ ScopedThreadConfiguration::~ScopedThreadConfiguration() {
 }
 
 void validate_compute_options(const ComputeOptions& compute_options) {
-    if (compute_options.compute_backend < 0 || compute_options.compute_backend > 2) {
-        throw std::runtime_error("compute_backend must be auto, cpu, or opencl");
+    if (compute_options.compute_backend < 0 || compute_options.compute_backend > 3) {
+        throw std::runtime_error("compute_backend must be auto, cpu, opencl, or cuda");
     }
 }
 

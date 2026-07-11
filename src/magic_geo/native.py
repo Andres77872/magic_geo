@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ COMPUTE_BACKEND_IDS = {
     "auto": 0,
     "cpu": 1,
     "opencl": 2,
+    "cuda": 3,
 }
 
 
@@ -78,6 +80,14 @@ NativeConfig = NativeConfigV2
 
 
 def _library_path() -> Path:
+    override = os.environ.get("MAGIC_GEO_NATIVE_LIBRARY")
+    if override:
+        candidate = Path(override).expanduser().resolve()
+        if not candidate.is_file():
+            raise RuntimeError(
+                f"MAGIC_GEO_NATIVE_LIBRARY does not name a file: {candidate}"
+            )
+        return candidate
     suffixes = ["libmagic_geo_native.so", "magic_geo_native.dll", "libmagic_geo_native.dylib"]
     package_dir = Path(__file__).resolve().parent
     for suffix in suffixes:

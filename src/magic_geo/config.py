@@ -118,8 +118,10 @@ class ErosionConfig(BaseModel):
 class ComputeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    backend: Literal["auto", "cpu", "opencl"] = "auto"
+    backend: Literal["auto", "cpu", "opencl", "cuda"] = "auto"
     threads: int = Field(0, ge=0, le=MAX_COMPUTE_THREADS)
+    # OpenCL fallback device ranking; automatic mode prefers native CUDA when
+    # that backend was compiled and the actual mesh meets its threshold.
     opencl_prefer_gpu: bool = True
 
 

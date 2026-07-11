@@ -1,4 +1,5 @@
 #include "opencl_compute.hpp"
+#include "cuda_compute.hpp"
 
 #include <algorithm>
 #include <array>
@@ -96,6 +97,8 @@ constexpr cl_program_build_info CL_PROGRAM_BUILD_LOG = 0x1183;
 constexpr cl_kernel_work_group_info CL_KERNEL_WORK_GROUP_SIZE = 0x11B0;
 constexpr cl_kernel_work_group_info CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE = 0x11B3;
 constexpr int OPENCL_AUTO_MIN_CELL_COUNT = 32768;
+constexpr int CUDA_SM_120_AUTO_MIN_CELL_COUNT = 8192;
+constexpr int CUDA_UNCALIBRATED_AUTO_MIN_CELL_COUNT = 32768;
 constexpr cl_device_fp_config CL_FP_DENORM = 1ULL << 0U;
 constexpr cl_device_fp_config CL_FP_INF_NAN = 1ULL << 1U;
 constexpr cl_device_fp_config CL_FP_ROUND_TO_NEAREST = 1ULL << 2U;
@@ -493,6 +496,7 @@ const char* requested_backend_name(int backend) {
         case 0: return "auto";
         case 1: return "cpu";
         case 2: return "opencl";
+        case 3: return "cuda";
         default: return "invalid";
     }
 }
@@ -713,6 +717,16 @@ void json_integer(std::string& output, bool& first, const char* key, T value) {
     output += std::to_string(value);
 }
 
+void json_number(std::string& output, bool& first, const char* key, double value) {
+    json_separator(output, first);
+    output += '"';
+    output += key;
+    output += "\":";
+    std::ostringstream encoded;
+    encoded << std::setprecision(9) << value;
+    output += encoded.str();
+}
+
 struct alignas(32) PackedVec4 {
     double x;
     double y;
@@ -727,26 +741,81 @@ thread_local ComputeSession::Impl* active_compute_session = nullptr;
 
 struct ComputeSession::Impl {
     Impl(
-        const Params& params,
+        const Params&,
         const ComputeOptions& compute_options,
         bool capability_only = false
     )
         : requested_backend(compute_options.compute_backend),
-          prefer_gpu(compute_options.opencl_prefer_gpu),
-          auto_offload_eligible(params.cell_count >= OPENCL_AUTO_MIN_CELL_COUNT) {
+          prefer_gpu(compute_options.opencl_prefer_gpu) {
         if (!capability_only && requested_backend == 1) {
             selected_backend = "cpu";
-            selection_reason = "CPU backend explicitly requested; OpenCL probe skipped";
+            selection_reason =
+                "CPU backend explicitly requested; CUDA/OpenCL probes skipped";
             return;
         }
-        if (!capability_only && requested_backend == 0 && !auto_offload_eligible) {
-            selected_backend = "cpu";
+        if (!capability_only && requested_backend == 0) {
+            auto_selection_pending = true;
             selection_reason =
-                "automatic OpenCL offload is below the evidence-based cell-count threshold; "
-                "OpenCL probe skipped";
+                "automatic accelerator selection is deferred until the actual mesh size is known";
             return;
         }
 
+        if (capability_only || requested_backend == 3) {
+            initialize_cuda_probe(requested_backend == 3 && !capability_only);
+            if (!capability_only && requested_backend == 3) {
+                if (!cuda_session || !cuda_session->available()) {
+                    const std::string reason = cuda_status().error.empty()
+                        ? "no usable NVIDIA CUDA device is available"
+                        : cuda_status().error;
+                    throw std::runtime_error(
+                        "explicit CUDA backend requested but initialization failed: " + reason
+                    );
+                }
+                selected_backend = "cuda";
+                initial_selected_backend = "cuda";
+                selection_reason = cuda_status().sm_120_optimized
+                    ? "native CUDA selected for an NVIDIA sm_120 device"
+                    : "highest-scoring FP64 NVIDIA CUDA device";
+                return;
+            }
+        }
+
+        probe_opencl();
+        if (capability_only) {
+            selected_backend = "cpu";
+            selection_reason = "capability-only probe; no generation is active";
+            return;
+        }
+        select_opencl_or_fallback(true);
+    }
+
+    ~Impl() {
+        release_runtime();
+    }
+
+    const CudaTelemetry& cuda_status() const {
+        return cuda_session ? cuda_session->telemetry() : cuda_probe;
+    }
+
+    void initialize_cuda_probe(bool create_session) {
+        cuda_probe_performed = true;
+        if (create_session) {
+            cuda_session = std::make_unique<CudaComputeSession>();
+            cuda_probe = cuda_session->telemetry();
+        } else {
+            cuda_probe = CudaComputeSession::probe();
+        }
+        if (cuda_status().available) {
+            cuda_auto_min_cell_count = cuda_status().sm_120_optimized
+                ? CUDA_SM_120_AUTO_MIN_CELL_COUNT
+                : CUDA_UNCALIBRATED_AUTO_MIN_CELL_COUNT;
+        }
+    }
+
+    void probe_opencl() {
+        if (probe_performed) {
+            return;
+        }
         probe_performed = true;
         Discovery discovery = discover_opencl();
         api = std::move(discovery.api);
@@ -761,13 +830,10 @@ struct ComputeSession::Impl {
         qualifying_gpu_device_count = discovery.qualifying_gpu_device_count;
         probe_error = std::move(discovery.error);
         devices = std::move(discovery.devices);
+    }
 
-        if (capability_only) {
-            selected_backend = "cpu";
-            selection_reason = "capability-only probe; no generation is active";
-            return;
-        }
-
+    bool select_opencl_or_fallback(bool explicit_request) {
+        probe_opencl();
         selected_device_index = choose_device_for_records();
         if (selected_device_index < 0) {
             std::string reason;
@@ -782,7 +848,7 @@ struct ComputeSession::Impl {
                     ? "no qualifying FP64 OpenCL device is available"
                     : probe_error;
             }
-            if (requested_backend == 2) {
+            if (explicit_request) {
                 throw std::runtime_error(
                     "explicit OpenCL backend requested but initialization failed: " + reason
                 );
@@ -792,7 +858,7 @@ struct ComputeSession::Impl {
             fallback_stage = "device_selection";
             fallback_reason = reason;
             selection_reason = "automatic OpenCL selection fell back to CPU";
-            return;
+            return false;
         }
 
         selected_backend = "opencl";
@@ -805,7 +871,7 @@ struct ComputeSession::Impl {
         try {
             initialize_runtime();
         } catch (const std::exception& error) {
-            if (requested_backend == 2) {
+            if (explicit_request) {
                 release_runtime();
                 throw std::runtime_error(
                     std::string("explicit OpenCL backend requested but initialization failed: ") +
@@ -813,11 +879,108 @@ struct ComputeSession::Impl {
                 );
             }
             fall_back_to_cpu("runtime_initialization", error.what());
+            return false;
         }
+        return true;
     }
 
-    ~Impl() {
-        release_runtime();
+    void ensure_auto_backend(std::size_t actual_cell_count) {
+        if (requested_backend != 0 || !auto_selection_pending) {
+            return;
+        }
+        auto_selection_pending = false;
+        auto_planning_cell_count = actual_cell_count;
+        bool cuda_probe_eligible = false;
+#ifdef MAGIC_GEO_HAS_CUDA
+        cuda_probe_eligible = actual_cell_count >=
+            static_cast<std::size_t>(CUDA_SM_120_AUTO_MIN_CELL_COUNT);
+#endif
+        cuda_auto_offload_eligible = false;
+        auto_offload_eligible =
+            actual_cell_count >= static_cast<std::size_t>(OPENCL_AUTO_MIN_CELL_COUNT);
+
+        if (!cuda_probe_eligible && !auto_offload_eligible) {
+            selected_backend = "cpu";
+            selection_reason =
+                "automatic acceleration is below the evidence-based actual-mesh thresholds; "
+                "CUDA/OpenCL probes skipped";
+            return;
+        }
+
+        std::string cuda_reason;
+        bool cuda_below_policy_threshold = false;
+        if (cuda_probe_eligible) {
+            initialize_cuda_probe(true);
+            if (cuda_session && cuda_session->available()) {
+                cuda_auto_min_cell_count = cuda_status().sm_120_optimized
+                    ? CUDA_SM_120_AUTO_MIN_CELL_COUNT
+                    : CUDA_UNCALIBRATED_AUTO_MIN_CELL_COUNT;
+                cuda_auto_offload_eligible = actual_cell_count >=
+                    static_cast<std::size_t>(cuda_auto_min_cell_count);
+                if (cuda_auto_offload_eligible) {
+                    selected_backend = "cuda";
+                    initial_selected_backend = "cuda";
+                    selection_reason = cuda_status().sm_120_optimized
+                        ? "automatic selection chose native CUDA for an NVIDIA sm_120 device"
+                        : "automatic selection chose an uncalibrated FP64 NVIDIA CUDA device at the conservative threshold";
+                    return;
+                }
+                cuda_reason =
+                    "the detected non-sm_120 CUDA device is below its conservative " +
+                    std::to_string(CUDA_UNCALIBRATED_AUTO_MIN_CELL_COUNT) +
+                    "-cell automatic threshold";
+                cuda_below_policy_threshold = true;
+            } else {
+                cuda_reason = cuda_status().error.empty()
+                    ? "no usable NVIDIA CUDA device is available"
+                    : cuda_status().error;
+            }
+            cuda_session.reset();
+        }
+
+        if (cuda_below_policy_threshold && !auto_offload_eligible) {
+            selected_backend = "cpu";
+            selection_reason =
+                "automatic CUDA probe found an uncalibrated device below its "
+                "conservative actual-mesh threshold; CPU retained by policy";
+            return;
+        }
+
+        std::string opencl_reason;
+        if (auto_offload_eligible) {
+            if (select_opencl_or_fallback(false)) {
+                if (!cuda_reason.empty()) {
+                    selection_reason =
+                        "automatic CUDA selection was unavailable (" + cuda_reason +
+                        "); selected qualifying OpenCL device";
+                }
+                return;
+            }
+            opencl_reason = fallback_reason;
+            if (fallback_stage == "runtime_initialization") {
+                if (!cuda_reason.empty()) {
+                    fallback_reason =
+                        "CUDA: " + cuda_reason + "; OpenCL: " + fallback_reason;
+                }
+                selection_reason =
+                    "automatic accelerator initialization fell back to CPU";
+                return;
+            }
+        }
+
+        selected_backend = "cpu";
+        fallback_used = true;
+        fallback_stage = "device_selection";
+        if (!cuda_reason.empty() && !opencl_reason.empty()) {
+            fallback_reason = "CUDA: " + cuda_reason + "; OpenCL: " + opencl_reason;
+        } else if (!cuda_reason.empty()) {
+            fallback_reason = "CUDA: " + cuda_reason;
+        } else if (!opencl_reason.empty()) {
+            fallback_reason = "OpenCL: " + opencl_reason;
+        } else {
+            fallback_reason = "no qualifying accelerator is available";
+        }
+        selection_reason = "automatic accelerator selection fell back to CPU";
     }
 
     int choose_device_for_records() const {
@@ -1044,6 +1207,11 @@ struct ComputeSession::Impl {
     }
 
     void fall_back_to_cpu(const std::string& stage, const std::string& reason) {
+        if (cuda_session) {
+            cuda_probe = cuda_session->telemetry();
+            cuda_session.reset();
+            cuda_probe.allocated_device_bytes = 0;
+        }
         release_runtime();
         selected_backend = "cpu";
         fallback_used = true;
@@ -1689,13 +1857,42 @@ struct ComputeSession::Impl {
         json_string(
             output, first, "requested_backend", requested_backend_name(requested_backend)
         );
+        const CudaTelemetry& cuda = cuda_status();
+        const std::uint64_t accelerator_dispatch_count =
+            kernel_dispatch_count + cuda.kernel_dispatch_count;
         json_string(output, first, "selected_backend", selected_backend);
         const std::string active_backend =
-            fallback_used && kernel_dispatch_count > 0 ? "hybrid" : selected_backend;
+            fallback_used && accelerator_dispatch_count > 0
+                ? "hybrid"
+                : selected_backend;
         json_string(output, first, "active_backend", active_backend);
         json_string(output, first, "initial_selected_backend", initial_selected_backend);
         json_string(output, first, "backend_selection_reason", selection_reason);
+        json_integer(
+            output, first, "automatic_planning_cell_count", auto_planning_cell_count
+        );
+        json_integer(
+            output, first, "accelerator_kernel_dispatch_count", accelerator_dispatch_count
+        );
         json_bool(output, first, "opencl_prefer_gpu", prefer_gpu);
+        json_integer(
+            output, first, "cuda_auto_min_cell_count", cuda_auto_min_cell_count
+        );
+        json_integer(
+            output,
+            first,
+            "cuda_sm_120_auto_min_cell_count",
+            CUDA_SM_120_AUTO_MIN_CELL_COUNT
+        );
+        json_integer(
+            output,
+            first,
+            "cuda_uncalibrated_auto_min_cell_count",
+            CUDA_UNCALIBRATED_AUTO_MIN_CELL_COUNT
+        );
+        json_bool(
+            output, first, "cuda_auto_offload_eligible", cuda_auto_offload_eligible
+        );
         json_integer(
             output, first, "opencl_auto_min_cell_count", OPENCL_AUTO_MIN_CELL_COUNT
         );
@@ -1705,6 +1902,191 @@ struct ComputeSession::Impl {
         json_bool(output, first, "backend_fallback_used", fallback_used);
         json_string(output, first, "backend_fallback_stage", fallback_stage);
         json_string(output, first, "backend_fallback_reason", fallback_reason);
+
+#ifdef MAGIC_GEO_HAS_CUDA
+        constexpr bool cuda_backend_compiled = true;
+#else
+        constexpr bool cuda_backend_compiled = false;
+#endif
+        json_bool(output, first, "cuda_compiled", cuda_backend_compiled);
+        json_bool(output, first, "cuda_probe_performed", cuda_probe_performed);
+        const std::string cuda_capability_status = !cuda_probe_performed
+            ? "not_probed"
+            : (!cuda_backend_compiled
+                ? "not_compiled"
+                : (cuda.available ? "available" : "unavailable"));
+        json_string(output, first, "cuda_capability_status", cuda_capability_status);
+        json_bool(output, first, "cuda_runtime_initialized", cuda.runtime_initialized);
+        json_bool(output, first, "cuda_available", cuda.available);
+        json_bool(output, first, "cuda_nvidia_device", cuda.nvidia_device);
+        json_bool(output, first, "cuda_fp64_supported", cuda.fp64_supported);
+        json_bool(output, first, "cuda_sm_120_optimized", cuda.sm_120_optimized);
+        json_string(output, first, "cuda_error", cuda.error);
+        json_integer(output, first, "cuda_device_count", cuda.device_count);
+        json_integer(
+            output, first, "cuda_selected_device_ordinal", cuda.selected_device_ordinal
+        );
+        json_string(output, first, "cuda_device_vendor", cuda.device_vendor);
+        json_string(output, first, "cuda_device_name", cuda.device_name);
+        json_string(output, first, "cuda_device_uuid", cuda.device_uuid);
+        json_string(output, first, "cuda_pci_bus_id", cuda.pci_bus_id);
+        json_integer(
+            output,
+            first,
+            "cuda_compute_capability_major",
+            cuda.compute_capability_major
+        );
+        json_integer(
+            output,
+            first,
+            "cuda_compute_capability_minor",
+            cuda.compute_capability_minor
+        );
+        json_integer(
+            output, first, "cuda_kernel_binary_version", cuda.kernel_binary_version
+        );
+        json_integer(output, first, "cuda_kernel_ptx_version", cuda.kernel_ptx_version);
+        json_integer(output, first, "cuda_driver_version", cuda.driver_version);
+        json_integer(output, first, "cuda_runtime_version", cuda.runtime_version);
+        json_integer(
+            output, first, "cuda_total_global_memory_bytes", cuda.total_global_memory_bytes
+        );
+        json_integer(
+            output, first, "cuda_free_global_memory_bytes", cuda.free_global_memory_bytes
+        );
+        json_integer(
+            output, first, "cuda_multiprocessor_count", cuda.multiprocessor_count
+        );
+        json_integer(output, first, "cuda_warp_size", cuda.warp_size);
+        json_integer(
+            output, first, "cuda_max_threads_per_block", cuda.max_threads_per_block
+        );
+        json_integer(
+            output,
+            first,
+            "cuda_max_threads_per_multiprocessor",
+            cuda.max_threads_per_multiprocessor
+        );
+        json_integer(
+            output, first, "cuda_max_block_dimension_x", cuda.max_block_dimensions[0]
+        );
+        json_integer(
+            output, first, "cuda_max_block_dimension_y", cuda.max_block_dimensions[1]
+        );
+        json_integer(
+            output, first, "cuda_max_block_dimension_z", cuda.max_block_dimensions[2]
+        );
+        json_integer(
+            output, first, "cuda_max_grid_dimension_x", cuda.max_grid_dimensions[0]
+        );
+        json_integer(
+            output, first, "cuda_max_grid_dimension_y", cuda.max_grid_dimensions[1]
+        );
+        json_integer(
+            output, first, "cuda_max_grid_dimension_z", cuda.max_grid_dimensions[2]
+        );
+        json_integer(output, first, "cuda_l2_cache_bytes", cuda.l2_cache_bytes);
+        json_integer(
+            output,
+            first,
+            "cuda_shared_memory_per_block_bytes",
+            cuda.shared_memory_per_block_bytes
+        );
+        json_integer(
+            output,
+            first,
+            "cuda_shared_memory_per_multiprocessor_bytes",
+            cuda.shared_memory_per_multiprocessor_bytes
+        );
+        json_integer(output, first, "cuda_registers_per_block", cuda.registers_per_block);
+        json_integer(
+            output,
+            first,
+            "cuda_registers_per_multiprocessor",
+            cuda.registers_per_multiprocessor
+        );
+        json_integer(output, first, "cuda_core_clock_khz", cuda.core_clock_khz);
+        json_integer(output, first, "cuda_memory_clock_khz", cuda.memory_clock_khz);
+        json_integer(
+            output, first, "cuda_memory_bus_width_bits", cuda.memory_bus_width_bits
+        );
+        json_string(output, first, "cuda_fp_contract", "off");
+        json_integer(output, first, "cuda_kernel_dispatch_count", cuda.kernel_dispatch_count);
+        json_integer(
+            output,
+            first,
+            "cuda_plate_assignment_dispatch_count",
+            cuda.plate_assignment_dispatch_count
+        );
+        json_integer(
+            output, first, "cuda_smoothing_operation_count", cuda.smoothing_operation_count
+        );
+        json_integer(
+            output,
+            first,
+            "cuda_smoothing_kernel_dispatch_count",
+            cuda.smoothing_kernel_dispatch_count
+        );
+        json_integer(
+            output,
+            first,
+            "cuda_batched_smoothing_operation_count",
+            cuda.batched_smoothing_operation_count
+        );
+        json_integer(
+            output,
+            first,
+            "cuda_batched_smoothing_kernel_dispatch_count",
+            cuda.batched_smoothing_kernel_dispatch_count
+        );
+        json_integer(
+            output,
+            first,
+            "cuda_crust_source_remap_dispatch_count",
+            cuda.crust_source_remap_dispatch_count
+        );
+        json_integer(
+            output, first, "cuda_host_to_device_bytes", cuda.host_to_device_bytes
+        );
+        json_integer(
+            output, first, "cuda_device_to_host_bytes", cuda.device_to_host_bytes
+        );
+        json_integer(
+            output, first, "cuda_device_allocation_count", cuda.device_allocation_count
+        );
+        json_integer(output, first, "cuda_mesh_upload_count", cuda.mesh_upload_count);
+        json_integer(
+            output, first, "cuda_allocated_device_bytes", cuda.allocated_device_bytes
+        );
+        json_integer(
+            output,
+            first,
+            "cuda_peak_allocated_device_bytes",
+            cuda.peak_allocated_device_bytes
+        );
+        json_number(output, first, "cuda_kernel_time_ms", cuda.kernel_time_ms);
+        json_number(output, first, "cuda_transfer_time_ms", cuda.transfer_time_ms);
+        json_number(output, first, "cuda_operation_time_ms", cuda.operation_time_ms);
+        json_number(
+            output, first, "cuda_last_kernel_time_ms", cuda.last_kernel_time_ms
+        );
+        json_number(
+            output, first, "cuda_last_transfer_time_ms", cuda.last_transfer_time_ms
+        );
+        json_number(
+            output, first, "cuda_last_operation_time_ms", cuda.last_operation_time_ms
+        );
+        json_integer(
+            output, first, "cuda_last_logical_work_items", cuda.last_logical_work_items
+        );
+        json_integer(output, first, "cuda_last_grid_blocks", cuda.last_grid_blocks);
+        json_integer(
+            output, first, "cuda_last_threads_per_block", cuda.last_threads_per_block
+        );
+        json_integer(
+            output, first, "cuda_last_warps_per_block", cuda.last_warps_per_block
+        );
+
         json_bool(output, first, "opencl_probe_performed", probe_performed);
         const std::string capability_status = !probe_performed
             ? "not_probed"
@@ -1895,6 +2277,10 @@ struct ComputeSession::Impl {
 
     int requested_backend = 0;
     bool prefer_gpu = true;
+    bool auto_selection_pending = false;
+    std::size_t auto_planning_cell_count = 0;
+    int cuda_auto_min_cell_count = CUDA_SM_120_AUTO_MIN_CELL_COUNT;
+    bool cuda_auto_offload_eligible = false;
     bool auto_offload_eligible = false;
     std::string selected_backend = "cpu";
     std::string initial_selected_backend = "cpu";
@@ -1902,6 +2288,10 @@ struct ComputeSession::Impl {
     bool fallback_used = false;
     std::string fallback_stage;
     std::string fallback_reason;
+
+    std::unique_ptr<CudaComputeSession> cuda_session;
+    CudaTelemetry cuda_probe;
+    bool cuda_probe_performed = false;
 
     std::unique_ptr<OpenClApi> api;
     bool probe_performed = false;
@@ -1988,20 +2378,29 @@ ComputeSession::~ComputeSession() {
     }
 }
 
-bool try_opencl_assign_plates(
+bool try_accelerated_assign_plates(
     const std::vector<Vec3>& centers,
     const std::vector<Cell>& cells,
     std::vector<int>& plate_ids
 ) {
-    if (active_compute_session == nullptr ||
-        active_compute_session->selected_backend != "opencl") {
+    if (active_compute_session == nullptr) {
         return false;
     }
     try {
-        active_compute_session->run_assign_plates(centers, cells, plate_ids);
+        active_compute_session->ensure_auto_backend(cells.size());
+        if (active_compute_session->selected_backend == "cuda") {
+            active_compute_session->cuda_session->run_assign_plates(
+                centers, cells, plate_ids
+            );
+        } else if (active_compute_session->selected_backend == "opencl") {
+            active_compute_session->run_assign_plates(centers, cells, plate_ids);
+        } else {
+            return false;
+        }
         return true;
     } catch (const std::exception& error) {
-        if (active_compute_session->requested_backend == 2) {
+        if (active_compute_session->requested_backend == 2 ||
+            active_compute_session->requested_backend == 3) {
             throw;
         }
         active_compute_session->fall_back_to_cpu("plate_assignment", error.what());
@@ -2009,24 +2408,33 @@ bool try_opencl_assign_plates(
     }
 }
 
-bool try_opencl_smooth_field(
+bool try_accelerated_smooth_field(
     const std::vector<Cell>& cells,
     const std::vector<double>& input,
     int steps,
     double self_weight,
     std::vector<double>& output
 ) {
-    if (active_compute_session == nullptr ||
-        active_compute_session->selected_backend != "opencl") {
+    if (active_compute_session == nullptr) {
         return false;
     }
     try {
-        active_compute_session->run_smooth_field(
-            cells, input, steps, self_weight, output
-        );
+        active_compute_session->ensure_auto_backend(cells.size());
+        if (active_compute_session->selected_backend == "cuda") {
+            active_compute_session->cuda_session->run_smooth_field(
+                cells, input, steps, self_weight, output
+            );
+        } else if (active_compute_session->selected_backend == "opencl") {
+            active_compute_session->run_smooth_field(
+                cells, input, steps, self_weight, output
+            );
+        } else {
+            return false;
+        }
         return true;
     } catch (const std::exception& error) {
-        if (active_compute_session->requested_backend == 2) {
+        if (active_compute_session->requested_backend == 2 ||
+            active_compute_session->requested_backend == 3) {
             throw;
         }
         active_compute_session->fall_back_to_cpu("neighbor_field_smoothing", error.what());
@@ -2034,7 +2442,7 @@ bool try_opencl_smooth_field(
     }
 }
 
-bool try_opencl_smooth_three_fields(
+bool try_accelerated_smooth_three_fields(
     const std::vector<Cell>& cells,
     const std::vector<double>& input_a,
     const std::vector<double>& input_b,
@@ -2047,27 +2455,46 @@ bool try_opencl_smooth_three_fields(
     std::vector<double>& output_b,
     std::vector<double>& output_c
 ) {
-    if (active_compute_session == nullptr ||
-        active_compute_session->selected_backend != "opencl") {
+    if (active_compute_session == nullptr) {
         return false;
     }
     try {
-        active_compute_session->run_smooth_three_fields(
-            cells,
-            input_a,
-            input_b,
-            input_c,
-            steps,
-            self_weight_a,
-            self_weight_b,
-            self_weight_c,
-            output_a,
-            output_b,
-            output_c
-        );
+        active_compute_session->ensure_auto_backend(cells.size());
+        if (active_compute_session->selected_backend == "cuda") {
+            active_compute_session->cuda_session->run_smooth_three_fields(
+                cells,
+                input_a,
+                input_b,
+                input_c,
+                steps,
+                self_weight_a,
+                self_weight_b,
+                self_weight_c,
+                output_a,
+                output_b,
+                output_c
+            );
+        } else if (active_compute_session->selected_backend == "opencl") {
+            active_compute_session->run_smooth_three_fields(
+                cells,
+                input_a,
+                input_b,
+                input_c,
+                steps,
+                self_weight_a,
+                self_weight_b,
+                self_weight_c,
+                output_a,
+                output_b,
+                output_c
+            );
+        } else {
+            return false;
+        }
         return true;
     } catch (const std::exception& error) {
-        if (active_compute_session->requested_backend == 2) {
+        if (active_compute_session->requested_backend == 2 ||
+            active_compute_session->requested_backend == 3) {
             throw;
         }
         active_compute_session->fall_back_to_cpu(
@@ -2077,26 +2504,38 @@ bool try_opencl_smooth_three_fields(
     }
 }
 
-bool try_opencl_remap_crust_sources(
+bool try_accelerated_remap_crust_sources(
     const std::vector<Cell>& cells,
     const std::vector<Vec3>& backtraced_positions,
     const std::vector<std::vector<int>>& previous_cells_by_plate,
     std::vector<int>& source_cell_ids
 ) {
-    if (active_compute_session == nullptr ||
-        active_compute_session->selected_backend != "opencl") {
+    if (active_compute_session == nullptr) {
         return false;
     }
     try {
-        active_compute_session->run_remap_crust_sources(
-            cells,
-            backtraced_positions,
-            previous_cells_by_plate,
-            source_cell_ids
-        );
+        active_compute_session->ensure_auto_backend(cells.size());
+        if (active_compute_session->selected_backend == "cuda") {
+            active_compute_session->cuda_session->run_remap_crust_sources(
+                cells,
+                backtraced_positions,
+                previous_cells_by_plate,
+                source_cell_ids
+            );
+        } else if (active_compute_session->selected_backend == "opencl") {
+            active_compute_session->run_remap_crust_sources(
+                cells,
+                backtraced_positions,
+                previous_cells_by_plate,
+                source_cell_ids
+            );
+        } else {
+            return false;
+        }
         return true;
     } catch (const std::exception& error) {
-        if (active_compute_session->requested_backend == 2) {
+        if (active_compute_session->requested_backend == 2 ||
+            active_compute_session->requested_backend == 3) {
             throw;
         }
         active_compute_session->fall_back_to_cpu("crust_source_remap", error.what());

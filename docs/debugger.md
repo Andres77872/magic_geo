@@ -57,6 +57,9 @@ touching the exporter, and skipped fields are recorded in the manifest instead o
 
 ## Frontend (system browser, no build step)
 
+Full UI reference: [debug_ui_guide.md](debug_ui_guide.md). Pipeline review with known
+issues: [layers_pipeline_review.md](layers_pipeline_review.md).
+
 One merged indexed `BufferGeometry` (fan per cell around its site, per-vertex `cell_id`), per-cell
 values in an R32F `DataTexture` fetched by cell id in the vertex shader, viridis/categorical
 colormap in the fragment shader. Layer switch and stage scrub swap one `Float32Array` — no

@@ -84,18 +84,25 @@ explicit simulation/result/serialization boundary. See
 [`cpp/src/engine/README.md`](cpp/src/engine/README.md) for module ownership,
 dependency flow, and invariants.
 
-The native compute backend is configurable as `auto`, `cpu`, or `opencl`. CPU
-is the deterministic reference and does not probe OpenCL. Explicit OpenCL
-dynamically selects a qualifying IEEE-FP64 device and fails if it cannot run;
-`auto` stays on native OpenMP below 32,768 requested cells and never substitutes
-a CPU OpenCL runtime for that path. Current kernels cover plate assignment,
-fixed-order scalar/fused boundary smoothing, and same-plate crust remapping.
-On the audited RTX 5090, the 32,768-cell erosion-6 native case was 1.12x faster
-than CPU and exactly matched its physical payload after backend telemetry was
-removed. The threshold is a device-dependent heuristic, not a universal GPU
-guarantee. See [the GPU simulation audit](docs/gpu_simulation_audit.md) for the
-pipeline analysis, benchmarks, determinism contract, validation matrix, and
-remaining structural bottlenecks.
+The native compute backend is configurable as `auto`, `cpu`, `opencl`, or
+`cuda`. CPU is the deterministic reference and does not probe either runtime.
+Explicit OpenCL dynamically selects a qualifying IEEE-FP64 device; explicit
+CUDA initializes a usable NVIDIA device; neither explicit backend silently
+falls back. CUDA is an optional CUDA 12.8+ build feature: a missing
+`nvcc`/`CUDAToolkit` produces a runtime stub, while CUDA-enabled artifacts link
+`cudart` statically so CPU/OpenCL loading does not require a separate runtime.
+The portable default emits real code for `sm_75`, `sm_80`, `sm_86`, `sm_89`,
+`sm_90`, and `sm_120`, plus `compute_75` and `compute_120` PTX; the RTX 5090
+audit uses a narrower `120-real;120-virtual` override. Automatic selection is
+deferred until the actual mesh size is known. Native `sm_120` CUDA begins at
+8,192 actual cells, uncalibrated CUDA and OpenCL begin at 32,768, and the
+fallback chain at eligible thresholds is CUDA, qualifying non-CPU OpenCL, then
+CPU. Current kernels cover plate assignment, fixed-order scalar/fused boundary
+smoothing, and deterministic same-plate crust remapping. See the
+[RTX 5090 CUDA optimization audit](docs/cuda_rtx5090_optimization.md) for the
+build, kernel, parity, performance, sanitizer, and telemetry evidence; the
+[historical GPU simulation audit](docs/gpu_simulation_audit.md) retains the
+broader pipeline analysis and determinism contract.
 
 ## Outputs
 
@@ -179,9 +186,10 @@ The generated JSON contains:
 - `natural_frontiers`: generated frontier records governed by the explicit border/terrain component contract above.
 - `mesh_lod`: v0 cube-face quadtree hierarchy over cell centroids, with occupied tile records, parent links, representative cells, and area summaries.
 - `spherical_spatial_index`: v0 HEALPix-inspired equal-area pixel records and S2-inspired cube-face cell records over generated centroids, with occupied IDs, representative cells, area/centroid summaries, and six-face totals; this is compatibility metadata, not a native HEALPix/S2 backend.
-- `backend`: requested/selected/active compute backend, OpenCL capability and
-  fallback state, device qualification, kernel/operation counts, work sizes,
-  and host/device transfer totals.
+- `backend`: requested/selected/active compute backend; CUDA/OpenCL capability
+  and fallback state; NVIDIA identity, compute capability, resource limits,
+  and native-code status; kernel/operation counts, launch sizes, device
+  allocations, event timings, and host/device transfer totals.
 - `settlements` and `routes`: generated human-geography records governed by the explicit selection and base-network contracts above; route records are subsequently enriched with route-corridor IDs and path cell IDs.
 - `political_regions`: generated human-geography records governed by the explicit capital/barrier partition contract above.
 - `cultures` and native `language_regions`: generated records governed by the explicit homeland and trade/lineage contracts above. `phonology_history_model` independently replays all downstream sound rules, era histories, lexical correspondences, diffusion ledgers, speaker-population histories, language back-references, and summaries. These remain synthetic linguistic diagnostics rather than empirical historical linguistics or individual speech simulation.

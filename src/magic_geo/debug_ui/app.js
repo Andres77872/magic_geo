@@ -563,6 +563,54 @@ function updateLegend(layer) {
   maxEl.title = hiClip ? `clipped — true max ${formatValue(stats.max)}` : '';
 }
 
+// ---------------------------------------------------------------------------
+// Docs helper: per-layer doc card + help overlay (content from docs.js)
+
+function renderLayerDoc(layer) {
+  const card = $('#layer-doc');
+  card.classList.toggle('hidden', !state.docCard || !layer);
+  $('#legend-info').classList.toggle('active', state.docCard);
+  if (!state.docCard || !layer) return;
+  const doc = layerDoc(layer);
+  const parts = [];
+  parts.push(`<h4>${escapeHtml(doc.id)}</h4>`);
+  const topicBits = [doc.topic, doc.kindLabel].filter(Boolean);
+  if (doc.unit) topicBits.push(`unit: <span class="doc-unit">${escapeHtml(doc.unit)}</span>`);
+  parts.push(`<div class="doc-topic">${topicBits.join(' · ')}</div>`);
+  if (doc.summary) parts.push(`<p>${escapeHtml(doc.summary)}</p>`);
+  else if (doc.unitMeaning) parts.push(`<p class="doc-dim">${escapeHtml(doc.unitMeaning)}.</p>`);
+  if (layer.stats) {
+    const stats = layer.stats;
+    parts.push('<table>'
+      + `<tr><td>min / max</td><td>${formatValue(stats.min)} … ${formatValue(stats.max)}</td></tr>`
+      + `<tr><td>legend (p2 / p98)</td><td>${formatValue(stats.p2)} … ${formatValue(stats.p98)}</td></tr>`
+      + '</table>');
+  }
+  if (layer.kind === 'categorical') {
+    parts.push(`<p class="doc-dim">${layer.categories.length} categories — see legend chips.</p>`);
+  }
+  if (doc.topicDoc) parts.push(`<p class="doc-dim">${escapeHtml(doc.topicDoc)}</p>`);
+  if (doc.sourceDoc) parts.push(`<p class="doc-dim">${escapeHtml(doc.sourceDoc)}</p>`);
+  card.innerHTML = parts.join('');
+}
+
+function toggleDocCard(force) {
+  state.docCard = force !== undefined ? force : !state.docCard;
+  localStorage.setItem('magicGeoDocCard', state.docCard ? '1' : '0');
+  renderLayerDoc(state.activeLayer);
+}
+
+function toggleHelp(force) {
+  state.helpOpen = force !== undefined ? force : !state.helpOpen;
+  const overlay = $('#help-overlay');
+  if (state.helpOpen && !overlay.dataset.built) {
+    $('#help-body').innerHTML = helpHtml(state.manifest);
+    overlay.dataset.built = '1';
+  }
+  overlay.classList.toggle('hidden', !state.helpOpen);
+  $('#toggle-help').classList.toggle('active', state.helpOpen);
+}
+
 function layerRange(layer) {
   const stats = layer.stats || {};
   let lo = stats.p2 ?? stats.min ?? 0;
@@ -792,7 +840,8 @@ function buildLayerList() {
       const item = document.createElement('div');
       item.className = 'layer-item';
       item.dataset.layerId = layer.id;
-      item.dataset.search = `${layer.source} ${layer.name}`.toLowerCase();
+      item.dataset.search = `${layer.source} ${layer.name} ${searchTerms(layer)}`.toLowerCase();
+      item.title = layerTooltip(layer);
       item.textContent = layer.name;
       if (kindBadge[layer.kind]) {
         const badge = document.createElement('span');
@@ -995,6 +1044,13 @@ function wireEvents() {
   });
 
   $('#layer-search').addEventListener('input', (event) => filterLayerList(event.target.value));
+
+  $('#toggle-help').addEventListener('click', () => toggleHelp());
+  $('#help-close').addEventListener('click', () => toggleHelp(false));
+  $('#help-overlay').addEventListener('click', (event) => {
+    if (event.target === $('#help-overlay')) toggleHelp(false);
+  });
+  $('#legend-info').addEventListener('click', () => toggleDocCard());
 
   const slider = $('#stage-slider');
   const number = $('#stage-number');
