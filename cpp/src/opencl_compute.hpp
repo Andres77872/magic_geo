@@ -1,0 +1,73 @@
+#pragma once
+
+#include "engine/model.hpp"
+
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace magic_geo::detail {
+
+// Owns one generation's backend selection and OpenCL resources. The active
+// session is thread-local so the existing simulation signatures remain stable;
+// every accelerated operation still receives and returns ordinary host data.
+class ComputeSession {
+public:
+    struct Impl;
+
+    ComputeSession(const Params& params, const ComputeOptions& compute_options);
+    ~ComputeSession();
+
+    ComputeSession(const ComputeSession&) = delete;
+    ComputeSession& operator=(const ComputeSession&) = delete;
+    ComputeSession(ComputeSession&&) = delete;
+    ComputeSession& operator=(ComputeSession&&) = delete;
+
+private:
+    std::unique_ptr<Impl> impl_;
+};
+
+// Return true only when OpenCL produced a complete host result. In auto mode a
+// runtime failure atomically disables OpenCL for the rest of the generation and
+// returns false so the caller can execute its unchanged CPU implementation.
+// Explicit OpenCL requests throw instead of silently falling back.
+bool try_opencl_assign_plates(
+    const std::vector<Vec3>& centers,
+    const std::vector<Cell>& cells,
+    std::vector<int>& plate_ids
+);
+
+bool try_opencl_smooth_field(
+    const std::vector<Cell>& cells,
+    const std::vector<double>& input,
+    int steps,
+    double self_weight,
+    std::vector<double>& output
+);
+
+bool try_opencl_smooth_three_fields(
+    const std::vector<Cell>& cells,
+    const std::vector<double>& input_a,
+    const std::vector<double>& input_b,
+    const std::vector<double>& input_c,
+    int steps,
+    double self_weight_a,
+    double self_weight_b,
+    double self_weight_c,
+    std::vector<double>& output_a,
+    std::vector<double>& output_b,
+    std::vector<double>& output_c
+);
+
+bool try_opencl_remap_crust_sources(
+    const std::vector<Cell>& cells,
+    const std::vector<Vec3>& backtraced_positions,
+    const std::vector<std::vector<int>>& previous_cells_by_plate,
+    std::vector<int>& source_cell_ids
+);
+
+// During generation this describes the active ComputeSession. Outside a
+// generation it performs a capability-only probe and reports CPU as active.
+std::string compute_backend_info_json();
+
+}  // namespace magic_geo::detail
