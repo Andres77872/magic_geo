@@ -17,6 +17,11 @@
 
 // --- Unit inference from field-name suffixes ------------------------------
 // Ordered longest-first so `_mm_y` wins over `_m`, `_m3_s` over `_s`, etc.
+const EXACT_UNITS = {
+  crust_density: ['g/cm³', 'Bulk density (grams per cubic centimetre).'],
+  initial_crust_density: ['g/cm³', 'Bulk density (grams per cubic centimetre).'],
+};
+
 const UNIT_RULES = [
   ['_km3_y', 'km³/year', 'Volumetric flux (cubic kilometres per year).'],
   ['_m3_s', 'm³/s', 'Volumetric discharge (cubic metres per second).'],
@@ -43,7 +48,7 @@ const UNIT_RULES = [
   ['_months', 'months', 'Count of months (0–12).'],
   ['_count', 'count', 'Integer count.'],
   ['_fraction', 'fraction', 'Dimensionless ratio, normally 0–1.'],
-  ['_index', 'index', 'Dimensionless index (usually normalised 0–1; higher = more).'],
+  ['_index', 'index', 'Dimensionless index (usually 0–1; signed for convergence/divergence-style quantities).'],
   ['_m', 'm', 'Length/elevation/depth (metres).'],
   // Note: no bare `_y` rule — it would mislabel coordinate fields like
   // `position_3d_y` / `s2_like_y` as "per year". Genuine annual fields carry a
@@ -74,17 +79,21 @@ const PATTERN_RULES = [
     doc: 'Running total accumulated across all simulation stages (monotonic per cell). The per-stage delta lives in the corresponding stage-history ledger.',
   },
   {
-    test: (n) => n.endsWith('_neighbor_edge_count') || n === 'cell_edge_count' || n === 'boundary_vertex_count' || n.endsWith('neighbor_boundary_segment_count'),
+    // `_edge_count` fields are graph-degree counts (e.g. hillslope sediment
+    // routing edges), the same static-topology family as neighbour counts.
+    test: (n) => n.endsWith('_edge_count') || n === 'boundary_vertex_count' || n.endsWith('neighbor_boundary_segment_count'),
     role: 'diagnostic',
-    doc: 'Topology count — how many of the cell\'s mesh neighbours/edges meet the named condition (e.g. cross a land/water or biome boundary). A static property of the mesh + classification, not an event tally.',
+    doc: 'Topology count — how many of the cell\'s mesh neighbours/edges meet the named condition (e.g. cross a land/water or biome boundary, or carry a routing edge). A static property of the mesh + classification, not an event tally.',
   },
   {
-    test: (n) => n.endsWith('_event_count') || n.endsWith('_transfer_count') || n.endsWith('_path_count') || n.endsWith('_edge_count'),
+    test: (n) => n.endsWith('_event_count') || n.endsWith('_transfer_count') || n.endsWith('_path_count'),
     role: 'diagnostic',
     doc: 'Bookkeeping counter — how many times an event/transfer/path touched this cell during the simulation. Useful for spotting hot spots and verifying conservation, not a physical quantity.',
   },
   {
-    test: (n) => n.includes('residual') || n.includes('mass_balance') || n.includes('consistency'),
+    // Deliberately narrow: `mass_balance` alone would misclassify real fluxes
+    // like ice_surface_mass_balance_m_y (accumulation − ablation).
+    test: (n) => n.includes('residual') || n.includes('consistency'),
     role: 'diagnostic',
     doc: 'Conservation residual / mass-balance check. Should sit near zero everywhere; large magnitudes flag a budget that does not close and are a debugging signal rather than terrain.',
   },
@@ -96,7 +105,7 @@ const PATTERN_RULES = [
   {
     test: (n) => n.endsWith('_index'),
     role: 'index',
-    doc: 'Derived index, normally normalised to 0–1 where higher means "more" of the named property. Built by a Python enricher from the physical fields; good for ranking cells, not an absolute measurement.',
+    doc: 'Derived index — typically normalised 0–1 where higher means "more" of the named property, but convergence/divergence-style indices are signed around 0 (check the value range below). Built by a Python enricher from the physical fields; good for ranking cells, not an absolute measurement.',
   },
   {
     test: (n) => n.endsWith('_fraction') || n.endsWith('_factor'),
@@ -110,9 +119,10 @@ const PATTERN_RULES = [
   },
 ];
 
-// Curated docs for the fields a user actually reaches for first. Keyed by the
-// bare field name (matches any source). Kept deliberately tight — the pattern
-// and family layers cover the long tail.
+// Curated docs, keyed by the bare field name (matches any source). The first
+// block covers the fields a user reaches for first; the domain catalog below
+// it holds the per-subsystem one-liners. Convention-following fields that are
+// absent here still resolve through the pattern and unit rules.
 const CURATED = {
   elevation_m: 'Surface elevation above the planetary datum, in metres. Negative below sea level. The most-used base layer; the default on load.',
   filled_elevation_m: 'Elevation after depression filling — closed basins raised to their spill level so flow routing has no sinks. Diff against `elevation_m` to see filled depressions.',
@@ -131,15 +141,16 @@ const CURATED = {
   landform: 'Geomorphic landform class (mountain_belt, coastal_plain, trench, …) from elevation and tectonic context.',
   plate_id: 'Tectonic plate the cell belongs to. Identifier — colour groups plates, magnitude is meaningless.',
   crust_type: 'Crust classification (continental, oceanic, craton, orogen, …).',
-  crust_age_ma: 'Age of the crust in millions of years. Oceanic crust is young at ridges and ages toward subduction zones.',
+  crust_age_ma: 'Current procedural crust-state age in Ma after remap and maturation rules. This replay root is serialized with binary64 round-trip precision. It is not a reconstructed geological creation age or proof of a ridge-to-subduction flowline.',
+  initial_crust_age_ma: 'Initial procedural crust-state age in Ma, serialized with binary64 round-trip precision. On oceanic-like cells this aliases the replayable ridge-seeded graph-travel-time ledger: distance over one global nominal half-spreading rate, with explicit ceiling/clamp/unreachable statuses. It is not a physical seafloor-creation reconstruction.',
   lithology: 'Dominant rock type (basalt, granite, limestone, …). NOTE: the per-stage history serializes lithology as numeric codes 0–6, while this cell layer uses names; the code order is alphabetical here and may not match the engine enum (see layers_review.md F3).',
   soil_type: 'Soil classification from climate, parent material, and drainage.',
   resource: 'Dominant natural-resource association for the cell (craton_iron_gold, sedimentary_fuels, …).',
   fertility: 'Agronomic fertility score combining soil, climate, and water availability.',
   sediment_thickness_m: 'Accumulated sediment column thickness in metres.',
   ice_thickness_m: 'Ice-sheet / glacier thickness in metres.',
-  water_depth_m: 'Water column depth (bathymetry for ocean, lake depth for lakes) in metres.',
-  lake_fill_fraction: 'How full a lake basin is, 0–1, at the end of the water-budget solve.',
+  water_depth_m: 'Water column depth (bathymetry for ocean, lake depth for lakes) in metres. One value represents the entire coarse control volume; it does not resolve subcell shelf, slope, coastline, or strait geometry.',
+  lake_fill_fraction: 'How full a lake basin is relative to its spill level at the end of the water-budget solve. Usually 0–1; values above 1 mark transiently overfilled basins.',
   basin_id: 'Drainage basin the cell belongs to. Identifier — colour groups a watershed.',
   landmass_id: 'Connected landmass (continent/island) the cell belongs to. Identifier.',
   settlement_score: 'Composite habitability/attractiveness score used to seed settlements.',
@@ -157,8 +168,11 @@ const CURATED = {
   ocean_current_north: 'Northward component of the surface ocean current. Pair with `ocean_current_east`.',
   mean_seasonal_wind_speed: 'Mean wind speed over the seasonal cycle (magnitude of the monthly wind vectors).',
   earthquake_recurrence_interval_y: 'Mean interval between large earthquakes, in years. Low values mark seismically active belts.',
-  crust_density: 'Bulk crust density (kg/m³ scale); oceanic crust is denser than continental.',
-  erosion_rate: 'Local erosion rate from the landscape-evolution solve (model units of depth per step).',
+  crust_density: 'Bulk crust density in g/cm³, serialized with binary64 round-trip precision; oceanic crust is denser than continental.',
+  initial_crust_density: 'Initial bulk crust density in g/cm³ before the geodynamic feedback loop, serialized with binary64 round-trip precision.',
+  crust_source_remap_event_count: 'V3 compatibility counter incremented when a stage\'s dominant incoming-volume contributor ID differs from the destination cell ID. It does not count all overlap contributors or prove a unique donor/remap. Use `plate_motion_history[*].crust_overlap_ledger` for canonical mixture provenance.',
+  last_crust_source_cell_id: 'V3 compatibility alias for the source contributing the largest incoming crust volume in the latest stage, with source ID as the tie-break. It is not a unique donor; the canonical destination-major mixture is in `plate_motion_history[*].crust_overlap_ledger`.',
+  erosion_rate: 'Local stream-power response in depth per 5 Ma reference step; applied incision is timestep-scaled.',
   flow_velocity_m_s: 'Channel flow velocity in m/s from the river-hydraulics solve.',
   froude_number: 'Froude number of channel flow (dimensionless): <1 subcritical, >1 supercritical. Mostly ~0 off the channel network.',
   manning_roughness_n: "Manning's roughness coefficient n for channel flow (dimensionless).",
@@ -171,6 +185,134 @@ const CURATED = {
   normal_3d_x: 'X component of the cell surface normal (planet frame). Geometry, not a physical field.',
   normal_3d_y: 'Y component of the cell surface normal (planet frame). Geometry, not a physical field.',
   normal_3d_z: 'Z component of the cell surface normal (planet frame). Geometry, not a physical field.',
+
+  // --- Domain catalog (merged from the retired docs.js module) ---------
+  // Terrain
+  island_class: 'Size classification of the containing landmass (continent, island, islet, …).',
+  distance_to_marine_water_km: 'Great-circle distance to the nearest marine (non-lake) water cell.',
+  // Tectonics
+  initial_plate_id: 'Plate assignment at initialization, before any plate reorganization events.',
+  crust_thickness_km: 'Crustal thickness; thick under orogens, thin under ridges.',
+  boundary_type: 'Dominant plate-boundary regime affecting the cell (convergent, divergent, transform, none).',
+  boundary_convergent: 'Strength of convergent-boundary influence on this cell.',
+  boundary_divergent: 'Strength of divergent-boundary influence on this cell.',
+  boundary_transform: 'Strength of transform-boundary influence on this cell.',
+  cumulative_tectonic_elevation_change_m: 'Net elevation change contributed by tectonics over the whole run. Each step is the full gain-1 isostatic change plus full gain-1 thermal-target change plus only the bounded dynamic-relief term.',
+  initial_isostatic_elevation_m: 'Initial local crustal isostatic-equilibrium elevation contribution. Later changes are applied in full outside the dynamic-relief clamp.',
+  initial_thermal_subsidence_m: 'Initial relative oceanic age–depth subsidence target; zero for non-oceanic-like cells. This is a target component, not absolute basement depth.',
+  thermal_subsidence_target_m: 'Current relative oceanic age–depth equilibrium target. Its full step-to-step change is applied outside the bounded dynamic-relief clamp; the field is not a separately evolved thermal-relief state.',
+  continental_shelf_id: 'Identifier for a coarse marine shelf diagnostic component. At Earth reference resolution a cell is roughly 400 km across, so this does not resolve fractional shelf area or a shelf–slope–rise profile.',
+  tectonic_uplift_rate_m_per_step: 'Current tectonic uplift (positive) or subsidence (negative) rate.',
+  seismic_hazard_index: 'Relative earthquake hazard from boundary proximity and fault slip rates.',
+  volcanic_potential_index: 'Relative likelihood of volcanism (subduction arcs, rifts, hotspots).',
+  // Climate
+  continentality_index: 'How continental (vs maritime) the local climate is; drives seasonal temperature range.',
+  orographic_factor: 'Terrain-forced uplift enhancement of precipitation on windward slopes.',
+  rain_shadow_factor: 'Precipitation suppression on lee slopes downwind of barriers.',
+  top_of_atmosphere_insolation_w_m2: 'Annual-mean solar input before the atmosphere, set by latitude and orbit.',
+  absorbed_shortwave_w_m2: 'Solar energy absorbed at the surface after albedo.',
+  outgoing_longwave_w_m2: 'Thermal radiation emitted back to space.',
+  greenhouse_trapping_w_m2: 'Longwave energy retained by the atmosphere.',
+  net_radiative_balance_w_m2: 'Absorbed minus outgoing radiation; the energy the circulation must transport.',
+  radiative_equilibrium_temperature_c: 'Temperature the cell would reach from local radiation balance alone.',
+  no_greenhouse_equilibrium_temperature_c: 'Radiative equilibrium temperature with the greenhouse effect removed.',
+  energy_balance_residual_c: 'Generated temperature minus the separately parameterized radiative-equilibrium temperature, in degrees Celsius. This is a diagnostic model mismatch, not the residual of a solved energy-closure equation and is not expected to be zero.',
+  atmospheric_cell: 'Which meridional circulation cell (Hadley / Ferrel / Polar) the cell sits in.',
+  cell_monsoon_index: 'Strength of monsoon-like seasonal wind reversal and precipitation contrast.',
+  surface_albedo_index: 'Surface reflectivity driven by ice, desert, vegetation, and water.',
+  // Ocean
+  ocean_current_temperature_c: 'Water temperature carried by the surface current (warm/cold current signature).',
+  ocean_current_regime: 'Classification of the local current (gyre limb, boundary current, drift, …).',
+  ocean_upwelling_index: 'Upwelling strength; high values mark nutrient-rich coasts.',
+  ocean_heat_transport_index: 'Net poleward heat delivery by ocean currents, moderating nearby coasts.',
+  fishery_productivity_index: 'Marine biological productivity from upwelling, shelf area, and currents.',
+  // Hydrology
+  runoff_mm_y: 'Annual runoff generated in the cell (precipitation minus evapotranspiration and infiltration losses).',
+  infiltration_mm_y: 'Annual water infiltrating into the subsurface.',
+  potential_evapotranspiration_mm_y: 'Atmospheric demand for water (energy-limited evaporation).',
+  actual_evapotranspiration_mm_y: 'Realized evapotranspiration (limited by available water).',
+  water_body_type: 'Ocean / lake / land classification of the cell.',
+  lake_basin_id: 'Lake basin the cell belongs to, when inside a lake system.',
+  depression_policy: 'How the depression containing this cell was resolved (preserved, filled, breached, …).',
+  depression_depth_m: 'Depth of the enclosing depression below its spill elevation.',
+  spill_elevation_m: 'Elevation of the depression\'s outlet sill.',
+  bankfull_discharge_m3_s: 'Channel-forming discharge of the river through this cell.',
+  river_channel_width_m: 'Modeled bankfull channel width.',
+  river_channel_depth_m: 'Modeled bankfull channel depth.',
+  bed_shear_stress_pa: 'Shear stress exerted on the channel bed; drives sediment entrainment.',
+  stream_power_index: 'Erosive capacity of the flow (slope × discharge).',
+  river_capture_risk: 'Likelihood that a neighboring basin captures this drainage in future evolution.',
+  river_avulsion_risk: 'Likelihood the channel jumps its banks and reroutes across the floodplain.',
+  // Groundwater
+  groundwater_recharge_mm_y: 'Annual recharge reaching the water table.',
+  groundwater_discharge_mm_y: 'Annual groundwater discharge back to the surface (springs, baseflow).',
+  groundwater_hydraulic_head_m: 'Water-table elevation driving lateral groundwater flow.',
+  groundwater_flow_to_cell_id: 'Downgradient cell receiving this cell\'s lateral groundwater flow.',
+  aquifer_class: 'Aquifer classification from lithology and structure.',
+  aquifer_productivity_index: 'How readily the aquifer yields water.',
+  baseflow_support_index: 'How strongly groundwater sustains dry-season river flow.',
+  karst_potential_index: 'Susceptibility to karstification (carbonate lithology + water).',
+  cave_development_index: 'Modeled cave-system development intensity.',
+  // Cryosphere
+  ice_velocity_m_y: 'Ice surface flow speed.',
+  ice_surface_mass_balance_m_y: 'Accumulation minus ablation at the ice surface; positive feeds the glacier.',
+  glacier_flow_to: 'Downstream cell receiving this cell\'s ice flux.',
+  glacial_erosion_m: 'Total bedrock eroded by ice over the run.',
+  moraine_deposition_m: 'Sediment deposited as moraines at ice margins.',
+  permafrost_class: 'Continuous / discontinuous / sporadic / absent permafrost classification.',
+  active_layer_depth_m: 'Seasonal thaw depth above permafrost.',
+  deglaciation_age_ka: 'Model time since the cell became ice-free.',
+  // Sediment
+  sediment_production_m: 'Sediment generated in the cell (hillslope + channel erosion).',
+  sediment_deposition_m: 'Sediment deposited in the cell.',
+  sediment_export_m: 'Sediment leaving the cell downstream.',
+  sediment_net_budget_m: 'Deposition minus erosion — positive is net aggradation.',
+  fluvial_sediment_marine_deposition_m: 'River sediment delivered to and deposited in marine cells (deltas, shelves).',
+  // Soils & ecology
+  soil_depth_m: 'Developed soil profile depth.',
+  soil_ph: 'Soil acidity/alkalinity.',
+  soil_moisture_index: 'Plant-available soil moisture.',
+  soil_texture_class: 'Dominant soil texture (sand/silt/clay mixes).',
+  biome_confidence_index: 'Model confidence in the biome assignment; low values flag transitional or conflicted cells.',
+  ecotone_index: 'How transitional the cell is between neighboring biomes.',
+  vegetation_biomass_index: 'Standing vegetation biomass.',
+  primary_productivity_index: 'Net primary productivity of the ecosystem.',
+  species_richness_index: 'Relative species diversity.',
+  species_endemism_index: 'Concentration of range-restricted species.',
+  wildfire_spread_risk_index: 'Composite wildfire spread risk from fuel, climate, and wind alignment.',
+  fire_frequency_index: 'Expected wildfire recurrence frequency.',
+  // Resources
+  ore_genesis_potential_index: 'Combined favorability for ore formation from magmatic/hydrothermal/structural controls.',
+  metallogenic_fertility_index: 'Crustal endowment favoring metal deposits.',
+  petroleum_source_rock_index: 'Quality of organic-rich source rocks.',
+  petroleum_accumulation_index: 'Modeled petroleum accumulation after generation, migration, and trapping.',
+  mining_potential_index: 'Overall extractive potential combining ore systems and accessibility.',
+  // Human geography
+  agricultural_potential_index: 'Suitability for agriculture from soils, climate, and terrain.',
+  culture_region_id: 'Cultural region the cell belongs to. An id layer — colors are labels.',
+  language_region_id: 'Language region the cell belongs to.',
+  political_region_id: 'Political region (polity) controlling the cell.',
+  natural_frontier_index: 'Strength of natural barriers (mountains, deserts, straits) at this cell.',
+  route_corridor_index: 'Suitability of the cell for long-distance route corridors.',
+  port_suitability_index: 'Suitability for a port from harbor shelter, access, and hinterland.',
+  harbor_suitability_index: 'Physical harbor quality (shelter, depth, coastline shape).',
+  // Mesh & geometry
+  id: 'The cell\'s own id — a coordinate-free gradient useful for checking mesh ordering.',
+  // Monthly
+  temperature_monthly_c: 'Monthly near-surface temperature; scrub months to watch the seasonal cycle and hemispheric phase flip.',
+  precipitation_monthly_mm: 'Monthly precipitation; scrub to see monsoon bands and storm-track migration.',
+  wind_monthly_east: 'Monthly eastward wind component; seasonal reversals mark monsoon circulations.',
+  wind_monthly_north: 'Monthly northward wind component.',
+  // Stage-history fields (hydrologic water budget)
+  water_balance_mm_y: 'Per-stage water balance closure: precipitation minus evapotranspiration, runoff, and storage terms.',
+  residual_mm_y: 'Unclosed remainder of the stage water budget — should be near 0; hotspots flag conservation bugs.',
+  local_relief_m: 'Relief within the cell\'s neighborhood at that stage.',
+  // Stage-history fields (numeric depression fill)
+  fill_depth_m: 'Depth added by this fill event to remove a numeric depression.',
+  elevation_before_fill_m: 'Surface elevation at the event cell before the fill event.',
+  elevation_after_fill_m: 'Surface elevation at the event cell after the fill event.',
+  breach_excavation_depth_m: 'Depth excavated through the sill when the policy breached instead of filled.',
+  breach_deposition_depth_m: 'Excavated material redeposited downstream of the breach.',
 };
 
 // Documentation for each record-family "source". These describe the whole group
@@ -208,6 +350,8 @@ const ROLE_BADGES = {
 };
 
 function inferUnit(name) {
+  const exact = EXACT_UNITS[name];
+  if (exact) return { unit: exact[0], gloss: exact[1] };
   for (const [suffix, unit, gloss] of UNIT_RULES) {
     if (name.endsWith(suffix)) return { unit, gloss };
   }
@@ -315,8 +459,19 @@ export function describeLayer(layer) {
   };
 }
 
-export function sourceDoc(source) {
-  return SOURCE_DOCS[source] || { title: source, doc: null };
+// One-line tooltip for a layer-list entry.
+export function layerTooltip(layer) {
+  const doc = describeLayer(layer);
+  const firstSentence = (doc.description.match(/^.*?\./) || [doc.description])[0];
+  return doc.unit ? `${layer.id} [${doc.unit}] — ${firstSentence}` : `${layer.id} — ${firstSentence}`;
+}
+
+// Extra text the layer-list filter matches beyond `source name` — the resolved
+// docs, unit, role, and (for categoricals) the class names.
+export function searchTerms(layer) {
+  const doc = describeLayer(layer);
+  return [doc.role, doc.unit, doc.family, doc.description, ...(doc.categories || [])]
+    .filter(Boolean).join(' ');
 }
 
 // Which documentation tier a layer resolves through, most specific first:
@@ -394,7 +549,7 @@ export const UI_GUIDE = [
     items: [
       ['Identifiers', 'Fields ending in <code>_id</code> (and <code>flow_to</code>/<code>spill_to</code>) are labels. The gradient is meaningless — read it as "same colour ≈ same group".'],
       ['Indices vs measurements', 'Fields ending in <code>_index</code> are derived, normally 0–1; fields with unit suffixes (<code>_m</code>, <code>_mm_y</code>, <code>_c</code>…) are physical quantities.'],
-      ['Residuals', 'Fields with <code>residual</code> / <code>mass_balance</code> should be ~0 everywhere; large values flag a budget that does not close.'],
+      ['Residuals', 'Fields with <code>residual</code> in the name should be ~0 everywhere; large values flag a budget that does not close.'],
       ['Ring seams', 'Visible gaps between cells in the flat projections are the documented boundary-ring mismatch, not a rendering bug — inspect <code>mean_neighbor_boundary_segment_mismatch_km</code>.'],
     ],
   },

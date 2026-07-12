@@ -13,6 +13,17 @@ def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
     return max(lower, min(upper, value))
 
 
+def _flow_accumulation_scale(cells: list[dict[str, Any]]) -> float:
+    positive = sorted(
+        max(0.0, float(cell.get("flow_accumulation", 0.0)))
+        for cell in cells
+        if max(0.0, float(cell.get("flow_accumulation", 0.0))) > 0.0
+    )
+    if not positive:
+        return 1.0
+    return max(1.0, positive[int(0.95 * (len(positive) - 1))])
+
+
 def _resource_class(resource: str) -> str:
     if resource in METAL_RESOURCES:
         return "metal"
@@ -39,7 +50,11 @@ def _formation_process(resource: str) -> str:
     return processes.get(resource, "undifferentiated_resource")
 
 
-def _reserve_potential(resource: str, cell: dict[str, Any]) -> float:
+def _reserve_potential(
+    resource: str,
+    cell: dict[str, Any],
+    flow_accumulation_scale: float,
+) -> float:
     convergent = _clamp(float(cell.get("boundary_convergent", 0.0)))
     divergent = _clamp(float(cell.get("boundary_divergent", 0.0)))
     sediment = _clamp(float(cell.get("sediment_thickness_m", 0.0)) / 3.0)
@@ -47,7 +62,10 @@ def _reserve_potential(resource: str, cell: dict[str, Any]) -> float:
     fertility = _clamp(float(cell.get("fertility", 0.0)))
     salinity = _clamp(float(cell.get("soil_salinity_index", 0.0)))
     runoff = _clamp(float(cell.get("runoff_mm_y", 0.0)) / 900.0)
-    flow = _clamp(float(cell.get("flow_accumulation", 0.0)) / 40.0)
+    flow = _clamp(
+        float(cell.get("flow_accumulation", 0.0))
+        / max(1.0, flow_accumulation_scale)
+    )
     resource_weights = {
         "volcanic_arc_metals": 0.34 + convergent * 0.42 + (0.18 if cell.get("landform") == "volcanic_arc" else 0.0),
         "craton_iron_gold": 0.28 + crust_age * 0.46 + (0.20 if cell.get("crust_type") == "craton" else 0.0),
@@ -77,7 +95,12 @@ def _extraction_hazard(cell: dict[str, Any]) -> float:
     return _clamp(tectonic + relief * 0.20 + ice * 0.20 + aridity * 0.10 + salinity * 0.08)
 
 
-def _confidence(resource: str, cell: dict[str, Any], reserve: float) -> float:
+def _confidence(
+    resource: str,
+    cell: dict[str, Any],
+    reserve: float,
+    flow_accumulation_scale: float,
+) -> float:
     evidence = 0.18
     if resource == "volcanic_arc_metals":
         evidence += _clamp(float(cell.get("boundary_convergent", 0.0))) * 0.36
@@ -93,7 +116,10 @@ def _confidence(resource: str, cell: dict[str, Any], reserve: float) -> float:
         evidence += 0.22 if cell.get("landform") == "salt_flat" else 0.0
     elif resource == "placer_metals":
         evidence += 0.22 if bool(cell.get("is_river", False)) else 0.0
-        evidence += _clamp(float(cell.get("flow_accumulation", 0.0)) / 40.0) * 0.26
+        evidence += _clamp(
+            float(cell.get("flow_accumulation", 0.0))
+            / max(1.0, flow_accumulation_scale)
+        ) * 0.26
     elif resource == "geothermal":
         evidence += _clamp(max(float(cell.get("boundary_divergent", 0.0)), float(cell.get("boundary_convergent", 0.0)))) * 0.34
         evidence += 0.18 if cell.get("landform") in {"volcanic_arc", "rift_valley"} else 0.0
@@ -131,15 +157,18 @@ def enrich_world_with_resource_deposits(world: dict[str, Any]) -> dict[str, Any]
     confidence_sum = 0.0
     total_area = 0.0
     high_viability = 0
+    flow_accumulation_scale = _flow_accumulation_scale(cells)
 
     for cell in cells:
         resource = str(cell.get("resource", "none"))
         if resource == "none":
             continue
-        reserve = _reserve_potential(resource, cell)
+        reserve = _reserve_potential(resource, cell, flow_accumulation_scale)
         accessibility = _accessibility(cell)
         hazard = _extraction_hazard(cell)
-        confidence = _confidence(resource, cell, reserve)
+        confidence = _confidence(
+            resource, cell, reserve, flow_accumulation_scale
+        )
         renewability = 0.78 if resource in AGRICULTURAL_RESOURCES else (0.32 if resource == "geothermal" else 0.02)
         viability = _clamp(reserve * 0.46 + accessibility * 0.30 + confidence * 0.20 - hazard * 0.18 + renewability * 0.10)
         deposit_class = _resource_class(resource)
@@ -177,6 +206,14 @@ def enrich_world_with_resource_deposits(world: dict[str, Any]) -> dict[str, Any]
         )
 
     world["resource_deposits"] = deposits
+    world["resource_deposit_model"] = {
+        "model_type": "causal_geologic_resource_deposit_diagnostics_v2",
+        "flow_accumulation_normalization_model": "positive_cell_p95_v1",
+        "flow_accumulation_scale": round(flow_accumulation_scale, 6),
+        "flow_accumulation_units": "runoff_mm_y_times_upstream_area_km2",
+        "physical_time_resolved": False,
+        "model_limitation": "diagnostic formation evidence without geochemical transport or reserve-volume simulation",
+    }
     summary = world.setdefault("summary", {})
     divisor = len(deposits) if deposits else 1
     summary["resource_deposit_count"] = len(deposits)

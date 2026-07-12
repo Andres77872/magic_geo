@@ -34,37 +34,32 @@ with zero exporter changes. The findings below are ordered by severity.
 
 ## 2. Findings
 
-### F1 — Stage/month scrub race can display stale data (confirmed, bug)
+### F1 — Stage/month scrub race can display stale data (confirmed, bug — **fixed**)
 
-[app.js:574](../src/magic_geo/debug_ui/app.js:574) guards a resolved fetch with
-`if (state.activeLayer !== layer) return;` — object identity only. Scrubbing the same
-layer issues concurrent fetches for different stages; the guard passes for all of them, so
-whichever response resolves **last** wins, not the one matching the UI state.
+**Fixed:** `activateLayer` now tags every request with a monotonic token
+(`state.fetchSeq`, [app.js:707](../src/magic_geo/debug_ui/app.js:707)) and drops any
+response that is no longer the newest request, so out-of-order responses can never
+overwrite the display.
 
-Failure scenario: drag the stage slider from 5 to 6 quickly; if the stage-5 response
-arrives after the stage-6 response, the globe silently shows stage-5 values while the
-slider, stage label, and inspector marker all say 6. The 1,600-stage
-`numeric_depression_fill_history` makes this easy to hit.
+Original issue: the resolved fetch was guarded only with
+`if (state.activeLayer !== layer)` — object identity. Scrubbing the same layer issued
+concurrent fetches for different stages; the guard passed for all of them, so whichever
+response resolved **last** won, not the one matching the UI state (easy to hit on the
+1,600-stage `numeric_depression_fill_history`).
 
-Fix: also compare `state.stage`/`state.month` captured at request time (or use a
-monotonically increasing request token) before uploading.
+### F2 — High-cardinality string fields are dropped silently (confirmed, contract violation — **fixed**)
 
-### F2 — High-cardinality string fields are dropped silently (confirmed, contract violation)
+**Fixed:** columns that are written to Parquet but yield no layer entry are now recorded
+under `skipped_layers` manifest keys with a reason — in `cells` (> 64 distinct values or
+no finite values), in each `stage_histories` entry, and in `monthly`. The columns still
+appear per cell via `/api/cell`.
 
-The module docstring promises "Anything that is skipped is recorded in the manifest rather
-than dropped silently" ([debug_export.py:12](../src/magic_geo/debug_export.py:12)). But when
-`_categories` exceeds the 64-value limit ([debug_export.py:103](../src/magic_geo/debug_export.py:103))
-or a numeric column has no finite values, `_layer_entry` returns `None`
-([debug_export.py:114](../src/magic_geo/debug_export.py:114)) and the field simply gets no
-layer — nothing is written to `skipped_fields`.
-
-Confirmed in the earthlike cache: `healpix_like_pixel_code` and `s2_like_token` exist as
-columns in `cells.parquet` but have no layer entry and no skip record. Users of the UI have
-no way to know these fields exist.
-
-Fix: record `{field: "cardinality > 64"}`-style entries (e.g. a `layers_skipped` manifest
-key), and consider serving them anyway through the cell inspector (they already appear
-there via `/api/cell`, which is the saving grace).
+Original issue: the module docstring promises "Anything that is skipped is recorded in
+the manifest rather than dropped silently", but when `_categories` exceeded the 64-value
+limit or a numeric column had no finite values, `_layer_entry` returned `None` and the
+field simply got no layer and no skip record. Confirmed in the earthlike cache:
+`healpix_like_pixel_code` and `s2_like_token` existed as columns in `cells.parquet` with
+no layer entry and no skip record.
 
 ### F3 — Per-stage `lithology` is numeric codes; per-cell `lithology` is strings (confirmed, data-model inconsistency)
 
@@ -81,18 +76,17 @@ ledger fields (`is_marine` arrives as 0/1 floats — acceptable, but undocumente
 Fix: either serialize names in the ledger, or emit the engine's code table into the
 manifest so the UI can label ledger codes.
 
-### F4 — Stage prefetch caches under the wrong key when month ≠ 0 (confirmed, bug)
+### F4 — Stage prefetch caches under the wrong key when month ≠ 0 (confirmed, bug — **fixed**)
 
-`prefetchNeighborStages` fetches with `month=0`
-([app.js:262](../src/magic_geo/debug_ui/app.js:262)), so entries are cached under
-`id|stage|0`. But `activateLayer` fetches with `state.month`
-([app.js:573](../src/magic_geo/debug_ui/app.js:573)), producing keys like `id|stage|5` if
-the user previously viewed a monthly layer with month 5 (`state.month` persists across
-layer switches). Every prefetched buffer then misses the cache and each scrub step
-re-downloads — the prefetch machinery is fully defeated in that state, with double traffic.
+**Fixed:** `layerCacheKey` now normalizes per layer kind
+([app.js:232](../src/magic_geo/debug_ui/app.js:232)) — month is zeroed for
+`numeric_stage` keys and stage for `numeric_monthly` keys — and
+`prefetchNeighborStages` fetches with the live `state.month`
+([app.js:264](../src/magic_geo/debug_ui/app.js:264)), so prefetched buffers always hit.
 
-Fix: normalize the cache key (month is irrelevant for `numeric_stage`, stage is irrelevant
-for `numeric_monthly` — key on the parameters the layer kind actually uses).
+Original issue: prefetch cached under `id|stage|0` while `activateLayer` fetched with the
+persisted `state.month`, producing keys like `id|stage|5` after viewing a monthly layer —
+every prefetched buffer missed the cache and each scrub step re-downloaded.
 
 ### F5 — Latent exporter crashes on plausible payload shapes (plausible)
 
@@ -109,27 +103,23 @@ for `numeric_monthly` — key on the parameters the layer kind actually uses).
 
 Fix: validate per-row and route offenders into `skipped_fields` instead of crashing.
 
-### F6 — Legend implies min/max but shows p2/p98 without any clip indication (confirmed, UX-correctness)
+### F6 — Legend implies min/max but shows p2/p98 without any clip indication (confirmed, UX-correctness — **mostly fixed**)
 
-`layerRange` normalizes to p2–p98 ([app.js:553](../src/magic_geo/debug_ui/app.js:553)) —
-a good default — but the legend end labels present those numbers with no "≤ / ≥" marker
-([app.js:548-550](../src/magic_geo/debug_ui/app.js:548)). For heavy-tailed layers this is
-seriously misleading: `cells/flow_accumulation` has p98 ≈ 5.2e7 but max ≈ **4.76e9** — the
-top two orders of magnitude all render as the same yellow, and the legend claims the scale
-tops out at 5.2e7. 62 of 446 layers additionally have p2 == p98 (mass-zero fields like
-`cells/froude_number`), where the silent fallback to min/max changes scale semantics
-between layers with no visual cue. There is also no way to switch to full range, log
-scale, or a diverging ramp for signed fields (`sediment_net_budget_m`,
-`*_residual_*`).
+**Fixed (clip indication):** the legend now prefixes clipped ends with `≤`/`≥` and shows
+the true min/max in the label tooltip ([app.js:561-568](../src/magic_geo/debug_ui/app.js:561));
+the docs card additionally shows min/max next to the p2–p98 colour-scale range.
 
-Fix: annotate legend labels (`≥`, `≤`), surface the true min/max, and consider a
-range-mode toggle.
+Still open: 62 of 446 layers have p2 == p98 (mass-zero fields like
+`cells/froude_number`), where the silent fallback to min/max
+([app.js:571](../src/magic_geo/debug_ui/app.js:571)) changes scale semantics between
+layers with no visual cue; and there is no way to switch to full range, log scale, or a
+diverging ramp for signed fields (`sediment_net_budget_m`, `*_residual_*`).
 
 ### F7 — Docs drift: `/api/stage-summary` is not used by the frontend (confirmed)
 
 [debugger.md](debugger.md) describes "per-stage summary tables for sparklines", but the
 inspector sparklines are built from `/api/cell` ledger slices
-([app.js:741-751](../src/magic_geo/debug_ui/app.js:741)); nothing in `app.js` calls
+([app.js:879-886](../src/magic_geo/debug_ui/app.js:879)); nothing in `app.js` calls
 `/api/stage-summary`. The endpoint works (verified by hand) but is dead from the UI's
 perspective — either wire per-stage *world aggregate* sparklines into the stage bar (the
 data is exactly right for it) or mark the endpoint as external-consumer API.
@@ -171,8 +161,8 @@ debugs it as a mesh defect. The globe projection is unaffected.
 ### F11 — Layer list: search does not open collapsed groups (confirmed, minor UX)
 
 Group collapse works by toggling the group body's `display`
-([app.js:659-661](../src/magic_geo/debug_ui/app.js:659)), while search toggles per-item
-`display` ([app.js:680-685](../src/magic_geo/debug_ui/app.js:680)). Matches inside a
+([app.js:795-797](../src/magic_geo/debug_ui/app.js:795)), while search toggles per-item
+`display` ([app.js:818-821](../src/magic_geo/debug_ui/app.js:818)). Matches inside a
 collapsed group stay invisible, and titles of fully-filtered-out groups remain visible.
 With 446 layers, search is the primary navigation — this deserves a fix.
 
@@ -204,17 +194,17 @@ With 446 layers, search is the primary navigation — this deserves a fix.
 
 ## 3. Recommended fix order
 
-| Priority | Finding | Effort |
-|---|---|---|
-| 1 | F1 stage-scrub race | small (request token) |
-| 2 | F4 prefetch cache key | one line |
-| 3 | F2 silent layer drops | small (manifest bookkeeping) |
-| 4 | F6 legend clip indication | small (UI) |
-| 5 | F11 search vs collapsed groups | small (UI) |
-| 6 | F3 ledger code tables | needs engine/serializer touch |
-| 7 | F5 exporter hardening | medium |
-| 8 | F8 id-layer color mode | medium |
-| 9 | F7, F9, F10, F12 | as convenient |
+| Priority | Finding | Effort | Status |
+|---|---|---|---|
+| 1 | F1 stage-scrub race | small (request token) | **fixed** |
+| 2 | F4 prefetch cache key | one line | **fixed** |
+| 3 | F2 silent layer drops | small (manifest bookkeeping) | **fixed** |
+| 4 | F6 legend clip indication | small (UI) | **fixed** (range-mode toggle still open) |
+| 5 | F11 search vs collapsed groups | small (UI) | open |
+| 6 | F3 ledger code tables | needs engine/serializer touch | open |
+| 7 | F5 exporter hardening | medium | open |
+| 8 | F8 id-layer color mode | medium | open |
+| 9 | F7, F9, F10, F12 | as convenient | open |
 
 ## 4. Reviewed inventory snapshot (earthlike run)
 

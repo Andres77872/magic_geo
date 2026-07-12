@@ -4,9 +4,9 @@ Deep reference for the GUI debugger frontend (`src/magic_geo/debug_ui/`). For th
 pipeline that produces the data it renders, see [debugger.md](debugger.md); for a
 review of that pipeline, see [layers_pipeline_review.md](layers_pipeline_review.md).
 
-In-app: press `?` (or `h`, or the `?` button) for the built-in help overlay, and `i`
-(or the legend's ⓘ button) for a doc card describing the active layer. Both are
-driven by [docs.js](../src/magic_geo/debug_ui/docs.js) — see
+In-app: press `?` (or the `?` button) for the built-in help overlay, and `d`
+(or the legend's ⓘ button) for the docs card describing the active layer. Both are
+driven by [layer_docs.js](../src/magic_geo/debug_ui/layer_docs.js) — see
 [Extending the docs helper](#extending-the-docs-helper).
 
 ## Quickstart
@@ -23,12 +23,12 @@ magic-geo serve -d runs/earthlike/debug                       # → http://127.0
 ```text
 ┌────────────┬──────────────────────────────────────┬────────────┐
 │ sidebar    │ topbar: projections · overlays · ?   │ inspector  │
-│  world     │         legend (+ ⓘ doc card)        │  (opens on │
+│  world     │         legend (+ ⓘ)                 │  (opens on │
 │  meta      │                                      │   click)   │
 │  search    │            globe / map               │  fields    │
 │  layer     │                                      │  ledgers   │
 │  list      │      stage/month bar (when the       │  monthly   │
-│            │      layer has a time axis)          │  adjacency │
+│  docs card │      layer has a time axis)          │  adjacency │
 │            │ status: layer · cell · value         │            │
 └────────────┴──────────────────────────────────────┴────────────┘
 ```
@@ -38,7 +38,7 @@ magic-geo serve -d runs/earthlike/debug                       # → http://127.0
 A **layer** is one per-cell column of the exported world, cataloged in
 `manifest.json` and served as a Float32 buffer from `/api/layer/{id}`. The
 sidebar groups layers by record family (source). On the default earthlike run
-there are 446 layers over 32 768 cells, in four kinds:
+there are 446 layers over 4 096 cells, in four kinds:
 
 | kind | badge | time axis | example |
 |---|---|---|---|
@@ -56,7 +56,7 @@ LRU-cached (48 entries) and stage scrubbing prefetches ±2 stages.
 - **Numeric** legends span the **p2–p98** percentile range of the data, not
   min–max. The extreme 2 % on each side render saturated. This keeps skewed
   layers (e.g. `flow_accumulation`) readable; hover a cell for the exact value.
-  The doc card (`i`) shows both min/max and the p2/p98 legend bounds.
+  The docs card (`d`) shows both min/max and the p2/p98 legend bounds.
 - **Monthly and stage** legend ranges span *all* months/stages at once, so a
   color means the same thing at every slider position — change over time reads
   as change in color.
@@ -71,7 +71,7 @@ LRU-cached (48 entries) and stage scrubbing prefetches ±2 stages.
 
 Field names carry their units as suffixes; the docs helper decodes these
 automatically (`_m`, `_km`, `_km2`, `_km3_y`, `_mm_y`, `_m3_s`, `_m_s`, `_m_y`,
-`_w_m2`, `_pa`/`_kpa`/`_hpa`, `_c`, `_ka`/`_ma`/`_y`, `_deg`, `_ph`,
+`_w_m2`, `_pa`/`_kpa`/`_hpa`, `_c`, `_ka`/`_ma`/`_years`, `_deg`, `_ph`,
 `_fraction`, `_index`, `_factor`, `_count`, `_id`). Prefixes identify the
 subsystem (`groundwater_*`, `glacial_*`, `wildfire_*`, `petroleum_*`, …); the
 doc card names the subsystem and explains it for every layer, including fields
@@ -101,9 +101,9 @@ added after this guide was written.
 | `g` | Graticule overlay |
 | `,` / `.` | Step stage or month backward / forward |
 | `/` | Focus the layer search |
-| `i` | Toggle the layer doc card |
-| `?` / `h` | Toggle the help overlay |
-| `Esc` | Close help → doc card → inspector (in that order) |
+| `d` | Toggle the layer docs card |
+| `?` | Toggle the help overlay |
+| `Esc` | Close help → inspector (in that order) |
 
 ### Mouse
 
@@ -171,21 +171,29 @@ debugger.
 
 ## Extending the docs helper
 
-[docs.js](../src/magic_geo/debug_ui/docs.js) resolves documentation in priority
-order:
+[layer_docs.js](../src/magic_geo/debug_ui/layer_docs.js) resolves documentation
+for each layer in priority order (`describeLayer`):
 
-1. `LAYER_DOCS` — curated one-liners keyed by exact field name. Add new entries
+1. `CURATED` — curated one-liners keyed by bare field name. Add new entries
    here when a field needs more than convention can say.
-2. `TOPIC_RULES` — ordered regex → subsystem blurb. New fields in an existing
-   subsystem are documented automatically by prefix; add a rule when a new
-   subsystem appears. Order matters: specific families before broad ones.
-3. `UNIT_RULES` — ordered regex → unit from the suffix conventions above.
+2. `PATTERN_RULES` — ordered name-pattern predicates that assign a role
+   (identifier, index, diagnostic, …) and a convention blurb. Order matters:
+   specific rules before broad ones.
+3. `UNIT_RULES` — ordered suffix → unit from the conventions above (plus
+   `EXACT_UNITS` for names that carry no suffix).
+4. A generated fallback: kind + inferred unit + value range from manifest stats.
 
-`SOURCE_DOCS` describes record families (shown at the bottom of the doc card),
-`KIND_DOCS` describes layer kinds (used in the help overlay), and `helpHtml()`
-builds the overlay from the live manifest, so layer/stage counts are always
-current. Everything degrades gracefully: an unknown field still gets a unit, a
-topic, or at minimum its kind explained.
+`SOURCE_DOCS` describes record families (shown at the bottom of the docs card),
+`UI_GUIDE` and `KEY_REFERENCE` feed the help overlay, and `docsCoverage()`
+reports in the overlay how many layers resolve through each tier — so it is
+obvious when new engine output has no bespoke docs yet. The layer-list tooltips
+and doc-text search (`layerTooltip`/`searchTerms`) are built on the same
+resolution. Everything degrades gracefully: an unknown field still gets a unit,
+a role, or at minimum its kind explained.
+
+After editing `CURATED` or the rules, regenerate the markdown reference with
+`node scripts/gen_layers_reference.mjs` (see
+[layers_reference.md](layers_reference.md)).
 
 ## Troubleshooting
 
@@ -198,8 +206,8 @@ topic, or at minimum its kind explained.
 - **Colors look flat** — heavy-tailed layer; the p2–p98 clamp is compressing
   the tail. Hover cells to read actual values.
 - **Stage scrub feels laggy on 1600-stage histories** — each stage is a
-  DuckDB-filtered fetch; scrubbed-past stages can resolve out of order and
-  briefly show a stale stage (see the review's findings). The label always
-  reflects the requested stage; pause for a moment and the display catches up.
+  DuckDB-filtered fetch. Out-of-order responses are dropped (only the newest
+  request may update the display), so fast scrubbing simply waits for the
+  latest fetch; ±2 neighbours prefetch to keep stepping instant.
 - **Seams between polygons** — documented ring mismatch (see above), useful as
   a mesh-quality signal.

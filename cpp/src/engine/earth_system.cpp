@@ -215,7 +215,8 @@ EarthSystemFeedbackStep summarize_feedback_step(
         step.mean_temperature_c += cell.temperature_c;
         step.mean_precipitation_mm_y += cell.precipitation_mm_y;
         step.mean_runoff_mm_y += cell.runoff_mm_y;
-        step.mean_erosion_rate_m_per_step += cell.erosion_rate;
+        step.mean_stream_power_response_m_per_reference_step +=
+            cell.erosion_rate;
         step.mean_sediment_thickness_m += cell.sediment_thickness_m;
         step.mean_cumulative_sediment_production_m += cell.sediment_production_m;
         step.mean_cumulative_sediment_deposition_m += cell.sediment_deposition_m;
@@ -270,7 +271,7 @@ EarthSystemFeedbackStep summarize_feedback_step(
     step.mean_temperature_c /= divisor;
     step.mean_precipitation_mm_y /= divisor;
     step.mean_runoff_mm_y /= divisor;
-    step.mean_erosion_rate_m_per_step /= divisor;
+    step.mean_stream_power_response_m_per_reference_step /= divisor;
     step.mean_sediment_thickness_m /= divisor;
     step.mean_cumulative_sediment_production_m /= divisor;
     step.mean_cumulative_sediment_deposition_m /= divisor;
@@ -306,8 +307,15 @@ HillslopeSedimentTransportStage transport_hillslope_sediment(
     stage.id = id;
     stage.feedback_stage_id = feedback_stage_id;
     stage.erosion_iteration = erosion_iteration;
+    stage.cell_count = n;
     production_depth_m.assign(static_cast<std::size_t>(n), 0.0);
     deposition_depth_m.assign(static_cast<std::size_t>(n), 0.0);
+    stage.alluvium_entrainment_depth_m_by_cell.assign(
+        static_cast<std::size_t>(n), 0.0
+    );
+    stage.bedrock_erosion_depth_m_by_cell.assign(
+        static_cast<std::size_t>(n), 0.0
+    );
     stage.input_cells.reserve(static_cast<std::size_t>(n));
     for (int cell_id = 0; cell_id < n; ++cell_id) {
         const Cell& cell = cells[static_cast<std::size_t>(cell_id)];
@@ -356,7 +364,8 @@ HillslopeSedimentTransportStage transport_hillslope_sediment(
             const double resistance = lithology_resistance(source.lithology);
             const double effective_diffusivity = std::min(
                 HILLSLOPE_MAX_EFFECTIVE_DIFFUSIVITY,
-                std::max(0.0, params.hillslope_diffusion) /
+                std::max(0.0, params.hillslope_diffusion) *
+                    maturation_timestep_scale(params) /
                     std::max(1.0e-12, resistance)
             );
             if (effective_diffusivity <= 0.0) {
@@ -439,6 +448,7 @@ HillslopeSedimentTransportStage transport_hillslope_sediment(
     stage.mass_balance_residual_km3 = std::abs(
         stage.production_volume_km3 - stage.deposition_volume_km3
     );
+    stage.source_production_depth_m_by_cell = production_depth_m;
     return stage;
 }
 
@@ -465,9 +475,18 @@ FluvialSedimentRoutingStage route_fluvial_sediment(
     stage.id = id;
     stage.feedback_stage_id = feedback_stage_id;
     stage.erosion_iteration = erosion_iteration;
+    stage.cell_count = n;
     stage.accumulation_scale = std::max(1.0, accumulation_scale);
+    stage.source_production_depth_m_by_cell = local_source_depth_m;
     deposition_depth_m.assign(static_cast<std::size_t>(n), 0.0);
     terminal_export_depth_m.assign(static_cast<std::size_t>(n), 0.0);
+    stage.alluvium_entrainment_depth_m_by_cell.assign(
+        static_cast<std::size_t>(n), 0.0
+    );
+    stage.bedrock_erosion_depth_m_by_cell.assign(
+        static_cast<std::size_t>(n), 0.0
+    );
+    stage.input_cells.reserve(static_cast<std::size_t>(n));
 
     std::vector<int> upstream_count(static_cast<std::size_t>(n), 0);
     for (int i = 0; i < n; ++i) {
@@ -481,6 +500,24 @@ FluvialSedimentRoutingStage route_fluvial_sediment(
             }
             upstream_count[static_cast<std::size_t>(cell.flow_to)]++;
         }
+        FluvialSedimentRoutingInputCell input_cell;
+        input_cell.cell_id = i;
+        input_cell.flow_to_cell_id = cell.flow_to;
+        input_cell.depression_component_id = cell.depression_component_id;
+        input_cell.depression_sink_cell_id = cell.depression_sink_cell_id;
+        input_cell.water_body = cell.water_body;
+        input_cell.is_water = cell.is_water;
+        input_cell.is_river = cell.is_river;
+        input_cell.is_lake = cell.is_lake;
+        input_cell.lake_overflows = cell.lake_overflows;
+        input_cell.cell_area_km2 = cell.area_km2;
+        input_cell.flow_accumulation = cell.flow_accumulation;
+        input_cell.runoff_mm_y = cell.runoff_mm_y;
+        input_cell.hydrologic_flow_slope = cell.hydrologic_flow_slope;
+        input_cell.routing_base_elevation_m =
+            routing_base_elevation_m[static_cast<std::size_t>(i)];
+        input_cell.spill_elevation_m = cell.spill_elevation_m;
+        stage.input_cells.push_back(input_cell);
     }
     std::priority_queue<int, std::vector<int>, std::greater<int>> ready;
     for (int i = 0; i < n; ++i) {
@@ -887,6 +924,8 @@ void erode(
     std::vector<Cell>& cells,
     std::vector<EarthSystemFeedbackStep>& feedback_history,
     std::vector<PlateMotionStep>& plate_motion_history,
+    CrustMaterialShadowState& crust_material_shadow,
+    CrustDryRockAccountingState& crust_dry_rock_accounting,
     std::vector<NumericDepressionFillEvent>& numeric_depression_fill_history,
     std::vector<HydrologicWaterBudgetStage>& hydrologic_water_budget_history,
     std::vector<FluvialSedimentRoutingStage>& sediment_routing_history,
@@ -900,7 +939,9 @@ void erode(
             iter + 1,
             plates,
             cells,
-            plate_motion_history
+            plate_motion_history,
+            crust_material_shadow,
+            crust_dry_rock_accounting
         );
         std::vector<double> accum;
         for (const Cell& cell : cells) {
@@ -949,9 +990,16 @@ void erode(
             const double erodability = 1.0 / lithology_resistance(cell.lithology);
             const double stream = params.stream_power_coefficient * erodability *
                 std::pow(acc_norm, params.drainage_exponent) * std::pow(std::max(0.0, slope * 900.0), params.slope_exponent);
+            const double erosion_depth_m =
+                stream * maturation_timestep_scale(params);
+            // Preserve the exported erosion-rate signal as the 5 Ma reference
+            // response used by downstream diagnostics. Only the applied
+            // incision/source depth is integrated over the configured nominal
+            // transition. Otherwise merely refining dt changes soils,
+            // ecosystems, land use, and resource diagnostics by construction.
             cell.erosion_rate = stream;
-            sediment_source[static_cast<std::size_t>(i)] = stream;
-            next[i] -= stream;
+            sediment_source[static_cast<std::size_t>(i)] = erosion_depth_m;
+            next[i] -= erosion_depth_m;
         }
         std::vector<double> sediment_delta;
         std::vector<double> sediment_export;
@@ -983,8 +1031,6 @@ void erode(
                 available_alluvium_depth_m,
                 fluvial_source_depth_m
             );
-            available_alluvium_depth_m -=
-                fluvial_alluvium_entrainment_depth_m;
             const double hillslope_bedrock_erosion_depth_m = std::max(
                 0.0,
                 hillslope_source_depth_m -
@@ -1000,10 +1046,22 @@ void erode(
                 hillslope_alluvium_entrainment_depth_m * area_km2 / 1000.0;
             hillslope_transport.bedrock_erosion_volume_km3 +=
                 hillslope_bedrock_erosion_depth_m * area_km2 / 1000.0;
+            hillslope_transport.alluvium_entrainment_depth_m_by_cell[
+                static_cast<std::size_t>(i)
+            ] = hillslope_alluvium_entrainment_depth_m;
+            hillslope_transport.bedrock_erosion_depth_m_by_cell[
+                static_cast<std::size_t>(i)
+            ] = hillslope_bedrock_erosion_depth_m;
             sediment_routing.alluvium_entrainment_volume_km3 +=
                 fluvial_alluvium_entrainment_depth_m * area_km2 / 1000.0;
             sediment_routing.bedrock_erosion_volume_km3 +=
                 fluvial_bedrock_erosion_depth_m * area_km2 / 1000.0;
+            sediment_routing.alluvium_entrainment_depth_m_by_cell[
+                static_cast<std::size_t>(i)
+            ] = fluvial_alluvium_entrainment_depth_m;
+            sediment_routing.bedrock_erosion_depth_m_by_cell[
+                static_cast<std::size_t>(i)
+            ] = fluvial_bedrock_erosion_depth_m;
             cells[i].sediment_alluvium_entrainment_m +=
                 hillslope_alluvium_entrainment_depth_m +
                 fluvial_alluvium_entrainment_depth_m;
@@ -1016,15 +1074,56 @@ void erode(
                 sediment_delta[static_cast<std::size_t>(i)] +
                 hillslope_deposition_depth_m[static_cast<std::size_t>(i)];
             cells[i].sediment_export_m += sediment_export[static_cast<std::size_t>(i)];
-            cells[i].sediment_thickness_m = std::max(
-                0.0,
-                available_alluvium_depth_m +
-                    sediment_delta[static_cast<std::size_t>(i)] +
-                    hillslope_deposition_depth_m[static_cast<std::size_t>(i)]
+            const double compatibility_surface_elevation_m =
+                next[i] + sediment_delta[static_cast<std::size_t>(i)];
+            apply_sediment_interface_material_change(
+                cells[i],
+                tectonic_elevation_change[static_cast<std::size_t>(i)],
+                hillslope_bedrock_erosion_depth_m +
+                    fluvial_bedrock_erosion_depth_m,
+                hillslope_alluvium_entrainment_depth_m +
+                    fluvial_alluvium_entrainment_depth_m,
+                sediment_delta[static_cast<std::size_t>(i)] +
+                    hillslope_deposition_depth_m[static_cast<std::size_t>(i)],
+                "hillslope/fluvial sediment interface"
             );
-            cells[i].elevation_m = next[i] + sediment_delta[i];
+            if (
+                std::abs(
+                    cells[i].elevation_m -
+                    compatibility_surface_elevation_m
+                ) > std::max(
+                    1.0e-9,
+                    std::abs(compatibility_surface_elevation_m) * 1.0e-12
+                )
+            ) {
+                throw std::runtime_error(
+                    "hillslope/fluvial sediment-interface update changed the compatibility surface"
+                );
+            }
             cells[i].sediment_net_budget_m = cells[i].sediment_deposition_m - cells[i].sediment_production_m;
         }
+        maximum_sediment_interface_closure_residual_m(
+            cells,
+            "post hillslope/fluvial transport"
+        );
+        validate_sediment_source_partition(
+            cells,
+            hillslope_transport.source_production_depth_m_by_cell,
+            hillslope_transport.alluvium_entrainment_depth_m_by_cell,
+            hillslope_transport.bedrock_erosion_depth_m_by_cell,
+            hillslope_transport.alluvium_entrainment_volume_km3,
+            hillslope_transport.bedrock_erosion_volume_km3,
+            "hillslope"
+        );
+        validate_sediment_source_partition(
+            cells,
+            sediment_routing.source_production_depth_m_by_cell,
+            sediment_routing.alluvium_entrainment_depth_m_by_cell,
+            sediment_routing.bedrock_erosion_depth_m_by_cell,
+            sediment_routing.alluvium_entrainment_volume_km3,
+            sediment_routing.bedrock_erosion_volume_km3,
+            "fluvial"
+        );
         sediment_routing_history.push_back(std::move(sediment_routing));
         hillslope_transport_history.push_back(std::move(hillslope_transport));
         const HydrologyStabilizationResult stabilization = stabilize_numeric_depressions(

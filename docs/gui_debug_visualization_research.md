@@ -1,5 +1,12 @@
 # GUI Visualization & Deep-Debugging Research
 
+> **Historical snapshot — superseded.** This is the research document that led to the debugger;
+> the recommendation has since been implemented (see [debugger.md](debugger.md) and
+> [debug_ui_guide.md](debug_ui_guide.md)). Codebase measurements below describe the tree as of the
+> date line and have drifted: `compute.backend` is now marshaled to the engine and includes `cuda`
+> (see [cuda_rtx5090_optimization.md](cuda_rtx5090_optimization.md)), and the CLI has grown past
+> nine commands. Read it for the rationale, not for current facts.
+
 Deep review of the magic-geo codebase plus researched options for adding a GUI mechanism to
 visualize and deep-debug generated worlds, while keeping the CLI as the generation interface.
 
@@ -262,7 +269,7 @@ effectively `-O0`. A Release build is likely several-fold faster for free.
 Single local user, Linux-first, solo developer, Python + C++ codebase. The GUI must provide:
 layer toggling over hundreds of per-cell fields on a **true spherical mesh** (4k → 1M cells),
 per-cell drill-down into ~100-field records and their per-stage ledger slices, stage/time
-scrubbing over `coupled_geodynamic_stage_clock_v11`, provenance/ledger inspection, run-to-run
+scrubbing over `coupled_geodynamic_stage_clock_v12`, provenance/ledger inspection, run-to-run
 diffing, and validation-divergence display. Generation stays in the CLI.
 
 ### 3.2 Prior art — UX patterns worth copying

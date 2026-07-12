@@ -4,10 +4,75 @@ import math
 from collections import Counter
 from typing import Any
 
+from .crust_dry_rock_accounting_validation import (
+    validate_crust_dry_rock_accounting,
+)
+from .crust_material_shadow_validation import validate_crust_material_shadow
+from .crust_overlap_candidate_fate_validation import (
+    validate_crust_overlap_candidate_fate,
+)
+from .crust_transport_validation import validate_crust_overlap_transport
+from .initial_oceanic_crust_age_validation import (
+    validate_initial_oceanic_crust_age,
+)
+from .oceanic_age_depth_validation import validate_oceanic_age_depth
+from .plate_boundary_edge_validation import validate_plate_boundary_edges
+from .sediment_source_partition_validation import (
+    validate_sediment_source_partitions,
+)
+from .sediment_interface_validation import validate_sediment_interfaces
+
 
 SOLAR_CONSTANT_W_M2 = 1361.0
 STEFAN_BOLTZMANN_W_M2_K4 = 5.670374419e-8
 SURFACE_LONGWAVE_EMISSIVITY = 0.96
+MATURATION_REFERENCE_TIMESTEP_MA = 5.0
+NOMINAL_TIME_MODEL = "configured_maturation_timestep_nominal_elapsed_time_v1"
+NOMINAL_TIME_BASIS = (
+    "configured_maturation_timestep_ma_per_erosion_transition_v1"
+)
+NOMINAL_TIME_SOURCE_PARAMETER = "erosion.maturation_timestep_ma"
+ITERATION_PROCESS_ORDER = (
+    "{plate_motion->crust_transport->crust_evolution->"
+    "precommit_tendency_evaluation[tectonic_elevation+hillslope_sediment+"
+    "stream_power_incision;prior_stabilized_surface_hydrology]->"
+    "provisional_terrain_composition->fluvial_sediment_routing["
+    "prior_flow_graph+provisional_accommodation]->"
+    "finite_alluvium_bedrock_inventory_and_terrain_commit->"
+    "(sea_level->climate->"
+    "causal_water_budget->hydrology->numeric_depression_correction)*"
+    "until_stable}*configured_erosion_iterations->cryosphere_state->"
+    "glacial_sediment_transport->"
+    "finite_alluvium_bedrock_inventory_and_terrain_commit->"
+    "(sea_level->climate->causal_water_budget->hydrology->"
+    "numeric_depression_correction)*until_stable->cryosphere_state_recompute"
+)
+EROSION_TRANSITION_COUPLING_SEMANTICS = (
+    "hillslope_and_stream_use_prior_stabilized_surface_and_hydrology_with_"
+    "updated_crust_state;tectonic_hillslope_stream_tendencies_are_combined_"
+    "before_terrain_commit;fluvial_routing_uses_prior_flow_graph_and_"
+    "provisional_terrain_accommodation"
+)
+LEGACY_MEAN_EROSION_RATE_FIELD_SEMANTICS = (
+    "mean_erosion_rate_m_per_step_is_a_reference_step_response_alias_not_"
+    "applied_transition_depth"
+)
+NOMINAL_TIME_RECORD_FIELDS = frozenset(
+    {
+        "nominal_time_model",
+        "nominal_time_unit",
+        "nominal_time_basis",
+        "nominal_time_source_parameter",
+        "nominal_time_role",
+        "nominal_interval_start_ma",
+        "nominal_interval_end_ma",
+        "nominal_interval_duration_ma",
+        "nominal_elapsed_time_ma",
+        "advances_nominal_time",
+        "nominal_time_calibrated",
+        "physical_time_resolved",
+    }
+)
 
 CRUST_NAMES = (
     "oceanic",
@@ -119,6 +184,588 @@ def _record_violation(violations: list[str], message: str) -> None:
         violations.append(message)
 
 
+def _validate_nominal_time_record(
+    record: dict[str, Any],
+    *,
+    label: str,
+    expected_start_ma: float,
+    expected_end_ma: float,
+    expected_role: str,
+    violations: list[str],
+) -> None:
+    missing = NOMINAL_TIME_RECORD_FIELDS - set(record)
+    if missing:
+        _record_violation(
+            violations,
+            f"{label} is missing nominal-time fields: {', '.join(sorted(missing))}",
+        )
+
+    if (
+        record.get("nominal_time_model") != NOMINAL_TIME_MODEL
+        or record.get("nominal_time_unit") != "Ma"
+        or record.get("nominal_time_basis") != NOMINAL_TIME_BASIS
+        or record.get("nominal_time_source_parameter")
+        != NOMINAL_TIME_SOURCE_PARAMETER
+        or record.get("nominal_time_role") != expected_role
+    ):
+        _record_violation(violations, f"{label} nominal-time metadata is invalid")
+
+    expected_duration_ma = expected_end_ma - expected_start_ma
+    expected_values = {
+        "nominal_interval_start_ma": expected_start_ma,
+        "nominal_interval_end_ma": expected_end_ma,
+        "nominal_interval_duration_ma": expected_duration_ma,
+        "nominal_elapsed_time_ma": expected_end_ma,
+    }
+    for field, expected in expected_values.items():
+        if not _close(record.get(field), expected, absolute=1.0e-10, relative=1.0e-12):
+            _record_violation(
+                violations,
+                f"{label} {field} does not match its configured nominal interval",
+            )
+
+    advances = expected_duration_ma > 0.0
+    if record.get("advances_nominal_time") is not advances:
+        _record_violation(
+            violations,
+            f"{label} advances_nominal_time does not match its interval duration",
+        )
+    if record.get("nominal_time_calibrated") is not False:
+        _record_violation(
+            violations, f"{label} must not claim calibrated nominal time"
+        )
+    if record.get("physical_time_resolved") is not False:
+        _record_violation(
+            violations, f"{label} must not claim resolved physical time"
+        )
+
+
+def _feedback_stage_clock_position(
+    feedback_stage_id: int,
+    erosion_iterations: int,
+    nominal_timestep_ma: float,
+) -> tuple[str, int, float] | None:
+    if feedback_stage_id == 0:
+        return "initial_climate_hydrology", -1, 0.0
+    if 1 <= feedback_stage_id <= erosion_iterations:
+        return (
+            "erosion_iteration",
+            feedback_stage_id,
+            feedback_stage_id * nominal_timestep_ma,
+        )
+    if feedback_stage_id == erosion_iterations + 1:
+        return (
+            "cryosphere_coupling",
+            -1,
+            erosion_iterations * nominal_timestep_ma,
+        )
+    return None
+
+
+def _validate_stage_end_snapshot_history(
+    world: dict[str, Any],
+    *,
+    key: str,
+    role: str,
+    erosion_iterations: int,
+    nominal_timestep_ma: float,
+    require_each_feedback_stage: bool,
+    violations: list[str],
+) -> list[dict[str, Any]]:
+    records = world.get(key)
+    if not isinstance(records, list) or not all(
+        isinstance(record, dict) for record in records
+    ):
+        _record_violation(violations, f"{key} must be a list of objects")
+        return []
+
+    seen_feedback_stage_ids: set[int] = set()
+    previous_elapsed_ma = -math.inf
+    for index, record in enumerate(records):
+        label = f"{key}[{index}]"
+        if _integer(record.get("id")) != index:
+            _record_violation(violations, f"{label} id is not sequential")
+        feedback_stage_id = _integer(record.get("feedback_stage_id"))
+        if feedback_stage_id is None:
+            _record_violation(violations, f"{label} feedback stage id is invalid")
+            continue
+        position = _feedback_stage_clock_position(
+            feedback_stage_id, erosion_iterations, nominal_timestep_ma
+        )
+        if position is None:
+            _record_violation(
+                violations, f"{label} lies outside the configured nominal clock"
+            )
+            continue
+        expected_stage, expected_iteration, expected_elapsed_ma = position
+        seen_feedback_stage_ids.add(feedback_stage_id)
+        if record.get("stage") != expected_stage:
+            _record_violation(
+                violations, f"{label} stage does not match its feedback stage"
+            )
+        if _integer(record.get("erosion_iteration")) != expected_iteration:
+            _record_violation(
+                violations,
+                f"{label} erosion iteration does not match its feedback stage",
+            )
+        _validate_nominal_time_record(
+            record,
+            label=label,
+            expected_start_ma=expected_elapsed_ma,
+            expected_end_ma=expected_elapsed_ma,
+            expected_role=role,
+            violations=violations,
+        )
+        if expected_elapsed_ma + 1.0e-10 < previous_elapsed_ma:
+            _record_violation(
+                violations, f"{key} nominal elapsed time is not monotonic"
+            )
+        previous_elapsed_ma = expected_elapsed_ma
+
+    if require_each_feedback_stage and seen_feedback_stage_ids != set(
+        range(erosion_iterations + 2)
+    ):
+        _record_violation(
+            violations,
+            f"{key} does not cover every configured feedback-stage endpoint",
+        )
+    return records
+
+
+def _validate_interval_transport_history(
+    world: dict[str, Any],
+    *,
+    key: str,
+    role: str,
+    erosion_iterations: int,
+    nominal_timestep_ma: float,
+    violations: list[str],
+) -> list[dict[str, Any]]:
+    records = world.get(key)
+    if not isinstance(records, list) or not all(
+        isinstance(record, dict) for record in records
+    ):
+        _record_violation(violations, f"{key} must be a list of objects")
+        return []
+    if len(records) != erosion_iterations:
+        _record_violation(
+            violations,
+            f"{key} length does not match configured erosion transitions",
+        )
+    for index, record in enumerate(records):
+        transition_id = index + 1
+        label = f"{key}[{index}]"
+        if _integer(record.get("id")) != index:
+            _record_violation(violations, f"{label} id is not sequential")
+        if _integer(record.get("feedback_stage_id")) != transition_id:
+            _record_violation(
+                violations, f"{label} feedback-stage link is invalid"
+            )
+        if _integer(record.get("erosion_iteration")) != transition_id:
+            _record_violation(
+                violations, f"{label} erosion iteration is invalid"
+            )
+        _validate_nominal_time_record(
+            record,
+            label=label,
+            expected_start_ma=index * nominal_timestep_ma,
+            expected_end_ma=transition_id * nominal_timestep_ma,
+            expected_role=role,
+            violations=violations,
+        )
+    return records
+
+
+def _validate_nominal_process_histories(
+    world: dict[str, Any],
+    *,
+    clock: dict[str, Any],
+    motion_history: list[dict[str, Any]],
+    erosion_iterations: int,
+    nominal_timestep_ma: float,
+    maturation_timestep_scale: float,
+    violations: list[str],
+) -> dict[str, int]:
+    nominal_elapsed_ma = erosion_iterations * nominal_timestep_ma
+
+    for index, record in enumerate(motion_history):
+        label = f"plate_motion_history[{index}]"
+        is_initial = index == 0
+        expected_iteration = -1 if is_initial else index
+        if index > erosion_iterations:
+            _record_violation(
+                violations, f"{label} lies outside the configured nominal clock"
+            )
+        if _integer(record.get("id")) != index:
+            _record_violation(violations, f"{label} id is not sequential")
+        if record.get("stage") != (
+            "initial_plate_domains" if is_initial else "plate_motion_iteration"
+        ):
+            _record_violation(violations, f"{label} stage is invalid")
+        if _integer(record.get("erosion_iteration")) != expected_iteration:
+            _record_violation(
+                violations, f"{label} erosion iteration is invalid"
+            )
+        _validate_nominal_time_record(
+            record,
+            label=label,
+            expected_start_ma=(index - 1) * nominal_timestep_ma
+            if not is_initial
+            else 0.0,
+            expected_end_ma=index * nominal_timestep_ma,
+            expected_role=(
+                "initial_plate_state_snapshot"
+                if is_initial
+                else "plate_motion_transition"
+            ),
+            violations=violations,
+        )
+
+    hydrologic_history = _validate_stage_end_snapshot_history(
+        world,
+        key="hydrologic_water_budget_history",
+        role="stage_end_stabilization_recomputation_snapshot",
+        erosion_iterations=erosion_iterations,
+        nominal_timestep_ma=nominal_timestep_ma,
+        require_each_feedback_stage=True,
+        violations=violations,
+    )
+    numeric_history = _validate_stage_end_snapshot_history(
+        world,
+        key="numeric_depression_fill_history",
+        role="stage_end_stabilization_event",
+        erosion_iterations=erosion_iterations,
+        nominal_timestep_ma=nominal_timestep_ma,
+        require_each_feedback_stage=False,
+        violations=violations,
+    )
+    hillslope_history = _validate_interval_transport_history(
+        world,
+        key="hillslope_sediment_transport_history",
+        role="erosion_interval_bulk_hillslope_transport",
+        erosion_iterations=erosion_iterations,
+        nominal_timestep_ma=nominal_timestep_ma,
+        violations=violations,
+    )
+    fluvial_history = _validate_interval_transport_history(
+        world,
+        key="fluvial_sediment_routing_history",
+        role="erosion_interval_bulk_fluvial_routing",
+        erosion_iterations=erosion_iterations,
+        nominal_timestep_ma=nominal_timestep_ma,
+        violations=violations,
+    )
+
+    glacial_history = world.get("glacial_sediment_transport_history")
+    if not isinstance(glacial_history, list) or not all(
+        isinstance(record, dict) for record in glacial_history
+    ):
+        _record_violation(
+            violations,
+            "glacial_sediment_transport_history must be a list of objects",
+        )
+        glacial_history = []
+    if len(glacial_history) != 1:
+        _record_violation(
+            violations,
+            "glacial sediment history must contain one final cryosphere record",
+        )
+    for index, record in enumerate(glacial_history):
+        label = f"glacial_sediment_transport_history[{index}]"
+        if _integer(record.get("id")) != index:
+            _record_violation(violations, f"{label} id is not sequential")
+        if _integer(record.get("feedback_stage_id")) != erosion_iterations + 1:
+            _record_violation(
+                violations, f"{label} final cryosphere link is invalid"
+            )
+        _validate_nominal_time_record(
+            record,
+            label=label,
+            expected_start_ma=nominal_elapsed_ma,
+            expected_end_ma=nominal_elapsed_ma,
+            expected_role="final_cryosphere_coupling_bulk_transport",
+            violations=violations,
+        )
+
+    model = world.get("plate_kinematic_model")
+    model_required = {
+        "model_type",
+        "time_unit",
+        "physical_time_resolved",
+        "nominal_time_calibrated",
+        "process_rate_calibration_resolved",
+        "time_step_convergence_demonstrated",
+        "nominal_time_model",
+        "nominal_time_unit",
+        "nominal_time_basis",
+        "nominal_time_source_parameter",
+        "nominal_timestep_ma",
+        "reference_timestep_ma",
+        "maturation_timestep_scale",
+        "timestep_scaling_model",
+        "motion_scale_deg_per_step",
+        "reference_motion_scale_deg_per_reference_step",
+        "effective_motion_scale_deg_per_step",
+        "reference_oceanic_crust_aging_ma_per_reference_step",
+        "effective_oceanic_crust_aging_ma_per_step",
+        "configured_motion_step_count",
+        "history_step_count",
+        "crust_transport_ledger_format",
+        "crust_transport_coverage_model",
+        "crust_transport_coverage_histogram_model",
+        "crust_categorical_remap_model",
+        "crust_categorical_remap_tie_break",
+        "oceanic_state_classification_model",
+        "transitional_oceanic_provenance_rule",
+        "volcanic_arc_oceanic_state_rule",
+        "crust_transport_coverage_arrangement_fragment_limit",
+        "crust_transport_execution_backend",
+        "accelerator_crust_source_remap_kernel_used",
+        "legacy_crust_source_cell_id_semantics",
+        "legacy_crust_source_remap_event_semantics",
+        "legacy_crust_source_reuse_count_semantics",
+        "canonical_crust_mixture_provenance_location",
+        "crust_density_unit",
+        "density_weighted_crust_volume_unit",
+        "density_weighted_crust_volume_to_mass_kg_factor",
+        "crust_advection_resolved",
+        "crust_volume_conserving_transport",
+        "density_weighted_volume_conserving_transport",
+        "crust_age_volume_moment_conserving_transport",
+        "mass_conserving_crust_transport",
+        "mass_conservation_scope",
+        "destination_overlap_areas_normalized",
+        "tectonic_process_inventory_changes_separately_ledgered",
+        "tectonic_process_inventory_ledger_granularity",
+        "tectonic_process_reason_resolved_inventory_ledgered",
+        "tectonic_process_inventory_ledger_scope",
+        "tectonic_process_inventory_attribution_format",
+        "tectonic_process_rule_model",
+        "tectonic_process_inventory_reason_order",
+        "tectonic_process_boundary_input_locations",
+        "tectonic_process_internal_heat_input",
+        "tectonic_process_geological_age_ga_input",
+        "tectonic_activity_formula",
+        "tectonic_activity_index",
+        "tectonic_process_rule_state_source_sink_accounting_resolved",
+        "tectonic_process_source_sink_attribution_resolved",
+        "tectonic_process_source_sink_attribution_semantics",
+        "tectonic_process_material_provenance_resolved",
+        "tectonic_process_attribution_order_dependent",
+        "tectonic_process_changed_cell_count_semantics",
+        "oceanic_convergence_subduction_proxy_semantics",
+        "plate_crossing_accretion_proxy_semantics",
+    }
+    if not isinstance(model, dict):
+        _record_violation(violations, "plate_kinematic_model must be an object")
+        model = {}
+    else:
+        missing = model_required - set(model)
+        if missing:
+            _record_violation(
+                violations,
+                f"plate_kinematic_model is missing fields: {', '.join(sorted(missing))}",
+            )
+    if (
+        model.get("model_type") != "rotating_voronoi_plate_domains_v3"
+        or model.get("time_unit") != "model_step"
+        or model.get("physical_time_resolved") is not False
+        or model.get("nominal_time_calibrated") is not False
+        or model.get("process_rate_calibration_resolved") is not False
+        or model.get("time_step_convergence_demonstrated") is not False
+        or model.get("nominal_time_model") != NOMINAL_TIME_MODEL
+        or model.get("nominal_time_unit") != "Ma"
+        or model.get("nominal_time_basis") != NOMINAL_TIME_BASIS
+        or model.get("nominal_time_source_parameter")
+        != NOMINAL_TIME_SOURCE_PARAMETER
+        or model.get("timestep_scaling_model")
+        != "reference_normalized_partial_process_scaling_v1"
+        or model.get("crust_transport_ledger_format")
+        != "destination_csr_spherical_forward_overlap_v1"
+        or model.get("crust_transport_coverage_model")
+        != "destination_local_gnomonic_line_arrangement_multiplicity_v1"
+        or model.get("crust_transport_coverage_histogram_model")
+        != "global_area_by_integer_source_multiplicity_v1"
+        or model.get("crust_categorical_remap_model")
+        != "joint_crust_type_lithology_dominant_incoming_volume_v1"
+        or model.get("crust_categorical_remap_tie_break")
+        != "lowest_crust_type_then_lowest_lithology"
+        or model.get("oceanic_state_classification_model")
+        != "crust_type_with_transitional_lithology_provenance_and_arc_numeric_guard_v2"
+        or model.get("transitional_oceanic_provenance_rule")
+        != "crust_type_2_is_oceanic_iff_lithology_0_basalt"
+        or model.get("volcanic_arc_oceanic_state_rule")
+        != "crust_type_3_is_oceanic_iff_age_le_320_ma_thickness_le_18_km_density_ge_2_84"
+        or _integer(
+            model.get("crust_transport_coverage_arrangement_fragment_limit")
+        )
+        != 16384
+        or model.get("crust_transport_execution_backend") != "cpu"
+        or model.get("accelerator_crust_source_remap_kernel_used") is not False
+        or model.get("legacy_crust_source_cell_id_semantics")
+        != "dominant_incoming_crust_volume_contributor_compatibility_alias_v1"
+        or model.get("legacy_crust_source_remap_event_semantics")
+        != "dominant_contributor_id_differs_from_destination_cell_id"
+        or model.get("legacy_crust_source_reuse_count_semantics")
+        != "destination_count_minus_unique_dominant_contributor_count"
+        or model.get("canonical_crust_mixture_provenance_location")
+        != "plate_motion_history[].crust_overlap_ledger"
+        or model.get("crust_density_unit") != "g_cm3"
+        or model.get("density_weighted_crust_volume_unit") != "g_cm3_km3"
+        or not _close(
+            model.get("density_weighted_crust_volume_to_mass_kg_factor"),
+            1.0e12,
+            absolute=1.0e-6,
+            relative=1.0e-12,
+        )
+        or model.get("crust_advection_resolved") is not True
+        or model.get("crust_volume_conserving_transport") is not True
+        or model.get("density_weighted_volume_conserving_transport") is not True
+        or model.get("crust_age_volume_moment_conserving_transport") is not True
+        or model.get("mass_conserving_crust_transport") is not True
+        or model.get("mass_conservation_scope")
+        != "transport_only_before_rule_based_tectonic_processes"
+        or model.get("destination_overlap_areas_normalized") is not False
+        or model.get("tectonic_process_inventory_changes_separately_ledgered")
+        is not True
+        or model.get("tectonic_process_inventory_ledger_granularity")
+        != "transported_post_and_rule_reason_positive_negative_per_step_v2"
+        or model.get("tectonic_process_reason_resolved_inventory_ledgered")
+        is not True
+        or model.get("tectonic_process_inventory_ledger_scope")
+        != "transported_pre_process_to_post_process_with_sequential_rule_attribution"
+        or model.get("tectonic_process_inventory_attribution_format")
+        != "sequential_rule_extensive_state_delta_v1"
+        or model.get("tectonic_process_rule_model")
+        != "ordered_thresholded_crust_state_transition_v2"
+        or model.get("tectonic_process_inventory_reason_order")
+        != [
+            "quiet_oceanic_aging",
+            "oceanic_ridge_rejuvenation",
+            "oceanic_ridge_creation_relaxation",
+            "divergent_continental_rifting",
+            "oceanic_convergence_subduction_proxy",
+            "continental_collision_orogeny",
+            "plate_crossing_accretion_proxy",
+            "age_bound_enforcement",
+            "thickness_bound_enforcement",
+            "density_bound_enforcement",
+        ]
+        or model.get("tectonic_process_boundary_input_locations")
+        != [
+            "plate_motion_history[].boundary_convergent_by_cell",
+            "plate_motion_history[].boundary_divergent_by_cell",
+            "plate_motion_history[].boundary_transform_by_cell",
+        ]
+        or model.get("tectonic_process_rule_state_source_sink_accounting_resolved")
+        is not True
+        or model.get("tectonic_process_source_sink_attribution_resolved")
+        is not False
+        or model.get("tectonic_process_source_sink_attribution_semantics")
+        != "componentwise_positive_negative_ordered_rule_state_delta_not_physical_material_flux"
+        or model.get("tectonic_process_material_provenance_resolved") is not False
+        or model.get("tectonic_process_attribution_order_dependent") is not True
+        or model.get("tectonic_process_changed_cell_count_semantics")
+        != "numeric_age_thickness_density_change_only_excludes_categorical_transitions"
+        or model.get("oceanic_convergence_subduction_proxy_semantics")
+        != "rule_adds_thickness_and_reduces_age_not_a_crust_removal_flux"
+        or model.get("plate_crossing_accretion_proxy_semantics")
+        != "extra_continental_convergence_thickening_not_external_reservoir_provenance"
+    ):
+        _record_violation(violations, "plate kinematic time metadata is invalid")
+
+    for field, expected in (
+        ("nominal_timestep_ma", nominal_timestep_ma),
+        ("reference_timestep_ma", MATURATION_REFERENCE_TIMESTEP_MA),
+        ("maturation_timestep_scale", maturation_timestep_scale),
+    ):
+        if not _close(model.get(field), expected, absolute=1.0e-12, relative=1.0e-12):
+            _record_violation(
+                violations, f"plate kinematic {field} does not mirror the clock"
+            )
+    if _integer(model.get("configured_motion_step_count")) != erosion_iterations:
+        _record_violation(
+            violations,
+            "plate kinematic configured motion steps do not mirror the clock",
+        )
+    if _integer(model.get("history_step_count")) != len(motion_history):
+        _record_violation(
+            violations,
+            "plate kinematic history step count does not mirror motion history",
+        )
+
+    motion_scale = _number(model.get("motion_scale_deg_per_step"))
+    reference_motion_scale = _number(
+        model.get("reference_motion_scale_deg_per_reference_step")
+    )
+    effective_motion_scale = _number(
+        model.get("effective_motion_scale_deg_per_step")
+    )
+    reference_aging = _number(
+        model.get("reference_oceanic_crust_aging_ma_per_reference_step")
+    )
+    effective_aging = _number(
+        model.get("effective_oceanic_crust_aging_ma_per_step")
+    )
+    if (
+        motion_scale is None
+        or reference_motion_scale is None
+        or effective_motion_scale is None
+        or min(motion_scale, reference_motion_scale, effective_motion_scale) < 0.0
+        or not _close(
+            effective_motion_scale,
+            reference_motion_scale * maturation_timestep_scale,
+            absolute=1.0e-12,
+            relative=1.0e-12,
+        )
+        or not _close(
+            motion_scale,
+            effective_motion_scale,
+            absolute=1.0e-12,
+            relative=1.0e-12,
+        )
+    ):
+        _record_violation(
+            violations,
+            "plate kinematic effective/reference motion scales do not replay",
+        )
+    if (
+        reference_aging is None
+        or effective_aging is None
+        or min(reference_aging, effective_aging) < 0.0
+        or not _close(
+            effective_aging,
+            reference_aging * maturation_timestep_scale,
+            absolute=1.0e-12,
+            relative=1.0e-12,
+        )
+    ):
+        _record_violation(
+            violations,
+            "plate kinematic effective/reference oceanic aging scales do not replay",
+        )
+
+    # The clock is the canonical config echo; all time-aware model metadata must
+    # mirror it rather than silently establishing a second elapsed-time basis.
+    if not _close(
+        clock.get("final_nominal_elapsed_time_ma"),
+        nominal_elapsed_ma,
+        absolute=1.0e-10,
+        relative=1.0e-12,
+    ):
+        _record_violation(
+            violations, "nominal process histories do not share the clock endpoint"
+        )
+
+    return {
+        "hydrologic_water_budget_history": len(hydrologic_history),
+        "numeric_depression_fill_history": len(numeric_history),
+        "hillslope_sediment_transport_history": len(hillslope_history),
+        "fluvial_sediment_routing_history": len(fluvial_history),
+        "glacial_sediment_transport_history": len(glacial_history),
+    }
+
+
 def _validate_plate_aggregates(
     world: dict[str, Any], checks: list[dict[str, Any]]
 ) -> None:
@@ -228,11 +875,15 @@ def _validate_plate_aggregates(
         if lithology not in LITHOLOGY_NAMES:
             _record_violation(violations, f"cell[{index}] has unknown lithology")
         boundary = max(convergent, divergent, transform)
-        oceanic = crust == "oceanic" or (
-            crust in {"transitional", "volcanic_arc"}
-            and age <= 320.0
-            and thickness <= 18.0
-            and density >= 2.84
+        oceanic = (
+            crust == "oceanic"
+            or (crust == "transitional" and lithology == "basalt")
+            or (
+                crust == "volcanic_arc"
+                and age <= 320.0
+                and thickness <= 18.0
+                and density >= 2.84
+            )
         )
         age_heat = (
             45.0 + 95.0 * math.exp(-age / 60.0)
@@ -1102,6 +1753,7 @@ FEEDBACK_VALUE_FIELDS = frozenset(
         "hydrologic_water_budget_residual_km3_y",
         "max_abs_hydrologic_water_budget_cell_residual_mm_y",
         "mean_erosion_rate_m_per_step",
+        "mean_stream_power_response_m_per_reference_step",
         "mean_sediment_thickness_m",
         "mean_cumulative_sediment_production_m",
         "mean_cumulative_sediment_deposition_m",
@@ -1138,7 +1790,28 @@ def _validate_feedback_structure(
         "clock_type",
         "time_unit",
         "physical_time_resolved",
+        "nominal_time_calibrated",
+        "absolute_geological_age_resolved",
+        "process_rate_calibration_resolved",
+        "time_step_convergence_demonstrated",
         "clock_limitation",
+        "nominal_time_model",
+        "nominal_time_unit",
+        "nominal_time_basis",
+        "nominal_time_source_parameter",
+        "nominal_time_direction",
+        "cell_erosion_rate_semantics",
+        "stream_incision_update",
+        "legacy_mean_erosion_rate_field_semantics",
+        "erosion_transition_coupling_semantics",
+        "nominal_timestep_ma",
+        "reference_timestep_ma",
+        "maturation_timestep_scale",
+        "nominal_timed_transition_count",
+        "initial_nominal_elapsed_time_ma",
+        "current_nominal_elapsed_time_ma",
+        "final_nominal_elapsed_time_ma",
+        "cryosphere_advances_nominal_time",
         "iteration_process_order",
         "geological_age_ga",
         "configured_erosion_iteration_count",
@@ -1189,15 +1862,108 @@ def _validate_feedback_structure(
     )
     final_id = len(history) - 1
     if (
-        clock.get("clock_type") != "coupled_geodynamic_stage_clock_v11"
+        clock.get("clock_type") != "coupled_geodynamic_stage_clock_v12"
         or clock.get("time_unit") != "model_step"
         or clock.get("physical_time_resolved") is not False
+        or clock.get("nominal_time_calibrated") is not False
+        or clock.get("absolute_geological_age_resolved") is not False
+        or clock.get("process_rate_calibration_resolved") is not False
+        or clock.get("time_step_convergence_demonstrated") is not False
         or clock.get("clock_limitation")
-        != "ordered_process_stages_without_calibrated_physical_duration"
-        or not isinstance(clock.get("iteration_process_order"), str)
-        or not clock.get("iteration_process_order")
+        != "nominal_geological_intervals_without_calibrated_physical_time_or_timestep_convergence"
+        or clock.get("nominal_time_model") != NOMINAL_TIME_MODEL
+        or clock.get("nominal_time_unit") != "Ma"
+        or clock.get("nominal_time_basis") != NOMINAL_TIME_BASIS
+        or clock.get("nominal_time_source_parameter")
+        != NOMINAL_TIME_SOURCE_PARAMETER
+        or clock.get("nominal_time_direction")
+        != "forward_from_initial_generated_state"
+        or clock.get("cell_erosion_rate_semantics")
+        != "stream_power_response_per_reference_step_not_applied_transition_depth"
+        or clock.get("stream_incision_update")
+        != "cell_erosion_rate_times_maturation_timestep_scale"
+        or clock.get("legacy_mean_erosion_rate_field_semantics")
+        != LEGACY_MEAN_EROSION_RATE_FIELD_SEMANTICS
+        or clock.get("erosion_transition_coupling_semantics")
+        != EROSION_TRANSITION_COUPLING_SEMANTICS
+        or clock.get("cryosphere_advances_nominal_time") is not False
+        or clock.get("iteration_process_order") != ITERATION_PROCESS_ORDER
     ):
         _record_violation(violations, "simulation clock metadata is invalid")
+
+    nominal_timestep_ma = _number(clock.get("nominal_timestep_ma"))
+    reference_timestep_ma = _number(clock.get("reference_timestep_ma"))
+    maturation_timestep_scale = _number(clock.get("maturation_timestep_scale"))
+    if nominal_timestep_ma is None or nominal_timestep_ma <= 0.0:
+        _record_violation(violations, "simulation clock nominal timestep is invalid")
+    if reference_timestep_ma is None or not _close(
+        reference_timestep_ma,
+        MATURATION_REFERENCE_TIMESTEP_MA,
+        absolute=1.0e-12,
+        relative=0.0,
+    ):
+        _record_violation(
+            violations, "simulation clock reference timestep is invalid"
+        )
+    if (
+        nominal_timestep_ma is not None
+        and reference_timestep_ma is not None
+        and nominal_timestep_ma > reference_timestep_ma
+    ):
+        _record_violation(
+            violations,
+            "simulation clock nominal timestep exceeds the configured reference step",
+        )
+    if (
+        nominal_timestep_ma is not None
+        and reference_timestep_ma is not None
+        and reference_timestep_ma > 0.0
+        and not _close(
+            maturation_timestep_scale,
+            nominal_timestep_ma / reference_timestep_ma,
+            absolute=1.0e-12,
+            relative=1.0e-12,
+        )
+    ):
+        _record_violation(
+            violations,
+            "simulation clock maturation timestep scale does not replay",
+        )
+
+    nominal_elapsed_ma = (
+        nominal_timestep_ma * erosion_iterations
+        if nominal_timestep_ma is not None and erosion_iterations is not None
+        else None
+    )
+    if _integer(clock.get("nominal_timed_transition_count")) != erosion_iterations:
+        _record_violation(
+            violations,
+            "simulation clock nominal transition count does not match erosion iterations",
+        )
+    if not _close(
+        clock.get("initial_nominal_elapsed_time_ma"),
+        0.0,
+        absolute=1.0e-12,
+        relative=0.0,
+    ):
+        _record_violation(
+            violations, "simulation clock initial nominal elapsed time is not zero"
+        )
+    if nominal_elapsed_ma is not None:
+        for field in (
+            "current_nominal_elapsed_time_ma",
+            "final_nominal_elapsed_time_ma",
+        ):
+            if not _close(
+                clock.get(field),
+                nominal_elapsed_ma,
+                absolute=1.0e-10,
+                relative=1.0e-12,
+            ):
+                _record_violation(
+                    violations,
+                    f"simulation clock {field} does not replay from timestep and transitions",
+                )
     clock_age = _number(clock.get("geological_age_ga"))
     planet_age = _planet_value(world, "geological_age_ga", 4.5)
     if clock_age is None or clock_age < 0.0 or not _close(
@@ -1228,8 +1994,56 @@ def _validate_feedback_structure(
             violations, "plate motion history length does not match erosion stages"
         )
 
+    process_history_counts: dict[str, int] = {}
+    if (
+        erosion_iterations is not None
+        and erosion_iterations >= 0
+        and nominal_timestep_ma is not None
+        and nominal_timestep_ma > 0.0
+        and maturation_timestep_scale is not None
+        and maturation_timestep_scale > 0.0
+    ):
+        process_history_counts = _validate_nominal_process_histories(
+            world,
+            clock=clock,
+            motion_history=motion_history,
+            erosion_iterations=erosion_iterations,
+            nominal_timestep_ma=nominal_timestep_ma,
+            maturation_timestep_scale=maturation_timestep_scale,
+            violations=violations,
+        )
+
     previous_sediment = (0.0, 0.0, 0.0)
     for index, step in enumerate(history):
+        is_initial = index == 0
+        is_erosion = (
+            erosion_iterations is not None and 1 <= index <= erosion_iterations
+        )
+        is_cryo = index == final_id and not is_initial
+        if nominal_timestep_ma is not None and nominal_timestep_ma > 0.0:
+            if is_initial:
+                interval_start_ma = 0.0
+                interval_end_ma = 0.0
+                interval_role = "initial_state_snapshot"
+            elif is_erosion:
+                interval_start_ma = (index - 1) * nominal_timestep_ma
+                interval_end_ma = index * nominal_timestep_ma
+                interval_role = "erosion_transition"
+            else:
+                interval_start_ma = (
+                    nominal_elapsed_ma if nominal_elapsed_ma is not None else 0.0
+                )
+                interval_end_ma = interval_start_ma
+                interval_role = "final_cryosphere_coupling_snapshot"
+            _validate_nominal_time_record(
+                step,
+                label=f"feedback step[{index}]",
+                expected_start_ma=interval_start_ma,
+                expected_end_ma=interval_end_ma,
+                expected_role=interval_role,
+                violations=violations,
+            )
+
         missing = FEEDBACK_REQUIRED_FIELDS - set(step)
         if missing:
             _record_violation(
@@ -1256,12 +2070,15 @@ def _validate_feedback_structure(
             _record_violation(
                 violations, f"feedback step[{index}] has non-finite numeric fields"
             )
+        if not _feedback_close(
+            step.get("mean_stream_power_response_m_per_reference_step"),
+            _number(step.get("mean_erosion_rate_m_per_step")) or 0.0,
+        ):
+            _record_violation(
+                violations,
+                f"feedback step[{index}] has inconsistent reference erosion aliases",
+            )
 
-        is_initial = index == 0
-        is_erosion = (
-            erosion_iterations is not None and 1 <= index <= erosion_iterations
-        )
-        is_cryo = index == final_id and not is_initial
         expected_stage = (
             "initial_climate_hydrology"
             if is_initial
@@ -1459,6 +2276,10 @@ def _validate_feedback_structure(
                     float(cell.get("erosion_rate", 0.0)) for cell in cells
                 )
                 / divisor,
+                "mean_stream_power_response_m_per_reference_step": sum(
+                    float(cell.get("erosion_rate", 0.0)) for cell in cells
+                )
+                / divisor,
                 "mean_sediment_thickness_m": sum(
                     float(cell.get("sediment_thickness_m", 0.0)) for cell in cells
                 )
@@ -1548,9 +2369,14 @@ def _validate_feedback_structure(
         ),
         observed={
             "configured_erosion_iteration_count": erosion_iterations,
+            "nominal_timestep_ma": nominal_timestep_ma,
+            "reference_timestep_ma": reference_timestep_ma,
+            "maturation_timestep_scale": maturation_timestep_scale,
+            "nominal_elapsed_time_ma": nominal_elapsed_ma,
             "clock_stage_count": stage_count,
             "feedback_record_count": len(history),
             "plate_motion_record_count": len(motion_history),
+            "time_aware_process_history_counts": process_history_counts,
             "violation_count": len(violations),
         },
         expected={
@@ -1559,6 +2385,9 @@ def _validate_feedback_structure(
                 erosion_iterations + 1 if erosion_iterations is not None else None
             ),
             "complete_stage_records": True,
+            "nominal_intervals_match_configured_timestep": True,
+            "physical_time_and_convergence_claims": False,
+            "plate_reference_and_effective_scales_replay": True,
             "final_stage_matches_cells": True,
         },
         evidence={"violations": violations},
@@ -1706,9 +2535,275 @@ def validate_physics_replays(world: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(world, dict):
         world = {}
     _validate_plate_aggregates(world, checks)
+    boundary_edges = validate_plate_boundary_edges(world)
+    _append_check(
+        checks,
+        domain="tectonics",
+        name="exact_directed_plate_boundary_segment_replay",
+        passed=bool(boundary_edges["passed"]),
+        message=(
+            "every cross-plate reciprocal control-volume segment, including "
+            "duplicate neighbor segments, must replay in canonical order from "
+            "the mesh, per-step plate assignments, Euler kinematics, and "
+            "opening crust state without legacy smoothed boundary inputs; "
+            "candidate sides remain separate from an explicit unknown physical "
+            "polarity decision and cannot select a slab"
+        ),
+        observed=boundary_edges["metrics"],
+        expected={
+            "authoritative_reciprocal_control_volume_geometry_replayed": True,
+            "direct_unsmoothed_euler_kinematics_replayed": True,
+            "opening_crust_state_and_polarity_candidate_replayed": True,
+            "explicit_unknown_physical_polarity_replayed": True,
+            "top_level_euler_parameters_cross_checked": True,
+            "step_rotations_replayed": True,
+            "plate_center_history_replayed": True,
+            "cell_plate_assignments_replayed": True,
+            "legacy_smoothed_boundary_fields_used": False,
+            "subduction_polarity_resolved": False,
+            "subducted_slab_geometry_resolved": False,
+        },
+        evidence={"violations": boundary_edges["failures"]},
+    )
+    initial_oceanic_age = validate_initial_oceanic_crust_age(world)
+    _append_check(
+        checks,
+        domain="tectonics",
+        name="initial_oceanic_crust_age_graph_replay",
+        passed=bool(initial_oceanic_age["passed"]),
+        message=(
+            "the provisional oceanic-like mask, eligible nominal ridge "
+            "segments, global representative spreading rate, multi-source "
+            "Dijkstra path witness, ceiling policy, area-weighted summaries, "
+            "CDF, and oceanic compatibility aliases must replay independently; "
+            "this procedural initialization is not a physical seafloor "
+            "creation, flowline, local spreading-rate, or subduction-history model"
+        ),
+        observed=initial_oceanic_age["metrics"],
+        expected={
+            "provisional_oceanic_mask_replayed": True,
+            "eligible_ridge_segments_replayed": True,
+            "representative_spreading_rates_replayed": True,
+            "ridge_seed_cells_replayed": True,
+            "dijkstra_unclamped_ages_replayed": True,
+            "dijkstra_path_witness_replayed": True,
+            "clamped_ages_and_status_replayed": True,
+            "summary_statistics_replayed": True,
+            "cdf_replayed": True,
+            "oceanic_cell_aliases_replayed": True,
+            "oceanic_history_aliases_replayed": True,
+            "procedural_authority": True,
+            "physical_seafloor_creation_resolved": False,
+            "spreading_rate_calibrated": False,
+            "local_spreading_rates_resolved": False,
+            "ridge_flowlines_resolved": False,
+            "subduction_sink_history_resolved": False,
+            "convergence_history_resolved": False,
+            "seton_2020_age_grid_used_as_generation_input": False,
+        },
+        evidence={"violations": initial_oceanic_age["failures"]},
+    )
     _validate_climate_energy(world, checks)
     history, clock, _ = _validate_feedback_structure(world, checks)
     _validate_feedback_summary(world, history, clock, checks)
+    crust_transport = validate_crust_overlap_transport(world)
+    _append_check(
+        checks,
+        domain="tectonics",
+        name="conservative_crust_overlap_replay",
+        passed=bool(crust_transport["passed"]),
+        message=(
+            "forward spherical overlap CSR, source-area closure, coverage "
+            "multiplicity, transported extensive moments, and process split "
+            "must replay independently"
+        ),
+        observed=crust_transport["metrics"],
+        expected={
+            "source_area_rows_close": True,
+            "crust_volume_conserved_during_transport": True,
+            "density_weighted_volume_conserved_during_transport": True,
+            "age_volume_moment_conserved_during_transport": True,
+            "gap_equals_overlap_excess_globally": True,
+        },
+        evidence={"violations": crust_transport["failures"]},
+    )
+    oceanic_age_depth = validate_oceanic_age_depth(world)
+    _append_check(
+        checks,
+        domain="tectonics",
+        name="oceanic_age_depth_thermal_target_replay",
+        passed=bool(oceanic_age_depth["passed"]),
+        message=(
+            "oceanic-like thermal subsidence targets and continental isostatic "
+            "equilibrium targets must replay from round-trip transport/process "
+            "age, thickness, density, type, and lithology roots; their full "
+            "same-cell target differences are applied outside the bounded "
+            "dynamic-relief clamp and must compose exactly into each tectonic "
+            "elevation change. This quasi-static operator is not a calibrated "
+            "transient relaxation, separately tracked realized thermal-relief "
+            "state, absolute basement, heat-flow, flexural, or dynamics solution"
+        ),
+        observed=oceanic_age_depth["metrics"],
+        expected={
+            "independent_crust_transport_root_replay_passed": True,
+            "analytical_checkpoint_count": 7,
+            "initial_isostatic_targets_replayed": True,
+            "initial_thermal_aliases_replayed": True,
+            "final_thermal_target_replayed": True,
+            "isostatic_target_application_replayed": True,
+            "dynamic_relief_clamp_replayed": True,
+            "tectonic_elevation_change_composition_replayed": True,
+            "authoritative_for_relative_thermal_subsidence_target_curve": True,
+            "authoritative_for_realized_thermal_relief_component": False,
+            "realized_thermal_relief_state_tracked": False,
+            "thermal_relaxation_timescale_calibrated": False,
+            "unapplied_thermal_tendency_residual_carried_forward": False,
+            "unapplied_thermal_equilibrium_residual_zero_by_construction": True,
+            "thermal_contribution_outside_bounded_dynamic_relief_clamp_resolved": True,
+            "thermal_contribution_to_tectonic_elevation_change_replayed": True,
+            "thermal_target_difference_tendency_application_replayed": True,
+            "absolute_basement_depth_calibrated": False,
+            "physical_crust_creation_age_provenance": False,
+            "ridge_age_distance_consistency": False,
+            "thermal_structure_represented": False,
+            "heat_flow_represented": False,
+            "dynamic_topography_represented": False,
+            "flexure_represented": False,
+            "physical_dynamics_represented": False,
+        },
+        evidence={"violations": oceanic_age_depth["failures"]},
+    )
+    candidate_fate = validate_crust_overlap_candidate_fate(world)
+    _append_check(
+        checks,
+        domain="tectonics",
+        name="overlap_candidate_fate_crosswalk_replay",
+        passed=bool(candidate_fate["passed"]),
+        message=(
+            "every same-step unordered boundary plate-pair consensus and every "
+            "multiplicity-at-least-two overlap membership class must replay "
+            "independently into a complete diagnostic overlap-excess partition; "
+            "the crosswalk may reflect independently validated upstream physical "
+            "polarity but cannot originate or promote it; pair endpoint incidence "
+            "is coarse pair-wide evidence rather than a local atom/fragment link, "
+            "candidate contributor IDs are global contributor-CSR indices, and the "
+            "crosswalk cannot allocate material, resolve topology/slab/fate, "
+            "calculate swept area, or mutate state or accounting shadows"
+        ),
+        observed=candidate_fate["metrics"],
+        expected={
+            "independent_boundary_root_replay_passed": True,
+            "independent_membership_root_replay_passed": True,
+            "every_boundary_pair_consensus_replayed": True,
+            "every_overlap_excess_class_candidate_replayed": True,
+            "overlap_excess_partition_closed": True,
+            "deterministic_crosswalk_authoritative": True,
+            "pair_wide_consensus_only": True,
+            "candidate_allocation_authoritative": False,
+            "local_segment_link_resolved": False,
+            "connected_atom_topology_resolved": False,
+            "local_fragment_topology_resolved": False,
+            "swept_area_calculated": False,
+            "crust_material_shadow_mutation_performed": False,
+            "crust_reservoir_mutation_performed": False,
+            "physical_material_fate_resolved": False,
+            "slab_selection_resolved": False,
+            "slab_transfer_resolved": False,
+            "state_mutation_performed": False,
+        },
+        evidence={"violations": candidate_fate["failures"]},
+    )
+    crust_material_shadow = validate_crust_material_shadow(world)
+    _append_check(
+        checks,
+        domain="tectonics",
+        name="persistent_crust_material_shadow_replay",
+        passed=bool(crust_material_shadow["passed"]),
+        message=(
+            "persistent sparse surface-crust dry-rock mass packets, normalized "
+            "overlap advection, and ordered unresolved rule source/sink "
+            "adjustments must replay independently; this diagnostic shadow is "
+            "not an authoritative physical crust-cycle reservoir"
+        ),
+        observed=crust_material_shadow["metrics"],
+        expected={
+            "transported_packets_replay": True,
+            "ordered_rule_adjustments_replay": True,
+            "closing_packets_match_scalar_crust_mass": True,
+            "physical_source_sink_resolved": False,
+            "global_crust_cycle_mass_conservation_resolved": False,
+        },
+        evidence={"violations": crust_material_shadow["failures"]},
+    )
+    crust_dry_rock_accounting = validate_crust_dry_rock_accounting(world)
+    _append_check(
+        checks,
+        domain="tectonics",
+        name="finite_crust_dry_rock_accounting_replay",
+        passed=bool(crust_dry_rock_accounting["passed"]),
+        message=(
+            "the bounded surface/exchange/empty-slab dry-rock counter-model, "
+            "source-normalized transport, and ordered legacy compensation "
+            "transactions must replay independently; numerical closure does "
+            "not resolve physical mantle, slab, sediment, phase, or fate"
+        ),
+        observed=crust_dry_rock_accounting["metrics"],
+        expected={
+            "finite_exchange_inventory_enforced": True,
+            "global_per_origin_and_reservoir_accounting_closed": True,
+            "subducted_slab_tables_empty": True,
+            "physical_source_sink_resolved": False,
+            "material_provenance_resolved": False,
+            "global_crust_cycle_mass_conservation_resolved": False,
+        },
+        evidence={"violations": crust_dry_rock_accounting["failures"]},
+    )
+    sediment_source_partitions = validate_sediment_source_partitions(world)
+    _append_check(
+        checks,
+        domain="sediment",
+        name="sediment_alluvium_bedrock_source_partition_replay",
+        passed=bool(sediment_source_partitions["passed"]),
+        message=(
+            "hillslope, fluvial, and glacial per-cell production demand must "
+            "partition alluvium first and bedrock second, reconstruct every "
+            "bulk-volume aggregate, and retain explicit non-mass, "
+            "non-provenance semantics"
+        ),
+        observed=sediment_source_partitions["metrics"],
+        expected={
+            "source_demand_partitioned_per_cell": True,
+            "bulk_reference_volume_reconstructed": True,
+            "alluvium_first_rule_replayed": True,
+            "dry_rock_mass_claim": False,
+            "material_provenance_claim": False,
+        },
+        evidence={"violations": sediment_source_partitions["failures"]},
+    )
+    sediment_interfaces = validate_sediment_interfaces(world)
+    _append_check(
+        checks,
+        domain="sediment",
+        name="bedrock_mobile_sediment_interface_replay",
+        passed=bool(sediment_interfaces["passed"]),
+        message=(
+            "the canonical bedrock surface must replay from initial terrain, "
+            "tectonic displacement, bedrock-only erosion, and sea-level datum "
+            "changes, while surface elevation closes as bedrock plus mobile "
+            "sediment; this geometric state does not claim dry mass, "
+            "porosity, compaction, or grain provenance"
+        ),
+        observed=sediment_interfaces["metrics"],
+        expected={
+            "authoritative_interface_geometry": True,
+            "surface_elevation_derived_from_interfaces": True,
+            "all_native_sediment_mutation_paths_replayed": True,
+            "dry_rock_mass_resolved": False,
+            "porosity_resolved": False,
+            "grain_provenance_resolved": False,
+        },
+        evidence={"violations": sediment_interfaces["failures"]},
+    )
     return checks
 
 

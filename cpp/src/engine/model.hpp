@@ -3,6 +3,7 @@
 #include "constants.hpp"
 #include "schema_names.hpp"
 #include "types/core.hpp"
+#include "types/crust_reservoir.hpp"
 #include "types/earth_system.hpp"
 #include "types/world.hpp"
 

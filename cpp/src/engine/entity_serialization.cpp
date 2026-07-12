@@ -5,16 +5,25 @@ namespace magic_geo::detail {
 std::string plates_json(const std::vector<Plate>& plates, int precision) {
     std::string out = "[";
     bool first_plate = true;
+    const int geometry_precision = std::max(
+        std::numeric_limits<double>::max_digits10,
+        precision
+    );
     for (const Plate& plate : plates) {
         comma(out, first_plate);
         out += "{";
         bool first = true;
         add_int(out, first, "id", plate.id);
         add_str(out, first, "kind", plate.kind == 0 ? "oceanic" : (plate.kind == 1 ? "continental" : "mixed"));
-        add_raw(out, first, "axis", "[" + num(plate.axis.x, precision) + "," + num(plate.axis.y, precision) + "," + num(plate.axis.z, precision) + "]");
-        add_raw(out, first, "initial_center", "[" + num(plate.initial_center.x, precision) + "," + num(plate.initial_center.y, precision) + "," + num(plate.initial_center.z, precision) + "]");
-        add_raw(out, first, "center", "[" + num(plate.center.x, precision) + "," + num(plate.center.y, precision) + "," + num(plate.center.z, precision) + "]");
-        add_double(out, first, "angular_speed", plate.angular_speed, precision);
+        add_raw(out, first, "axis", "[" + num(plate.axis.x, geometry_precision) + "," + num(plate.axis.y, geometry_precision) + "," + num(plate.axis.z, geometry_precision) + "]");
+        add_raw(out, first, "initial_center", vec3_json(
+            plate.initial_center, geometry_precision
+        ));
+        add_raw(out, first, "center", vec3_json(
+            plate.center, geometry_precision
+        ));
+        add_double(out, first, "angular_speed", plate.angular_speed,
+            geometry_precision);
         add_double(out, first, "cumulative_rotation_deg", plate.cumulative_rotation_deg, precision);
         add_double(out, first, "crust_density", plate.crust_density, precision);
         add_double(out, first, "crust_thickness_km", plate.crust_thickness_km, precision);
@@ -70,6 +79,18 @@ std::string vec3_json(Vec3 value, int precision) {
     return out;
 }
 
+std::string vec3_array_json(const std::vector<Vec3>& values, int precision) {
+    std::string out = "[";
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) {
+            out += ",";
+        }
+        out += vec3_json(values[i], precision);
+    }
+    out += "]";
+    return out;
+}
+
 std::string latlon_ring_json(const std::vector<LatLon>& ring, int precision) {
     std::string out = "[";
     for (std::size_t i = 0; i < ring.size(); ++i) {
@@ -89,7 +110,10 @@ std::string latlon_ring_json(const std::vector<LatLon>& ring, int precision) {
 std::string cells_json(const std::vector<Cell>& cells, int precision) {
     std::string out = "[";
     bool first_cell = true;
-    const int geometry_precision = std::max(12, precision);
+    const int geometry_precision = std::max(
+        std::numeric_limits<double>::max_digits10,
+        precision
+    );
     const int surface_precision = std::max(10, precision);
     for (const Cell& cell : cells) {
         comma(out, first_cell);
@@ -101,6 +125,10 @@ std::string cells_json(const std::vector<Cell>& cells, int precision) {
         add_double(out, first, "lat_deg", cell.lat * DEG, geometry_precision);
         add_double(out, first, "lon_deg", cell.lon * DEG, geometry_precision);
         add_double(out, first, "area_km2", cell.area_km2, geometry_precision);
+        add_raw(out, first, "control_volume_vertices_3d",
+            vec3_array_json(cell.control_volume_vertices, geometry_precision));
+        add_raw(out, first, "control_volume_edge_neighbor_ids",
+            int_array_json(cell.control_volume_edge_neighbor_ids));
         add_raw(out, first, "neighbors", int_array_json(cell.neighbors));
         add_int(out, first, "political_region_id", cell.political_region_id);
         add_int(out, first, "culture_region_id", cell.culture_region_id);
@@ -122,27 +150,50 @@ std::string cells_json(const std::vector<Cell>& cells, int precision) {
         add_double(out, first, "boundary_convergent", cell.boundary_convergent, precision);
         add_double(out, first, "boundary_divergent", cell.boundary_divergent, precision);
         add_double(out, first, "boundary_transform", cell.boundary_transform, precision);
-        add_double(out, first, "crust_age_ma", cell.crust_age_ma, precision);
-        add_double(out, first, "crust_thickness_km", cell.crust_thickness_km, precision);
-        add_double(out, first, "crust_density", cell.crust_density, precision);
-        add_double(out, first, "initial_crust_age_ma", cell.initial_crust_age_ma, precision);
-        add_double(out, first, "initial_crust_thickness_km", cell.initial_crust_thickness_km, precision);
-        add_double(out, first, "initial_crust_density", cell.initial_crust_density, precision);
-        add_double(out, first, "cumulative_tectonic_elevation_change_m", cell.cumulative_tectonic_elevation_change_m, precision);
-        add_double(out, first, "initial_isostatic_elevation_m", cell.initial_isostatic_elevation_m, precision);
-        add_double(out, first, "initial_thermal_subsidence_m", cell.initial_thermal_subsidence_m, precision);
-        add_double(out, first, "initial_ridge_uplift_m", cell.initial_ridge_uplift_m, precision);
-        add_double(out, first, "initial_orogenic_uplift_m", cell.initial_orogenic_uplift_m, precision);
-        add_double(out, first, "initial_volcanic_uplift_m", cell.initial_volcanic_uplift_m, precision);
-        add_double(out, first, "initial_trench_subsidence_m", cell.initial_trench_subsidence_m, precision);
-        add_double(out, first, "initial_rift_subsidence_m", cell.initial_rift_subsidence_m, precision);
-        add_double(out, first, "initial_transform_fault_relief_m", cell.initial_transform_fault_relief_m, precision);
-        add_double(out, first, "initial_secondary_roughness_m", cell.initial_secondary_roughness_m, precision);
-        add_double(out, first, "initial_elevation_m", cell.initial_elevation_m, precision);
+        add_raw(out, first, "crust_age_ma", roundtrip_num(cell.crust_age_ma));
+        add_raw(out, first, "crust_thickness_km",
+            roundtrip_num(cell.crust_thickness_km));
+        add_raw(out, first, "crust_density",
+            roundtrip_num(cell.crust_density));
+        add_raw(out, first, "initial_crust_age_ma",
+            roundtrip_num(cell.initial_crust_age_ma));
+        add_raw(out, first, "initial_crust_thickness_km",
+            roundtrip_num(cell.initial_crust_thickness_km));
+        add_raw(out, first, "initial_crust_density",
+            roundtrip_num(cell.initial_crust_density));
+        add_double(out, first, "cumulative_tectonic_elevation_change_m",
+            cell.cumulative_tectonic_elevation_change_m, surface_precision);
+        add_double(out, first, "initial_isostatic_elevation_m",
+            cell.initial_isostatic_elevation_m, surface_precision);
+        add_raw(out, first, "initial_thermal_subsidence_m",
+            roundtrip_num(cell.initial_thermal_subsidence_m));
+        add_raw(out, first, "thermal_subsidence_target_m",
+            roundtrip_num(cell.thermal_subsidence_target_m));
+        add_double(out, first, "initial_ridge_uplift_m",
+            cell.initial_ridge_uplift_m, surface_precision);
+        add_double(out, first, "initial_orogenic_uplift_m",
+            cell.initial_orogenic_uplift_m, surface_precision);
+        add_double(out, first, "initial_volcanic_uplift_m",
+            cell.initial_volcanic_uplift_m, surface_precision);
+        add_double(out, first, "initial_trench_subsidence_m",
+            cell.initial_trench_subsidence_m, surface_precision);
+        add_double(out, first, "initial_rift_subsidence_m",
+            cell.initial_rift_subsidence_m, surface_precision);
+        add_double(out, first, "initial_transform_fault_relief_m",
+            cell.initial_transform_fault_relief_m, surface_precision);
+        add_double(out, first, "initial_secondary_roughness_m",
+            cell.initial_secondary_roughness_m, surface_precision);
+        add_double(out, first, "initial_elevation_m",
+            cell.initial_elevation_m, surface_precision);
         add_double(out, first, "tectonic_uplift_rate_m_per_step", cell.uplift_rate, precision);
         add_double(out, first, "volcanic_potential_index", cell.volcanic_potential_index, precision);
-        add_double(out, first, "elevation_m", cell.elevation_m, surface_precision);
-        add_double(out, first, "water_depth_m", cell.water_depth_m, surface_precision);
+        add_double(out, first, "bedrock_surface_elevation_m",
+            cell.bedrock_surface_elevation_m, surface_precision);
+        // These two fields jointly determine the discrete ocean mask.  Fixed
+        // fractional formatting can collapse a one-ULP-below-sea-level water
+        // cell to signed zero and make the serialized mask unreplayable.
+        add_raw(out, first, "elevation_m", roundtrip_num(cell.elevation_m));
+        add_raw(out, first, "water_depth_m", roundtrip_num(cell.water_depth_m));
         add_bool(out, first, "is_water", cell.is_water);
         add_str(out, first, "water_body_type", WATER_BODY_NAMES[cell.water_body]);
         add_double(out, first, "temperature_c", cell.temperature_c, precision);
@@ -237,7 +288,8 @@ std::string cells_json(const std::vector<Cell>& cells, int precision) {
         add_int(out, first, "numeric_depression_temporary_lake_event_count",
             cell.numeric_depression_temporary_lake_event_count);
         add_double(out, first, "erosion_rate", cell.erosion_rate, precision);
-        add_double(out, first, "sediment_thickness_m", cell.sediment_thickness_m, precision);
+        add_double(out, first, "sediment_thickness_m",
+            cell.sediment_thickness_m, surface_precision);
         add_double(out, first, "sediment_production_m", cell.sediment_production_m, precision);
         add_double(out, first, "sediment_deposition_m", cell.sediment_deposition_m, precision);
         add_double(out, first, "sediment_export_m", cell.sediment_export_m, precision);

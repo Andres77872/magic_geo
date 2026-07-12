@@ -999,7 +999,6 @@ void apply_numeric_depression_correction(
                 "numeric depression breach conflicts with an earlier correction"
             );
         }
-        cell.elevation_m = event.breach_target_elevation_m_by_cell[index];
         const double sediment_thickness_before_m = cell.sediment_thickness_m;
         const double alluvium_entrainment_depth_m = std::min(
             sediment_thickness_before_m,
@@ -1013,8 +1012,24 @@ void apply_numeric_depression_correction(
             alluvium_entrainment_depth_m;
         event.breach_bedrock_erosion_depth_m_by_cell[index] =
             bedrock_erosion_depth_m;
-        cell.sediment_thickness_m =
-            sediment_thickness_before_m - alluvium_entrainment_depth_m;
+        apply_sediment_interface_material_change(
+            cell,
+            0.0,
+            bedrock_erosion_depth_m,
+            alluvium_entrainment_depth_m,
+            0.0,
+            "numeric depression breach excavation"
+        );
+        if (
+            std::abs(
+                cell.elevation_m -
+                event.breach_target_elevation_m_by_cell[index]
+            ) > 1.0e-7
+        ) {
+            throw std::runtime_error(
+                "numeric depression breach sediment-interface target mismatch"
+            );
+        }
         cell.sediment_production_m += excavation_depth_m;
         cell.sediment_alluvium_entrainment_m +=
             alluvium_entrainment_depth_m;
@@ -1066,8 +1081,14 @@ void apply_numeric_depression_correction(
         }
         const double deposition_depth_m =
             deposition_volume_km3 * 1000.0 / cell.area_km2;
-        cell.elevation_m += deposition_depth_m;
-        cell.sediment_thickness_m += deposition_depth_m;
+        apply_sediment_interface_material_change(
+            cell,
+            0.0,
+            0.0,
+            0.0,
+            deposition_depth_m,
+            "numeric depression breach deposition"
+        );
         cell.sediment_deposition_m += deposition_depth_m;
         cell.sediment_net_budget_m =
             cell.sediment_deposition_m - cell.sediment_production_m;
@@ -1083,6 +1104,10 @@ void apply_numeric_depression_correction(
         );
         mutated_cell_ids_this_pass.insert(cell_id);
     }
+    maximum_sediment_interface_closure_residual_m(
+        cells,
+        "post numeric depression breach correction"
+    );
     if (remaining_deposition_volume_km3 > 1.0e-7) {
         throw std::runtime_error(
             "numeric depression breach deposition capacity was not realized"
@@ -1146,6 +1171,10 @@ HydrologyStabilizationResult stabilize_numeric_depressions(
                 static_cast<int>(filled_unique_cell_ids.size());
             result.numeric_depression_temporary_lake_unique_cell_count =
                 static_cast<int>(temporary_lake_unique_cell_ids.size());
+            maximum_sediment_interface_closure_residual_m(
+                cells,
+                "post hydrology stabilization"
+            );
             return result;
         }
         if (recomputation_index == NUMERIC_DEPRESSION_FILL_MAX_PASSES) {

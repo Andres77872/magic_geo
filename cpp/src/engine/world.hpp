@@ -9,6 +9,9 @@ namespace magic_geo::detail {
 
 struct EarthSystemState {
     std::vector<Cell> cells;
+    InitialOceanicCrustAgeDiagnostics initial_oceanic_crust_age;
+    CrustMaterialShadowState crust_material_shadow;
+    CrustDryRockAccountingState crust_dry_rock_accounting;
     std::vector<Plate> plates;
     std::vector<PlateMotionStep> plate_motion_history;
     std::vector<NumericDepressionFillEvent> numeric_depression_fill_history;
@@ -50,6 +53,7 @@ struct GeneratedWorld {
 };
 
 GeneratedWorld simulate_world(const Params& params);
+GeneratedWorld simulate_geo_world(const Params& params);
 std::string serialize_world(const Params& params, const GeneratedWorld& world);
 
 }  // namespace magic_geo::detail

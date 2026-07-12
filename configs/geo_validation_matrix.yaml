@@ -270,6 +270,68 @@ scenarios:
       plate_motion_transition_count: {min: 6, max: 6}
       mountain_convergent_alignment: {min: 0.55, max: 1.0}
 
+  - id: maturation_initial
+    description: Same-seed natural initial-state control with no iterative tectonic/erosional maturation.
+    tags: [maturation, paired_control, isolated_iteration_response]
+    overrides:
+      mesh:
+        cell_count: 512
+      tectonics:
+        plate_count: 10
+      erosion:
+        iterations: 0
+    expectations:
+      simulation_stage_count: {min: 2, max: 2}
+      plate_motion_transition_count: {min: 0, max: 0}
+      crust_evolved_cell_fraction: {min: 0.0, max: 0.0}
+      plate_reassigned_cell_fraction: {min: 0.0, max: 0.0}
+
+  - id: maturation_evolved
+    description: Same seed and parameters as maturation_initial, changing only to six coupled maturation iterations.
+    tags: [maturation, isolated_iteration_response]
+    overrides:
+      mesh:
+        cell_count: 512
+      tectonics:
+        plate_count: 10
+      erosion:
+        iterations: 6
+    expectations:
+      simulation_stage_count: {min: 8, max: 8}
+      plate_motion_transition_count: {min: 6, max: 6}
+      crust_evolved_cell_fraction: {min: 0.50, max: 1.0}
+      plate_reassigned_cell_fraction: {min: 0.01, max: 1.0}
+
+  - id: maturation_timestep_coarse
+    description: Ten nominal Ma represented by two reference-size maturation transitions.
+    tags: [maturation, timestep_refinement, paired_control]
+    overrides:
+      run: {seed: 20260711}
+      mesh: {cell_count: 128}
+      tectonics: {plate_count: 8}
+      erosion:
+        iterations: 2
+        maturation_timestep_ma: 5.0
+    expectations:
+      maturation_timestep_ma: {min: 5.0, max: 5.0}
+      maturation_timestep_scale: {min: 1.0, max: 1.0}
+      nominal_maturation_duration_ma: {min: 10.0, max: 10.0}
+
+  - id: maturation_timestep_refined
+    description: The same ten nominal Ma represented by four half-size maturation transitions.
+    tags: [maturation, timestep_refinement]
+    overrides:
+      run: {seed: 20260711}
+      mesh: {cell_count: 128}
+      tectonics: {plate_count: 8}
+      erosion:
+        iterations: 4
+        maturation_timestep_ma: 2.5
+    expectations:
+      maturation_timestep_ma: {min: 2.5, max: 2.5}
+      maturation_timestep_scale: {min: 0.5, max: 0.5}
+      nominal_maturation_duration_ma: {min: 10.0, max: 10.0}
+
 relations:
   - id: less_water_makes_less_ocean
     left: arid_landworld
@@ -389,3 +451,66 @@ relations:
     right: stagnant_surface
     metric: sediment_gross_mobilization_volume_km3
     minimum_difference: 1000000.0
+
+  - id: maturation_iterations_add_coupled_stages
+    left: maturation_evolved
+    operator: gt
+    right: maturation_initial
+    metric: simulation_stage_count
+    minimum_difference: 6.0
+
+  - id: maturation_iterations_rotate_plates
+    left: maturation_evolved
+    operator: gt
+    right: maturation_initial
+    metric: mean_plate_cumulative_rotation_deg
+    minimum_difference: 1.0
+
+  - id: maturation_iterations_evolve_crust
+    left: maturation_evolved
+    operator: gt
+    right: maturation_initial
+    metric: crust_evolved_cell_fraction
+    minimum_difference: 0.50
+
+  - id: maturation_iterations_reassign_plate_domains
+    left: maturation_evolved
+    operator: gt
+    right: maturation_initial
+    metric: plate_reassigned_cell_fraction
+    minimum_difference: 0.01
+
+  - id: maturation_iterations_mobilize_sediment
+    left: maturation_evolved
+    operator: gt
+    right: maturation_initial
+    metric: sediment_gross_mobilization_volume_km3
+    minimum_difference: 1000000.0
+
+  - id: timestep_refinement_preserves_nominal_duration
+    left: maturation_timestep_refined
+    operator: eq
+    right: maturation_timestep_coarse
+    metric: nominal_maturation_duration_ma
+    tolerance: 0.000001
+
+  - id: timestep_refinement_preserves_plate_rotation
+    left: maturation_timestep_refined
+    operator: eq
+    right: maturation_timestep_coarse
+    metric: mean_plate_cumulative_rotation_deg
+    tolerance: 0.000001
+
+  - id: timestep_refinement_uses_smaller_transitions
+    left: maturation_timestep_refined
+    operator: lt
+    right: maturation_timestep_coarse
+    metric: maturation_timestep_ma
+    minimum_difference: 2.5
+
+  - id: timestep_refinement_adds_sampling_stages
+    left: maturation_timestep_refined
+    operator: gt
+    right: maturation_timestep_coarse
+    metric: simulation_stage_count
+    minimum_difference: 2.0

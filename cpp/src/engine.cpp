@@ -23,4 +23,15 @@ std::string generate_world_json(
     return detail::serialize_world(params, detail::simulate_world(params));
 }
 
+std::string generate_geo_world_json(
+    const Params& params,
+    const ComputeOptions& compute_options
+) {
+    detail::validate_compute_options(compute_options);
+    detail::validate_params(params);
+    detail::ScopedThreadConfiguration thread_configuration(params.threads);
+    detail::ComputeSession compute_session(params, compute_options);
+    return detail::serialize_world(params, detail::simulate_geo_world(params));
+}
+
 }  // namespace magic_geo

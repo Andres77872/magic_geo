@@ -4,12 +4,26 @@
 > determinism analysis. Its backend inventory, automatic-selection policy,
 > thresholds, and latest benchmark results are superseded by the
 > [RTX 5090 CUDA optimization audit](cuda_rtx5090_optimization.md).
+> Its nearest-source crust-remap analysis is also superseded by
+> `forward_spherical_control_volume_overlap_v1`: production crust transport is
+> conservative and CPU-authoritative. The old accelerator remap kernel is
+> retained only as a low-level tested capability; no current generation path
+> uses it. GPU overlap implementation, parity, telemetry, and benchmarking are
+> pending.
+>
+> Generated v3 worlds make the split machine-readable:
+> `backend_scope=accelerated_native_kernels_not_end_to_end_pipeline`,
+> `crust_transport_execution_backend=cpu`,
+> `crust_transport_accelerator_dispatch_count=0`, and
+> `cpu_conservative_crust_overlap_transition_count` records the authoritative
+> overlap transitions. Retained CUDA/OpenCL nearest-source dispatch counters
+> are deprecated and must remain zero during world generation.
 
 # GPU simulation audit and architecture guide
 
-This document records the repository-specific performance audit, the current
+This document records the repository-specific performance audit, the historical
 CPU/OpenCL split, and the constraints that future acceleration work must
-preserve. It describes the working tree as of 2026-07-10. Measurements are
+preserve. It describes the pre-overlap-remapper working tree as of 2026-07-10. Measurements are
 diagnostic observations from one host, not release budgets or cross-machine
 benchmarks.
 
@@ -27,15 +41,16 @@ native fraction = 1.70 / 4.21 ~= 0.40
 ideal native-only speedup = 4.21 / (4.21 - 1.70) ~= 1.68
 ```
 
-The first safe acceleration tranche therefore focuses on deterministic,
+The first safe acceleration tranche therefore focused on deterministic,
 dense native loops rather than claiming that GPU execution will solve the full
-pipeline. The current implementation has:
+pipeline. The audited baseline had:
 
 - a deterministic KD tree for Fibonacci nearest-neighbor construction;
 - fixed-size inline arrays for the four 12-month cell fields;
 - a versioned CPU/auto/OpenCL backend contract and truthful telemetry;
 - FP64 OpenCL kernels for plate assignment, scalar and fused three-field
-  fixed-order CSR smoothing, and segmented same-plate crust-source remapping;
+  fixed-order CSR smoothing, and the now-superseded segmented same-plate
+  nearest-source remapping primitive;
 - planet-radius propagation through remaining route/logistics/campaign paths;
 - fail-closed finite/range validation at both Python and native boundaries.
 
@@ -68,8 +83,8 @@ There are two important pipelines, separated by JSON:
 ```text
 WorldConfig (Pydantic)
   -> config_to_native: nested Python mappings
-  -> ctypes CConfigV2
-  -> magic_geo_generate_json_v2
+  -> ctypes CConfigV3
+  -> magic_geo_generate_json_v3
      -> validate ComputeOptions and Params
      -> scoped OpenMP thread policy / ComputeSession
      -> simulate_world
@@ -82,7 +97,7 @@ WorldConfig (Pydantic)
            -> sea-level/climate/water-budget/hydrology stabilization
         -> cryosphere coupling
         -> soils, biomes, resources, water features
-        -> settlements, civilization, history
+        -> settlements, civilization, history (full-world branch only)
      -> serialize_world: one compact C++ JSON string
   -> C pointer copy and json.loads
   -> one large Python dict/list object graph
@@ -95,11 +110,12 @@ Python enrichment ordering is centralized in `src/magic_geo/api.py`. Both are
 semantic orderings, not merely scheduling choices. Later stages consume fields
 written by earlier stages.
 
-`generate_geo_world` is not yet a native physical-only simulation. It invokes
-the same full native world generation, parses the same JSON, removes native
-civilization fields, and then runs a shorter physical enrichment sequence.
-That explains why the measured geo API time (about 4.00 s) is close to the full
-API time (about 4.21 s).
+`generate_geo_world` now invokes a native physical-only branch that stops
+before settlement and every civilization generator. The serializer retains
+stable empty/default civilization placeholders, which the Python boundary
+removes before running the shorter natural enrichment sequence. The timing
+figures below predate this separation and remain historical baseline evidence,
+not measurements of the current geo-only branch.
 
 ### Memory path
 
@@ -120,7 +136,7 @@ state and process histories. The measured peak still remained about 338 MB.
 | --- | ---: | --- |
 | Pre-optimization canonical native + compact JSON, 4,096 cells / erosion 6 | ~1.70 s | C++ simulation, C++ serialization, C boundary copy, and parse dominate only part of the full call. |
 | Pre-optimization canonical full API | ~4.21 s | Native boundary plus all Python enrichers. |
-| Pre-optimization canonical geo API | ~4.00 s | Native civilization is still generated and then stripped. |
+| Pre-optimization canonical geo API | ~4.00 s | Historical measurement from before the native geo-only branch; civilization was generated and stripped at that time. |
 | Direct canonical full API audit run | 3.946 s internal; 4.22 s process | Same scale; process startup and teardown explain the outer difference. |
 | Direct canonical peak RSS | 450,108 KiB, about 440 MiB | Dominated by duplicated native/JSON/Python representations and provenance. |
 | Compact native JSON | 66.3 MiB | Before Python pretty-printing and object expansion. |
@@ -145,7 +161,7 @@ current KD tree changed the observed mesh-build times as follows:
 This is a mesh microbenchmark, not a full API result. The benefit grows with
 cell count, but reciprocal-neighbor repair and downstream work remain.
 
-### Current OpenCL tranche timing
+### Historical OpenCL tranche timing
 
 These direct native two-run medians use 16 host threads and
 `include_cells=false`. They include plate assignment, scalar smoothing, fused
@@ -258,7 +274,7 @@ per-dimension, and kernel limits. Telemetry separates raw FP64 devices from
 fully qualifying devices and reports selection, fallback, program state,
 dispatch counts, work sizes, device capabilities, and transfer bytes.
 
-### Current GPU kernels
+### GPU kernels in the historical nearest-source baseline
 
 All kernels use OpenCL C 1.2 FP64 and disable contraction.
 
@@ -272,15 +288,16 @@ All kernels use OpenCL C 1.2 FP64 and disable contraction.
    weights 0.58, 0.58, and 0.62. Field-major ping-pong buffers preserve the
    scalar kernel's arithmetic order for each field.
 4. `remap_crust_sources`: one work item per current cell over the ascending
-   candidate segment for its plate. The CPU computes deterministic backtraced
-   queries; the GPU returns source IDs; the CPU validates every ID and then
-   computes all provenance deltas.
+   candidate segment for its plate. This primitive remains unit-tested, but the
+   production v3 plate path no longer calls it. The authoritative path instead
+   forward-rotates native source polygons, computes exact spherical overlaps,
+   coverage multiplicity, and extensive mixtures on CPU.
 
-Positions and adjacency are uploaded once per generation. The three boundary
-fields now share one packed upload/read pair and one traversal per smoothing
+In that historical baseline, positions and adjacency were uploaded once per
+generation. The three boundary fields shared one packed upload/read pair and one traversal per smoothing
 step; the independent continental-coherence and relief fields still use scalar
-transfers. Crust remap uploads queries, plate IDs, offsets, and candidate IDs
-every erosion iteration. Context creation and source compilation also occur
+transfers. The old crust remap uploaded queries, plate IDs, offsets, and candidate IDs
+every erosion iteration. Context creation and source compilation occurred
 once per world, not once per process. These costs explain the limited gain.
 
 ### Radius propagation and finite validation
@@ -358,7 +375,7 @@ ordering rules it replaces.
 | --- | --- | --- |
 | Plate-center argmax | GPU now | Dense cell-by-plate loop; fixed ascending plate order. |
 | Fixed-step scalar or fused three-field neighbor smoothing | GPU now | Independent destination cells over immutable ordered CSR; field arithmetic remains ordered. |
-| Same-plate crust-source scan | GPU now, still a bottleneck | Dense segmented scan with deterministic candidate order; CPU retains rotations, validation, and provenance. |
+| Forward spherical crust overlap | CPU authoritative; GPU reconciliation pending | Source-polygon rotation, cap-index candidate search, spherical clipping, destination coverage arrangement, and extensive ledgers define v3 semantics. The legacy nearest-source GPU scan is not a valid substitute. |
 | Independent per-cell algebra with immutable inputs | GPU candidate | Safe only if field order, clamping, and FP policy match and several fields are batched to amortize transfers. |
 | Monthly climate fields | GPU candidate after SoA | Twelve fixed lanes are suitable, but atmospheric/moisture dependencies and downstream parity require a whole-stage design, not isolated expressions. |
 | Sea-level connectivity sweep / union-find | CPU | Ordered connectivity changes and deterministic component choice. |
@@ -383,8 +400,9 @@ records to Python, then migrate enrichers in dependency order. Arrow is useful
 for debug/export interoperability, but the hot in-process ABI can remain a
 small C view over contiguous arrays.
 
-Also add a physical-only native mode so `generate_geo_world` never computes or
-serializes civilization state that it immediately deletes.
+The physical-only native mode is now implemented: `generate_geo_world` no
+longer computes civilization state. The remaining boundary cost is stable JSON
+serialization/parsing of the natural state plus empty schema placeholders.
 
 ### 2. Make provenance selectable and columnar
 
@@ -399,15 +417,21 @@ Performance modes must never silently weaken evidence. The selected provenance
 level belongs in the schema and validation should report which replay guarantees
 are available.
 
-### 3. Replace scan-heavy crust remap, not merely its processor
+### 3. Reconcile the conservative overlap transport with accelerators
 
-The new remap kernel parallelizes one query per cell, but each query still scans
-all previous cells in its plate, approximately O(N^2 / plate_count), and uploads
-the segmented candidate structure each erosion step. Benchmark it separately.
-Likely next designs are deterministic per-plate spatial indices on CPU, or a
-device-resident segmented spatial index. Any replacement must replay ascending
-cell IDs for exact-distance ties and return the same source IDs before the CPU
-builds transport/process provenance.
+The nearest-source scan described by the original profile is no longer the
+production crust algorithm. V3 uses a CPU spherical point index,
+forward-rotated source polygons, exact overlap clipping, canonical
+destination-major CSR, and a destination-local line arrangement for
+union/gap/excess multiplicity. That coverage arrangement fails closed above
+16,384 local fragments; the legal 512-cell Fibonacci and 642-cell geodesic
+180-degree stress cases passed with maximum contributor counts 17 and 24 and
+maximum multiplicities 5 and 7, but exhaustive worst-case complexity is not
+established. Profile this path before choosing a GPU decomposition. Any
+accelerator design must reproduce source-row closure, unnormalized destination
+coverage, canonical pair ordering, all three extensive inventories, and global
+gap/overlap balance—not merely return one source ID. Add CPU/GPU ledger parity
+and fallback telemetry before claiming production acceleration.
 
 ### 4. Move from `Cell` AoS to simulation SoA
 
@@ -571,8 +595,13 @@ for cells, erosion in (
 
     cpu = generate_world(cpu_config)
     opencl = generate_world(opencl_config)
-    if erosion:
-        assert opencl["backend"]["opencl_crust_source_remap_dispatch_count"] == erosion
+    assert opencl["backend"]["crust_transport_execution_backend"] == "cpu"
+    assert opencl["backend"]["crust_transport_accelerator_dispatch_count"] == 0
+    assert opencl["backend"]["opencl_crust_source_remap_dispatch_count"] == 0
+    assert (
+        opencl["backend"]["cpu_conservative_crust_overlap_transition_count"]
+        == erosion
+    )
     cpu["backend"] = {}
     opencl["backend"] = {}
     assert cpu == opencl, (cells, erosion)
@@ -580,8 +609,11 @@ for cells, erosion in (
 PY
 ```
 
-The dispatch assertion proves that the remap kernel, rather than only
-assignment/smoothing, executed.
+These assertions prove the current split: accelerator assignment/smoothing may
+execute, while authoritative v3 crust transport stays on the CPU and the
+retired donor-remap counter stays zero. A future GPU overlap implementation
+needs a new model-specific dispatch counter and complete CSR-ledger parity;
+incrementing the deprecated donor counter would not qualify.
 
 ### Sanitizers
 

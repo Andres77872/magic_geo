@@ -90,4 +90,15 @@ void CudaComputeSession::run_remap_crust_sources(
     throw_cuda_not_compiled();
 }
 
+void CudaComputeSession::run_crust_overlap_continuous_shadow(
+    const CrustTransportPlan&,
+    const std::vector<Cell>&,
+    const std::vector<double>&,
+    const std::vector<double>&,
+    const std::vector<double>&,
+    CrustOverlapContinuousShadowResult&
+) {
+    throw_cuda_not_compiled();
+}
+
 }  // namespace magic_geo::detail

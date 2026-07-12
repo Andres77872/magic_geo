@@ -619,6 +619,49 @@ __kernel void smooth_three_neighbor_fields(
         (1.0 - self_weight_c) * average_c;
 }
 
+__kernel void reduce_crust_overlap_continuous_shadow(
+    __global const int* destination_offsets,
+    __global const int* source_cell_ids,
+    __global const double* overlap_area_km2,
+    __global const double* destination_area_km2,
+    __global const double* source_state,
+    const int cell_count,
+    __global double* output
+) {
+    const size_t destination = get_global_id(0);
+    const size_t stride = (size_t)cell_count;
+    if (destination >= stride) {
+        return;
+    }
+    double volume = 0.0;
+    double density_volume = 0.0;
+    double age_moment = 0.0;
+    const int begin = destination_offsets[destination];
+    const int end = destination_offsets[destination + 1];
+    for (int edge = begin; edge < end; ++edge) {
+        const int source = source_cell_ids[edge];
+        const double edge_volume =
+            overlap_area_km2[edge] * source_state[source];
+        volume = volume + edge_volume;
+        density_volume = density_volume +
+            edge_volume * source_state[stride + (size_t)source];
+        age_moment = age_moment +
+            edge_volume * source_state[2 * stride + (size_t)source];
+    }
+    output[destination] = volume;
+    output[stride + destination] = density_volume;
+    output[2 * stride + destination] = age_moment;
+    output[3 * stride + destination] = volume > 0.0
+        ? volume / destination_area_km2[destination]
+        : 0.0;
+    output[4 * stride + destination] = volume > 0.0
+        ? density_volume / volume
+        : source_state[stride + destination];
+    output[5 * stride + destination] = volume > 0.0
+        ? age_moment / volume
+        : 0.0;
+}
+
 __kernel void remap_crust_sources(
     __global const double4* mesh_positions,
     __global const double4* backtraced_positions,
@@ -725,6 +768,64 @@ void json_number(std::string& output, bool& first, const char* key, double value
     std::ostringstream encoded;
     encoded << std::setprecision(9) << value;
     output += encoded.str();
+}
+
+void merge_crust_overlap_shadow_validation_maxima(
+    CrustOverlapContinuousShadowValidation& maxima,
+    const CrustOverlapContinuousShadowValidation& value
+) {
+    maxima.maximum_crust_volume_error_km3 = std::max(
+        maxima.maximum_crust_volume_error_km3,
+        value.maximum_crust_volume_error_km3
+    );
+    maxima.maximum_crust_volume_error_bound_km3 = std::max(
+        maxima.maximum_crust_volume_error_bound_km3,
+        value.maximum_crust_volume_error_bound_km3
+    );
+    maxima.maximum_density_weighted_volume_error = std::max(
+        maxima.maximum_density_weighted_volume_error,
+        value.maximum_density_weighted_volume_error
+    );
+    maxima.maximum_density_weighted_volume_error_bound = std::max(
+        maxima.maximum_density_weighted_volume_error_bound,
+        value.maximum_density_weighted_volume_error_bound
+    );
+    maxima.maximum_crust_age_volume_moment_error = std::max(
+        maxima.maximum_crust_age_volume_moment_error,
+        value.maximum_crust_age_volume_moment_error
+    );
+    maxima.maximum_crust_age_volume_moment_error_bound = std::max(
+        maxima.maximum_crust_age_volume_moment_error_bound,
+        value.maximum_crust_age_volume_moment_error_bound
+    );
+    maxima.maximum_remapped_thickness_error_km = std::max(
+        maxima.maximum_remapped_thickness_error_km,
+        value.maximum_remapped_thickness_error_km
+    );
+    maxima.maximum_remapped_thickness_error_bound_km = std::max(
+        maxima.maximum_remapped_thickness_error_bound_km,
+        value.maximum_remapped_thickness_error_bound_km
+    );
+    maxima.maximum_remapped_density_error = std::max(
+        maxima.maximum_remapped_density_error,
+        value.maximum_remapped_density_error
+    );
+    maxima.maximum_remapped_density_error_bound = std::max(
+        maxima.maximum_remapped_density_error_bound,
+        value.maximum_remapped_density_error_bound
+    );
+    maxima.maximum_remapped_age_error_ma = std::max(
+        maxima.maximum_remapped_age_error_ma,
+        value.maximum_remapped_age_error_ma
+    );
+    maxima.maximum_remapped_age_error_bound_ma = std::max(
+        maxima.maximum_remapped_age_error_bound_ma,
+        value.maximum_remapped_age_error_bound_ma
+    );
+    maxima.maximum_error_to_bound_ratio = std::max(
+        maxima.maximum_error_to_bound_ratio,
+        value.maximum_error_to_bound_ratio
+    );
 }
 
 struct alignas(32) PackedVec4 {
@@ -1084,14 +1185,34 @@ struct ComputeSession::Impl {
             program, "smooth_three_neighbor_fields", &rc
         );
         require_success(rc, "clCreateKernel(smooth_three_neighbor_fields)");
-        remap_kernel = api->create_kernel(program, "remap_crust_sources", &rc);
-        require_success(rc, "clCreateKernel(remap_crust_sources)");
-
+        overlap_shadow_kernel = api->create_kernel(
+            program, "reduce_crust_overlap_continuous_shadow", &rc
+        );
+        require_success(
+            rc, "clCreateKernel(reduce_crust_overlap_continuous_shadow)"
+        );
         assign_local_work_size = choose_local_work_size(assign_kernel);
         smooth_local_work_size = choose_local_work_size(smooth_kernel);
         smooth_three_local_work_size = choose_local_work_size(smooth_three_kernel);
-        remap_local_work_size = choose_local_work_size(remap_kernel);
+        overlap_shadow_local_work_size = choose_local_work_size(
+            overlap_shadow_kernel
+        );
         runtime_ready = true;
+    }
+
+    void ensure_legacy_remap_kernel() {
+        if (remap_kernel != nullptr) {
+            return;
+        }
+        cl_int rc = CL_SUCCESS;
+        remap_kernel = api->create_kernel(program, "remap_crust_sources", &rc);
+        require_success(rc, "clCreateKernel(remap_crust_sources legacy test hook)");
+        if (remap_kernel == nullptr) {
+            throw std::runtime_error(
+                "clCreateKernel(remap_crust_sources legacy test hook) returned null"
+            );
+        }
+        remap_local_work_size = choose_local_work_size(remap_kernel);
     }
 
     std::size_t choose_local_work_size(cl_kernel kernel) const {
@@ -1167,6 +1288,12 @@ struct ComputeSession::Impl {
         release_mem(remap_candidate_offset_buffer);
         release_mem(remap_candidate_id_buffer);
         release_mem(remap_source_id_buffer);
+        release_mem(overlap_shadow_destination_offset_buffer);
+        release_mem(overlap_shadow_source_id_buffer);
+        release_mem(overlap_shadow_area_buffer);
+        release_mem(overlap_shadow_destination_area_buffer);
+        release_mem(overlap_shadow_source_state_buffer);
+        release_mem(overlap_shadow_output_buffer);
         center_capacity = 0;
         plate_capacity = 0;
         smooth_capacity = 0;
@@ -1174,6 +1301,8 @@ struct ComputeSession::Impl {
         remap_cell_capacity = 0;
         remap_plate_capacity = 0;
         remap_candidate_capacity = 0;
+        overlap_shadow_cell_capacity = 0;
+        overlap_shadow_edge_capacity = 0;
         if (assign_kernel != nullptr && api) {
             api->release_kernel(assign_kernel);
             assign_kernel = nullptr;
@@ -1189,6 +1318,10 @@ struct ComputeSession::Impl {
         if (remap_kernel != nullptr && api) {
             api->release_kernel(remap_kernel);
             remap_kernel = nullptr;
+        }
+        if (overlap_shadow_kernel != nullptr && api) {
+            api->release_kernel(overlap_shadow_kernel);
+            overlap_shadow_kernel = nullptr;
         }
         if (program != nullptr && api) {
             api->release_program(program);
@@ -1428,6 +1561,132 @@ struct ComputeSession::Impl {
                 "crust remap candidate-id buffer allocation"
             );
             remap_candidate_capacity = candidate_count;
+        }
+    }
+
+    static std::size_t checked_opencl_bytes(
+        std::size_t count,
+        std::size_t element_size,
+        const char* context
+    ) {
+        if (
+            element_size != 0 &&
+            count > std::numeric_limits<std::size_t>::max() / element_size
+        ) {
+            throw std::runtime_error(
+                std::string(context) + " byte count overflow"
+            );
+        }
+        return count * element_size;
+    }
+
+    void ensure_overlap_shadow_buffers(
+        std::size_t cell_count,
+        std::size_t edge_count
+    ) {
+        const std::size_t offset_bytes = checked_opencl_bytes(
+            cell_count + 1, sizeof(cl_int),
+            "OpenCL crust-overlap shadow destination offsets"
+        );
+        const std::size_t edge_id_bytes = checked_opencl_bytes(
+            edge_count, sizeof(cl_int),
+            "OpenCL crust-overlap shadow source ids"
+        );
+        const std::size_t edge_area_bytes = checked_opencl_bytes(
+            edge_count, sizeof(double),
+            "OpenCL crust-overlap shadow edge areas"
+        );
+        const std::size_t destination_area_bytes = checked_opencl_bytes(
+            cell_count, sizeof(double),
+            "OpenCL crust-overlap shadow destination areas"
+        );
+        const std::size_t source_state_bytes = checked_opencl_bytes(
+            cell_count, 3U * sizeof(double),
+            "OpenCL crust-overlap shadow source state"
+        );
+        const std::size_t output_bytes = checked_opencl_bytes(
+            cell_count, 6U * sizeof(double),
+            "OpenCL crust-overlap shadow output"
+        );
+        std::size_t required_bytes = 0;
+        for (std::size_t bytes : {
+                 offset_bytes,
+                 edge_id_bytes,
+                 edge_area_bytes,
+                 destination_area_bytes,
+                 source_state_bytes,
+                 output_bytes,
+             }) {
+            if (bytes > std::numeric_limits<std::size_t>::max() - required_bytes) {
+                throw std::runtime_error(
+                    "OpenCL crust-overlap shadow aggregate allocation size overflow"
+                );
+            }
+            required_bytes += bytes;
+        }
+        const DeviceRecord* record = selected_device();
+        if (
+            record == nullptr ||
+            (record->global_memory_bytes != 0 &&
+             required_bytes > record->global_memory_bytes)
+        ) {
+            throw std::runtime_error(
+                "OpenCL crust-overlap shadow buffers exceed device global memory"
+            );
+        }
+
+        if (cell_count > overlap_shadow_cell_capacity) {
+            release_mem(overlap_shadow_destination_offset_buffer);
+            release_mem(overlap_shadow_destination_area_buffer);
+            release_mem(overlap_shadow_source_state_buffer);
+            release_mem(overlap_shadow_output_buffer);
+            overlap_shadow_destination_offset_buffer = create_buffer(
+                CL_MEM_READ_ONLY,
+                offset_bytes,
+                "crust-overlap shadow destination-offset buffer allocation"
+            );
+            overlap_shadow_destination_area_buffer = create_buffer(
+                CL_MEM_READ_ONLY,
+                destination_area_bytes,
+                "crust-overlap shadow destination-area buffer allocation"
+            );
+            overlap_shadow_source_state_buffer = create_buffer(
+                CL_MEM_READ_ONLY,
+                source_state_bytes,
+                "crust-overlap shadow source-state buffer allocation"
+            );
+            overlap_shadow_output_buffer = create_buffer(
+                CL_MEM_READ_WRITE,
+                output_bytes,
+                "crust-overlap shadow output buffer allocation"
+            );
+            overlap_shadow_cell_capacity = cell_count;
+        }
+        if (std::max<std::size_t>(1, edge_count) > overlap_shadow_edge_capacity) {
+            release_mem(overlap_shadow_source_id_buffer);
+            release_mem(overlap_shadow_area_buffer);
+            const std::size_t allocated_edge_count = std::max<std::size_t>(
+                1, edge_count
+            );
+            overlap_shadow_source_id_buffer = create_buffer(
+                CL_MEM_READ_ONLY,
+                checked_opencl_bytes(
+                    allocated_edge_count,
+                    sizeof(cl_int),
+                    "OpenCL crust-overlap shadow source-id allocation"
+                ),
+                "crust-overlap shadow source-id buffer allocation"
+            );
+            overlap_shadow_area_buffer = create_buffer(
+                CL_MEM_READ_ONLY,
+                checked_opencl_bytes(
+                    allocated_edge_count,
+                    sizeof(double),
+                    "OpenCL crust-overlap shadow edge-area allocation"
+                ),
+                "crust-overlap shadow edge-area buffer allocation"
+            );
+            overlap_shadow_edge_capacity = allocated_edge_count;
         }
     }
 
@@ -1681,6 +1940,205 @@ struct ComputeSession::Impl {
         last_local_work_size = smooth_three_local_work_size;
     }
 
+    void run_crust_overlap_continuous_shadow(
+        const CrustTransportPlan& transport,
+        const std::vector<Cell>& cells,
+        const std::vector<double>& source_crust_thickness_km,
+        const std::vector<double>& source_crust_density,
+        const std::vector<double>& source_crust_age_ma,
+        CrustOverlapContinuousShadowResult& output
+    ) {
+        if (!runtime_ready || selected_backend != "opencl") {
+            throw std::runtime_error(
+                "OpenCL crust-overlap continuous shadow runtime is not active"
+            );
+        }
+        validate_crust_overlap_continuous_shadow_input(
+            transport,
+            cells,
+            source_crust_thickness_km,
+            source_crust_density,
+            source_crust_age_ma
+        );
+        if (cells.empty()) {
+            output = {};
+            return;
+        }
+        const std::size_t cell_count = cells.size();
+        const std::size_t edge_count = transport.source_cell_ids.size();
+        ensure_overlap_shadow_buffers(cell_count, edge_count);
+
+        std::vector<cl_int> destination_offsets(
+            transport.destination_offsets.begin(),
+            transport.destination_offsets.end()
+        );
+        std::vector<cl_int> source_cell_ids(
+            transport.source_cell_ids.begin(),
+            transport.source_cell_ids.end()
+        );
+        std::vector<double> destination_area(cell_count);
+        std::vector<double> source_state(3U * cell_count);
+        for (std::size_t index = 0; index < cell_count; ++index) {
+            destination_area[index] = cells[index].area_km2;
+            source_state[index] = source_crust_thickness_km[index];
+            source_state[cell_count + index] = source_crust_density[index];
+            source_state[2U * cell_count + index] = source_crust_age_ma[index];
+        }
+        const std::size_t offset_bytes = checked_opencl_bytes(
+            transport.destination_offsets.size(),
+            sizeof(cl_int),
+            "OpenCL crust-overlap shadow offset upload"
+        );
+        const std::size_t source_id_bytes = checked_opencl_bytes(
+            edge_count,
+            sizeof(cl_int),
+            "OpenCL crust-overlap shadow source-id upload"
+        );
+        const std::size_t edge_area_bytes = checked_opencl_bytes(
+            edge_count,
+            sizeof(double),
+            "OpenCL crust-overlap shadow edge-area upload"
+        );
+        const std::size_t destination_area_bytes = checked_opencl_bytes(
+            cell_count,
+            sizeof(double),
+            "OpenCL crust-overlap shadow destination-area upload"
+        );
+        const std::size_t source_state_bytes = checked_opencl_bytes(
+            source_state.size(),
+            sizeof(double),
+            "OpenCL crust-overlap shadow source-state upload"
+        );
+        const std::size_t output_count = 6U * cell_count;
+        const std::size_t output_bytes = checked_opencl_bytes(
+            output_count,
+            sizeof(double),
+            "OpenCL crust-overlap shadow output readback"
+        );
+        write_buffer(
+            overlap_shadow_destination_offset_buffer,
+            offset_bytes,
+            destination_offsets.data()
+        );
+        if (edge_count > 0) {
+            write_buffer(
+                overlap_shadow_source_id_buffer,
+                source_id_bytes,
+                source_cell_ids.data()
+            );
+            write_buffer(
+                overlap_shadow_area_buffer,
+                edge_area_bytes,
+                transport.overlap_area_km2.data()
+            );
+        }
+        write_buffer(
+            overlap_shadow_destination_area_buffer,
+            destination_area_bytes,
+            destination_area.data()
+        );
+        write_buffer(
+            overlap_shadow_source_state_buffer,
+            source_state_bytes,
+            source_state.data()
+        );
+
+        const cl_int kernel_cell_count = static_cast<cl_int>(cell_count);
+        set_arg(
+            overlap_shadow_kernel,
+            0,
+            sizeof(overlap_shadow_destination_offset_buffer),
+            &overlap_shadow_destination_offset_buffer
+        );
+        set_arg(
+            overlap_shadow_kernel,
+            1,
+            sizeof(overlap_shadow_source_id_buffer),
+            &overlap_shadow_source_id_buffer
+        );
+        set_arg(
+            overlap_shadow_kernel,
+            2,
+            sizeof(overlap_shadow_area_buffer),
+            &overlap_shadow_area_buffer
+        );
+        set_arg(
+            overlap_shadow_kernel,
+            3,
+            sizeof(overlap_shadow_destination_area_buffer),
+            &overlap_shadow_destination_area_buffer
+        );
+        set_arg(
+            overlap_shadow_kernel,
+            4,
+            sizeof(overlap_shadow_source_state_buffer),
+            &overlap_shadow_source_state_buffer
+        );
+        set_arg(
+            overlap_shadow_kernel,
+            5,
+            sizeof(kernel_cell_count),
+            &kernel_cell_count
+        );
+        set_arg(
+            overlap_shadow_kernel,
+            6,
+            sizeof(overlap_shadow_output_buffer),
+            &overlap_shadow_output_buffer
+        );
+        const std::size_t global = rounded_global_size(
+            cell_count, overlap_shadow_local_work_size
+        );
+        require_success(
+            api->enqueue_ndrange_kernel(
+                queue,
+                overlap_shadow_kernel,
+                1,
+                nullptr,
+                &global,
+                &overlap_shadow_local_work_size,
+                0,
+                nullptr,
+                nullptr
+            ),
+            "clEnqueueNDRangeKernel(reduce_crust_overlap_continuous_shadow)"
+        );
+        kernel_dispatch_count++;
+        crust_overlap_continuous_shadow_dispatch_count++;
+
+        std::vector<double> packed_output(output_count);
+        read_buffer(
+            overlap_shadow_output_buffer,
+            output_bytes,
+            packed_output.data()
+        );
+        output.crust_volume_km3_by_destination.assign(
+            packed_output.begin(), packed_output.begin() + cell_count
+        );
+        output.density_weighted_crust_volume_by_destination.assign(
+            packed_output.begin() + cell_count,
+            packed_output.begin() + 2U * cell_count
+        );
+        output.crust_age_volume_moment_by_destination.assign(
+            packed_output.begin() + 2U * cell_count,
+            packed_output.begin() + 3U * cell_count
+        );
+        output.remapped_crust_thickness_km_by_destination.assign(
+            packed_output.begin() + 3U * cell_count,
+            packed_output.begin() + 4U * cell_count
+        );
+        output.remapped_crust_density_by_destination.assign(
+            packed_output.begin() + 4U * cell_count,
+            packed_output.begin() + 5U * cell_count
+        );
+        output.remapped_crust_age_ma_by_destination.assign(
+            packed_output.begin() + 5U * cell_count,
+            packed_output.end()
+        );
+        last_global_work_size = global;
+        last_local_work_size = overlap_shadow_local_work_size;
+    }
+
     void run_remap_crust_sources(
         const std::vector<Cell>& cells,
         const std::vector<Vec3>& backtraced_positions,
@@ -1699,6 +2157,7 @@ struct ComputeSession::Impl {
                 static_cast<std::size_t>(std::numeric_limits<cl_int>::max())) {
             throw std::runtime_error("OpenCL crust-source remap exceeds 32-bit kernel indices");
         }
+        ensure_legacy_remap_kernel();
 
         std::vector<PackedVec4> packed_queries(cells.size());
         std::vector<cl_int> current_plate_ids(cells.size(), -1);
@@ -1868,6 +2327,288 @@ struct ComputeSession::Impl {
         json_string(output, first, "active_backend", active_backend);
         json_string(output, first, "initial_selected_backend", initial_selected_backend);
         json_string(output, first, "backend_selection_reason", selection_reason);
+        json_string(
+            output,
+            first,
+            "backend_scope",
+            "accelerated_native_kernels_not_end_to_end_pipeline"
+        );
+        json_string(
+            output,
+            first,
+            "crust_transport_execution_backend",
+            "cpu"
+        );
+        json_string(
+            output,
+            first,
+            "crust_transport_execution_model",
+            "forward_spherical_control_volume_overlap_v1"
+        );
+        json_integer(
+            output,
+            first,
+            "crust_transport_accelerator_dispatch_count",
+            0
+        );
+        json_integer(
+            output,
+            first,
+            "cpu_conservative_crust_overlap_transition_count",
+            cpu_conservative_crust_overlap_transition_count
+        );
+        json_string(
+            output,
+            first,
+            "crust_overlap_geometry_and_csr_authoritative_backend",
+            "cpu"
+        );
+        json_string(
+            output,
+            first,
+            "crust_overlap_continuous_production_remap_authoritative_backend",
+            "cpu"
+        );
+        json_string(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_model",
+            "cpu_authoritative_overlap_csr_continuous_moment_shadow_v1"
+        );
+        json_string(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_scope",
+            "raw_extensive_moments_and_derived_continuous_state_only"
+        );
+        json_string(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_error_summary_semantics",
+            "per_quantity_maximum_error_and_maximum_bound_are_independent_uniform_maxima_paired_worst_case_is_maximum_error_to_bound_ratio"
+        );
+        json_string(
+            output,
+            first,
+            "crust_transport_accelerator_dispatch_count_semantics",
+            "complete_authoritative_forward_overlap_plan_dispatches_only"
+        );
+        json_bool(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_only",
+            true
+        );
+        json_bool(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_authoritative",
+            false
+        );
+        json_bool(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_result_used_for_state",
+            false
+        );
+        json_bool(
+            output,
+            first,
+            "crust_overlap_accelerator_geometry_parity_demonstrated",
+            false
+        );
+        json_bool(
+            output,
+            first,
+            "crust_overlap_accelerator_coverage_membership_parity_demonstrated",
+            false
+        );
+        json_bool(
+            output,
+            first,
+            "crust_overlap_accelerator_categorical_parity_demonstrated",
+            false
+        );
+        json_bool(
+            output,
+            first,
+            "crust_overlap_accelerator_complete_parity_demonstrated",
+            false
+        );
+        json_bool(
+            output,
+            first,
+            "crust_overlap_accelerator_state_authoritative",
+            false
+        );
+        const std::uint64_t shadow_device_dispatch_count =
+            crust_overlap_continuous_shadow_dispatch_count +
+            cuda.crust_overlap_continuous_shadow_dispatch_count;
+        json_integer(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_device_dispatch_count",
+            shadow_device_dispatch_count
+        );
+        json_integer(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_validated_transition_count",
+            crust_overlap_continuous_shadow_validated_transition_count
+        );
+        json_integer(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_failure_count",
+            crust_overlap_continuous_shadow_failure_count
+        );
+        json_bool(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_last_validation_passed",
+            crust_overlap_continuous_shadow_last_validation_passed
+        );
+        json_bool(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_all_validated_transitions_passed",
+            crust_overlap_continuous_shadow_validated_transition_count > 0 &&
+                crust_overlap_continuous_shadow_failure_count == 0
+        );
+        const char* shadow_status =
+            crust_overlap_continuous_shadow_failure_count > 0
+                ? "failed_and_cpu_authority_retained"
+                : (crust_overlap_continuous_shadow_validated_transition_count > 0 &&
+                        crust_overlap_continuous_shadow_validated_transition_count ==
+                            static_cast<std::uint64_t>(
+                                cpu_conservative_crust_overlap_transition_count
+                            )
+                    ? "passed"
+                    : (crust_overlap_continuous_shadow_validated_transition_count > 0
+                        ? "partial_pass_before_cpu_fallback"
+                        : (cpu_conservative_crust_overlap_transition_count == 0
+                            ? "not_run_no_conservative_transition"
+                            : "not_run_no_active_accelerator")));
+        json_string(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_validation_status",
+            shadow_status
+        );
+        json_number(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_maximum_crust_volume_error_km3",
+            crust_overlap_continuous_shadow_maxima.
+                maximum_crust_volume_error_km3
+        );
+        json_number(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_maximum_crust_volume_error_bound_km3",
+            crust_overlap_continuous_shadow_maxima.
+                maximum_crust_volume_error_bound_km3
+        );
+        json_number(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_maximum_density_weighted_volume_error",
+            crust_overlap_continuous_shadow_maxima.
+                maximum_density_weighted_volume_error
+        );
+        json_number(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_maximum_density_weighted_volume_error_bound",
+            crust_overlap_continuous_shadow_maxima.
+                maximum_density_weighted_volume_error_bound
+        );
+        json_number(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_maximum_age_volume_moment_error",
+            crust_overlap_continuous_shadow_maxima.
+                maximum_crust_age_volume_moment_error
+        );
+        json_number(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_maximum_age_volume_moment_error_bound",
+            crust_overlap_continuous_shadow_maxima.
+                maximum_crust_age_volume_moment_error_bound
+        );
+        json_number(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_maximum_remapped_thickness_error_km",
+            crust_overlap_continuous_shadow_maxima.
+                maximum_remapped_thickness_error_km
+        );
+        json_number(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_maximum_remapped_thickness_error_bound_km",
+            crust_overlap_continuous_shadow_maxima.
+                maximum_remapped_thickness_error_bound_km
+        );
+        json_number(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_maximum_remapped_density_error",
+            crust_overlap_continuous_shadow_maxima.
+                maximum_remapped_density_error
+        );
+        json_number(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_maximum_remapped_density_error_bound",
+            crust_overlap_continuous_shadow_maxima.
+                maximum_remapped_density_error_bound
+        );
+        json_number(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_maximum_remapped_age_error_ma",
+            crust_overlap_continuous_shadow_maxima.
+                maximum_remapped_age_error_ma
+        );
+        json_number(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_maximum_remapped_age_error_bound_ma",
+            crust_overlap_continuous_shadow_maxima.
+                maximum_remapped_age_error_bound_ma
+        );
+        json_number(
+            output,
+            first,
+            "crust_overlap_continuous_shadow_maximum_error_to_bound_ratio",
+            crust_overlap_continuous_shadow_maxima.maximum_error_to_bound_ratio
+        );
+        json_bool(
+            output,
+            first,
+            "accelerator_crust_source_remap_kernel_production_active",
+            false
+        );
+        json_bool(
+            output,
+            first,
+            "legacy_nearest_source_remap_world_pipeline_enabled",
+            false
+        );
+        json_bool(
+            output,
+            first,
+            "legacy_crust_source_remap_dispatch_counters_deprecated",
+            true
+        );
+        json_string(
+            output,
+            first,
+            "accelerator_crust_source_remap_kernel_role",
+            "legacy_nearest_donor_test_hook_not_used_by_v3_transport"
+        );
         json_integer(
             output, first, "automatic_planning_cell_count", auto_planning_cell_count
         );
@@ -2046,6 +2787,12 @@ struct ComputeSession::Impl {
             cuda.crust_source_remap_dispatch_count
         );
         json_integer(
+            output,
+            first,
+            "cuda_crust_overlap_continuous_shadow_dispatch_count",
+            cuda.crust_overlap_continuous_shadow_dispatch_count
+        );
+        json_integer(
             output, first, "cuda_host_to_device_bytes", cuda.host_to_device_bytes
         );
         json_integer(
@@ -2163,6 +2910,12 @@ struct ComputeSession::Impl {
             "opencl_crust_source_remap_dispatch_count",
             crust_remap_dispatch_count
         );
+        json_integer(
+            output,
+            first,
+            "opencl_crust_overlap_continuous_shadow_dispatch_count",
+            crust_overlap_continuous_shadow_dispatch_count
+        );
         json_integer(output, first, "opencl_host_to_device_bytes", host_to_device_bytes);
         json_integer(output, first, "opencl_device_to_host_bytes", device_to_host_bytes);
         json_integer(output, first, "opencl_last_global_work_size", last_global_work_size);
@@ -2277,6 +3030,11 @@ struct ComputeSession::Impl {
 
     int requested_backend = 0;
     bool prefer_gpu = true;
+    int cpu_conservative_crust_overlap_transition_count = 0;
+    std::uint64_t crust_overlap_continuous_shadow_validated_transition_count = 0;
+    std::uint64_t crust_overlap_continuous_shadow_failure_count = 0;
+    bool crust_overlap_continuous_shadow_last_validation_passed = false;
+    CrustOverlapContinuousShadowValidation crust_overlap_continuous_shadow_maxima;
     bool auto_selection_pending = false;
     std::size_t auto_planning_cell_count = 0;
     int cuda_auto_min_cell_count = CUDA_SM_120_AUTO_MIN_CELL_COUNT;
@@ -2314,6 +3072,7 @@ struct ComputeSession::Impl {
     cl_kernel assign_kernel = nullptr;
     cl_kernel smooth_kernel = nullptr;
     cl_kernel smooth_three_kernel = nullptr;
+    cl_kernel overlap_shadow_kernel = nullptr;
     cl_kernel remap_kernel = nullptr;
     bool runtime_ready = false;
     bool program_built = false;
@@ -2321,6 +3080,7 @@ struct ComputeSession::Impl {
     std::size_t assign_local_work_size = 1;
     std::size_t smooth_local_work_size = 1;
     std::size_t smooth_three_local_work_size = 1;
+    std::size_t overlap_shadow_local_work_size = 1;
     std::size_t remap_local_work_size = 1;
 
     const Cell* mesh_identity = nullptr;
@@ -2341,6 +3101,12 @@ struct ComputeSession::Impl {
     cl_mem remap_candidate_offset_buffer = nullptr;
     cl_mem remap_candidate_id_buffer = nullptr;
     cl_mem remap_source_id_buffer = nullptr;
+    cl_mem overlap_shadow_destination_offset_buffer = nullptr;
+    cl_mem overlap_shadow_source_id_buffer = nullptr;
+    cl_mem overlap_shadow_area_buffer = nullptr;
+    cl_mem overlap_shadow_destination_area_buffer = nullptr;
+    cl_mem overlap_shadow_source_state_buffer = nullptr;
+    cl_mem overlap_shadow_output_buffer = nullptr;
     std::size_t center_capacity = 0;
     std::size_t plate_capacity = 0;
     std::size_t smooth_capacity = 0;
@@ -2348,6 +3114,8 @@ struct ComputeSession::Impl {
     std::size_t remap_cell_capacity = 0;
     std::size_t remap_plate_capacity = 0;
     std::size_t remap_candidate_capacity = 0;
+    std::size_t overlap_shadow_cell_capacity = 0;
+    std::size_t overlap_shadow_edge_capacity = 0;
 
     std::uint64_t kernel_dispatch_count = 0;
     std::uint64_t plate_assignment_dispatch_count = 0;
@@ -2356,6 +3124,7 @@ struct ComputeSession::Impl {
     std::uint64_t batched_smoothing_operation_count = 0;
     std::uint64_t batched_smoothing_kernel_dispatch_count = 0;
     std::uint64_t crust_remap_dispatch_count = 0;
+    std::uint64_t crust_overlap_continuous_shadow_dispatch_count = 0;
     std::uint64_t host_to_device_bytes = 0;
     std::uint64_t device_to_host_bytes = 0;
     std::size_t last_global_work_size = 0;
@@ -2540,6 +3309,90 @@ bool try_accelerated_remap_crust_sources(
         }
         active_compute_session->fall_back_to_cpu("crust_source_remap", error.what());
         return false;
+    }
+}
+
+void reconcile_accelerated_crust_overlap_continuous_shadow(
+    const CrustTransportPlan& transport,
+    const std::vector<Cell>& cells,
+    const std::vector<double>& source_crust_thickness_km,
+    const std::vector<double>& source_crust_density,
+    const std::vector<double>& source_crust_age_ma
+) {
+    if (active_compute_session == nullptr) {
+        return;
+    }
+    active_compute_session->ensure_auto_backend(cells.size());
+    if (active_compute_session->selected_backend == "cpu") {
+        return;
+    }
+    try {
+        CrustOverlapContinuousShadowResult result;
+        if (active_compute_session->selected_backend == "cuda") {
+            active_compute_session->cuda_session->run_crust_overlap_continuous_shadow(
+                transport,
+                cells,
+                source_crust_thickness_km,
+                source_crust_density,
+                source_crust_age_ma,
+                result
+            );
+        } else if (active_compute_session->selected_backend == "opencl") {
+            active_compute_session->run_crust_overlap_continuous_shadow(
+                transport,
+                cells,
+                source_crust_thickness_km,
+                source_crust_density,
+                source_crust_age_ma,
+                result
+            );
+        } else {
+            throw std::runtime_error(
+                "crust overlap continuous shadow selected an invalid backend"
+            );
+        }
+        const CrustOverlapContinuousShadowValidation validation =
+            validate_crust_overlap_continuous_shadow_result(
+                transport,
+                cells,
+                source_crust_thickness_km,
+                source_crust_density,
+                source_crust_age_ma,
+                result
+            );
+        merge_crust_overlap_shadow_validation_maxima(
+            active_compute_session->crust_overlap_continuous_shadow_maxima,
+            validation
+        );
+        if (!validation.passed) {
+            throw std::runtime_error(
+                "accelerator crust-overlap continuous shadow mismatch: " +
+                validation.failure
+            );
+        }
+        active_compute_session->
+            crust_overlap_continuous_shadow_validated_transition_count++;
+        active_compute_session->
+            crust_overlap_continuous_shadow_last_validation_passed = true;
+    } catch (const std::exception& error) {
+        active_compute_session->crust_overlap_continuous_shadow_failure_count++;
+        active_compute_session->
+            crust_overlap_continuous_shadow_last_validation_passed = false;
+        if (
+            active_compute_session->requested_backend == 2 ||
+            active_compute_session->requested_backend == 3
+        ) {
+            throw;
+        }
+        active_compute_session->fall_back_to_cpu(
+            "crust_overlap_continuous_shadow_reconciliation", error.what()
+        );
+    }
+}
+
+void record_cpu_conservative_crust_overlap_transition() {
+    if (active_compute_session != nullptr) {
+        active_compute_session->cpu_conservative_crust_overlap_transition_count++;
     }
 }
 

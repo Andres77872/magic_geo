@@ -1,5 +1,6 @@
 #pragma once
 
+#include "crust_overlap_shadow.hpp"
 #include "engine/model.hpp"
 
 #include <array>
@@ -59,6 +60,7 @@ struct CudaTelemetry {
     std::uint64_t batched_smoothing_operation_count = 0;
     std::uint64_t batched_smoothing_kernel_dispatch_count = 0;
     std::uint64_t crust_source_remap_dispatch_count = 0;
+    std::uint64_t crust_overlap_continuous_shadow_dispatch_count = 0;
     std::uint64_t host_to_device_bytes = 0;
     std::uint64_t device_to_host_bytes = 0;
     std::uint64_t device_allocation_count = 0;
@@ -135,6 +137,15 @@ public:
         const std::vector<Vec3>& backtraced_positions,
         const std::vector<std::vector<int>>& previous_cells_by_plate,
         std::vector<int>& source_cell_ids
+    );
+
+    void run_crust_overlap_continuous_shadow(
+        const CrustTransportPlan& transport,
+        const std::vector<Cell>& cells,
+        const std::vector<double>& source_crust_thickness_km,
+        const std::vector<double>& source_crust_density,
+        const std::vector<double>& source_crust_age_ma,
+        CrustOverlapContinuousShadowResult& output
     );
 
 private:

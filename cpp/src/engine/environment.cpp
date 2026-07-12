@@ -108,9 +108,16 @@ GlacialSedimentTransportStage transport_glacial_sediment(
     GlacialSedimentTransportStage stage;
     stage.id = id;
     stage.feedback_stage_id = feedback_stage_id;
+    stage.cell_count = n;
     stage.input_cells.reserve(static_cast<std::size_t>(n));
     std::vector<double> production_depth_m(static_cast<std::size_t>(n), 0.0);
     std::vector<double> deposition_depth_m(static_cast<std::size_t>(n), 0.0);
+    stage.alluvium_entrainment_depth_m_by_cell.assign(
+        static_cast<std::size_t>(n), 0.0
+    );
+    stage.bedrock_erosion_depth_m_by_cell.assign(
+        static_cast<std::size_t>(n), 0.0
+    );
     std::set<int> target_cell_ids;
 
     for (int cell_id = 0; cell_id < n; ++cell_id) {
@@ -220,21 +227,42 @@ GlacialSedimentTransportStage transport_glacial_sediment(
             alluvium_entrainment_depth_m * cell.area_km2 / 1000.0;
         stage.bedrock_erosion_volume_km3 +=
             bedrock_erosion_depth_m * cell.area_km2 / 1000.0;
+        stage.alluvium_entrainment_depth_m_by_cell[
+            static_cast<std::size_t>(i)
+        ] = alluvium_entrainment_depth_m;
+        stage.bedrock_erosion_depth_m_by_cell[
+            static_cast<std::size_t>(i)
+        ] = bedrock_erosion_depth_m;
         cell.sediment_alluvium_entrainment_m +=
             alluvium_entrainment_depth_m;
         cell.sediment_bedrock_erosion_m += bedrock_erosion_depth_m;
-        cell.elevation_m +=
+        const double compatibility_surface_elevation_m =
+            cell.elevation_m +
             deposition_depth_m[static_cast<std::size_t>(i)] -
             source_depth_m;
         cell.sediment_production_m +=
             source_depth_m;
         cell.sediment_deposition_m +=
             deposition_depth_m[static_cast<std::size_t>(i)];
-        cell.sediment_thickness_m = std::max(
+        apply_sediment_interface_material_change(
+            cell,
             0.0,
-            cell.sediment_thickness_m - alluvium_entrainment_depth_m +
-                deposition_depth_m[static_cast<std::size_t>(i)]
+            bedrock_erosion_depth_m,
+            alluvium_entrainment_depth_m,
+            deposition_depth_m[static_cast<std::size_t>(i)],
+            "glacial sediment interface"
         );
+        if (
+            std::abs(cell.elevation_m - compatibility_surface_elevation_m) >
+            std::max(
+                1.0e-9,
+                std::abs(compatibility_surface_elevation_m) * 1.0e-12
+            )
+        ) {
+            throw std::runtime_error(
+                "glacial sediment-interface update changed the compatibility surface"
+            );
+        }
         cell.glacial_sediment_net_m =
             cell.glacial_sediment_deposition_m -
             cell.glacial_sediment_production_m;
@@ -246,6 +274,10 @@ GlacialSedimentTransportStage transport_glacial_sediment(
         );
         stage.post_transport_elevation_m_by_cell.push_back(cell.elevation_m);
     }
+    maximum_sediment_interface_closure_residual_m(
+        cells,
+        "post glacial transport"
+    );
     stage.transfer_count = static_cast<int>(stage.transfers.size());
     stage.source_cell_count = stage.transfer_count;
     stage.target_cell_count = static_cast<int>(target_cell_ids.size());
@@ -254,6 +286,16 @@ GlacialSedimentTransportStage transport_glacial_sediment(
     );
     stage.terrain_volume_change_residual_km3 =
         stage.mass_balance_residual_km3;
+    stage.source_production_depth_m_by_cell = production_depth_m;
+    validate_sediment_source_partition(
+        cells,
+        stage.source_production_depth_m_by_cell,
+        stage.alluvium_entrainment_depth_m_by_cell,
+        stage.bedrock_erosion_depth_m_by_cell,
+        stage.alluvium_entrainment_volume_km3,
+        stage.bedrock_erosion_volume_km3,
+        "glacial"
+    );
     return stage;
 }
 

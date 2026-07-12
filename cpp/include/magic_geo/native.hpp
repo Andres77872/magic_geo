@@ -59,12 +59,16 @@ struct Params {
     int threads = 0;
     bool include_cells = true;
     int float_precision = 4;
+    // Nominal, reference-scaling interval for maturation. This is deliberately
+    // not advertised as a calibrated physical timestep.
+    double maturation_timestep_ma = 5.0;
 };
 
-// Compute policy is intentionally separate from Params so the original public
-// C++ parameter layout remains ABI-compatible. The legacy one-argument
-// generate_world_json overload always uses the CPU; callers must opt into
-// automatic, OpenCL, or CUDA execution through the two-argument overload.
+// Compute policy is intentionally separate from scientific parameters. The
+// legacy one-argument generate_world_json overload always uses the CPU; callers
+// opt into automatic, OpenCL, or CUDA execution through the two-argument
+// overload. Stable binary compatibility is provided by the versioned CConfig
+// structs below; C++ callers should rebuild when Params grows.
 struct ComputeOptions {
     int compute_backend = 0;
     // Retained for ABI compatibility and OpenCL device ranking. Automatic
@@ -125,13 +129,25 @@ struct CConfigV2 {
     int opencl_prefer_gpu;
 };
 
+// Versioned timestep extension. V1 and V2 retain their exact layouts; callers
+// using either older ABI receive the historical 5 Ma nominal reference step.
+struct CConfigV3 {
+    CConfigV2 base;
+    double maturation_timestep_ma;
+};
+
 MAGIC_GEO_API std::string backend_info_json();
 MAGIC_GEO_API std::string generate_world_json(const Params& params);
 MAGIC_GEO_API std::string generate_world_json(
     const Params& params,
     const ComputeOptions& compute_options
 );
+MAGIC_GEO_API std::string generate_geo_world_json(
+    const Params& params,
+    const ComputeOptions& compute_options
+);
 MAGIC_GEO_API Params params_from_c_config(const CConfig& cfg);
+MAGIC_GEO_API Params params_from_c_config(const CConfigV3& cfg);
 MAGIC_GEO_API ComputeOptions compute_options_from_c_config(const CConfigV2& cfg);
 
 }  // namespace magic_geo
@@ -140,6 +156,13 @@ extern "C" {
 MAGIC_GEO_API const char* magic_geo_backend_info_json();
 MAGIC_GEO_API const char* magic_geo_generate_json(const magic_geo::CConfig* cfg);
 MAGIC_GEO_API const char* magic_geo_generate_json_v2(const magic_geo::CConfigV2* cfg);
+MAGIC_GEO_API const char* magic_geo_generate_json_v3(const magic_geo::CConfigV3* cfg);
+MAGIC_GEO_API const char* magic_geo_generate_geo_json_v2(
+    const magic_geo::CConfigV2* cfg
+);
+MAGIC_GEO_API const char* magic_geo_generate_geo_json_v3(
+    const magic_geo::CConfigV3* cfg
+);
 MAGIC_GEO_API void magic_geo_free_string(const char* ptr);
 }
 

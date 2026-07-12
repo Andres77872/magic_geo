@@ -23,11 +23,35 @@
 namespace magic_geo::detail {
 
 // Shared numeric, geometry, configuration, and JSON primitives.
+inline constexpr double OCEANIC_AGE_DEPTH_YOUNG_CUTOFF_MA = 70.0;
+inline constexpr double
+    OCEANIC_AGE_DEPTH_YOUNG_COEFFICIENT_M_PER_SQRT_MA = 350.0;
+inline constexpr double OCEANIC_AGE_DEPTH_OLD_EXPONENTIAL_SCALE_M = 3200.0;
+inline constexpr double OCEANIC_AGE_DEPTH_OLD_EFOLDING_TIME_MA = 62.8;
+inline constexpr double
+    OCEANIC_AGE_DEPTH_TARGET_DIFFERENCE_GAIN = 1.0;
+inline constexpr double
+    TECTONIC_ISOSTATIC_TARGET_DIFFERENCE_GAIN = 1.0;
+inline constexpr double TECTONIC_DYNAMIC_RELIEF_MINIMUM_CHANGE_M = -180.0;
+inline constexpr double TECTONIC_DYNAMIC_RELIEF_MAXIMUM_CHANGE_M = 220.0;
+inline constexpr double TECTONIC_UPLIFT_RATE_RESPONSE_FRACTION = 0.42;
 double climate_stellar_temperature_forcing_c(const Params& params);
 double climate_greenhouse_temperature_forcing_c(const Params& params);
 double climate_thermal_moisture_temperature_anomaly_c(const Params& params);
 double climate_thermal_moisture_capacity_factor(const Params& params);
 double crust_age_ceiling_ma(const Params& params, double model_ceiling_ma);
+double maturation_timestep_scale(const Params& params);
+double timestep_scaled_fraction(double reference_fraction, double timestep_scale);
+double oceanic_age_depth_thermal_subsidence_m(
+    double crust_age_ma,
+    bool oceanic_like
+);
+std::vector<double> build_initial_oceanic_crust_age_field(
+    const Params& params,
+    const std::vector<Cell>& cells,
+    const std::vector<PlateBoundarySegment>& boundary_segments,
+    InitialOceanicCrustAgeDiagnostics* diagnostics = nullptr
+);
 Vec3 add(Vec3 a, Vec3 b);
 Vec3 sub(Vec3 a, Vec3 b);
 Vec3 mul(Vec3 a, double scalar);
@@ -45,6 +69,7 @@ double hash01(std::uint64_t seed, std::uint64_t a, std::uint64_t b = 0);
 double signed_noise(std::uint64_t seed, std::uint64_t a, std::uint64_t b = 0);
 std::string json_escape(const std::string& value);
 std::string num(double value, int precision);
+std::string roundtrip_num(double value);
 void comma(std::string& out, bool& first);
 void add_raw(std::string& out, bool& first, const char* key, const std::string& raw);
 void add_str(std::string& out, bool& first, const char* key, const std::string& value);
@@ -69,6 +94,68 @@ private:
 void validate_compute_options(const ComputeOptions& compute_options);
 void validate_params(const Params& params);
 std::vector<Cell> build_mesh(const Params& params);
+CrustTransportPlan build_identity_crust_transport_plan(
+    const std::vector<Cell>& cells
+);
+CrustTransportPlan build_forward_overlap_crust_transport_plan(
+    const Params& params,
+    const std::vector<Plate>& plates,
+    const std::vector<Cell>& cells,
+    const std::vector<int>& previous_plate_ids,
+    const std::vector<int>& previous_crust_types,
+    const std::vector<int>& previous_lithologies,
+    const std::vector<double>& previous_crust_age_ma,
+    const std::vector<double>& previous_crust_thickness_km,
+    const std::vector<double>& previous_crust_density,
+    const std::vector<double>& step_rotation_deg
+);
+void initialize_crust_material_shadow(
+    const std::vector<Cell>& cells,
+    int plate_motion_history_id,
+    int erosion_iteration,
+    const std::string& stage,
+    CrustMaterialShadowState& state
+);
+void begin_crust_material_shadow_step(
+    const std::vector<Cell>& cells,
+    const CrustTransportPlan& transport_plan,
+    int plate_motion_history_id,
+    int erosion_iteration,
+    const std::string& stage,
+    CrustMaterialShadowState& state
+);
+void apply_crust_material_shadow_transition(
+    CrustMaterialShadowState& state,
+    int cell_id,
+    int current_plate_id,
+    CrustProcessReason process_reason,
+    double area_km2,
+    double before_thickness_km,
+    double before_density_g_cm3,
+    double after_thickness_km,
+    double after_density_g_cm3
+);
+void finalize_crust_material_shadow_step(
+    const std::vector<Cell>& cells,
+    const CrustTransportPlan& transport_plan,
+    CrustMaterialShadowState& state
+);
+void initialize_crust_dry_rock_accounting(
+    const std::vector<Cell>& cells,
+    int plate_count,
+    int plate_motion_history_id,
+    int crust_material_shadow_history_id,
+    int erosion_iteration,
+    const std::string& stage,
+    CrustDryRockAccountingState& state
+);
+void advance_crust_dry_rock_accounting_step(
+    const std::vector<Cell>& cells,
+    int plate_count,
+    const CrustTransportPlan& transport_plan,
+    const CrustMaterialShadowStep& shadow_step,
+    CrustDryRockAccountingState& state
+);
 
 // Tectonic and relief stages.
 std::vector<Plate> generate_plates(const Params& params);
@@ -83,9 +170,23 @@ double lithology_resistance(int lithology);
 void derive_crust_and_topography(
     const Params& params,
     const std::vector<Plate>& plates,
-    std::vector<Cell>& cells
+    std::vector<Cell>& cells,
+    InitialOceanicCrustAgeDiagnostics* initial_oceanic_crust_age = nullptr
+);
+bool is_oceanic_crust_state(
+    int crust_type,
+    int lithology,
+    double age_ma,
+    double thickness_km,
+    double density
+);
+double crust_equilibrium_elevation_m(
+    double thickness_km,
+    double density,
+    bool oceanic
 );
 PlateMotionStep summarize_plate_motion_step(
+    const Params& params,
     const std::vector<Cell>& cells,
     const std::vector<Plate>& plates,
     int id,
@@ -97,14 +198,36 @@ PlateMotionStep summarize_plate_motion_step(
     const std::vector<double>& crust_age_change_ma,
     const std::vector<double>& crust_thickness_change_km,
     const std::vector<double>& crust_density_change,
-    const std::vector<double>& tectonic_elevation_change_m
+    const std::vector<double>& tectonic_elevation_change_m,
+    const std::vector<double>& previous_local_isostatic_equilibrium_m,
+    const std::vector<double>& isostatic_equilibrium_change_m,
+    const std::vector<double>& previous_local_thermal_subsidence_target_m,
+    const std::vector<double>& thermal_equilibrium_change_m,
+    const std::vector<double>& unbounded_dynamic_relief_change_m,
+    const std::vector<double>& bounded_dynamic_relief_change_m
+);
+std::vector<PlateBoundarySegment> build_plate_boundary_segments(
+    const Params& params,
+    const std::vector<Cell>& cells,
+    const std::vector<Plate>& plates,
+    const CrustTransportPlan& opening_crust,
+    int* reciprocal_mesh_segment_count
+);
+CrustOverlapCandidateFateLedger build_crust_overlap_candidate_fate_ledger(
+    const CrustTransportPlan& transport,
+    const std::vector<PlateBoundarySegment>& boundary_segments,
+    int step_id,
+    int cell_count,
+    int plate_count
 );
 std::vector<double> advance_plate_motion_and_crust(
     const Params& params,
     int erosion_iteration,
     std::vector<Plate>& plates,
     std::vector<Cell>& cells,
-    std::vector<PlateMotionStep>& plate_motion_history
+    std::vector<PlateMotionStep>& plate_motion_history,
+    CrustMaterialShadowState& crust_material_shadow,
+    CrustDryRockAccountingState& crust_dry_rock_accounting
 );
 void summarize_plates(
     const Params& params,
@@ -149,12 +272,42 @@ EarthSystemFeedbackStep summarize_feedback_step(
     int plate_motion_history_id,
     const FeedbackReference* previous
 );
+void initialize_sediment_interface(Cell& cell, const char* context);
+void shift_sediment_interface_datum(
+    Cell& cell,
+    double elevation_change_m,
+    const char* context
+);
+void apply_sediment_interface_material_change(
+    Cell& cell,
+    double vertical_displacement_m,
+    double bedrock_erosion_depth_m,
+    double alluvium_entrainment_depth_m,
+    double deposition_depth_m,
+    const char* context
+);
+void validate_sediment_interface(const Cell& cell, const char* context);
+double maximum_sediment_interface_closure_residual_m(
+    const std::vector<Cell>& cells,
+    const char* context
+);
+void validate_sediment_source_partition(
+    const std::vector<Cell>& cells,
+    const std::vector<double>& source_depth_m_by_cell,
+    const std::vector<double>& alluvium_entrainment_depth_m_by_cell,
+    const std::vector<double>& bedrock_erosion_depth_m_by_cell,
+    double alluvium_entrainment_volume_km3,
+    double bedrock_erosion_volume_km3,
+    const char* context
+);
 void erode(
     const Params& params,
     std::vector<Plate>& plates,
     std::vector<Cell>& cells,
     std::vector<EarthSystemFeedbackStep>& feedback_history,
     std::vector<PlateMotionStep>& plate_motion_history,
+    CrustMaterialShadowState& crust_material_shadow,
+    CrustDryRockAccountingState& crust_dry_rock_accounting,
     std::vector<NumericDepressionFillEvent>& numeric_depression_fill_history,
     std::vector<HydrologicWaterBudgetStage>& hydrologic_water_budget_history,
     std::vector<FluvialSedimentRoutingStage>& sediment_routing_history,
@@ -314,6 +467,7 @@ std::string summary_json(
 std::string plates_json(const std::vector<Plate>& plates, int precision);
 std::string int_array_json(const std::vector<int>& values);
 std::string double_array_json(const std::vector<double>& values, int precision);
+std::string roundtrip_double_array_json(const std::vector<double>& values);
 template <std::size_t Size>
 std::string double_array_json(
     const std::array<double, Size>& values,
@@ -372,10 +526,12 @@ std::string hydrologic_water_budget_model_json(
     int precision
 );
 std::string hydrologic_water_budget_history_json(
+    const Params& params,
     const std::vector<HydrologicWaterBudgetStage>& history,
     int precision
 );
 std::string numeric_depression_fill_history_json(
+    const Params& params,
     const std::vector<NumericDepressionFillEvent>& history,
     int precision
 );
@@ -384,6 +540,7 @@ std::string glacial_sediment_transport_model_json(
     int precision
 );
 std::string glacial_sediment_transport_history_json(
+    const Params& params,
     const std::vector<GlacialSedimentTransportStage>& history,
     int precision
 );
@@ -392,6 +549,7 @@ std::string hillslope_sediment_transport_model_json(
     const std::vector<HillslopeSedimentTransportStage>& history
 );
 std::string hillslope_sediment_transport_history_json(
+    const Params& params,
     const std::vector<HillslopeSedimentTransportStage>& history,
     int precision
 );
@@ -400,6 +558,7 @@ std::string fluvial_sediment_routing_model_json(
     int precision
 );
 std::string fluvial_sediment_routing_history_json(
+    const Params& params,
     const std::vector<FluvialSedimentRoutingStage>& history,
     int precision
 );
@@ -412,11 +571,16 @@ std::string sediment_inventory_model_json(
     const std::vector<GlacialSedimentTransportStage>& glacial_history,
     int precision
 );
+std::string sediment_interface_model_json(
+    const std::vector<Cell>& cells,
+    int precision
+);
 std::string simulation_clock_json(
     const Params& params,
     const std::vector<EarthSystemFeedbackStep>& feedback_history
 );
 std::string earth_system_feedback_history_json(
+    const Params& params,
     const std::vector<EarthSystemFeedbackStep>& feedback_history,
     int precision
 );
@@ -425,8 +589,21 @@ std::string plate_kinematic_model_json(
     const std::vector<PlateMotionStep>& history,
     const std::vector<Cell>& cells
 );
+std::string plate_boundary_segment_model_json(
+    const Params& params,
+    const std::vector<PlateMotionStep>& history
+);
+std::string initial_oceanic_crust_age_model_json(
+    const InitialOceanicCrustAgeDiagnostics& diagnostics
+);
+std::string initial_oceanic_crust_age_ledger_json(
+    const InitialOceanicCrustAgeDiagnostics& diagnostics
+);
+std::string crust_overlap_candidate_fate_model_json();
+std::string oceanic_age_depth_model_json();
 std::string sea_level_model_json(const Params& params, const std::vector<Cell>& cells);
 std::string plate_motion_history_json(
+    const Params& params,
     const std::vector<PlateMotionStep>& history,
     int precision
 );

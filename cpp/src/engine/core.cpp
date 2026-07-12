@@ -41,6 +41,29 @@ double crust_age_ceiling_ma(const Params& params, double model_ceiling_ma) {
     return std::max(0.0, std::min(model_ceiling_ma, params.geological_age_ga * 1000.0));
 }
 
+double maturation_timestep_scale(const Params& params) {
+    return params.maturation_timestep_ma /
+        MATURATION_REFERENCE_TIMESTEP_MA;
+}
+
+double timestep_scaled_fraction(
+    double reference_fraction,
+    double timestep_scale
+) {
+    const double bounded_fraction = clamp(reference_fraction, 0.0, 1.0);
+    const double bounded_scale = std::max(0.0, timestep_scale);
+    if (bounded_fraction <= 0.0 || bounded_scale <= 0.0) {
+        return 0.0;
+    }
+    if (bounded_scale == 1.0) {
+        return bounded_fraction;
+    }
+    if (bounded_fraction >= 1.0) {
+        return 1.0;
+    }
+    return -std::expm1(bounded_scale * std::log1p(-bounded_fraction));
+}
+
 Vec3 add(Vec3 a, Vec3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
 Vec3 sub(Vec3 a, Vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 Vec3 mul(Vec3 a, double s) { return {a.x * s, a.y * s, a.z * s}; }
@@ -57,6 +80,9 @@ Vec3 normalize(Vec3 a) {
     return mul(a, 1.0 / n);
 }
 Vec3 rotate_about_axis(Vec3 value, Vec3 axis, double angle_rad) {
+    if (angle_rad == 0.0) {
+        return value;
+    }
     const Vec3 unit_axis = normalize(axis);
     const double cosine = std::cos(angle_rad);
     const double sine = std::sin(angle_rad);
@@ -89,9 +115,9 @@ const char* mesh_backend_name(int backend) {
 const char* cell_area_model_name(int backend) {
     switch (backend) {
         case MESH_BACKEND_FIBONACCI:
-            return "equal_area_fibonacci_quadrature_v1";
+            return "spherical_voronoi_control_volume_v1";
         case MESH_BACKEND_GEODESIC_ICOSAHEDRON:
-            return "spherical_barycentric_dual_v1";
+            return "spherical_barycentric_control_volume_v2";
         default:
             return "unknown";
     }
@@ -231,6 +257,7 @@ void validate_params(const Params& params) {
         "oceanic_crust_aging_ma_per_step",
         params.oceanic_crust_aging_ma_per_step
     );
+    require_finite("maturation_timestep_ma", params.maturation_timestep_ma);
     require_finite("lapse_rate_c_per_km", params.lapse_rate_c_per_km);
     require_finite("base_temperature_c", params.base_temperature_c);
     require_finite("precipitation_scale", params.precipitation_scale);
@@ -345,6 +372,9 @@ void validate_params(const Params& params) {
     }
     if (params.oceanic_crust_aging_ma_per_step < 0.0 || params.oceanic_crust_aging_ma_per_step > 50.0) {
         throw std::runtime_error("oceanic_crust_aging_ma_per_step must be between 0 and 50");
+    }
+    if (params.maturation_timestep_ma <= 0.0 || params.maturation_timestep_ma > 5.0) {
+        throw std::runtime_error("maturation_timestep_ma must be greater than 0 and at most 5");
     }
     if (params.subtropical_drying_strength < 0.0 || params.subtropical_drying_strength > 0.9) {
         throw std::runtime_error("subtropical_drying_strength must be between 0 and 0.9");

@@ -14,6 +14,15 @@ from collections import Counter
 import math
 from typing import Any, Callable
 
+from .ore_genesis import _cell_indices as _replay_ore_cell_indices
+from .resource_dynamics import (
+    AGRICULTURAL_RESOURCES,
+    _accessibility as _replay_resource_accessibility,
+    _confidence as _replay_resource_confidence,
+    _extraction_hazard as _replay_resource_hazard,
+    _reserve_potential as _replay_resource_reserve,
+)
+
 
 Check = dict[str, Any]
 Record = dict[str, Any]
@@ -883,6 +892,18 @@ def _validate_soils_ecotones(
     profiles, profile_shape = _records(world, "soil_profiles")
     horizons, horizon_shape = _records(world, "soil_horizons")
     histories, history_shape = _records(world, "soil_profile_histories")
+    pedogenesis_model, pedogenesis_model_shape = _dict_payload(
+        world, "soil_pedogenesis_model"
+    )
+    geo_only = world.get("generation_scope") == "geo_only"
+    feedback = world.get("earth_system_feedback_history", [])
+    expected_natural_stages = (
+        feedback
+        if geo_only
+        and isinstance(feedback, list)
+        and all(isinstance(step, dict) for step in feedback)
+        else []
+    )
     errors: list[str] = []
     if (
         not profile_shape
@@ -893,6 +914,28 @@ def _validate_soils_ecotones(
         or not _sequential_ids(histories)
     ):
         errors.append("soil profile/horizon/history structure or IDs")
+    if (
+        not pedogenesis_model_shape
+        or pedogenesis_model.get("model_type")
+        != "posthoc_final_state_profile_reconstruction_v2"
+        or pedogenesis_model.get("physical_time_resolved") is not False
+        or pedogenesis_model.get("state_mutation_evidence") is not False
+    ):
+        errors.append("soil pedogenesis temporal model metadata")
+    if geo_only and (
+        not expected_natural_stages
+        or pedogenesis_model.get("time_basis") != "natural_simulation_stage"
+        or pedogenesis_model.get("stage_source")
+        != "earth_system_feedback_history"
+        or _int(pedogenesis_model.get("stage_count"))
+        != len(expected_natural_stages)
+        or pedogenesis_model.get("natural_stage_flux_partition")
+        != "normalized_across_nominally_advancing_erosion_intervals"
+        or pedogenesis_model.get("linked_nominal_time_coordinate_available")
+        is not True
+        or pedogenesis_model.get("nominal_time_calibrated") is not False
+    ):
+        errors.append("geo-only soil history must use the natural stage ledger")
     horizon_by_id = {_int(horizon.get("id")): horizon for horizon in horizons}
     history_by_id = {_int(history.get("id")): history for history in histories}
     assigned_cells: set[int] = set()
@@ -985,15 +1028,102 @@ def _validate_soils_ecotones(
         ):
             errors.append(f"profile {profile_id}: history mirror/steps")
             continue
+        if geo_only and len(steps) != len(expected_natural_stages):
+            errors.append(f"profile {profile_id}: natural stage coverage")
         previous_depth: float | None = None
+        step_production_sum = 0.0
+        step_erosion_sum = 0.0
+        step_values: dict[str, list[float]] = {
+            "weathering_index": [],
+            "leaching_index": [],
+            "bioturbation_index": [],
+            "horizon_differentiation_index": [],
+            "pedogenic_flux_index": [],
+        }
         for step_index, step in enumerate(steps):
+            source_duration = math.nan
             start = _number(step.get("start_depth_m"))
             end = _number(step.get("end_depth_m"))
+            production = _number(step.get("soil_production_m"))
+            erosion_loss = _number(step.get("erosion_loss_m"))
             if not math.isfinite(start) or not math.isfinite(end) or min(start, end) < 0.0:
                 errors.append(f"profile {profile_id}: history depths {step_index}")
+            if (
+                _int(step.get("stage_index")) != step_index + 1
+                or not math.isfinite(production)
+                or not math.isfinite(erosion_loss)
+                or min(production, erosion_loss) < 0.0
+                or not _close(
+                    production,
+                    max(0.0, end - start + erosion_loss),
+                    absolute=3.0e-5,
+                )
+            ):
+                errors.append(
+                    f"profile {profile_id}: production/erosion {step_index}"
+                )
+            if math.isfinite(production):
+                step_production_sum += production
+            if math.isfinite(erosion_loss):
+                step_erosion_sum += erosion_loss
             if previous_depth is not None and not _close(start, previous_depth):
                 errors.append(f"profile {profile_id}: history continuity {step_index}")
             previous_depth = end
+            if geo_only:
+                source_stage = (
+                    expected_natural_stages[step_index]
+                    if step_index < len(expected_natural_stages)
+                    else {}
+                )
+                if (
+                    step.get("time_basis") != "natural_simulation_stage"
+                    or step.get("physical_time_resolved") is not False
+                    or step.get("start_year_bp") is not None
+                    or step.get("end_year_bp") is not None
+                    or _int(step.get("natural_stage_id"))
+                    != _int(source_stage.get("id"))
+                    or str(step.get("natural_stage_name", ""))
+                    != str(source_stage.get("stage", ""))
+                    or _int(step.get("start_model_step")) != step_index
+                    or _int(step.get("end_model_step")) != step_index + 1
+                    or step.get("nominal_time_link_available") is not True
+                    or step.get("nominal_time_calibrated") is not False
+                    or step.get("nominal_time_basis")
+                    != source_stage.get("nominal_time_basis")
+                    or step.get("nominal_time_source_parameter")
+                    != source_stage.get("nominal_time_source_parameter")
+                    or not _close(
+                        step.get("nominal_interval_start_ma"),
+                        source_stage.get("nominal_interval_start_ma"),
+                    )
+                    or not _close(
+                        step.get("nominal_interval_end_ma"),
+                        source_stage.get("nominal_interval_end_ma"),
+                    )
+                    or not _close(
+                        step.get("nominal_interval_duration_ma"),
+                        source_stage.get("nominal_interval_duration_ma"),
+                    )
+                ):
+                    errors.append(
+                        f"profile {profile_id}: natural time provenance {step_index}"
+                    )
+                source_duration = _number(
+                    source_stage.get("nominal_interval_duration_ma")
+                )
+                if source_duration == 0.0 and (
+                    not _close(start, end)
+                    or not _close(production, 0.0, absolute=1.0e-9)
+                    or not _close(erosion_loss, 0.0, absolute=1.0e-9)
+                    or not _close(
+                        step.get("pedogenic_flux_index"),
+                        0.0,
+                        absolute=1.0e-9,
+                    )
+                ):
+                    errors.append(
+                        f"profile {profile_id}: zero-duration soil change {step_index}"
+                    )
             for field in (
                 "weathering_index",
                 "leaching_index",
@@ -1008,6 +1138,58 @@ def _validate_soils_ecotones(
             ):
                 if not _bounded(step.get(field)):
                     errors.append(f"profile {profile_id}: {field} {step_index}")
+            for field in step_values:
+                value = _number(step.get(field))
+                if math.isfinite(value) and (
+                    not geo_only or source_duration > 0.0
+                ):
+                    step_values[field].append(value)
+        if steps:
+            if (
+                not _close(history.get("initial_depth_m"), steps[0].get("start_depth_m"))
+                or not _close(history.get("final_depth_m"), steps[-1].get("end_depth_m"))
+                or not _close(history.get("final_depth_m"), profile.get("total_depth_m"))
+                or not _close(
+                    history.get("total_soil_production_m"),
+                    step_production_sum,
+                    absolute=2.0e-4,
+                )
+                or not _close(
+                    history.get("total_erosion_loss_m"),
+                    step_erosion_sum,
+                    absolute=2.0e-4,
+                )
+            ):
+                errors.append(f"profile {profile_id}: history depth/flux totals")
+            mean_fields = {
+                "mean_weathering_index": "weathering_index",
+                "mean_leaching_index": "leaching_index",
+                "mean_bioturbation_index": "bioturbation_index",
+                "mean_horizon_differentiation_index": (
+                    "horizon_differentiation_index"
+                ),
+                "mean_pedogenic_flux_index": "pedogenic_flux_index",
+            }
+            for history_field, step_field in mean_fields.items():
+                values = step_values[step_field]
+                expected_mean = sum(values) / len(values) if values else 0.0
+                if not _close(history.get(history_field), expected_mean):
+                    errors.append(
+                        f"profile {profile_id}: history mean {history_field}"
+                    )
+            expected_high_erosion = any(
+                _number(step.get("erosion_pressure_index"), 0.0) >= 0.65
+                and (
+                    not geo_only
+                    or _number(
+                        step.get("nominal_interval_duration_ma"), 0.0
+                    )
+                    > 0.0
+                )
+                for step in steps
+            )
+            if history.get("high_erosion_pressure") is not expected_high_erosion:
+                errors.append(f"profile {profile_id}: high erosion mirror")
     expected_profiles = {
         _int(cell.get("id")) for cell in cells if _int(cell.get("soil_profile_id")) >= 0
     }
@@ -1025,6 +1207,22 @@ def _validate_soils_ecotones(
                 len(history.get("steps", []))
                 for history in histories
                 if isinstance(history.get("steps"), list)
+            ),
+            "soil_pedogenesis_stage_count": _int(
+                pedogenesis_model.get("stage_count")
+            ),
+            "soil_pedogenesis_time_basis": pedogenesis_model.get("time_basis"),
+            "total_soil_production_m": float(
+                sum(
+                    _number(history.get("total_soil_production_m"), 0.0)
+                    for history in histories
+                )
+            ),
+            "total_soil_erosion_loss_m": float(
+                sum(
+                    _number(history.get("total_erosion_loss_m"), 0.0)
+                    for history in histories
+                )
             ),
         },
     )
@@ -1130,9 +1328,30 @@ def _validate_lakes_watersheds(
         for field in ("area_km2", "lake_area_km2", "storage_capacity_km3", "annual_runoff_km3", "mean_water_depth_m", "max_depression_depth_m", "overflow_path_length_km"):
             if not _nonnegative(basin.get(field)):
                 basin_errors.append(f"basin {basin_id}: {field}")
-        for field in ("geologic_area_fraction", "overflow_index", "avulsion_risk"):
+        for field in ("geologic_area_fraction", "avulsion_risk"):
             if not _bounded(basin.get(field)):
                 basin_errors.append(f"basin {basin_id}: {field}")
+        # `overflow_index` is the unnormalized runoff/storage pressure used by
+        # the native lake model. Production clamps that ratio to [0, 50] and
+        # only normalizes it later when deriving avulsion pressure; treating it
+        # as a unit interval rejects valid high-throughput basins.
+        overflows = basin.get("overflows")
+        if not isinstance(overflows, bool):
+            basin_errors.append(f"basin {basin_id}: overflows")
+        overflow_index = basin.get("overflow_index")
+        if not _bounded(overflow_index, 0.0, 50.0):
+            basin_errors.append(f"basin {basin_id}: overflow_index")
+        storage_capacity = _number(basin.get("storage_capacity_km3"))
+        annual_runoff = _number(basin.get("annual_runoff_km3"))
+        expected_overflow_index = (
+            min(50.0, max(0.0, annual_runoff / max(0.001, storage_capacity)))
+            if overflows is True
+            and math.isfinite(storage_capacity)
+            and math.isfinite(annual_runoff)
+            else 0.0
+        )
+        if not _close(overflow_index, expected_overflow_index):
+            basin_errors.append(f"basin {basin_id}: overflow_index replay")
         if not _bounded(basin.get("fill_fraction"), 0.0, 1.5):
             basin_errors.append(f"basin {basin_id}: fill_fraction")
         if _int(basin.get("lake_cell_count"), -1) < 0 or _int(basin.get("lake_cell_count")) > len(linked_cells):
@@ -2060,10 +2279,38 @@ def _validate_resources(
     checks: list[Check], world: dict[str, Any], cells: list[Record], cells_by_id: dict[int, Record], summary: Record
 ) -> None:
     domain = "geologic_resources"
+    geo_only = world.get("generation_scope") == "geo_only"
+    positive_flow = sorted(
+        max(0.0, _number(cell.get("flow_accumulation"), 0.0))
+        for cell in cells
+        if max(0.0, _number(cell.get("flow_accumulation"), 0.0)) > 0.0
+    )
+    expected_flow_scale = (
+        max(1.0, positive_flow[int(0.95 * (len(positive_flow) - 1))])
+        if positive_flow
+        else 1.0
+    )
+    deposit_model, deposit_model_shape = _dict_payload(
+        world, "resource_deposit_model"
+    )
     deposits, deposit_shape = _records(world, "resource_deposits")
     deposit_errors: list[str] = []
     if not deposit_shape or not _sequential_ids(deposits):
         deposit_errors.append("deposit structure/IDs")
+    if (
+        not deposit_model_shape
+        or deposit_model.get("model_type")
+        != "causal_geologic_resource_deposit_diagnostics_v2"
+        or deposit_model.get("flow_accumulation_normalization_model")
+        != "positive_cell_p95_v1"
+        or not _close(
+            deposit_model.get("flow_accumulation_scale"),
+            expected_flow_scale,
+            absolute=1.0e-4,
+        )
+        or deposit_model.get("physical_time_resolved") is not False
+    ):
+        deposit_errors.append("resource flow normalization model")
     deposit_by_id = {_int(deposit.get("id")): deposit for deposit in deposits}
     for deposit in deposits:
         deposit_id = _int(deposit.get("id"))
@@ -2072,6 +2319,51 @@ def _validate_resources(
             deposit_errors.append(f"deposit {deposit_id}: cell source")
             continue
         cell = cells_by_id[cell_id]
+        resource = str(cell.get("resource", "none"))
+        expected_reserve = _replay_resource_reserve(
+            resource, cell, expected_flow_scale
+        )
+        expected_hazard = _replay_resource_hazard(cell)
+        expected_confidence = _replay_resource_confidence(
+            resource, cell, expected_reserve, expected_flow_scale
+        )
+        replay_fields = {
+            "reserve_potential_index": expected_reserve,
+            "extraction_hazard_index": expected_hazard,
+            "geologic_confidence_index": expected_confidence,
+        }
+        if geo_only:
+            expected_accessibility = _replay_resource_accessibility(cell)
+            expected_renewability = (
+                0.78
+                if resource in AGRICULTURAL_RESOURCES
+                else (0.32 if resource == "geothermal" else 0.02)
+            )
+            expected_viability = max(
+                0.0,
+                min(
+                    1.0,
+                    expected_reserve * 0.46
+                    + expected_accessibility * 0.30
+                    + expected_confidence * 0.20
+                    - expected_hazard * 0.18
+                    + expected_renewability * 0.10,
+                ),
+            )
+            replay_fields.update(
+                {
+                    "accessibility_index": expected_accessibility,
+                    "economic_viability_index": expected_viability,
+                    "renewability_index": expected_renewability,
+                }
+            )
+        if str(deposit.get("resource", "")) != resource:
+            deposit_errors.append(f"deposit {deposit_id}: resource mirror")
+        for field, expected_value in replay_fields.items():
+            if not _close(
+                deposit.get(field), expected_value, absolute=3.0e-6
+            ):
+                deposit_errors.append(f"deposit {deposit_id}: {field} replay")
         if not _close(deposit.get("area_km2"), cell.get("area_km2")):
             deposit_errors.append(f"deposit {deposit_id}: area source")
         for field in (
@@ -2082,11 +2374,41 @@ def _validate_resources(
         ):
             if not _bounded(deposit.get(field)):
                 deposit_errors.append(f"deposit {deposit_id}: {field}")
+        if geo_only:
+            for field in ("accessibility_index", "economic_viability_index"):
+                if not _bounded(deposit.get(field)):
+                    deposit_errors.append(f"deposit {deposit_id}: {field}")
         if not isinstance(deposit.get("formation_evidence"), dict) or not str(deposit.get("resource", "")):
             deposit_errors.append(f"deposit {deposit_id}: formation evidence/resource")
+    deposit_summary_expected: dict[str, Any] = {
+        "resource_deposit_count": len(deposits),
+        "resource_deposit_total_area_km2": float(
+            sum(
+                _number(deposit.get("area_km2"), 0.0)
+                for deposit in deposits
+            )
+        ),
+    }
+    if geo_only:
+        divisor = len(deposits) if deposits else 1
+        deposit_summary_expected.update(
+            {
+                "mean_resource_reserve_potential_index": sum(
+                    _number(deposit.get("reserve_potential_index"), 0.0)
+                    for deposit in deposits
+                ) / divisor,
+                "mean_resource_economic_viability_index": sum(
+                    _number(deposit.get("economic_viability_index"), 0.0)
+                    for deposit in deposits
+                ) / divisor,
+                "mean_resource_geologic_confidence_index": sum(
+                    _number(deposit.get("geologic_confidence_index"), 0.0)
+                    for deposit in deposits
+                ) / divisor,
+            }
+        )
     deposit_mirror_ok, deposit_mirror_errors = _all_summary_mirrors(
-        summary,
-        {"resource_deposit_count": len(deposits), "resource_deposit_total_area_km2": sum(_number(deposit.get("area_km2"), 0.0) for deposit in deposits)},
+        summary, deposit_summary_expected
     )
     _add(
         checks,
@@ -2098,10 +2420,25 @@ def _validate_resources(
         expected="sequential cell-linked deposits with bounded indices",
     )
 
+    ore_model, ore_model_shape = _dict_payload(world, "ore_genesis_model")
     ore, ore_shape = _records(world, "ore_genesis_systems")
     ore_errors: list[str] = []
     if not ore_shape or not _sequential_ids(ore):
         ore_errors.append("ore system structure/IDs")
+    if (
+        not ore_model_shape
+        or ore_model.get("model_type")
+        != "causal_tectonic_lithologic_ore_genesis_diagnostics_v2"
+        or ore_model.get("flow_accumulation_normalization_model")
+        != "positive_cell_p95_v1"
+        or not _close(
+            ore_model.get("flow_accumulation_scale"),
+            expected_flow_scale,
+            absolute=1.0e-4,
+        )
+        or ore_model.get("physical_time_resolved") is not False
+    ):
+        ore_errors.append("ore flow normalization model")
     assigned: set[int] = set()
     fault_ids = set(range(len(_records(world, "fault_systems")[0])))
     zone_ids = {
@@ -2109,6 +2446,28 @@ def _validate_resources(
         for key in ("collision_zones", "subduction_zones", "rift_zones")
         for zone in _records(world, key)[0]
     }
+    expected_ore_by_cell = {
+        _int(cell.get("id")): _replay_ore_cell_indices(
+            cell, expected_flow_scale
+        )
+        for cell in cells
+    }
+    ore_cell_fields = {
+        "ore_genesis_potential_index": "ore",
+        "hydrothermal_alteration_index": "hydrothermal",
+        "metallogenic_fertility_index": "fertility",
+        "ore_structural_control_index": "structural",
+        "placer_concentration_index": "placer",
+    }
+    for cell_id, expected_indices in expected_ore_by_cell.items():
+        cell = cells_by_id[cell_id]
+        for field, expected_key in ore_cell_fields.items():
+            if not _close(
+                cell.get(field),
+                expected_indices[expected_key],
+                absolute=3.0e-6,
+            ):
+                ore_errors.append(f"cell {cell_id}: {field} replay")
     for system in ore:
         system_id = _int(system.get("id"))
         cell_ids, unique = _id_list(system.get("cell_ids"))
@@ -2135,6 +2494,72 @@ def _validate_resources(
         for field in ("mean_ore_genesis_potential_index", "max_ore_genesis_potential_index", "mean_hydrothermal_alteration_index", "mean_metallogenic_fertility_index", "mean_ore_structural_control_index", "mean_placer_concentration_index", "ore_genesis_confidence_index"):
             if not _bounded(system.get(field)):
                 ore_errors.append(f"ore {system_id}: {field}")
+        if geo_only and not _bounded(system.get("mean_resource_viability_index")):
+            ore_errors.append(
+                f"ore {system_id}: mean_resource_viability_index"
+            )
+        expected_system_fields = {
+            "mean_ore_genesis_potential_index": sum(
+                expected_ore_by_cell[cell_id]["ore"] for cell_id in cell_ids
+            ) / len(cell_ids),
+            "max_ore_genesis_potential_index": max(
+                expected_ore_by_cell[cell_id]["ore"] for cell_id in cell_ids
+            ),
+            "mean_hydrothermal_alteration_index": sum(
+                expected_ore_by_cell[cell_id]["hydrothermal"]
+                for cell_id in cell_ids
+            ) / len(cell_ids),
+            "mean_metallogenic_fertility_index": sum(
+                expected_ore_by_cell[cell_id]["fertility"]
+                for cell_id in cell_ids
+            ) / len(cell_ids),
+            "mean_ore_structural_control_index": sum(
+                expected_ore_by_cell[cell_id]["structural"]
+                for cell_id in cell_ids
+            ) / len(cell_ids),
+            "mean_placer_concentration_index": sum(
+                expected_ore_by_cell[cell_id]["placer"] for cell_id in cell_ids
+            ) / len(cell_ids),
+        }
+        expected_system_fields["ore_genesis_confidence_index"] = max(
+            0.0,
+            min(
+                1.0,
+                expected_system_fields["mean_ore_genesis_potential_index"]
+                * 0.34
+                + expected_system_fields["mean_hydrothermal_alteration_index"]
+                * 0.14
+                + expected_system_fields[
+                    "mean_metallogenic_fertility_index"
+                ]
+                * 0.16
+                + expected_system_fields[
+                    "mean_ore_structural_control_index"
+                ]
+                * 0.12
+                + min(1.0, len(deposit_ids) / float(len(cell_ids))) * 0.16
+                + min(1.0, len(_id_list(system.get("plate_ids"))[0]) / 3.0)
+                * 0.08,
+            ),
+        )
+        if geo_only:
+            expected_system_fields["mean_resource_viability_index"] = (
+                sum(
+                    _number(
+                        deposit_by_id[deposit_id].get(
+                            "economic_viability_index"
+                        ),
+                        0.0,
+                    )
+                    for deposit_id in deposit_ids
+                )
+                / len(deposit_ids)
+                if deposit_ids
+                else 0.0
+            )
+        for field, expected_value in expected_system_fields.items():
+            if not _close(system.get(field), expected_value, absolute=3.0e-6):
+                ore_errors.append(f"ore {system_id}: {field} replay")
         steps = system.get("formation_steps")
         if not isinstance(steps, list) or not all(isinstance(step, dict) for step in steps) or _int(system.get("formation_step_count")) != len(steps):
             ore_errors.append(f"ore {system_id}: formation steps")
@@ -2148,6 +2573,58 @@ def _validate_resources(
                     ore_errors.append(f"ore {system_id}: step deposits {step_index}")
                 if not _bounded(step.get("mean_ore_genesis_potential_index")) or not _bounded(step.get("mean_process_intensity_index")):
                     ore_errors.append(f"ore {system_id}: step values {step_index}")
+                expected_linked_deposits = sorted(
+                    deposit_id
+                    for deposit_id in deposit_ids
+                    if _int(deposit_by_id[deposit_id].get("cell_id"))
+                    in set(active_ids)
+                )
+                metric_fields = {
+                    "metallogenic_fertility": "metallogenic_fertility_index",
+                    "placer_concentration": "placer_concentration_index",
+                    "hydrothermal_alteration": "hydrothermal_alteration_index",
+                    "ore_structural_control": "ore_structural_control_index",
+                }
+                process_field = metric_fields.get(str(step.get("process_metric", "")))
+                expected_step_ore = (
+                    sum(
+                        _number(
+                            cells_by_id[cell_id].get(
+                                "ore_genesis_potential_index"
+                            ),
+                            0.0,
+                        )
+                        for cell_id in active_ids
+                    )
+                    / len(active_ids)
+                    if active_ids
+                    else 0.0
+                )
+                expected_process = (
+                    sum(
+                        _number(cells_by_id[cell_id].get(process_field), 0.0)
+                        for cell_id in active_ids
+                    )
+                    / len(active_ids)
+                    if active_ids and process_field is not None
+                    else math.nan
+                )
+                if (
+                    _int(step.get("step_index")) != step_index
+                    or linked_deposits != expected_linked_deposits
+                    or process_field is None
+                    or not _close(
+                        step.get("mean_ore_genesis_potential_index"),
+                        expected_step_ore,
+                        absolute=3.0e-6,
+                    )
+                    or not _close(
+                        step.get("mean_process_intensity_index"),
+                        expected_process,
+                        absolute=3.0e-6,
+                    )
+                ):
+                    ore_errors.append(f"ore {system_id}: step replay {step_index}")
     if assigned != {_int(cell.get("id")) for cell in cells if _int(cell.get("ore_genesis_system_id")) >= 0}:
         ore_errors.append("ore assignment inverse")
     ore_mirror_ok, ore_mirror_errors = _all_summary_mirrors(

@@ -176,16 +176,22 @@ def _export_cells(cells: list[dict], tables_dir: Path, manifest: dict) -> None:
     rows = _write_parquet(cells_path, columns, kinds)
 
     layers = []
+    skipped_layers: dict[str, str] = {}
     for name, kind in kinds.items():
         entry = _layer_entry(f"cells/{name}", "cells", name, kind, columns[name])
         if entry is not None:
             layers.append(entry)
+        elif kind in ("str", "bool"):
+            skipped_layers[name] = f"more than {_CATEGORY_LIMIT} distinct values (column kept in cells.parquet)"
+        else:
+            skipped_layers[name] = "no finite values (column kept in cells.parquet)"
 
     manifest["cells"] = {
         "parquet": "tables/cells.parquet",
         "row_count": rows,
         "fields": [{"name": name, "dtype": kinds[name]} for name in columns],
         "skipped_fields": skipped,
+        "skipped_layers": skipped_layers,
     }
     manifest["layers"].extend(layers)
 
@@ -204,25 +210,29 @@ def _export_cells(cells: list[dict], tables_dir: Path, manifest: dict) -> None:
                     value = values[index]
                     monthly[name].append(float(value[month]) if isinstance(value, list) else None)
         rows = _write_parquet(tables_dir / "cells_monthly.parquet", monthly, monthly_kinds)
+        monthly_skipped: dict[str, str] = {}
         manifest["monthly"] = {
             "parquet": "tables/cells_monthly.parquet",
             "row_count": rows,
             "fields": sorted(monthly_columns),
+            "skipped_layers": monthly_skipped,
         }
         for name, values in monthly_columns.items():
             flat = [item for value in values if isinstance(value, list) for item in value]
             stats = _numeric_stats(flat)
-            if stats is not None:
-                manifest["layers"].append(
-                    {
-                        "id": f"monthly/{name}",
-                        "source": "cells_monthly",
-                        "name": name,
-                        "kind": "numeric_monthly",
-                        "month_count": 12,
-                        "stats": stats,
-                    }
-                )
+            if stats is None:
+                monthly_skipped[name] = "no finite values (column kept in cells_monthly.parquet)"
+                continue
+            manifest["layers"].append(
+                {
+                    "id": f"monthly/{name}",
+                    "source": "cells_monthly",
+                    "name": name,
+                    "kind": "numeric_monthly",
+                    "month_count": 12,
+                    "stats": stats,
+                }
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +298,7 @@ def _export_stage_history(name: str, records: list[dict], tables_dir: Path, mani
     cell_rows = _write_parquet(tables_dir / f"{name}_stage_cells.parquet", stage_columns, stage_kinds)
     _write_parquet(tables_dir / f"{name}_stages.parquet", summary_columns, summary_kinds)
 
+    skipped_layers: dict[str, str] = {}
     manifest["stage_histories"][name] = {
         "stage_count": len(records),
         "stage_cells_parquet": cells_rel,
@@ -295,10 +306,12 @@ def _export_stage_history(name: str, records: list[dict], tables_dir: Path, mani
         "per_cell_fields": per_cell_fields,
         "row_count": cell_rows,
         "stages": stage_meta,
+        "skipped_layers": skipped_layers,
     }
     for field in per_cell_fields:
         stats = _numeric_stats(stage_columns[field])
         if stats is None:
+            skipped_layers[field] = "no finite values (column kept in the stage-cells parquet)"
             continue
         manifest["layers"].append(
             {

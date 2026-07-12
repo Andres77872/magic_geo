@@ -8,9 +8,12 @@ Verified against the earthlike run: 32 768 cells, 446 layers, stage histories of
 
 ## Findings
 
-### F1 — Stage scrub can display a stale stage (app.js, medium)
+### F1 — Stage scrub can display a stale stage (app.js, medium — **fixed**)
 
-`activateLayer()` guards against superseded fetches with
+> Fixed: `activateLayer()` now uses a monotonic request sequence (`state.fetchSeq`)
+> and drops any response that is no longer the newest request.
+
+`activateLayer()` guarded against superseded fetches with
 `if (state.activeLayer !== layer) return;` — but not against superseded
 *stage/month* on the same layer. Dragging the slider fires one fetch per input
 event; whichever response resolves last wins the texture, while
@@ -33,7 +36,10 @@ nothing visibly breaks, but the API contract implied by the manifest
 ("families have `jsonl` files") is unfulfillable over HTTP. Either add
 `?full=1` to page the JSONL, or document the sidecar-only behavior.
 
-### F3 — Layers dropped silently, contradicting the exporter's contract (debug_export.py, low-medium)
+### F3 — Layers dropped silently, contradicting the exporter's contract (debug_export.py, low-medium — **fixed**)
+
+> Fixed: columns without a layer entry are now recorded under `skipped_layers`
+> (in `cells`, each stage history, and `monthly`) with a reason.
 
 The module docstring promises "anything that is skipped is recorded in the
 manifest rather than dropped silently", and `skipped_fields` honors that for
@@ -44,7 +50,10 @@ doesn't append — no manifest record. On the earthlike run, `s2_like_token` and
 and no skip list. Record them, e.g. `manifest["cells"]["fields_without_layers"]
 = {name: reason}`.
 
-### F4 — Prefetch and cache keys disagree across kinds (app.js, low)
+### F4 — Prefetch and cache keys disagree across kinds (app.js, low — **fixed**)
+
+> Fixed: `layerCacheKey` now normalizes per kind (stage layers → month 0,
+> monthly layers → stage 0, static layers → 0/0), exactly as suggested below.
 
 `layerCacheKey(layerId, stage, month)` incorporates both time axes for every
 kind, but `prefetchNeighborStages()` hardcodes `month = 0`. After viewing a

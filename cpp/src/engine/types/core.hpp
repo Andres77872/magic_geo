@@ -38,6 +38,15 @@ struct Cell {
     double lat = 0.0;
     double lon = 0.0;
     double area_km2 = 0.0;
+    // Authoritative finite-volume geometry. Vertices are ordered
+    // counter-clockwise as seen from outside the sphere. Entry i in
+    // control_volume_edge_neighbor_ids identifies the cell across the
+    // great-circle edge from vertex i to vertex (i + 1) % vertex_count.
+    // A geodesic barycentric dual can have two consecutive edge segments
+    // with the same neighboring cell because the shared dual boundary bends
+    // at the primal-edge midpoint.
+    std::vector<Vec3> control_volume_vertices;
+    std::vector<int> control_volume_edge_neighbor_ids;
     std::vector<int> neighbors;
     int plate_id = 0;
     int initial_plate_id = 0;
@@ -73,6 +82,10 @@ struct Cell {
     double boundary_transform = 0.0;
     double initial_isostatic_elevation_m = 0.0;
     double initial_thermal_subsidence_m = 0.0;
+    // Instantaneous relative oceanic-basement equilibrium target from the
+    // age-depth curve, not a realized terrain-component state. This is zero
+    // for states that do not satisfy the oceanic-like predicate.
+    double thermal_subsidence_target_m = 0.0;
     double initial_ridge_uplift_m = 0.0;
     double initial_orogenic_uplift_m = 0.0;
     double initial_volcanic_uplift_m = 0.0;
@@ -83,6 +96,10 @@ struct Cell {
     double initial_elevation_m = 0.0;
     double volcanic_potential_index = 0.0;
     double uplift_rate = 0.0;
+    // Canonical top of non-mobile bedrock beneath the bulk mobile-sediment
+    // layer.  elevation_m is the compatibility surface derived from this
+    // interface plus sediment_thickness_m.
+    double bedrock_surface_elevation_m = 0.0;
     double elevation_m = 0.0;
     double water_depth_m = 0.0;
     bool is_water = false;

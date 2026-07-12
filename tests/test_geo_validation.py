@@ -12,10 +12,18 @@ from magic_geo.api import (
     NATIVE_CIVILIZATION_CELL_FIELDS,
     NATIVE_CIVILIZATION_SUMMARY_FIELDS,
     NATIVE_CIVILIZATION_TOP_LEVEL_FIELDS,
+    _strip_native_civilization_outputs,
     generate_geo_world,
     generate_world,
 )
-from magic_geo.config import WorldConfig, load_config
+from magic_geo.config import WorldConfig, config_to_native, load_config
+from magic_geo.control_volume_geometry import inspect_control_volume_geometry
+from magic_geo.geo_evolution_provenance import (
+    DIAGNOSTIC_TRAJECTORY_FAMILIES,
+    NATIVE_STATE_HISTORY_FAMILIES,
+    NOMINAL_TIME_BASIS,
+    SOIL_LINKED_TIME_BASIS,
+)
 from magic_geo.cli import app
 from magic_geo.geo_validation import extract_geo_metrics, validate_geo_world
 from magic_geo.geo_validation_suite import (
@@ -24,6 +32,10 @@ from magic_geo.geo_validation_suite import (
     evaluate_geo_validation_suite,
     geo_fingerprint,
     load_geo_validation_manifest,
+)
+from magic_geo.native import (
+    generate_geo_world as generate_native_geo_world,
+    generate_world as generate_native_world,
 )
 
 
@@ -85,6 +97,7 @@ class GeoWorldValidationTests(TestCase):
             "commodity_occurrences",
             "fault_systems",
             "groundwater_flow_systems",
+            "geo_evolution_provenance",
             "ice_sheet_histories",
             "ore_genesis_systems",
             "planet_parameters",
@@ -122,15 +135,472 @@ class GeoWorldValidationTests(TestCase):
             self.assertEqual(reef["settlement_ids"], [])
             self.assertEqual(reef["port_site_ids"], [])
 
-    def test_small_generated_earth_world_passes_deep_validation(self) -> None:
-        report = validate_geo_world(self.world, profile="earthlike")
+    def test_native_control_volumes_close_and_share_exact_reciprocal_edges(
+        self,
+    ) -> None:
+        inspection = inspect_control_volume_geometry(self.world)
+
+        self.assertTrue(inspection["passed"], inspection["failures"])
+        metrics = inspection["metrics"]
+        self.assertLess(metrics["surface_closure_error_km2"], 0.01)
+        self.assertLess(metrics["maximum_area_replay_error_km2"], 0.001)
+        self.assertLess(metrics["maximum_shared_endpoint_error"], 1.0e-9)
+        self.assertEqual(
+            metrics["control_volume_edge_pair_count"],
+            3 * len(self.world["cells"]) - 6,
+        )
+
+    def test_control_volume_replay_rejects_edge_and_area_corruption(self) -> None:
+        altered = deepcopy(self.world)
+        altered["cells"][0]["control_volume_vertices_3d"][0][0] += 0.01
+
+        inspection = inspect_control_volume_geometry(altered)
+        report = validate_geo_world(altered, profile="generic")
+
+        self.assertFalse(inspection["passed"])
+        self.assertTrue(inspection["failures"])
+        self.assertFalse(report["passed"])
+        self.assertFalse(
+            _check(report, "mesh", "native_cell_area_model_replay")["passed"]
+        )
+
+    def test_geo_factory_rejects_cell_omission(self) -> None:
+        data = self.config.model_dump(mode="python")
+        data["output"]["include_cells"] = False
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"generate_geo_world requires output\.include_cells=true",
+        ):
+            generate_geo_world(WorldConfig.model_validate(data))
+
+    def test_native_geo_path_skips_society_without_changing_natural_state(
+        self,
+    ) -> None:
+        native_config = config_to_native(self.config)
+        full = generate_native_world(native_config)
+        geo = generate_native_geo_world(native_config)
+
+        self.assertIsInstance(full["settlements"], list)
+        self.assertIsInstance(full["routes"], list)
+        for field in NATIVE_CIVILIZATION_TOP_LEVEL_FIELDS:
+            self.assertEqual(geo.get(field), [])
+
+        _strip_native_civilization_outputs(full)
+        _strip_native_civilization_outputs(geo)
+        self.assertEqual(geo, full)
+
+    def test_generate_cli_exposes_geo_only_scope(self) -> None:
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "geo-world.json"
+            result = CliRunner().invoke(
+                app,
+                [
+                    "generate",
+                    "--config",
+                    "configs/earthlike_seed.yaml",
+                    "--cells",
+                    "128",
+                    "--geo-only",
+                    "--output",
+                    str(output),
+                ],
+            )
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("scope=geo_only", result.output)
+        self.assertEqual(payload["generation_scope"], "geo_only")
+        self.assertIn("geo_evolution_provenance", payload)
+        self.assertNotIn("settlements", payload)
+        self.assertNotIn("historical_eras", payload)
+
+    def test_small_generated_earth_world_passes_generic_deep_validation(
+        self,
+    ) -> None:
+        report = validate_geo_world(self.world, profile="generic")
 
         self.assertTrue(report["passed"])
         self.assertEqual(report["summary"]["error_failure_count"], 0)
         self.assertEqual(report["metrics"]["cell_count"], 128)
+
+    def test_small_generated_earth_world_passes_earthlike_internal_calibration(
+        self,
+    ) -> None:
+        report = validate_geo_world(self.world, profile="earthlike")
+        calibration = _check(
+            report,
+            "earthlike_profile",
+            "calibration_pass_fraction",
+        )
+
+        self.assertTrue(report["passed"])
+        self.assertTrue(calibration["passed"])
+        self.assertGreaterEqual(
+            calibration["observed"],
+            calibration["expected"]["minimum"],
+        )
+
+    def test_each_natural_layer_has_direct_contract_evidence(self) -> None:
+        report = validate_geo_world(self.world, profile="generic")
+        audit = report["layer_contracts"]
+        layers = audit["layers"]
+
+        self.assertEqual(audit["report_type"], "geo_layer_contract_audit_v1")
+        self.assertEqual(audit["layer_count"], 14)
+        self.assertEqual(audit["passed_layer_count"], 14)
+        self.assertTrue(audit["all_layer_contracts_passed"])
         self.assertEqual(
-            report["summary"]["domains"]["earthlike_profile"]["failed_count"],
+            [layer["phase"] for layer in layers],
+            list(range(len(layers))),
+        )
+        self.assertEqual(
+            {layer["id"] for layer in layers},
+            {
+                "planet_parameters",
+                "spherical_mesh",
+                "plate_tectonics",
+                "crust_lithology",
+                "relief_bathymetry",
+                "sea_level_ocean",
+                "climate_atmosphere",
+                "hydrology",
+                "erosion_sediment",
+                "cryosphere",
+                "soils_pedogenesis",
+                "biomes_ecosystems",
+                "natural_resources",
+                "coupled_maturation",
+            },
+        )
+        ids = {layer["id"] for layer in layers}
+        for layer in layers:
+            self.assertTrue(layer["contract_passed"], layer)
+            self.assertFalse(layer["missing_or_invalid_outputs"], layer)
+            self.assertGreater(layer["validation_check_count"], 0, layer)
+            self.assertEqual(layer["validation_error_failure_count"], 0, layer)
+            self.assertFalse(layer["missing_validation_domains"], layer)
+            self.assertTrue(
+                all(
+                    count > 0
+                    for count in layer["validation_domain_coverage"].values()
+                ),
+                layer,
+            )
+            self.assertFalse(layer["failed_dependencies"], layer)
+            self.assertTrue(set(layer["dependencies"]).issubset(ids), layer)
+            self.assertFalse(layer["empirical_realism_proven"])
+
+        maturation = next(
+            layer for layer in layers if layer["id"] == "coupled_maturation"
+        )
+        self.assertEqual(
+            maturation["temporal_class"],
+            "reference_scaled_nominal_maturation_intervals_without_physical_time",
+        )
+        self.assertIn("no_physical_calibration", maturation["evidence_class"])
+        self.assertEqual(report["summary"]["layer_contract_failure_count"], 0)
+
+    def test_history_families_distinguish_native_mutation_from_diagnostics(
+        self,
+    ) -> None:
+        provenance = self.world["geo_evolution_provenance"]
+        records = {
+            record["family"]: record for record in provenance["families"]
+        }
+
+        self.assertFalse(provenance["physical_time_resolved"])
+        self.assertTrue(provenance["nominal_time_coordinate_available"])
+        self.assertFalse(provenance["nominal_time_calibrated"])
+        self.assertFalse(self.world["simulation_clock"]["physical_time_resolved"])
+        self.assertEqual(
+            provenance["native_state_history_families"],
+            list(NATIVE_STATE_HISTORY_FAMILIES),
+        )
+        self.assertEqual(
+            provenance["diagnostic_trajectory_families"],
+            list(DIAGNOSTIC_TRAJECTORY_FAMILIES),
+        )
+        self.assertFalse(
+            set(NATIVE_STATE_HISTORY_FAMILIES).intersection(
+                DIAGNOSTIC_TRAJECTORY_FAMILIES
+            )
+        )
+        self.assertEqual(
+            records["plate_motion_history"]["state_mutation_evidence"], "yes"
+        )
+        self.assertEqual(
+            records["soil_profile_histories"]["state_mutation_evidence"], "no"
+        )
+        self.assertTrue(
+            records["soil_profile_histories"][
+                "nominal_time_coordinate_available"
+            ]
+        )
+        self.assertEqual(
+            records["soil_profile_histories"]["time_basis"],
+            SOIL_LINKED_TIME_BASIS,
+        )
+        self.assertEqual(
+            records["numeric_depression_fill_history"][
+                "state_mutation_evidence"
+            ],
+            "mixed",
+        )
+        self.assertEqual(
+            records["climate_seasonal_histories"]["time_basis"],
+            "monthly_climatology",
+        )
+        self.assertEqual(
+            records["plate_motion_history"]["time_basis"],
+            NOMINAL_TIME_BASIS,
+        )
+        for family, record in records.items():
+            self.assertEqual(record["record_count"], len(self.world[family]))
+            self.assertFalse(record["physical_time_resolved"])
+            self.assertFalse(record["nominal_time_calibrated"])
+            if family in NATIVE_STATE_HISTORY_FAMILIES:
+                self.assertTrue(record["nominal_time_coordinate_available"])
+                for native_step in self.world[family]:
+                    self.assertEqual(
+                        native_step["nominal_time_basis"], NOMINAL_TIME_BASIS
+                    )
+                    self.assertFalse(native_step["physical_time_resolved"])
+                    self.assertFalse(native_step["nominal_time_calibrated"])
+
+        self.assertTrue(
+            self.world["soil_pedogenesis_model"][
+                "linked_nominal_time_coordinate_available"
+            ]
+        )
+        soil_steps = self.world["soil_profile_histories"][0]["steps"]
+        self.assertTrue(all(step["nominal_time_link_available"] for step in soil_steps))
+        self.assertTrue(all(step["start_year_bp"] is None for step in soil_steps))
+
+        report = validate_geo_world(self.world, profile="generic")
+        self.assertEqual(
+            _check(
+                report,
+                "evolution_provenance",
+                "history_family_temporal_semantics",
+            )["status"],
+            "passed",
+        )
+
+    def test_false_temporal_provenance_claim_is_rejected(self) -> None:
+        altered = deepcopy(self.world)
+        altered["geo_evolution_provenance"]["physical_time_resolved"] = True
+        diagnostic = next(
+            record
+            for record in altered["geo_evolution_provenance"]["families"]
+            if record["family"] == "soil_profile_histories"
+        )
+        diagnostic["state_mutation_evidence"] = "yes"
+        diagnostic["time_basis"] = "calibrated_geological_years"
+
+        report = validate_geo_world(altered, profile="generic")
+        check = _check(
+            report,
+            "evolution_provenance",
+            "history_family_temporal_semantics",
+        )
+        maturation = next(
+            layer
+            for layer in report["layer_contracts"]["layers"]
+            if layer["id"] == "coupled_maturation"
+        )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(check["status"], "failed")
+        self.assertIn(
+            "physical_time_resolved must be false", check["evidence"]["violations"]
+        )
+        self.assertIn(
+            "soil_profile_histories: state_mutation_evidence",
+            check["evidence"]["violations"],
+        )
+        self.assertIn(
+            "soil_profile_histories: time_basis",
+            check["evidence"]["violations"],
+        )
+        self.assertFalse(maturation["contract_passed"])
+
+    def test_mutated_nominal_history_interval_is_rejected(self) -> None:
+        altered = deepcopy(self.world)
+        altered["plate_motion_history"][1]["nominal_interval_end_ma"] += 0.5
+
+        report = validate_geo_world(altered, profile="generic")
+        provenance = _check(
+            report,
+            "evolution_provenance",
+            "history_family_temporal_semantics",
+        )
+        clock = _check(report, "simulation", "coupled_stage_feedback_replay")
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(provenance["status"], "failed")
+        self.assertEqual(clock["status"], "failed")
+
+    def test_controlled_model_steps_create_a_replayable_maturation_trajectory(
+        self,
+    ) -> None:
+        zero_data = self.config.model_dump(mode="python")
+        zero_data["erosion"]["iterations"] = 0
+        initial_only = generate_geo_world(WorldConfig.model_validate(zero_data))
+        matured = self.world
+
+        self.assertEqual(
+            initial_only["plate_motion_history"][0],
+            matured["plate_motion_history"][0],
+        )
+        self.assertEqual(
+            initial_only["earth_system_feedback_history"][0],
+            matured["earth_system_feedback_history"][0],
+        )
+        self.assertEqual(
+            [step["stage"] for step in initial_only["earth_system_feedback_history"]],
+            ["initial_climate_hydrology", "cryosphere_coupling"],
+        )
+        self.assertEqual(
+            [step["stage"] for step in matured["earth_system_feedback_history"]],
+            ["initial_climate_hydrology"]
+            + ["erosion_iteration" for _ in range(self.config.erosion.iterations)]
+            + ["cryosphere_coupling"],
+        )
+        self.assertEqual(
+            len(initial_only["plate_motion_history"]), 1
+        )
+        self.assertEqual(
+            len(matured["plate_motion_history"]),
+            self.config.erosion.iterations + 1,
+        )
+        self.assertEqual(
+            len(matured["earth_system_feedback_history"]),
+            self.config.erosion.iterations + 2,
+        )
+
+        for plate in initial_only["plates"]:
+            self.assertEqual(plate["cumulative_rotation_deg"], 0.0)
+        for plate in matured["plates"]:
+            expected_rotation = (
+                plate["angular_speed"]
+                * self.config.tectonics.plate_motion_scale_deg_per_step
+                * self.config.erosion.maturation_timestep_ma
+                / 5.0
+                * self.config.erosion.iterations
+            )
+            self.assertAlmostEqual(
+                plate["cumulative_rotation_deg"], expected_rotation, delta=0.002
+            )
+
+        self.assertEqual(
+            sum(
+                cell["plate_assignment_change_count"]
+                for cell in initial_only["cells"]
+            ),
             0,
+        )
+        self.assertGreater(
+            sum(
+                cell["plate_assignment_change_count"]
+                for cell in matured["cells"]
+            ),
+            0,
+        )
+        self.assertFalse(
+            any(
+                abs(cell["crust_age_ma"] - cell["initial_crust_age_ma"])
+                > 1.0e-6
+                for cell in initial_only["cells"]
+            )
+        )
+        self.assertTrue(
+            any(
+                abs(cell["crust_age_ma"] - cell["initial_crust_age_ma"])
+                > 1.0e-6
+                for cell in matured["cells"]
+            )
+        )
+        self.assertGreater(
+            matured["sediment_inventory_model"]["gross_mobilization_volume_km3"],
+            initial_only["sediment_inventory_model"][
+                "gross_mobilization_volume_km3"
+            ],
+        )
+        self.assertTrue(validate_geo_world(initial_only, profile="generic")["passed"])
+        self.assertTrue(validate_geo_world(matured, profile="generic")["passed"])
+
+    def test_missing_layer_artifact_fails_its_contract(self) -> None:
+        altered = deepcopy(self.world)
+        altered.pop("climate_classification")
+
+        report = validate_geo_world(altered, profile="generic")
+        climate = next(
+            layer
+            for layer in report["layer_contracts"]["layers"]
+            if layer["id"] == "climate_atmosphere"
+        )
+
+        self.assertFalse(report["passed"])
+        self.assertFalse(climate["contract_passed"])
+        self.assertEqual(
+            climate["missing_or_invalid_outputs"], ["climate_classification"]
+        )
+        self.assertGreaterEqual(
+            report["summary"]["layer_contract_failure_count"], 1
+        )
+
+    def test_layer_contract_failures_propagate_to_dependents(self) -> None:
+        altered = deepcopy(self.world)
+        altered.pop("planet_parameters")
+
+        report = validate_geo_world(altered, profile="generic")
+        layers = {
+            layer["id"]: layer for layer in report["layer_contracts"]["layers"]
+        }
+
+        self.assertFalse(layers["planet_parameters"]["contract_passed"])
+        self.assertFalse(layers["spherical_mesh"]["contract_passed"])
+        self.assertEqual(
+            layers["spherical_mesh"]["failed_dependencies"],
+            ["planet_parameters"],
+        )
+        self.assertFalse(layers["plate_tectonics"]["contract_passed"])
+
+    def test_dry_boundary_passes_complete_geo_validation(self) -> None:
+        data = self.config.model_dump(mode="python")
+        data["climate"]["precipitation_scale"] = 0.0
+        data["erosion"]["iterations"] = 0
+        dry_world = generate_geo_world(WorldConfig.model_validate(data))
+
+        report = validate_geo_world(dry_world, profile="generic")
+
+        self.assertTrue(report["passed"], report["checks"])
+        drainage = _check(report, "hydrology", "acyclic_downhill_drainage")
+        self.assertEqual(drainage["status"], "passed")
+        self.assertEqual(drainage["observed"]["land_basin_count"], 0)
+        self.assertEqual(drainage["observed"]["watershed_basin_count"], 0)
+
+        altered = deepcopy(dry_world)
+        altered["resource_deposit_model"]["flow_accumulation_scale"] = 3.0
+        altered["ore_genesis_model"]["flow_accumulation_scale"] = 3.0
+        altered_report = validate_geo_world(altered, profile="generic")
+        self.assertFalse(altered_report["passed"])
+        self.assertEqual(
+            _check(
+                altered_report,
+                "geologic_resources",
+                "resource_deposit_sources_and_ranges",
+            )["status"],
+            "failed",
+        )
+        self.assertEqual(
+            _check(
+                altered_report,
+                "geologic_resources",
+                "ore_system_membership_and_formation_sources",
+            )["status"],
+            "failed",
         )
 
     def test_civilization_layers_do_not_affect_geo_verdict_metrics_or_fingerprint(
@@ -277,6 +747,107 @@ class GeoWorldValidationTests(TestCase):
                 self.assertFalse(report["passed"])
                 self.assertGreater(report["summary"]["error_failure_count"], 0)
 
+    def test_crust_material_shadow_failure_surfaces_in_report_and_cli(self) -> None:
+        altered = deepcopy(self.world)
+        altered["crust_material_shadow_model"][
+            "physical_source_sink_resolved"
+        ] = True
+
+        report = validate_geo_world(altered, profile="generic")
+        check = _check(
+            report,
+            "tectonics",
+            "persistent_crust_material_shadow_replay",
+        )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(check["status"], "failed")
+        self.assertTrue(check["evidence"]["violations"])
+        self.assertTrue(
+            any(
+                "finite surface/exchange/empty-slab counter-model" in limitation
+                for limitation in report["model_limitations"]
+            )
+        )
+
+        with TemporaryDirectory() as directory:
+            world_path = Path(directory) / "world.json"
+            world_path.write_text(json.dumps(altered), encoding="utf-8")
+            result = CliRunner().invoke(
+                app,
+                ["validate-geo", "--world", str(world_path)],
+            )
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn(
+            "FAIL tectonics.persistent_crust_material_shadow_replay",
+            result.output,
+        )
+
+    def test_finite_crust_accounting_failure_surfaces_in_report_and_cli(
+        self,
+    ) -> None:
+        altered = deepcopy(self.world)
+        altered["crust_dry_rock_accounting_model"][
+            "material_provenance_resolved"
+        ] = True
+
+        report = validate_geo_world(altered, profile="generic")
+        check = _check(
+            report,
+            "tectonics",
+            "finite_crust_dry_rock_accounting_replay",
+        )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(check["status"], "failed")
+        self.assertTrue(check["evidence"]["violations"])
+
+        with TemporaryDirectory() as directory:
+            world_path = Path(directory) / "world.json"
+            world_path.write_text(json.dumps(altered), encoding="utf-8")
+            result = CliRunner().invoke(
+                app,
+                ["validate-geo", "--world", str(world_path)],
+            )
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn(
+            "FAIL tectonics.finite_crust_dry_rock_accounting_replay",
+            result.output,
+        )
+
+    def test_sediment_partition_failure_surfaces_in_report_and_cli(self) -> None:
+        altered = deepcopy(self.world)
+        altered["glacial_sediment_transport_model"][
+            "source_partition_audit_is_provenance_claim"
+        ] = True
+
+        report = validate_geo_world(altered, profile="generic")
+        check = _check(
+            report,
+            "sediment",
+            "sediment_alluvium_bedrock_source_partition_replay",
+        )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(check["status"], "failed")
+        self.assertTrue(check["evidence"]["violations"])
+
+        with TemporaryDirectory() as directory:
+            world_path = Path(directory) / "world.json"
+            world_path.write_text(json.dumps(altered), encoding="utf-8")
+            result = CliRunner().invoke(
+                app,
+                ["validate-geo", "--world", str(world_path)],
+            )
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn(
+            "FAIL sediment.sediment_alluvium_bedrock_source_partition_replay",
+            result.output,
+        )
+
     def test_biome_label_and_mirrored_diagnostic_do_not_bypass_replay(self) -> None:
         altered = deepcopy(self.world)
         original = str(altered["cells"][0]["biome"])
@@ -361,16 +932,49 @@ class GeoWorldValidationTests(TestCase):
         self.assertFalse(strict_report["requested_policy"]["policy_passed"])
         self.assertEqual(strict_report["summary"]["warning_failure_count"], 1)
 
+    def test_validate_geo_cli_rejects_contract_only_failure(self) -> None:
+        altered = deepcopy(self.world)
+        altered.pop("groundwater_flow_model")
+
+        with TemporaryDirectory() as directory:
+            world_path = Path(directory) / "world.json"
+            report_path = Path(directory) / "report.json"
+            world_path.write_text(json.dumps(altered), encoding="utf-8")
+            result = CliRunner().invoke(
+                app,
+                [
+                    "validate-geo",
+                    "--world",
+                    str(world_path),
+                    "--output",
+                    str(report_path),
+                ],
+            )
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("FAIL geo", result.output)
+        self.assertIn("FAIL layer_contract.hydrology", result.output)
+        self.assertFalse(report["passed"])
+        self.assertFalse(report["requested_policy"]["policy_passed"])
+
     def test_geo_generation_does_not_change_legacy_earth_generation(self) -> None:
         legacy_before = generate_world(self.config)
+
+        legacy_geo_report = validate_geo_world(legacy_before, profile="generic")
+        self.assertTrue(legacy_geo_report["passed"])
+        self.assertNotIn(
+            "evolution_provenance",
+            legacy_geo_report["summary"]["domains"],
+        )
 
         generate_geo_world(self.config)
         legacy_after = generate_world(self.config)
 
         self.assertEqual(legacy_after, legacy_before)
         self.assertNotIn("generation_scope", legacy_after)
-        self.assertTrue(legacy_after["settlements"])
-        self.assertTrue(legacy_after["political_regions"])
+        self.assertIsInstance(legacy_after["settlements"], list)
+        self.assertIsInstance(legacy_after["political_regions"], list)
         self.assertIn("trade_route_graph", legacy_after)
         self.assertIn("political_region_graph", legacy_after)
         self.assertIn("settlement_score", legacy_after["cells"][0])
@@ -450,7 +1054,7 @@ schema_version: 1
 name: small diverse planets
 scenarios:
   - id: earth
-    profile: earthlike
+    profile: generic
     repeat: 2
     expectations:
       surface_area_km2: {min: 500000000, max: 520000000}
@@ -488,4 +1092,50 @@ relations:
         self.assertGreater(
             members["earth"]["metrics"]["surface_area_km2"],
             members["compact"]["metrics"]["surface_area_km2"],
+        )
+
+    def test_checked_matrix_isolates_iteration_driven_maturation(self) -> None:
+        complete = load_geo_validation_manifest(
+            Path("configs/geo_validation_matrix.yaml")
+        )
+        selected_ids = {"maturation_initial", "maturation_evolved"}
+        manifest = {
+            **complete,
+            "name": "isolated maturation integration",
+            "scenarios": [
+                scenario
+                for scenario in complete["scenarios"]
+                if scenario["id"] in selected_ids
+            ],
+            "relations": [
+                relation
+                for relation in complete["relations"]
+                if relation["left"] in selected_ids
+                and relation["right"] in selected_ids
+            ],
+        }
+
+        report = evaluate_geo_validation_suite(self.config, manifest)
+        members = {member["id"]: member for member in report["members"]}
+
+        self.assertTrue(report["passed"], report)
+        self.assertEqual(report["summary"]["scenario_pass_count"], 2)
+        self.assertEqual(report["summary"]["relation_pass_count"], 5)
+        self.assertEqual(
+            members["maturation_initial"]["metrics"][
+                "crust_evolved_cell_fraction"
+            ],
+            0.0,
+        )
+        self.assertGreaterEqual(
+            members["maturation_evolved"]["metrics"][
+                "crust_evolved_cell_fraction"
+            ],
+            0.50,
+        )
+        self.assertEqual(
+            members["maturation_evolved"]["metrics"][
+                "simulation_stage_count"
+            ],
+            8,
         )

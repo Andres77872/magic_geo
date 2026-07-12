@@ -214,7 +214,82 @@ double lithology_resistance(int lithology) {
     }
 }
 
-void derive_crust_and_topography(const Params& params, const std::vector<Plate>& plates, std::vector<Cell>& cells) {
+namespace {
+
+struct InitialCrustCategoryState {
+    int crust_type = 0;
+    int lithology = 0;
+    double thickness_km = 0.0;
+    double density_g_cm3 = 0.0;
+};
+
+InitialCrustCategoryState initial_crust_category_state(
+    const Plate& plate,
+    bool continental,
+    bool continental_margin,
+    double convergent,
+    double divergent,
+    double category_noise,
+    double numeric_noise
+) {
+    InitialCrustCategoryState state;
+    if (continental) {
+        if (convergent > 0.40) {
+            state.crust_type = 5;
+            state.lithology = 6;
+        } else if (divergent > 0.36) {
+            state.crust_type = 6;
+            state.lithology = 3;
+        } else if (
+            category_noise > 0.55 &&
+            convergent < 0.16 &&
+            divergent < 0.14
+        ) {
+            state.crust_type = 4;
+            state.lithology = 1;
+        } else if (category_noise < -0.45) {
+            state.crust_type = 7;
+            state.lithology = numeric_noise > 0.0 ? 2 : 4;
+        } else {
+            state.crust_type = 1;
+            state.lithology = numeric_noise > 0.35 ? 1 : 3;
+        }
+        state.thickness_km = clamp(
+            29.0 + 17.0 * convergent - 8.0 * divergent +
+                5.0 * numeric_noise,
+            18.0,
+            72.0
+        );
+        return state;
+    }
+
+    if (convergent > 0.35 && plate.kind != 0) {
+        state.crust_type = 3;
+        state.lithology = 5;
+    } else if (continental_margin) {
+        state.crust_type = 2;
+        state.lithology = 0;
+    } else {
+        state.crust_type = 0;
+        state.lithology = 0;
+    }
+    state.thickness_km = clamp(
+        6.5 + 3.0 * convergent + 1.5 * numeric_noise,
+        4.5,
+        14.0
+    );
+    state.density_g_cm3 = 3.00;
+    return state;
+}
+
+}  // namespace
+
+void derive_crust_and_topography(
+    const Params& params,
+    const std::vector<Plate>& plates,
+    std::vector<Cell>& cells,
+    InitialOceanicCrustAgeDiagnostics* initial_oceanic_crust_age
+) {
     const int n = static_cast<int>(cells.size());
     const double relief_scale = clamp(1.0 / std::sqrt(std::max(0.08, params.gravity_g)), 0.55, 1.60);
     const double tectonic_activity = clamp(params.internal_heat * std::sqrt(4.5 / std::max(0.05, params.geological_age_ga)), 0.25, 2.25);
@@ -288,71 +363,103 @@ void derive_crust_and_topography(const Params& params, const std::vector<Plate>&
     }
 #pragma omp parallel for schedule(static)
     for (int i = 0; i < n; ++i) {
+        Cell& cell = cells[static_cast<std::size_t>(i)];
+        const Plate& plate = plates[static_cast<std::size_t>(cell.plate_id)];
+        const double category_noise = signed_noise(
+            params.seed,
+            static_cast<std::uint64_t>(i),
+            23
+        );
+        const double numeric_noise = signed_noise(
+            params.seed,
+            static_cast<std::uint64_t>(i),
+            31
+        );
+        const InitialCrustCategoryState state =
+            initial_crust_category_state(
+                plate,
+                continental_mask[static_cast<std::size_t>(i)] != 0,
+                continental_margin[static_cast<std::size_t>(i)] != 0,
+                cell.boundary_convergent,
+                cell.boundary_divergent,
+                category_noise,
+                numeric_noise
+            );
+        cell.crust_type = state.crust_type;
+        cell.lithology = state.lithology;
+        // The exact boundary geometry and oceanic predicate need a complete
+        // provisional state before the ridge-distance age field is built.
+        cell.crust_age_ma = 0.0;
+        cell.crust_thickness_km = state.thickness_km;
+        cell.crust_density = state.density_g_cm3 > 0.0
+            ? state.density_g_cm3
+            : 2.70 + 0.08 * hash01(params.seed, i, 43);
+    }
+    const CrustTransportPlan provisional_identity_transport =
+        build_identity_crust_transport_plan(cells);
+    int provisional_reciprocal_mesh_segment_count = 0;
+    const std::vector<PlateBoundarySegment> provisional_boundary_segments =
+        build_plate_boundary_segments(
+            params,
+            cells,
+            plates,
+            provisional_identity_transport,
+            &provisional_reciprocal_mesh_segment_count
+        );
+    const std::vector<double> initial_oceanic_crust_age_ma =
+        build_initial_oceanic_crust_age_field(
+            params,
+            cells,
+            provisional_boundary_segments,
+            initial_oceanic_crust_age
+        );
+#pragma omp parallel for schedule(static)
+    for (int i = 0; i < n; ++i) {
         Cell& cell = cells[i];
-        const Plate& plate = plates[cell.plate_id];
         const double n0 = continental_noise[static_cast<std::size_t>(i)];
-        const double n1 = signed_noise(params.seed, static_cast<std::uint64_t>(i), 23);
-        const double n2 = signed_noise(params.seed, static_cast<std::uint64_t>(i), 31);
         const double coherent_n2 = relief_noise[static_cast<std::size_t>(i)];
         const bool continental = continental_mask[static_cast<std::size_t>(i)] != 0;
         const double conv = cell.boundary_convergent;
         const double div = cell.boundary_divergent;
         const double trans = cell.boundary_transform;
-        if (continental) {
-            if (conv > 0.40) {
-                cell.crust_type = 5;
-                cell.lithology = 6;
-            } else if (div > 0.36) {
-                cell.crust_type = 6;
-                cell.lithology = 3;
-            } else if (n1 > 0.55 && conv < 0.16 && div < 0.14) {
-                cell.crust_type = 4;
-                cell.lithology = 1;
-            } else if (n1 < -0.45) {
-                cell.crust_type = 7;
-                cell.lithology = n2 > 0.0 ? 2 : 4;
-            } else {
-                cell.crust_type = 1;
-                cell.lithology = n2 > 0.35 ? 1 : 3;
-            }
-        } else {
-            if (conv > 0.35 && plate.kind != 0) {
-                cell.crust_type = 3;
-                cell.lithology = 5;
-            } else if (continental_margin[static_cast<std::size_t>(i)] != 0) {
-                cell.crust_type = 2;
-                cell.lithology = 0;
-            } else {
-                cell.crust_type = 0;
-                cell.lithology = 0;
-            }
-        }
         const bool oceanic = cell.crust_type == 0 || cell.crust_type == 2 || cell.crust_type == 3;
         const double initial_age_ceiling_ma = crust_age_ceiling_ma(
-            params, oceanic ? 260.0 : 4200.0
+            params, 4200.0
         );
         cell.crust_age_ma = oceanic
-            ? clamp(
-                8.0 + 190.0 * (1.0 - div) + 25.0 * n1,
-                0.0,
-                initial_age_ceiling_ma
-            )
+            ? initial_oceanic_crust_age_ma[static_cast<std::size_t>(i)]
             : clamp(
                 450.0 + 900.0 * params.geological_age_ga * hash01(params.seed, i, 41),
                 std::min(120.0, initial_age_ceiling_ma),
                 initial_age_ceiling_ma
             );
-        cell.crust_thickness_km = oceanic
-            ? clamp(6.5 + 3.0 * conv + 1.5 * n2, 4.5, 14.0)
-            : clamp(29.0 + 17.0 * conv - 8.0 * div + 5.0 * n2, 18.0, 72.0);
-        cell.crust_density = oceanic ? 3.00 : 2.70 + 0.08 * hash01(params.seed, i, 43);
         const double isostatic = oceanic
-            ? -3000.0
+            ? -OCEANIC_RIDGE_REFERENCE_DEPTH_M
             : CONTINENTAL_ISOSTATIC_FREEBOARD_M +
-                12.0 * (cell.crust_thickness_km - 30.0) -
-                1800.0 * (cell.crust_density - 2.72);
-        const double thermal = oceanic ? -1050.0 * std::sqrt(std::max(0.0, cell.crust_age_ma) / 190.0) : 0.0;
-        const double ridge = div * (oceanic ? 2600.0 : 880.0) * relief_scale;
+                CONTINENTAL_CRUST_THICKNESS_FREEBOARD_M_PER_KM * (
+                    cell.crust_thickness_km -
+                    CONTINENTAL_REFERENCE_CRUST_THICKNESS_KM
+                ) -
+                CONTINENTAL_CRUST_DENSITY_FREEBOARD_M_PER_G_CM3 * (
+                    cell.crust_density -
+                    CONTINENTAL_REFERENCE_CRUST_DENSITY_G_CM3
+                );
+        const bool oceanic_like = is_oceanic_crust_state(
+            cell.crust_type,
+            cell.lithology,
+            cell.crust_age_ma,
+            cell.crust_thickness_km,
+            cell.crust_density
+        );
+        const double thermal = oceanic_age_depth_thermal_subsidence_m(
+            cell.crust_age_ma,
+            oceanic_like
+        );
+        // The published age-depth relation already includes the elevated
+        // zero-age ridge intercept.  Adding a second oceanic ridge uplift
+        // would double-count that bathymetry; the continental divergent term
+        // remains a separate broad rift-shoulder proxy.
+        const double ridge = div * (oceanic ? 0.0 : 880.0) * relief_scale;
         const double rift = div * (oceanic ? 0.0 : -820.0) * relief_scale;
         const double convergence_squared = conv * conv;
         const double orogen = (
@@ -378,6 +485,7 @@ void derive_crust_and_topography(const Params& params, const std::vector<Plate>&
             180.0 * std::sin(9.0 * cell.lon + 4.0 * cell.lat);
         cell.initial_isostatic_elevation_m = isostatic;
         cell.initial_thermal_subsidence_m = thermal;
+        cell.thermal_subsidence_target_m = thermal;
         cell.initial_ridge_uplift_m = ridge;
         cell.initial_orogenic_uplift_m = orogen;
         cell.initial_volcanic_uplift_m = volcanic;
@@ -393,7 +501,8 @@ void derive_crust_and_topography(const Params& params, const std::vector<Plate>&
             1.0
         );
         cell.uplift_rate = params.tectonic_uplift_scale * tectonic_activity *
-            (1.5 * div + 8.5 * conv + (cell.crust_type == 3 ? 2.5 : 0.0));
+            (1.5 * div + 8.5 * conv + (cell.crust_type == 3 ? 2.5 : 0.0)) *
+            maturation_timestep_scale(params);
         cell.elevation_m = cell.initial_elevation_m;
         cell.initial_plate_id = cell.plate_id;
         cell.last_crust_source_cell_id = cell.id;
@@ -401,32 +510,87 @@ void derive_crust_and_topography(const Params& params, const std::vector<Plate>&
         cell.initial_crust_thickness_km = cell.crust_thickness_km;
         cell.initial_crust_density = cell.crust_density;
     }
+    for (Cell& cell : cells) {
+        initialize_sediment_interface(cell, "initial topography");
+    }
 }
 
-bool is_oceanic_crust_state(int crust_type, double age_ma, double thickness_km, double density) {
+bool is_oceanic_crust_state(
+    int crust_type,
+    int lithology,
+    double age_ma,
+    double thickness_km,
+    double density
+) {
     if (crust_type == 0) {
         return true;
     }
-    if (crust_type != 2 && crust_type != 3) {
+    if (crust_type == 2) {
+        return lithology == 0;
+    }
+    if (crust_type != 3) {
         return false;
     }
     return age_ma <= 320.0 && thickness_km <= 18.0 && density >= 2.84;
 }
 
-double crust_equilibrium_elevation_m(double thickness_km, double density, bool oceanic) {
-    if (oceanic) {
-        return -3000.0;
-    }
-    return CONTINENTAL_ISOSTATIC_FREEBOARD_M +
-        12.0 * (thickness_km - 30.0) -
-        1800.0 * (density - 2.72);
+namespace {
+
+struct CrustRuleState {
+    int crust_type = 0;
+    int lithology = 0;
+    double age_ma = 0.0;
+    double thickness_km = 0.0;
+    double density = 0.0;
+};
+
+struct CrustProcessCellDelta {
+    bool triggered = false;
+    bool changed = false;
+    double crust_volume_km3 = 0.0;
+    double density_weighted_crust_volume = 0.0;
+    double crust_age_volume_moment_km3_ma = 0.0;
+};
+
+void record_crust_process_transition(
+    double area_km2,
+    bool triggered,
+    const CrustRuleState& before,
+    const CrustRuleState& after,
+    CrustProcessCellDelta& delta
+) {
+    const double before_volume = area_km2 * before.thickness_km;
+    const double after_volume = area_km2 * after.thickness_km;
+    const bool changed =
+        before.age_ma != after.age_ma ||
+        before.thickness_km != after.thickness_km ||
+        before.density != after.density;
+    delta.triggered = delta.triggered || triggered;
+    delta.changed = delta.changed || changed;
+    delta.crust_volume_km3 += after_volume - before_volume;
+    delta.density_weighted_crust_volume +=
+        after_volume * after.density - before_volume * before.density;
+    delta.crust_age_volume_moment_km3_ma +=
+        after_volume * after.age_ma - before_volume * before.age_ma;
 }
 
-double oceanic_thermal_subsidence_m(double crust_age_ma, bool oceanic) {
-    return oceanic ? -1050.0 * std::sqrt(std::max(0.0, crust_age_ma) / 190.0) : 0.0;
+}  // namespace
+
+double crust_equilibrium_elevation_m(double thickness_km, double density, bool oceanic) {
+    if (oceanic) {
+        return -OCEANIC_RIDGE_REFERENCE_DEPTH_M;
+    }
+    return CONTINENTAL_ISOSTATIC_FREEBOARD_M +
+        CONTINENTAL_CRUST_THICKNESS_FREEBOARD_M_PER_KM * (
+            thickness_km - CONTINENTAL_REFERENCE_CRUST_THICKNESS_KM
+        ) -
+        CONTINENTAL_CRUST_DENSITY_FREEBOARD_M_PER_G_CM3 * (
+            density - CONTINENTAL_REFERENCE_CRUST_DENSITY_G_CM3
+        );
 }
 
 PlateMotionStep summarize_plate_motion_step(
+    const Params& params,
     const std::vector<Cell>& cells,
     const std::vector<Plate>& plates,
     int id,
@@ -438,8 +602,32 @@ PlateMotionStep summarize_plate_motion_step(
     const std::vector<double>& crust_age_change_ma,
     const std::vector<double>& crust_thickness_change_km,
     const std::vector<double>& crust_density_change,
-    const std::vector<double>& tectonic_elevation_change_m
+    const std::vector<double>& tectonic_elevation_change_m,
+    const std::vector<double>& previous_local_isostatic_equilibrium_m,
+    const std::vector<double>& isostatic_equilibrium_change_m,
+    const std::vector<double>& previous_local_thermal_subsidence_target_m,
+    const std::vector<double>& thermal_equilibrium_change_m,
+    const std::vector<double>& unbounded_dynamic_relief_change_m,
+    const std::vector<double>& bounded_dynamic_relief_change_m
 ) {
+    if (cells.size() > static_cast<std::size_t>(
+            std::numeric_limits<int>::max())) {
+        throw std::length_error(
+            "plate-motion summary cell count exceeds native integer capacity"
+        );
+    }
+    if (
+        previous_local_isostatic_equilibrium_m.size() != cells.size() ||
+        isostatic_equilibrium_change_m.size() != cells.size() ||
+        previous_local_thermal_subsidence_target_m.size() != cells.size() ||
+        thermal_equilibrium_change_m.size() != cells.size() ||
+        unbounded_dynamic_relief_change_m.size() != cells.size() ||
+        bounded_dynamic_relief_change_m.size() != cells.size()
+    ) {
+        throw std::invalid_argument(
+            "plate-motion equilibrium checkpoint cardinality must equal cell count"
+        );
+    }
     PlateMotionStep step;
     step.id = id;
     step.erosion_iteration = erosion_iteration;
@@ -449,6 +637,33 @@ PlateMotionStep summarize_plate_motion_step(
     step.cell_plate_ids.reserve(cells.size());
     step.crust_type_by_cell.reserve(cells.size());
     step.lithology_by_cell.reserve(cells.size());
+    step.transport_plan = crust_motion.transport_plan;
+    step.boundary_segments = build_plate_boundary_segments(
+        params,
+        cells,
+        plates,
+        step.transport_plan,
+        &step.reciprocal_mesh_segment_count
+    );
+    step.boundary_segment_count = static_cast<int>(
+        step.boundary_segments.size()
+    );
+    step.crust_overlap_candidate_fate_ledger =
+        build_crust_overlap_candidate_fate_ledger(
+            step.transport_plan,
+            step.boundary_segments,
+            step.id,
+            step.cell_count,
+            step.plate_count
+        );
+    std::unordered_set<int> boundary_incident_cell_ids;
+    for (const PlateBoundarySegment& segment : step.boundary_segments) {
+        boundary_incident_cell_ids.insert(segment.left_cell_id);
+        boundary_incident_cell_ids.insert(segment.right_cell_id);
+    }
+    step.control_volume_boundary_incident_cell_count = static_cast<int>(
+        boundary_incident_cell_ids.size()
+    );
     step.crust_source_cell_ids = crust_motion.source_cell_ids;
     if (step.crust_source_cell_ids.size() != cells.size()) {
         step.crust_source_cell_ids.resize(cells.size());
@@ -461,6 +676,8 @@ PlateMotionStep summarize_plate_motion_step(
     step.crust_age_process_change_ma_by_cell = crust_motion.age_process_change_ma_by_cell;
     step.crust_thickness_process_change_km_by_cell = crust_motion.thickness_process_change_km_by_cell;
     step.crust_density_process_change_by_cell = crust_motion.density_process_change_by_cell;
+    step.process_inventory_delta_by_reason =
+        crust_motion.process_inventory_delta_by_reason;
     for (std::vector<double>* values : {
         &step.crust_transport_distance_km_by_cell,
         &step.crust_age_transport_change_ma_by_cell,
@@ -484,6 +701,18 @@ PlateMotionStep summarize_plate_motion_step(
     step.crust_thickness_change_km_by_cell = crust_thickness_change_km;
     step.crust_density_change_by_cell = crust_density_change;
     step.tectonic_elevation_change_m_by_cell = tectonic_elevation_change_m;
+    step.previous_local_isostatic_equilibrium_m.reserve(cells.size());
+    step.post_process_local_isostatic_equilibrium_m.reserve(cells.size());
+    step.isostatic_equilibrium_change_m.reserve(cells.size());
+    step.previous_local_thermal_subsidence_target_m.reserve(cells.size());
+    step.post_process_local_thermal_subsidence_target_m.reserve(cells.size());
+    step.thermal_equilibrium_change_m.reserve(cells.size());
+    step.thermal_target_difference_tendency_m.reserve(cells.size());
+    step.unbounded_dynamic_relief_change_m.reserve(cells.size());
+    step.bounded_dynamic_relief_change_m.reserve(cells.size());
+    step.boundary_convergent_by_cell.reserve(cells.size());
+    step.boundary_divergent_by_cell.reserve(cells.size());
+    step.boundary_transform_by_cell.reserve(cells.size());
 
     std::vector<int> plate_cell_counts(plates.size(), 0);
     std::vector<double> plate_areas(plates.size(), 0.0);
@@ -493,6 +722,125 @@ PlateMotionStep summarize_plate_motion_step(
         step.cell_plate_ids.push_back(cell.plate_id);
         step.crust_type_by_cell.push_back(cell.crust_type);
         step.lithology_by_cell.push_back(cell.lithology);
+        step.boundary_convergent_by_cell.push_back(cell.boundary_convergent);
+        step.boundary_divergent_by_cell.push_back(cell.boundary_divergent);
+        step.boundary_transform_by_cell.push_back(cell.boundary_transform);
+        const double previous_isostatic_equilibrium_m =
+            previous_local_isostatic_equilibrium_m[index];
+        const bool post_process_oceanic_like = is_oceanic_crust_state(
+            cell.crust_type,
+            cell.lithology,
+            cell.crust_age_ma,
+            cell.crust_thickness_km,
+            cell.crust_density
+        );
+        const double post_process_isostatic_equilibrium_m =
+            crust_equilibrium_elevation_m(
+                cell.crust_thickness_km,
+                cell.crust_density,
+                post_process_oceanic_like
+            );
+        const double expected_isostatic_equilibrium_change_m =
+            TECTONIC_ISOSTATIC_TARGET_DIFFERENCE_GAIN * (
+                post_process_isostatic_equilibrium_m -
+                    previous_isostatic_equilibrium_m
+            );
+        if (
+            !std::isfinite(previous_isostatic_equilibrium_m) ||
+            !std::isfinite(post_process_isostatic_equilibrium_m) ||
+            !std::isfinite(isostatic_equilibrium_change_m[index]) ||
+            isostatic_equilibrium_change_m[index] !=
+                expected_isostatic_equilibrium_change_m
+        ) {
+            throw std::runtime_error(
+                "plate-motion isostatic equilibrium change is non-finite or stale"
+            );
+        }
+        const double previous_thermal_subsidence_m =
+            previous_local_thermal_subsidence_target_m[index];
+        const double expected_post_process_thermal_subsidence_m =
+            oceanic_age_depth_thermal_subsidence_m(
+                cell.crust_age_ma,
+                post_process_oceanic_like
+            );
+        if (!std::isfinite(previous_thermal_subsidence_m) ||
+            !std::isfinite(cell.thermal_subsidence_target_m) ||
+            cell.thermal_subsidence_target_m !=
+                expected_post_process_thermal_subsidence_m) {
+            throw std::runtime_error(
+                "plate-motion thermal checkpoint is non-finite or stale"
+            );
+        }
+        const double expected_thermal_target_difference_tendency_m =
+            OCEANIC_AGE_DEPTH_TARGET_DIFFERENCE_GAIN * (
+                cell.thermal_subsidence_target_m -
+                    previous_thermal_subsidence_m
+            );
+        const double recorded_thermal_target_difference_tendency_m =
+            thermal_equilibrium_change_m[index];
+        if (!std::isfinite(recorded_thermal_target_difference_tendency_m) ||
+            recorded_thermal_target_difference_tendency_m !=
+                expected_thermal_target_difference_tendency_m) {
+            throw std::runtime_error(
+                "plate-motion thermal equilibrium tendency is non-finite or stale"
+            );
+        }
+        const double expected_bounded_dynamic_relief_change_m = clamp(
+            unbounded_dynamic_relief_change_m[index],
+            TECTONIC_DYNAMIC_RELIEF_MINIMUM_CHANGE_M,
+            TECTONIC_DYNAMIC_RELIEF_MAXIMUM_CHANGE_M
+        );
+        if (
+            !std::isfinite(unbounded_dynamic_relief_change_m[index]) ||
+            !std::isfinite(bounded_dynamic_relief_change_m[index]) ||
+            bounded_dynamic_relief_change_m[index] !=
+                expected_bounded_dynamic_relief_change_m
+        ) {
+            throw std::runtime_error(
+                "plate-motion bounded dynamic relief change is non-finite or stale"
+            );
+        }
+        const double expected_tectonic_elevation_change_m =
+            expected_isostatic_equilibrium_change_m +
+            expected_thermal_target_difference_tendency_m +
+            expected_bounded_dynamic_relief_change_m;
+        if (
+            index >= tectonic_elevation_change_m.size() ||
+            !std::isfinite(tectonic_elevation_change_m[index]) ||
+            tectonic_elevation_change_m[index] !=
+                expected_tectonic_elevation_change_m
+        ) {
+            throw std::runtime_error(
+                "plate-motion tectonic elevation change does not replay"
+            );
+        }
+        step.previous_local_isostatic_equilibrium_m.push_back(
+            previous_isostatic_equilibrium_m
+        );
+        step.post_process_local_isostatic_equilibrium_m.push_back(
+            post_process_isostatic_equilibrium_m
+        );
+        step.isostatic_equilibrium_change_m.push_back(
+            isostatic_equilibrium_change_m[index]
+        );
+        step.previous_local_thermal_subsidence_target_m.push_back(
+            previous_thermal_subsidence_m
+        );
+        step.post_process_local_thermal_subsidence_target_m.push_back(
+            cell.thermal_subsidence_target_m
+        );
+        step.thermal_equilibrium_change_m.push_back(
+            recorded_thermal_target_difference_tendency_m
+        );
+        step.thermal_target_difference_tendency_m.push_back(
+            recorded_thermal_target_difference_tendency_m
+        );
+        step.unbounded_dynamic_relief_change_m.push_back(
+            unbounded_dynamic_relief_change_m[index]
+        );
+        step.bounded_dynamic_relief_change_m.push_back(
+            bounded_dynamic_relief_change_m[index]
+        );
         const int source_cell_id = step.crust_source_cell_ids[index];
         if (source_cell_id != static_cast<int>(index)) {
             step.crust_source_remap_cell_count++;
@@ -581,6 +929,8 @@ PlateMotionStep summarize_plate_motion_step(
         PlateKinematicSnapshot snapshot;
         snapshot.plate_id = plate.id;
         snapshot.center = plate.center;
+        snapshot.rotation_axis = plate.axis;
+        snapshot.intrinsic_angular_speed = plate.angular_speed;
         snapshot.step_rotation_deg = plate_index < step_rotation_deg.size() ? step_rotation_deg[plate_index] : 0.0;
         snapshot.cumulative_rotation_deg = plate.cumulative_rotation_deg;
         snapshot.cell_count = plate_cell_counts[plate_index];
@@ -592,6 +942,130 @@ PlateMotionStep summarize_plate_motion_step(
     if (!plates.empty()) {
         step.mean_plate_rotation_deg /= static_cast<double>(plates.size());
     }
+    for (const Cell& cell : cells) {
+        const double volume = cell.area_km2 * cell.crust_thickness_km;
+        step.post_process_crust_volume_km3 += volume;
+        step.post_process_density_weighted_crust_volume +=
+            volume * cell.crust_density;
+        step.post_process_crust_age_volume_moment +=
+            volume * cell.crust_age_ma;
+    }
+    // Validate rule completeness against per-cell transported-to-final state
+    // changes.  This avoids using the ill-conditioned difference between two
+    // large global inventories as the omission detector.
+    std::array<long double, 3> direct_rule_delta{};
+    std::array<long double, 3> direct_rule_absolute_delta{};
+    for (std::size_t index = 0; index < cells.size(); ++index) {
+        const Cell& cell = cells[index];
+        const double transported_volume = cell.area_km2 *
+            step.transport_plan.remapped_crust_thickness_km_by_cell[index];
+        const double post_process_volume =
+            cell.area_km2 * cell.crust_thickness_km;
+        const std::array<double, 3> transported_state = {
+            transported_volume,
+            transported_volume *
+                step.transport_plan.remapped_crust_density_by_cell[index],
+            transported_volume *
+                step.transport_plan.remapped_crust_age_ma_by_cell[index],
+        };
+        const std::array<double, 3> post_process_state = {
+            post_process_volume,
+            post_process_volume * cell.crust_density,
+            post_process_volume * cell.crust_age_ma,
+        };
+        for (std::size_t component = 0;
+             component < direct_rule_delta.size();
+             ++component) {
+            const double cell_delta =
+                post_process_state[component] - transported_state[component];
+            direct_rule_delta[component] += cell_delta;
+            direct_rule_absolute_delta[component] += std::abs(cell_delta);
+        }
+    }
+    std::array<long double, 3> attributed_process_delta{};
+    std::array<long double, 3> attributed_absolute_delta{};
+    for (const CrustProcessInventoryDelta& reason :
+         step.process_inventory_delta_by_reason) {
+        const std::array<double, 3> signed_from_positive_negative = {
+            reason.positive_crust_volume_km3 -
+                reason.negative_crust_volume_magnitude_km3,
+            reason.positive_density_weighted_crust_volume -
+                reason.negative_density_weighted_crust_volume_magnitude,
+            reason.positive_crust_age_volume_moment_km3_ma -
+                reason.negative_crust_age_volume_moment_magnitude_km3_ma,
+        };
+        const std::array<double, 3> recorded_net = {
+            reason.crust_volume_km3,
+            reason.density_weighted_crust_volume,
+            reason.crust_age_volume_moment_km3_ma,
+        };
+        for (std::size_t component = 0;
+             component < recorded_net.size();
+             ++component) {
+            if (recorded_net[component] !=
+                signed_from_positive_negative[component]) {
+                throw std::runtime_error(
+                    "crust process positive/negative inventory did not reconcile"
+                );
+            }
+        }
+        attributed_process_delta[0] += reason.crust_volume_km3;
+        attributed_process_delta[1] += reason.density_weighted_crust_volume;
+        attributed_process_delta[2] +=
+            reason.crust_age_volume_moment_km3_ma;
+        attributed_absolute_delta[0] +=
+            reason.positive_crust_volume_km3 +
+            reason.negative_crust_volume_magnitude_km3;
+        attributed_absolute_delta[1] +=
+            reason.positive_density_weighted_crust_volume +
+            reason.negative_density_weighted_crust_volume_magnitude;
+        attributed_absolute_delta[2] +=
+            reason.positive_crust_age_volume_moment_km3_ma +
+            reason.negative_crust_age_volume_moment_magnitude_km3_ma;
+    }
+    const std::array<double, 3> serialized_process_delta = {
+        step.post_process_crust_volume_km3 -
+            step.transport_plan.transported_crust_volume_km3,
+        step.post_process_density_weighted_crust_volume -
+            step.transport_plan.transported_density_weighted_crust_volume,
+        step.post_process_crust_age_volume_moment -
+            step.transport_plan.transported_crust_age_volume_moment,
+    };
+    const std::array<long double, 3> inventory_subtraction_magnitude = {
+        std::abs(step.post_process_crust_volume_km3) +
+            std::abs(step.transport_plan.transported_crust_volume_km3),
+        std::abs(step.post_process_density_weighted_crust_volume) +
+            std::abs(
+                step.transport_plan.transported_density_weighted_crust_volume
+            ),
+        std::abs(step.post_process_crust_age_volume_moment) +
+            std::abs(step.transport_plan.transported_crust_age_volume_moment),
+    };
+    for (std::size_t index = 0; index < direct_rule_delta.size(); ++index) {
+        const long double rule_forward_error_bound =
+            128.0L * std::numeric_limits<double>::epsilon() *
+            (1.0L + direct_rule_absolute_delta[index] +
+                attributed_absolute_delta[index]);
+        if (std::abs(
+                direct_rule_delta[index] - attributed_process_delta[index]
+            ) > rule_forward_error_bound) {
+            throw std::runtime_error(
+                "reason-resolved crust process inventory exceeded its rule-delta forward-error bound"
+            );
+        }
+        const long double component_inventory_bound =
+            16.0L * std::numeric_limits<double>::epsilon() *
+            static_cast<long double>(std::max<std::size_t>(1, cells.size())) *
+            (1.0L + inventory_subtraction_magnitude[index]);
+        if (std::abs(
+                static_cast<long double>(serialized_process_delta[index]) -
+                direct_rule_delta[index]
+            ) > component_inventory_bound) {
+            throw std::runtime_error(
+                "serialized crust process inventory exceeded its accumulation forward-error bound"
+            );
+        }
+    }
     return step;
 }
 
@@ -600,15 +1074,30 @@ std::vector<double> advance_plate_motion_and_crust(
     int erosion_iteration,
     std::vector<Plate>& plates,
     std::vector<Cell>& cells,
-    std::vector<PlateMotionStep>& plate_motion_history
+    std::vector<PlateMotionStep>& plate_motion_history,
+    CrustMaterialShadowState& crust_material_shadow,
+    CrustDryRockAccountingState& crust_dry_rock_accounting
 ) {
+    if (cells.size() > static_cast<std::size_t>(
+            std::numeric_limits<int>::max())) {
+        throw std::length_error(
+            "plate-motion cell count exceeds native integer capacity"
+        );
+    }
     const int n = static_cast<int>(cells.size());
+    const double timestep_scale = maturation_timestep_scale(params);
     std::vector<int> previous_plate_ids(static_cast<std::size_t>(n));
     std::vector<int> previous_crust_types(static_cast<std::size_t>(n));
     std::vector<int> previous_lithologies(static_cast<std::size_t>(n));
     std::vector<double> previous_crust_age(static_cast<std::size_t>(n));
     std::vector<double> previous_crust_thickness(static_cast<std::size_t>(n));
     std::vector<double> previous_crust_density(static_cast<std::size_t>(n));
+    std::vector<double> previous_local_isostatic_equilibrium_m(
+        static_cast<std::size_t>(n)
+    );
+    std::vector<double> previous_local_thermal_subsidence_target_m(
+        static_cast<std::size_t>(n)
+    );
     std::vector<double> previous_convergent(static_cast<std::size_t>(n));
     std::vector<double> previous_divergent(static_cast<std::size_t>(n));
     std::vector<double> previous_transform(static_cast<std::size_t>(n));
@@ -620,6 +1109,33 @@ std::vector<double> advance_plate_motion_and_crust(
         previous_crust_age[static_cast<std::size_t>(i)] = cell.crust_age_ma;
         previous_crust_thickness[static_cast<std::size_t>(i)] = cell.crust_thickness_km;
         previous_crust_density[static_cast<std::size_t>(i)] = cell.crust_density;
+        const bool previous_oceanic_like = is_oceanic_crust_state(
+            cell.crust_type,
+            cell.lithology,
+            cell.crust_age_ma,
+            cell.crust_thickness_km,
+            cell.crust_density
+        );
+        const double expected_previous_thermal_subsidence_m =
+            oceanic_age_depth_thermal_subsidence_m(
+                cell.crust_age_ma,
+                previous_oceanic_like
+            );
+        if (!std::isfinite(cell.thermal_subsidence_target_m) ||
+            cell.thermal_subsidence_target_m !=
+                expected_previous_thermal_subsidence_m) {
+            throw std::runtime_error(
+                "cell thermal subsidence is non-finite or stale before plate motion"
+            );
+        }
+        previous_local_thermal_subsidence_target_m[static_cast<std::size_t>(i)] =
+            cell.thermal_subsidence_target_m;
+        previous_local_isostatic_equilibrium_m[static_cast<std::size_t>(i)] =
+            crust_equilibrium_elevation_m(
+                cell.crust_thickness_km,
+                cell.crust_density,
+                previous_oceanic_like
+            );
         previous_convergent[static_cast<std::size_t>(i)] = cell.boundary_convergent;
         previous_divergent[static_cast<std::size_t>(i)] = cell.boundary_divergent;
         previous_transform[static_cast<std::size_t>(i)] = cell.boundary_transform;
@@ -630,7 +1146,8 @@ std::vector<double> advance_plate_motion_and_crust(
     centers.reserve(plates.size());
     for (std::size_t index = 0; index < plates.size(); ++index) {
         Plate& plate = plates[index];
-        const double rotation_deg = plate.angular_speed * params.plate_motion_scale_deg_per_step;
+        const double rotation_deg = plate.angular_speed *
+            params.plate_motion_scale_deg_per_step * timestep_scale;
         const double rotation_rad = rotation_deg / DEG;
         plate.center = rotate_about_axis(plate.center, plate.axis, rotation_rad);
         plate.cumulative_rotation_deg += rotation_deg;
@@ -640,15 +1157,37 @@ std::vector<double> advance_plate_motion_and_crust(
     assign_plates(centers, cells);
     classify_boundaries(params, plates, cells);
 
-    std::vector<std::vector<int>> previous_cells_by_plate(plates.size());
-    for (int i = 0; i < n; ++i) {
-        const int plate_id = previous_plate_ids[static_cast<std::size_t>(i)];
-        if (plate_id >= 0 && plate_id < static_cast<int>(plates.size())) {
-            previous_cells_by_plate[static_cast<std::size_t>(plate_id)].push_back(i);
-        }
-    }
     CrustMotionDiagnostics crust_motion;
-    crust_motion.source_cell_ids.assign(static_cast<std::size_t>(n), -1);
+    crust_motion.transport_plan = build_forward_overlap_crust_transport_plan(
+        params,
+        plates,
+        cells,
+        previous_plate_ids,
+        previous_crust_types,
+        previous_lithologies,
+        previous_crust_age,
+        previous_crust_thickness,
+        previous_crust_density,
+        step_rotation_deg
+    );
+    reconcile_accelerated_crust_overlap_continuous_shadow(
+        crust_motion.transport_plan,
+        cells,
+        previous_crust_thickness,
+        previous_crust_density,
+        previous_crust_age
+    );
+    begin_crust_material_shadow_step(
+        cells,
+        crust_motion.transport_plan,
+        static_cast<int>(plate_motion_history.size()),
+        erosion_iteration,
+        "plate_motion_iteration",
+        crust_material_shadow
+    );
+    record_cpu_conservative_crust_overlap_transition();
+    crust_motion.source_cell_ids =
+        crust_motion.transport_plan.dominant_source_cell_ids;
     crust_motion.transport_distance_km_by_cell.assign(static_cast<std::size_t>(n), 0.0);
     crust_motion.age_transport_change_ma_by_cell.assign(static_cast<std::size_t>(n), 0.0);
     crust_motion.thickness_transport_change_km_by_cell.assign(static_cast<std::size_t>(n), 0.0);
@@ -656,60 +1195,43 @@ std::vector<double> advance_plate_motion_and_crust(
     crust_motion.age_process_change_ma_by_cell.assign(static_cast<std::size_t>(n), 0.0);
     crust_motion.thickness_process_change_km_by_cell.assign(static_cast<std::size_t>(n), 0.0);
     crust_motion.density_process_change_by_cell.assign(static_cast<std::size_t>(n), 0.0);
-    std::vector<Vec3> backtraced_positions(static_cast<std::size_t>(n));
 #pragma omp parallel for schedule(static)
     for (int i = 0; i < n; ++i) {
         const std::size_t index = static_cast<std::size_t>(i);
-        const int plate_id = cells[index].plate_id;
-        const Plate& plate = plates[static_cast<std::size_t>(plate_id)];
-        const double rotation_rad = step_rotation_deg[static_cast<std::size_t>(plate_id)] / DEG;
-        backtraced_positions[index] = rotate_about_axis(
-            cells[index].p, plate.axis, -rotation_rad
-        );
-    }
-    if (!try_accelerated_remap_crust_sources(
-            cells,
-            backtraced_positions,
-            previous_cells_by_plate,
-            crust_motion.source_cell_ids
-        )) {
-#pragma omp parallel for schedule(static)
-        for (int i = 0; i < n; ++i) {
-            const std::size_t index = static_cast<std::size_t>(i);
-            const int plate_id = cells[index].plate_id;
-            const Vec3 backtraced_position = backtraced_positions[index];
-            int best_source = i;
-            double best_score = -2.0;
-            const std::vector<int>& candidates =
-                previous_cells_by_plate[static_cast<std::size_t>(plate_id)];
-            for (int candidate : candidates) {
-                const double score = dot(
-                    backtraced_position,
-                    cells[static_cast<std::size_t>(candidate)].p
-                );
-                if (score > best_score) {
-                    best_score = score;
-                    best_source = candidate;
-                }
-            }
-            crust_motion.source_cell_ids[index] = best_source;
+        const int edge_begin =
+            crust_motion.transport_plan.destination_offsets[index];
+        const int edge_end =
+            crust_motion.transport_plan.destination_offsets[index + 1];
+        double distance_volume_sum = 0.0;
+        double incoming_volume = 0.0;
+        for (int edge_index = edge_begin; edge_index < edge_end; ++edge_index) {
+            const int source_cell_id = crust_motion.transport_plan.source_cell_ids[
+                static_cast<std::size_t>(edge_index)
+            ];
+            const double edge_volume =
+                crust_motion.transport_plan.overlap_area_km2[
+                    static_cast<std::size_t>(edge_index)
+                ] * previous_crust_thickness[
+                    static_cast<std::size_t>(source_cell_id)
+                ];
+            incoming_volume += edge_volume;
+            distance_volume_sum += edge_volume *
+                crust_motion.transport_plan.source_kinematic_distance_km[
+                    static_cast<std::size_t>(source_cell_id)
+                ];
         }
-    }
-#pragma omp parallel for schedule(static)
-    for (int i = 0; i < n; ++i) {
-        const std::size_t index = static_cast<std::size_t>(i);
-        const Vec3 backtraced_position = backtraced_positions[index];
-        const std::size_t source_index = static_cast<std::size_t>(
-            crust_motion.source_cell_ids[index]
-        );
-        crust_motion.transport_distance_km_by_cell[index] =
-            angular_distance(backtraced_position, cells[index].p) * params.radius_km;
+        crust_motion.transport_distance_km_by_cell[index] = incoming_volume > 0.0
+            ? distance_volume_sum / incoming_volume
+            : 0.0;
         crust_motion.age_transport_change_ma_by_cell[index] =
-            previous_crust_age[source_index] - previous_crust_age[index];
+            crust_motion.transport_plan.remapped_crust_age_ma_by_cell[index] -
+            previous_crust_age[index];
         crust_motion.thickness_transport_change_km_by_cell[index] =
-            previous_crust_thickness[source_index] - previous_crust_thickness[index];
+            crust_motion.transport_plan.remapped_crust_thickness_km_by_cell[index] -
+            previous_crust_thickness[index];
         crust_motion.density_transport_change_by_cell[index] =
-            previous_crust_density[source_index] - previous_crust_density[index];
+            crust_motion.transport_plan.remapped_crust_density_by_cell[index] -
+            previous_crust_density[index];
     }
 
     const double tectonic_activity = clamp(
@@ -721,9 +1243,31 @@ std::vector<double> advance_plate_motion_and_crust(
     std::vector<double> crust_thickness_change(static_cast<std::size_t>(n), 0.0);
     std::vector<double> crust_density_change(static_cast<std::size_t>(n), 0.0);
     std::vector<double> tectonic_elevation_change(static_cast<std::size_t>(n), 0.0);
+    std::vector<double> isostatic_equilibrium_change_m(
+        static_cast<std::size_t>(n),
+        0.0
+    );
+    std::vector<double> thermal_equilibrium_change_m(
+        static_cast<std::size_t>(n),
+        0.0
+    );
+    std::vector<double> unbounded_dynamic_relief_change_m(
+        static_cast<std::size_t>(n),
+        0.0
+    );
+    std::vector<double> bounded_dynamic_relief_change_m(
+        static_cast<std::size_t>(n),
+        0.0
+    );
     std::vector<int> aged_oceanic_flags(static_cast<std::size_t>(n), 0);
     std::vector<int> rejuvenated_oceanic_flags(static_cast<std::size_t>(n), 0);
     std::vector<int> subducted_oceanic_flags(static_cast<std::size_t>(n), 0);
+    std::vector<std::array<CrustProcessCellDelta, CRUST_PROCESS_REASON_COUNT>>
+        process_delta_by_cell(static_cast<std::size_t>(n));
+    // OpenMP cannot propagate exceptions across the parallel region. Each
+    // worker records only its own cell's fail-closed shadow-accounting error;
+    // the canonical serial pass below raises it after all workers join.
+    std::vector<std::string> crust_material_errors(static_cast<std::size_t>(n));
 #pragma omp parallel for schedule(static)
     for (int i = 0; i < n; ++i) {
         Cell& cell = cells[static_cast<std::size_t>(i)];
@@ -733,30 +1277,88 @@ std::vector<double> advance_plate_motion_and_crust(
         const bool plate_changed = cell.plate_id != old_plate_id;
         const bool local_old_oceanic = is_oceanic_crust_state(
             previous_crust_types[index],
+            previous_lithologies[index],
             previous_crust_age[index],
             previous_crust_thickness[index],
             previous_crust_density[index]
         );
         const bool old_oceanic = is_oceanic_crust_state(
-            previous_crust_types[source_index],
-            previous_crust_age[source_index],
-            previous_crust_thickness[source_index],
-            previous_crust_density[source_index]
+            crust_motion.transport_plan.remapped_crust_type_by_cell[index],
+            crust_motion.transport_plan.remapped_lithology_by_cell[index],
+            crust_motion.transport_plan.remapped_crust_age_ma_by_cell[index],
+            crust_motion.transport_plan.remapped_crust_thickness_km_by_cell[index],
+            crust_motion.transport_plan.remapped_crust_density_by_cell[index]
         );
         const double conv = cell.boundary_convergent;
         const double div = cell.boundary_divergent;
         const double trans = cell.boundary_transform;
 
-        int crust_type = previous_crust_types[source_index];
-        int lithology = previous_lithologies[source_index];
-        double crust_age = previous_crust_age[source_index];
-        double crust_thickness = previous_crust_thickness[source_index];
-        double crust_density = previous_crust_density[source_index];
+        int crust_type =
+            crust_motion.transport_plan.remapped_crust_type_by_cell[index];
+        int lithology =
+            crust_motion.transport_plan.remapped_lithology_by_cell[index];
+        double crust_age =
+            crust_motion.transport_plan.remapped_crust_age_ma_by_cell[index];
+        double crust_thickness =
+            crust_motion.transport_plan.remapped_crust_thickness_km_by_cell[index];
+        double crust_density =
+            crust_motion.transport_plan.remapped_crust_density_by_cell[index];
 
+        const auto current_rule_state = [&]() {
+            return CrustRuleState{
+                crust_type,
+                lithology,
+                crust_age,
+                crust_thickness,
+                crust_density,
+            };
+        };
+        const auto record_reason = [&](
+            CrustProcessReason reason,
+            bool triggered,
+            const CrustRuleState& before
+        ) {
+            record_crust_process_transition(
+                cell.area_km2,
+                triggered,
+                before,
+                current_rule_state(),
+                process_delta_by_cell[index][static_cast<std::size_t>(reason)]
+            );
+            if (crust_material_errors[index].empty()) {
+                const CrustRuleState after = current_rule_state();
+                try {
+                    apply_crust_material_shadow_transition(
+                        crust_material_shadow,
+                        i,
+                        cell.plate_id,
+                        reason,
+                        cell.area_km2,
+                        before.thickness_km,
+                        before.density,
+                        after.thickness_km,
+                        after.density
+                    );
+                } catch (const std::exception& error) {
+                    crust_material_errors[index] = error.what();
+                } catch (...) {
+                    crust_material_errors[index] =
+                        "unknown crust material shadow transition failure";
+                }
+            }
+        };
+
+        const CrustRuleState before_quiet_aging = current_rule_state();
         if (old_oceanic && div < 0.10 && conv < 0.10) {
             const double quiet_fraction = clamp(1.0 - std::max(div, conv) / 0.10, 0.0, 1.0);
-            crust_age += params.oceanic_crust_aging_ma_per_step * quiet_fraction;
+            crust_age += params.oceanic_crust_aging_ma_per_step *
+                timestep_scale * quiet_fraction;
         }
+        record_reason(
+            CRUST_PROCESS_QUIET_OCEANIC_AGING,
+            old_oceanic && div < 0.10 && conv < 0.10,
+            before_quiet_aging
+        );
 
         if (plate_changed && std::max(conv, div) < 0.18) {
             crust_type = 2;
@@ -764,17 +1366,82 @@ std::vector<double> advance_plate_motion_and_crust(
         }
         if (div >= 0.10) {
             if (old_oceanic) {
-                const double rejuvenation = clamp(div * (plate_changed ? 0.72 : 0.55), 0.0, 0.85);
+                const CrustRuleState before_rejuvenation = current_rule_state();
+                const double background_rejuvenation_reference =
+                    clamp(div * 0.55, 0.0, 0.85);
+                double rejuvenation = timestep_scale == 1.0 ?
+                    clamp(div * (plate_changed ? 0.72 : 0.55), 0.0, 0.85) :
+                    timestep_scaled_fraction(
+                        background_rejuvenation_reference,
+                        timestep_scale
+                    );
+                if (plate_changed && timestep_scale != 1.0) {
+                    const double crossing_rejuvenation_reference =
+                        clamp(div * 0.72, 0.0, 0.85);
+                    const double crossing_impulse = clamp(
+                        (crossing_rejuvenation_reference -
+                            background_rejuvenation_reference) /
+                            std::max(
+                                1.0e-12,
+                                1.0 - background_rejuvenation_reference
+                            ),
+                        0.0,
+                        1.0
+                    );
+                    rejuvenation = 1.0 -
+                        (1.0 - rejuvenation) *
+                        (1.0 - crossing_impulse);
+                }
                 crust_age *= 1.0 - rejuvenation;
-                crust_thickness += (7.0 - crust_thickness) * 0.34 * div;
-                crust_density += (3.0 - crust_density) * 0.24 * div;
+                record_reason(
+                    CRUST_PROCESS_OCEANIC_RIDGE_REJUVENATION,
+                    true,
+                    before_rejuvenation
+                );
+                const CrustRuleState before_ridge_relaxation =
+                    current_rule_state();
+                if (timestep_scale == 1.0) {
+                    crust_thickness += (7.0 - crust_thickness) * 0.34 * div;
+                    crust_density += (3.0 - crust_density) * 0.24 * div;
+                } else {
+                    crust_thickness += (7.0 - crust_thickness) *
+                        timestep_scaled_fraction(0.34 * div, timestep_scale);
+                    crust_density += (3.0 - crust_density) *
+                        timestep_scaled_fraction(0.24 * div, timestep_scale);
+                }
+                record_reason(
+                    CRUST_PROCESS_OCEANIC_RIDGE_CREATION_RELAXATION,
+                    true,
+                    before_ridge_relaxation
+                );
                 if (div >= 0.28) {
                     crust_type = 0;
                     lithology = 0;
                 }
             } else {
-                crust_thickness -= tectonic_activity * (0.45 + (plate_changed ? 0.20 : 0.0)) * div;
-                crust_density += 0.004 * div;
+                const CrustRuleState before_continental_rifting =
+                    current_rule_state();
+                if (timestep_scale == 1.0) {
+                    crust_thickness -= tectonic_activity *
+                        (0.45 + (plate_changed ? 0.20 : 0.0)) * div;
+                } else {
+                    crust_thickness -= tectonic_activity * 0.45 * div *
+                        timestep_scale;
+                    if (plate_changed) {
+                        crust_thickness -= tectonic_activity * 0.20 * div;
+                    }
+                }
+                // A fully uncovered overlap row can start this ordered rule at
+                // zero thickness. Divergent thinning may exhaust material but
+                // must never manufacture a negative scalar crust reservoir;
+                // the later thickness bound explicitly records any reseeding.
+                crust_thickness = std::max(0.0, crust_thickness);
+                crust_density += 0.004 * div * timestep_scale;
+                record_reason(
+                    CRUST_PROCESS_DIVERGENT_CONTINENTAL_RIFTING,
+                    true,
+                    before_continental_rifting
+                );
                 if (div >= 0.24) {
                     crust_type = 6;
                     lithology = 3;
@@ -783,15 +1450,62 @@ std::vector<double> advance_plate_motion_and_crust(
         }
         if (conv >= 0.10) {
             if (old_oceanic) {
-                crust_thickness += tectonic_activity * 0.34 * conv;
-                crust_age *= 1.0 - 0.12 * conv;
+                const CrustRuleState before_oceanic_convergence =
+                    current_rule_state();
+                crust_thickness += tectonic_activity * 0.34 * conv *
+                    timestep_scale;
+                crust_age *= 1.0 - timestep_scaled_fraction(
+                    0.12 * conv,
+                    timestep_scale
+                );
+                record_reason(
+                    CRUST_PROCESS_OCEANIC_CONVERGENCE_SUBDUCTION_PROXY,
+                    true,
+                    before_oceanic_convergence
+                );
                 if (conv >= 0.26) {
                     crust_type = 3;
                     lithology = 5;
                 }
             } else {
-                crust_thickness += tectonic_activity * (0.72 + (plate_changed ? 0.38 : 0.0)) * conv;
-                crust_density -= 0.006 * conv;
+                const CrustRuleState before_collision = current_rule_state();
+                if (timestep_scale == 1.0) {
+                    const double combined_thickness = crust_thickness +
+                        tectonic_activity *
+                        (0.72 + (plate_changed ? 0.38 : 0.0)) * conv;
+                    crust_thickness += tectonic_activity * 0.72 * conv;
+                    crust_density -= 0.006 * conv * timestep_scale;
+                    record_reason(
+                        CRUST_PROCESS_CONTINENTAL_COLLISION_OROGENY,
+                        true,
+                        before_collision
+                    );
+                    const CrustRuleState before_accretion = current_rule_state();
+                    crust_thickness = combined_thickness;
+                    record_reason(
+                        CRUST_PROCESS_PLATE_CROSSING_ACCRETION_PROXY,
+                        plate_changed,
+                        before_accretion
+                    );
+                } else {
+                    crust_thickness += tectonic_activity * 0.72 * conv *
+                        timestep_scale;
+                    crust_density -= 0.006 * conv * timestep_scale;
+                    record_reason(
+                        CRUST_PROCESS_CONTINENTAL_COLLISION_OROGENY,
+                        true,
+                        before_collision
+                    );
+                    const CrustRuleState before_accretion = current_rule_state();
+                    if (plate_changed) {
+                        crust_thickness += tectonic_activity * 0.38 * conv;
+                    }
+                    record_reason(
+                        CRUST_PROCESS_PLATE_CROSSING_ACCRETION_PROXY,
+                        plate_changed,
+                        before_accretion
+                    );
+                }
                 if (plate_changed && conv >= 0.18) {
                     crust_type = 8;
                     lithology = 6;
@@ -803,21 +1517,59 @@ std::vector<double> advance_plate_motion_and_crust(
         }
 
         const bool new_oceanic = is_oceanic_crust_state(
-            crust_type, crust_age, crust_thickness, crust_density
+            crust_type,
+            lithology,
+            crust_age,
+            crust_thickness,
+            crust_density
+        );
+        const CrustRuleState before_age_bound = current_rule_state();
+        const double age_upper_bound = crust_age_ceiling_ma(
+            params,
+            new_oceanic ? 320.0 : 4200.0
         );
         crust_age = clamp(
             crust_age,
             0.0,
-            crust_age_ceiling_ma(params, new_oceanic ? 320.0 : 4200.0)
+            age_upper_bound
         );
-        crust_thickness = clamp(crust_thickness, new_oceanic ? 4.5 : 16.0, new_oceanic ? 18.0 : 76.0);
+        record_reason(
+            CRUST_PROCESS_AGE_BOUND_ENFORCEMENT,
+            before_age_bound.age_ma < 0.0 ||
+                before_age_bound.age_ma > age_upper_bound,
+            before_age_bound
+        );
+        const CrustRuleState before_thickness_bound = current_rule_state();
+        const double minimum_thickness = new_oceanic ? 4.5 : 16.0;
+        const double maximum_thickness = new_oceanic ? 18.0 : 76.0;
+        crust_thickness = clamp(
+            crust_thickness,
+            minimum_thickness,
+            maximum_thickness
+        );
+        record_reason(
+            CRUST_PROCESS_THICKNESS_BOUND_ENFORCEMENT,
+            before_thickness_bound.thickness_km < minimum_thickness ||
+                before_thickness_bound.thickness_km > maximum_thickness,
+            before_thickness_bound
+        );
+        const CrustRuleState before_density_bound = current_rule_state();
         crust_density = clamp(crust_density, 2.58, 3.08);
+        record_reason(
+            CRUST_PROCESS_DENSITY_BOUND_ENFORCEMENT,
+            before_density_bound.density < 2.58 ||
+                before_density_bound.density > 3.08,
+            before_density_bound
+        );
 
-        crust_motion.age_process_change_ma_by_cell[index] = crust_age - previous_crust_age[source_index];
+        crust_motion.age_process_change_ma_by_cell[index] = crust_age -
+            crust_motion.transport_plan.remapped_crust_age_ma_by_cell[index];
         crust_motion.thickness_process_change_km_by_cell[index] =
-            crust_thickness - previous_crust_thickness[source_index];
+            crust_thickness -
+            crust_motion.transport_plan.remapped_crust_thickness_km_by_cell[index];
         crust_motion.density_process_change_by_cell[index] =
-            crust_density - previous_crust_density[source_index];
+            crust_density -
+            crust_motion.transport_plan.remapped_crust_density_by_cell[index];
         crust_age_change[index] = crust_age - previous_crust_age[index];
         crust_thickness_change[index] = crust_thickness - previous_crust_thickness[index];
         crust_density_change[index] = crust_density - previous_crust_density[index];
@@ -851,12 +1603,34 @@ std::vector<double> advance_plate_motion_and_crust(
             cell.last_plate_assignment_change_iteration = erosion_iteration;
         }
 
-        const double old_equilibrium = crust_equilibrium_elevation_m(
-            previous_crust_thickness[index], previous_crust_density[index], local_old_oceanic
-        ) + oceanic_thermal_subsidence_m(previous_crust_age[index], local_old_oceanic);
-        const double new_equilibrium = crust_equilibrium_elevation_m(
-            crust_thickness, crust_density, new_oceanic
-        ) + oceanic_thermal_subsidence_m(crust_age, new_oceanic);
+        const double old_isostatic_equilibrium_m = crust_equilibrium_elevation_m(
+            previous_crust_thickness[index],
+            previous_crust_density[index],
+            local_old_oceanic
+        );
+        const double new_isostatic_equilibrium_m = crust_equilibrium_elevation_m(
+            crust_thickness,
+            crust_density,
+            new_oceanic
+        );
+        const double old_thermal_subsidence_m =
+            previous_local_thermal_subsidence_target_m[index];
+        const double new_thermal_subsidence_m =
+            oceanic_age_depth_thermal_subsidence_m(
+                crust_age,
+                new_oceanic
+            );
+        const double thermal_target_difference_tendency =
+            OCEANIC_AGE_DEPTH_TARGET_DIFFERENCE_GAIN * (
+                new_thermal_subsidence_m - old_thermal_subsidence_m
+            );
+        if (!std::isfinite(thermal_target_difference_tendency)) {
+            crust_material_errors[index] =
+                "non-finite oceanic age-depth equilibrium tendency";
+        }
+        thermal_equilibrium_change_m[index] =
+            thermal_target_difference_tendency;
+        cell.thermal_subsidence_target_m = new_thermal_subsidence_m;
         cell.volcanic_potential_index = clamp(
             0.42 * div + 0.38 * conv * (crust_type == 3 ? 1.0 : 0.35) +
             0.16 * (lithology == 5 ? 1.0 : 0.0) + 0.04 * tectonic_activity,
@@ -864,22 +1638,98 @@ std::vector<double> advance_plate_motion_and_crust(
             1.0
         );
         cell.uplift_rate = params.tectonic_uplift_scale * tectonic_activity *
-            (1.5 * div + 8.5 * conv + (crust_type == 3 ? 2.5 : 0.0));
+            (1.5 * div + 8.5 * conv + (crust_type == 3 ? 2.5 : 0.0)) *
+            timestep_scale;
         const double boundary_change =
             80.0 * (conv - previous_convergent[index]) +
             55.0 * (div - previous_divergent[index]) -
             30.0 * (trans - previous_transform[index]);
-        const double equilibrium_change = 0.18 * (new_equilibrium - old_equilibrium);
-        const double delta = clamp(
-            cell.uplift_rate * 0.42 + equilibrium_change + boundary_change,
-            -180.0,
-            220.0
+        const double isostatic_equilibrium_tendency_m =
+            TECTONIC_ISOSTATIC_TARGET_DIFFERENCE_GAIN * (
+                new_isostatic_equilibrium_m - old_isostatic_equilibrium_m
+            );
+        isostatic_equilibrium_change_m[index] =
+            isostatic_equilibrium_tendency_m;
+        // Isostatic relaxation is effectively complete on the nominal 5 Ma
+        // maturation interval, so equilibrium target changes must not share
+        // the empirical per-step relief clamp.  Clipping the combined term
+        // used to leave kilometre-scale oceanic freeboard behind after a
+        // crust-state transition, with no carried residual.  Only the
+        // heuristic dynamic relief increment remains bounded here.
+        const double equilibrium_change =
+            isostatic_equilibrium_tendency_m + thermal_target_difference_tendency;
+        const double unbounded_dynamic_relief_change =
+            cell.uplift_rate * TECTONIC_UPLIFT_RATE_RESPONSE_FRACTION +
+            boundary_change;
+        const double bounded_dynamic_relief_change = clamp(
+            unbounded_dynamic_relief_change,
+            TECTONIC_DYNAMIC_RELIEF_MINIMUM_CHANGE_M,
+            TECTONIC_DYNAMIC_RELIEF_MAXIMUM_CHANGE_M
         );
+        unbounded_dynamic_relief_change_m[index] =
+            unbounded_dynamic_relief_change;
+        bounded_dynamic_relief_change_m[index] =
+            bounded_dynamic_relief_change;
+        const double delta =
+            equilibrium_change + bounded_dynamic_relief_change;
         tectonic_elevation_change[index] = delta;
         cell.cumulative_tectonic_elevation_change_m += delta;
     }
 
     for (int i = 0; i < n; ++i) {
+        const std::string& error = crust_material_errors[
+            static_cast<std::size_t>(i)
+        ];
+        if (!error.empty()) {
+            throw std::runtime_error(
+                "crust material shadow transition failed for cell " +
+                std::to_string(i) + ": " + error
+            );
+        }
+    }
+
+    // Reduce in canonical cell order with wider accumulators.  Positive and
+    // negative magnitudes are authoritative; the exported net is defined from
+    // their rounded double values so the serialized identity is exact.
+    std::array<std::array<long double, 3>, CRUST_PROCESS_REASON_COUNT>
+        positive_process_delta{};
+    std::array<std::array<long double, 3>, CRUST_PROCESS_REASON_COUNT>
+        negative_process_delta{};
+    std::array<std::array<long double, 3>, CRUST_PROCESS_REASON_COUNT>
+        signed_process_delta{};
+    for (int i = 0; i < n; ++i) {
+        for (int reason_index = 0;
+             reason_index < CRUST_PROCESS_REASON_COUNT;
+             ++reason_index) {
+            const CrustProcessCellDelta& cell_delta =
+                process_delta_by_cell[static_cast<std::size_t>(i)][
+                    static_cast<std::size_t>(reason_index)
+                ];
+            CrustProcessInventoryDelta& total =
+                crust_motion.process_inventory_delta_by_reason[
+                    static_cast<std::size_t>(reason_index)
+                ];
+            total.triggered_cell_count += cell_delta.triggered ? 1 : 0;
+            total.changed_cell_count += cell_delta.changed ? 1 : 0;
+            const std::array<double, 3> components = {
+                cell_delta.crust_volume_km3,
+                cell_delta.density_weighted_crust_volume,
+                cell_delta.crust_age_volume_moment_km3_ma,
+            };
+            for (std::size_t component = 0;
+                 component < components.size();
+                 ++component) {
+                positive_process_delta[static_cast<std::size_t>(reason_index)][
+                    component
+                ] += std::max(0.0, components[component]);
+                negative_process_delta[static_cast<std::size_t>(reason_index)][
+                    component
+                ] += std::max(0.0, -components[component]);
+                signed_process_delta[static_cast<std::size_t>(reason_index)][
+                    component
+                ] += components[component];
+            }
+        }
         if (aged_oceanic_flags[static_cast<std::size_t>(i)] != 0) {
             crust_motion.aged_oceanic_cell_ids.push_back(i);
         }
@@ -890,8 +1740,78 @@ std::vector<double> advance_plate_motion_and_crust(
             crust_motion.subducted_oceanic_cell_ids.push_back(i);
         }
     }
+    for (int reason_index = 0;
+         reason_index < CRUST_PROCESS_REASON_COUNT;
+         ++reason_index) {
+        CrustProcessInventoryDelta& total =
+            crust_motion.process_inventory_delta_by_reason[
+                static_cast<std::size_t>(reason_index)
+            ];
+        const auto& positive = positive_process_delta[
+            static_cast<std::size_t>(reason_index)
+        ];
+        const auto& negative = negative_process_delta[
+            static_cast<std::size_t>(reason_index)
+        ];
+        const auto& signed_delta = signed_process_delta[
+            static_cast<std::size_t>(reason_index)
+        ];
+        total.positive_crust_volume_km3 = static_cast<double>(positive[0]);
+        total.negative_crust_volume_magnitude_km3 =
+            static_cast<double>(negative[0]);
+        total.positive_density_weighted_crust_volume =
+            static_cast<double>(positive[1]);
+        total.negative_density_weighted_crust_volume_magnitude =
+            static_cast<double>(negative[1]);
+        total.positive_crust_age_volume_moment_km3_ma =
+            static_cast<double>(positive[2]);
+        total.negative_crust_age_volume_moment_magnitude_km3_ma =
+            static_cast<double>(negative[2]);
+        total.crust_volume_km3 =
+            total.positive_crust_volume_km3 -
+            total.negative_crust_volume_magnitude_km3;
+        total.density_weighted_crust_volume =
+            total.positive_density_weighted_crust_volume -
+            total.negative_density_weighted_crust_volume_magnitude;
+        total.crust_age_volume_moment_km3_ma =
+            total.positive_crust_age_volume_moment_km3_ma -
+            total.negative_crust_age_volume_moment_magnitude_km3_ma;
+        const std::array<double, 3> canonical_net = {
+            total.crust_volume_km3,
+            total.density_weighted_crust_volume,
+            total.crust_age_volume_moment_km3_ma,
+        };
+        for (std::size_t component = 0;
+             component < canonical_net.size();
+             ++component) {
+            const long double forward_error_bound =
+                64.0L * std::numeric_limits<double>::epsilon() *
+                (1.0L + positive[component] + negative[component]);
+            if (std::abs(
+                    signed_delta[component] -
+                    static_cast<long double>(canonical_net[component])
+                ) > forward_error_bound) {
+                throw std::runtime_error(
+                    "crust process signed inventory reduction exceeded its forward-error bound"
+                );
+            }
+        }
+    }
 
+    finalize_crust_material_shadow_step(
+        cells,
+        crust_motion.transport_plan,
+        crust_material_shadow
+    );
+    advance_crust_dry_rock_accounting_step(
+        cells,
+        static_cast<int>(plates.size()),
+        crust_motion.transport_plan,
+        crust_material_shadow.history.back(),
+        crust_dry_rock_accounting
+    );
     plate_motion_history.push_back(summarize_plate_motion_step(
+        params,
         cells,
         plates,
         static_cast<int>(plate_motion_history.size()),
@@ -903,14 +1823,24 @@ std::vector<double> advance_plate_motion_and_crust(
         crust_age_change,
         crust_thickness_change,
         crust_density_change,
-        tectonic_elevation_change
+        tectonic_elevation_change,
+        previous_local_isostatic_equilibrium_m,
+        isostatic_equilibrium_change_m,
+        previous_local_thermal_subsidence_target_m,
+        thermal_equilibrium_change_m,
+        unbounded_dynamic_relief_change_m,
+        bounded_dynamic_relief_change_m
     ));
     return tectonic_elevation_change;
 }
 
 double approximate_heat_flow_mw_m2(const Params& params, const Cell& cell) {
     const bool oceanic = is_oceanic_crust_state(
-        cell.crust_type, cell.crust_age_ma, cell.crust_thickness_km, cell.crust_density
+        cell.crust_type,
+        cell.lithology,
+        cell.crust_age_ma,
+        cell.crust_thickness_km,
+        cell.crust_density
     );
     const double age = std::max(0.0, cell.crust_age_ma);
     const double age_heat = oceanic

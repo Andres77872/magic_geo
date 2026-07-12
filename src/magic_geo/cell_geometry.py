@@ -261,6 +261,7 @@ def enrich_world_with_cell_geometry(world: dict[str, Any]) -> dict[str, Any]:
     total_quality = 0.0
     total_vertices = 0
     ring_count = 0
+    native_control_volume_ring_count = 0
     cell_neighbor_segments: dict[
         tuple[int, int],
         tuple[tuple[float, float, float], tuple[float, float, float]],
@@ -289,10 +290,31 @@ def enrich_world_with_cell_geometry(world: dict[str, Any]) -> dict[str, Any]:
         neighbor_records = _neighbor_geometry(cell, center, east, north, cells_by_id)
         bearings = [float(record["bearing"]) for record in neighbor_records]
         distances = [float(record["distance"]) for record in neighbor_records]
-        vertex_angles = _vertex_angles_from_bearings(bearings, fallback_count=max(5, len(cell.get("neighbors", [])) or 6))
         area_km2 = max(1.0, float(cell.get("area_km2", 0.0)))
-        radius_rad = _target_radius_rad(area_km2, len(vertex_angles), distances, radius_km)
-        ring_xyz = _ring_points(center, east, north, vertex_angles, radius_rad)
+        native_vertices = cell.get("control_volume_vertices_3d")
+        native_edge_neighbor_ids = cell.get("control_volume_edge_neighbor_ids")
+        use_native_control_volume = (
+            isinstance(native_vertices, list)
+            and isinstance(native_edge_neighbor_ids, list)
+            and len(native_vertices) >= 3
+            and len(native_vertices) == len(native_edge_neighbor_ids)
+            and all(isinstance(point, list) and len(point) == 3 for point in native_vertices)
+        )
+        if use_native_control_volume:
+            ring_xyz = [
+                _normalize((float(point[0]), float(point[1]), float(point[2])))
+                for point in native_vertices
+            ]
+            native_control_volume_ring_count += 1
+        else:
+            vertex_angles = _vertex_angles_from_bearings(
+                bearings,
+                fallback_count=max(5, len(cell.get("neighbors", [])) or 6),
+            )
+            radius_rad = _target_radius_rad(
+                area_km2, len(vertex_angles), distances, radius_km
+            )
+            ring_xyz = _ring_points(center, east, north, vertex_angles, radius_rad)
         boundary_ring = [[round(lat, 6), round(lon, 6)] for lat, lon in (_lat_lon_from_xyz(point) for point in ring_xyz)]
         polygon_area_km2 = _ring_area_km2(center, ring_xyz, radius_km)
         perimeter_km = _ring_perimeter_km(ring_xyz, radius_km)
@@ -308,7 +330,18 @@ def enrich_world_with_cell_geometry(world: dict[str, Any]) -> dict[str, Any]:
         cell["cell_geometry_quality"] = round(geometry_quality, 6)
 
         cell_id = int(cell.get("id", -1))
-        if cell_id >= 0 and len(neighbor_records) >= 3 and len(ring_xyz) == len(neighbor_records):
+        if (
+            use_native_control_volume
+            and cell_id >= 0
+            and len(set(int(value) for value in native_edge_neighbor_ids))
+            == len(native_edge_neighbor_ids)
+        ):
+            for index, raw_neighbor_id in enumerate(native_edge_neighbor_ids):
+                cell_neighbor_segments[(cell_id, int(raw_neighbor_id))] = (
+                    ring_xyz[index],
+                    ring_xyz[(index + 1) % len(ring_xyz)],
+                )
+        elif cell_id >= 0 and len(neighbor_records) >= 3 and len(ring_xyz) == len(neighbor_records):
             for index, record in enumerate(neighbor_records):
                 neighbor_id = int(record["neighbor_id"])
                 cell_neighbor_segments[(cell_id, neighbor_id)] = (ring_xyz[(index - 1) % len(ring_xyz)], ring_xyz[index])
@@ -471,7 +504,11 @@ def enrich_world_with_cell_geometry(world: dict[str, Any]) -> dict[str, Any]:
 
     world["cell_adjacency_edges"] = adjacency_edges
     summary = world.setdefault("summary", {})
-    summary["cell_geometry_index"] = "approx_neighbor_bearing_v0"
+    summary["cell_geometry_index"] = (
+        "native_spherical_control_volume_v1"
+        if native_control_volume_ring_count == ring_count
+        else "approx_neighbor_bearing_v0"
+    )
     summary["cell_geometry_ring_count"] = ring_count
     summary["cell_geometry_total_area_km2"] = round(total_polygon_area_km2, 6)
     summary["cell_geometry_reference_area_km2"] = round(total_area_km2, 6)

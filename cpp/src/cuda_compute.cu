@@ -131,6 +131,53 @@ __global__ __launch_bounds__(CUDA_BLOCK_THREADS) void smooth_three_fields_kernel
         self_weight_c * value_c + (1.0 - self_weight_c) * average_c;
 }
 
+__global__ __launch_bounds__(CUDA_BLOCK_THREADS)
+void reduce_crust_overlap_continuous_shadow_kernel(
+    const int* __restrict__ destination_offsets,
+    const int* __restrict__ source_cell_ids,
+    const double* __restrict__ overlap_area_km2,
+    const double* __restrict__ destination_area_km2,
+    const double* __restrict__ source_state,
+    int cell_count,
+    double* __restrict__ output
+) {
+    const int destination = static_cast<int>(
+        blockIdx.x * blockDim.x + threadIdx.x
+    );
+    if (destination >= cell_count) {
+        return;
+    }
+    const std::size_t stride = static_cast<std::size_t>(cell_count);
+    double volume = 0.0;
+    double density_volume = 0.0;
+    double age_moment = 0.0;
+    const int begin = read_only(destination_offsets + destination);
+    const int end = read_only(destination_offsets + destination + 1);
+    for (int edge = begin; edge < end; ++edge) {
+        const int source = read_only(source_cell_ids + edge);
+        const double edge_volume = read_only(overlap_area_km2 + edge) *
+            read_only(source_state + source);
+        volume = volume + edge_volume;
+        density_volume = density_volume + edge_volume *
+            read_only(source_state + stride + static_cast<std::size_t>(source));
+        age_moment = age_moment + edge_volume *
+            read_only(source_state + 2U * stride + static_cast<std::size_t>(source));
+    }
+    const std::size_t index = static_cast<std::size_t>(destination);
+    output[index] = volume;
+    output[stride + index] = density_volume;
+    output[2U * stride + index] = age_moment;
+    output[3U * stride + index] = volume > 0.0
+        ? volume / read_only(destination_area_km2 + destination)
+        : 0.0;
+    output[4U * stride + index] = volume > 0.0
+        ? density_volume / volume
+        : read_only(source_state + stride + index);
+    output[5U * stride + index] = volume > 0.0
+        ? age_moment / volume
+        : 0.0;
+}
+
 __global__ __launch_bounds__(CUDA_BLOCK_THREADS) void remap_crust_sources_kernel(
     const double* __restrict__ mesh_x,
     const double* __restrict__ mesh_y,
@@ -1125,6 +1172,220 @@ struct CudaComputeSession::Impl {
         finish_operation(started);
     }
 
+    void run_crust_overlap_continuous_shadow(
+        const CrustTransportPlan& transport,
+        const std::vector<Cell>& cells,
+        const std::vector<double>& source_crust_thickness_km,
+        const std::vector<double>& source_crust_density,
+        const std::vector<double>& source_crust_age_ma,
+        CrustOverlapContinuousShadowResult& output
+    ) {
+        ensure_available();
+        state.error.clear();
+        const ScopedCudaDevice device_guard(selected_device);
+        validate_crust_overlap_continuous_shadow_input(
+            transport,
+            cells,
+            source_crust_thickness_km,
+            source_crust_density,
+            source_crust_age_ma
+        );
+        const int cell_count = checked_int_count(
+            cells.size(), "CUDA crust-overlap shadow cell count"
+        );
+        checked_int_count(
+            transport.source_cell_ids.size(),
+            "CUDA crust-overlap shadow edge count"
+        );
+        if (cells.empty()) {
+            output = {};
+            return;
+        }
+        const auto started = begin_operation();
+        const std::size_t edge_count = transport.source_cell_ids.size();
+        const std::size_t packed_source_count = cells.size() * 3U;
+        const std::size_t packed_output_count = cells.size() * 6U;
+        const std::size_t offset_bytes = checked_bytes(
+            transport.destination_offsets.size(),
+            sizeof(int),
+            "CUDA crust-overlap shadow offset upload"
+        );
+        const std::size_t source_id_bytes = checked_bytes(
+            edge_count,
+            sizeof(int),
+            "CUDA crust-overlap shadow source-id upload"
+        );
+        const std::size_t edge_area_bytes = checked_bytes(
+            edge_count,
+            sizeof(double),
+            "CUDA crust-overlap shadow edge-area upload"
+        );
+        const std::size_t destination_area_bytes = checked_bytes(
+            cells.size(),
+            sizeof(double),
+            "CUDA crust-overlap shadow destination-area upload"
+        );
+        const std::size_t source_state_bytes = checked_bytes(
+            packed_source_count,
+            sizeof(double),
+            "CUDA crust-overlap shadow source-state upload"
+        );
+        const std::size_t output_bytes = checked_bytes(
+            packed_output_count,
+            sizeof(double),
+            "CUDA crust-overlap shadow output readback"
+        );
+        std::size_t required_bytes = 0;
+        for (std::size_t bytes : {
+                 offset_bytes,
+                 source_id_bytes,
+                 edge_area_bytes,
+                 destination_area_bytes,
+                 source_state_bytes,
+                 output_bytes,
+             }) {
+            if (bytes > std::numeric_limits<std::size_t>::max() - required_bytes) {
+                throw std::runtime_error(
+                    "CUDA crust-overlap shadow aggregate allocation size overflow"
+                );
+            }
+            required_bytes += bytes;
+        }
+        if (
+            state.total_global_memory_bytes != 0 &&
+            required_bytes > state.total_global_memory_bytes
+        ) {
+            throw std::runtime_error(
+                "CUDA crust-overlap shadow buffers exceed device global memory"
+            );
+        }
+
+        ensure_capacity(
+            overlap_shadow_destination_offsets,
+            transport.destination_offsets.size(),
+            "cudaMalloc(crust-overlap shadow destination offsets)"
+        );
+        ensure_capacity(
+            overlap_shadow_source_cell_ids,
+            std::max<std::size_t>(1, edge_count),
+            "cudaMalloc(crust-overlap shadow source ids)"
+        );
+        ensure_capacity(
+            overlap_shadow_area_km2,
+            std::max<std::size_t>(1, edge_count),
+            "cudaMalloc(crust-overlap shadow edge areas)"
+        );
+        ensure_capacity(
+            overlap_shadow_destination_area_km2,
+            cells.size(),
+            "cudaMalloc(crust-overlap shadow destination areas)"
+        );
+        ensure_capacity(
+            overlap_shadow_source_state,
+            packed_source_count,
+            "cudaMalloc(crust-overlap shadow source state)"
+        );
+        ensure_capacity(
+            overlap_shadow_output,
+            packed_output_count,
+            "cudaMalloc(crust-overlap shadow output)"
+        );
+
+        std::vector<double> destination_area(cells.size());
+        std::vector<double> source_state(packed_source_count);
+        for (std::size_t index = 0; index < cells.size(); ++index) {
+            destination_area[index] = cells[index].area_km2;
+            source_state[index] = source_crust_thickness_km[index];
+            source_state[cells.size() + index] = source_crust_density[index];
+            source_state[2U * cells.size() + index] = source_crust_age_ma[index];
+        }
+        const HostToDeviceCopy copies[] = {
+            {
+                overlap_shadow_destination_offsets.data,
+                transport.destination_offsets.data(),
+                offset_bytes,
+            },
+            {
+                overlap_shadow_source_cell_ids.data,
+                edge_count == 0 ? nullptr : transport.source_cell_ids.data(),
+                source_id_bytes,
+            },
+            {
+                overlap_shadow_area_km2.data,
+                edge_count == 0 ? nullptr : transport.overlap_area_km2.data(),
+                edge_area_bytes,
+            },
+            {
+                overlap_shadow_destination_area_km2.data,
+                destination_area.data(),
+                destination_area_bytes,
+            },
+            {
+                overlap_shadow_source_state.data,
+                source_state.data(),
+                source_state_bytes,
+            },
+        };
+        copy_host_to_device_batch(copies, 5);
+
+        const std::uint64_t blocks = grid_blocks_for_threads(cells.size());
+        if (blocks > static_cast<std::uint64_t>(state.max_grid_dimensions[0])) {
+            throw std::runtime_error(
+                "CUDA crust-overlap shadow grid exceeds device limits"
+            );
+        }
+        launch_timed([&] {
+            reduce_crust_overlap_continuous_shadow_kernel<<<
+                static_cast<unsigned int>(blocks), CUDA_BLOCK_THREADS, 0, stream
+            >>>(
+                overlap_shadow_destination_offsets.data,
+                overlap_shadow_source_cell_ids.data,
+                overlap_shadow_area_km2.data,
+                overlap_shadow_destination_area_km2.data,
+                overlap_shadow_source_state.data,
+                cell_count,
+                overlap_shadow_output.data
+            );
+            require_cuda(
+                cudaPeekAtLastError(),
+                "reduce_crust_overlap_continuous_shadow_kernel launch"
+            );
+        });
+        state.kernel_dispatch_count++;
+        state.crust_overlap_continuous_shadow_dispatch_count++;
+        set_last_launch(cells.size(), blocks, CUDA_WARPS_PER_BLOCK);
+
+        std::vector<double> packed_output(packed_output_count);
+        copy_device_to_host(
+            packed_output.data(), overlap_shadow_output.data, output_bytes
+        );
+        const std::size_t output_stride = cells.size();
+        output.crust_volume_km3_by_destination.assign(
+            packed_output.begin(), packed_output.begin() + output_stride
+        );
+        output.density_weighted_crust_volume_by_destination.assign(
+            packed_output.begin() + output_stride,
+            packed_output.begin() + 2U * output_stride
+        );
+        output.crust_age_volume_moment_by_destination.assign(
+            packed_output.begin() + 2U * output_stride,
+            packed_output.begin() + 3U * output_stride
+        );
+        output.remapped_crust_thickness_km_by_destination.assign(
+            packed_output.begin() + 3U * output_stride,
+            packed_output.begin() + 4U * output_stride
+        );
+        output.remapped_crust_density_by_destination.assign(
+            packed_output.begin() + 4U * output_stride,
+            packed_output.begin() + 5U * output_stride
+        );
+        output.remapped_crust_age_ma_by_destination.assign(
+            packed_output.begin() + 5U * output_stride,
+            packed_output.end()
+        );
+        finish_operation(started);
+    }
+
     void run_remap_crust_sources(
         const std::vector<Cell>& cells,
         const std::vector<Vec3>& backtraced_positions,
@@ -1329,6 +1590,12 @@ struct CudaComputeSession::Impl {
         release_buffer_noexcept(remap_candidate_offsets);
         release_buffer_noexcept(remap_candidate_ids);
         release_buffer_noexcept(remap_source_ids);
+        release_buffer_noexcept(overlap_shadow_destination_offsets);
+        release_buffer_noexcept(overlap_shadow_source_cell_ids);
+        release_buffer_noexcept(overlap_shadow_area_km2);
+        release_buffer_noexcept(overlap_shadow_destination_area_km2);
+        release_buffer_noexcept(overlap_shadow_source_state);
+        release_buffer_noexcept(overlap_shadow_output);
         state.allocated_device_bytes = 0;
         if (timing_start != nullptr) {
             (void)cudaEventDestroy(timing_start);
@@ -1385,6 +1652,12 @@ struct CudaComputeSession::Impl {
     DeviceBuffer<int> remap_candidate_offsets;
     DeviceBuffer<int> remap_candidate_ids;
     DeviceBuffer<int> remap_source_ids;
+    DeviceBuffer<int> overlap_shadow_destination_offsets;
+    DeviceBuffer<int> overlap_shadow_source_cell_ids;
+    DeviceBuffer<double> overlap_shadow_area_km2;
+    DeviceBuffer<double> overlap_shadow_destination_area_km2;
+    DeviceBuffer<double> overlap_shadow_source_state;
+    DeviceBuffer<double> overlap_shadow_output;
 
     double operation_kernel_time_ms = 0.0;
     double operation_transfer_time_ms = 0.0;
@@ -1483,6 +1756,29 @@ void CudaComputeSession::run_remap_crust_sources(
             backtraced_positions,
             previous_cells_by_plate,
             source_cell_ids
+        );
+    } catch (const std::exception& error) {
+        impl_->state.error = error.what();
+        throw;
+    }
+}
+
+void CudaComputeSession::run_crust_overlap_continuous_shadow(
+    const CrustTransportPlan& transport,
+    const std::vector<Cell>& cells,
+    const std::vector<double>& source_crust_thickness_km,
+    const std::vector<double>& source_crust_density,
+    const std::vector<double>& source_crust_age_ma,
+    CrustOverlapContinuousShadowResult& output
+) {
+    try {
+        impl_->run_crust_overlap_continuous_shadow(
+            transport,
+            cells,
+            source_crust_thickness_km,
+            source_crust_density,
+            source_crust_age_ma,
+            output
         );
     } catch (const std::exception& error) {
         impl_->state.error = error.what();

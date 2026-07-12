@@ -4,6 +4,14 @@ This document records the CUDA implementation, RTX 5090 calibration, and
 validation evidence collected on 2026-07-10. The thresholds and timings are
 host-specific engineering evidence, not universal NVIDIA performance claims.
 
+> **Current crust-transport boundary:** the calibration below predates
+> `forward_spherical_control_volume_overlap_v1`. Production v3 crust transport
+> now runs authoritatively on CPU for `cpu`, `opencl`, and `cuda` backends. The
+> CUDA nearest-source kernel remains a raw tested primitive but is not called by
+> world generation. None of the remap dispatch counts or speedups below measures
+> the new overlap path; GPU implementation, complete-ledger parity, telemetry,
+> fallback behavior, and new crossover calibration remain pending.
+
 ## Audited target
 
 The development host contains one NVIDIA GeForce RTX 5090 (GB202, PCI
@@ -134,9 +142,11 @@ and complete host results:
    fields.
 3. Three-field smoothing fuses the three fields so each thread reads the CSR
    row once while preserving each field's original summation order.
-4. Crust-source remapping assigns one warp to each query. Warp lanes scan
-   ascending candidate positions cooperatively and reduce `(score, position)`
-   pairs so an exact tie selects the earliest candidate, matching CPU order.
+4. The legacy crust-source primitive assigns one warp to each nearest-source
+   query. Warp lanes scan ascending candidate positions cooperatively and reduce
+   `(score, position)` pairs so an exact tie selects the earliest candidate.
+   This kernel remains directly tested but no longer implements production
+   crust transport.
 
 The session owns a nonblocking stream, reusable CUDA events and capacity
 buffers, structure-of-arrays mesh coordinates, and CSR adjacency. Mesh uploads
@@ -162,7 +172,7 @@ support the launch-limit, transfer-minimization, and coalescing choices.
 | Plate assignment | 37 | 0 | 0 | 0 |
 | Scalar smoothing | 40 | 0 | 0 | 0 |
 | Fused three-field smoothing | 40 | 0 | 0 | 0 |
-| Crust-source remapping | 40 | 0 | 0 | 0 |
+| Legacy crust-source primitive | 40 | 0 | 0 | 0 |
 
 `cuobjdump --list-elf` identifies `cuda_compute.sm_120.cubin`, and
 `--list-ptx` identifies `cuda_compute.sm_120.ptx`. This is direct artifact
@@ -173,6 +183,10 @@ multi-architecture build also found SASS for `sm_75`, `sm_80`, `sm_86`,
 the distributable CMake policy.
 
 ## Measured parity and performance
+
+The measurements in this section are retained as the pre-v3 accelerator
+baseline. They cover the former nearest-source production path and must be
+rerun before assigning a crossover threshold to spherical overlap transport.
 
 The reusable benchmark calls the native ctypes boundary directly. Its timer
 starts before `generate_world(config)`, so it covers construction of the ctypes
@@ -243,8 +257,8 @@ equal to the CPU reference.
 ## Validation evidence
 
 The default multi-architecture CUDA Release build passed all four CTest targets
-on the RTX 5090, including the raw-kernel test. The integrated native API test
-exercises complete CPU/CUDA payload parity, odd-sized 129-cell remapping,
+on the RTX 5090, including the raw-kernel test, for the audited pre-v3 tree. The integrated native API test
+exercised complete CPU/CUDA payload parity, odd-sized 129-cell legacy remapping,
 repeated erosion dispatches, explicit failure behavior, telemetry, and
 concurrent CPU/CUDA sessions. A CUDA-disabled/stub build separately passed its
 three CPU/ABI tests.
@@ -295,14 +309,25 @@ loaded successfully in the driverless, GPU-masked sandbox without a dynamic
 
 ## Profile-driven CPU optimization and remaining limits
 
-Sampling showed that, after crust remapping, repeated climate humidity paths
-are the next native bottleneck. The CPU reference now replaces a heap-allocated
+Historical sampling showed that, after nearest-source crust remapping, repeated climate humidity paths
+were the next native bottleneck. The CPU reference replaces a heap-allocated
 `std::set` per cell with a fixed 35-ID visited array and precomputes the strict
 upwind neighbor/alignment for the six prevailing-wind regimes once per climate
 recomputation. Complete physical payload hashes remain identical. Warm native
 CPU time improved by 1.7% at 4,096 cells/erosion 6 with 16 threads, 2.2% at
 16,384 cells/erosion 2 with 16 threads, and 7.5% at 4,096 cells/erosion 6 with
 one thread.
+
+The v3 overlap path adds CPU spherical candidate search, clipping, canonical
+CSR construction, and destination coverage arrangements. The latter fails
+closed above 16,384 local fragments. Legal 180°/step, 32-plate Fibonacci-512
+and geodesic-642 stress cases pass, but they are not an exhaustive worst-case
+complexity proof. This path must be profiled independently. A valid CUDA port
+must reproduce source-area closure, unnormalized destination gaps and multiple
+coverage, the global area-by-multiplicity histogram, arrangement line/fragment
+telemetry, all three transported extensive inventories and the aggregate
+process delta, canonical ledger ordering, and fallback telemetry; parity of a
+single dominant source ID is insufficient.
 
 Ordered Priority-Flood, sea-level union/find, flow accumulation, sediment
 topology, RNG, and serialization remain on the CPU. Moving those stages with

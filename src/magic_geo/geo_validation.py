@@ -6,6 +6,12 @@ from copy import deepcopy
 from typing import Any, Iterable
 
 from .biome_dynamics import enrich_world_with_biome_diagnostics
+from .control_volume_geometry import (
+    CONTROL_VOLUME_AREA_MODELS,
+    inspect_control_volume_geometry,
+)
+from .geo_evolution_provenance import validate_geo_evolution_provenance
+from .geo_layer_contracts import evaluate_geo_layer_contracts
 from .geo_validation_physics import validate_physics_replays
 from .geo_validation_subsystems import validate_natural_subsystems
 
@@ -22,7 +28,13 @@ GEO_MODEL_LIMITATIONS = (
     "the simulation clock orders procedural stages but has no calibrated physical duration",
     "the diagnostic atmosphere is not a three-dimensional mass-conserving circulation solver",
     "configured ocean inventory is not a closed total-water partition across ocean, ice, groundwater, lakes, and atmosphere",
-    "plate-attached nearest-neighbor crust transport is not mass-conserving",
+    "first-order conservative crust overlap is diffusive, CPU-authoritative, and guarded by a 16,384-fragment local arrangement cap without exhaustive worst-case proof; an accelerator may validate and discard only a continuous-moment CSR shadow, while geometry, categories, production state, complete parity, and device-lane evidence remain unresolved",
+    "the diagnostically authoritative pair-wide overlap candidate crosswalk accounts for every excess class but does not resolve a local fragment-to-segment link, physical polarity, allocation, material fate, slab transfer, or state mutation",
+    "post-transport tectonic rules expose ordered per-reason positive, negative, and net state-moment changes, but not physical reservoir, material-provenance, energy, or phase source/sink fluxes",
+    "initial oceanic-like crust age is a replayable multi-source ridge-distance graph field using one globally averaged nominal half-spreading rate; it does not reconstruct local flowlines, calibrated spreading, subduction sinks, convergence history, or physical seafloor creation and destruction",
+    "the continuity-adjusted Parsons-Sclater relation is authoritative only for a relative oceanic thermal-subsidence target curve; full local thermal and isostatic equilibrium target differences now replay into terrain outside the bounded dynamic-relief clamp, but the quasi-static timescale separation is not a calibrated transient relaxation and the model does not separately track realized thermal relief or resolve absolute basement depth, heat flow or thermal structure, dynamic topography, flexure, or physical dynamics",
+    "persistent surface-crust dry-rock packets and the finite surface/exchange/empty-slab counter-model close numerical transport and legacy compensation accounting, but remain non-authoritative and do not resolve physical transfer bases, fate, solid volume, phase, mantle, slab, sediment coupling, or a physical global crust cycle",
+    "the bedrock surface and mobile-sediment thickness form an explicit canonical geometric interface and hillslope, fluvial, glacial, and numeric-breach updates replay, but bulk reference-volume closure still does not resolve dry-rock mass, sediment density, porosity, compaction, grain provenance, or chemical weathering",
     "ecosystem, species, wildfire, and resource layers are diagnostic index models rather than calibrated population or process solvers",
     "Earth empirical fit remains a separate calibration verdict from internal contract integrity",
 )
@@ -354,6 +366,7 @@ def extract_geo_metrics(world: dict[str, Any]) -> dict[str, Any]:
         return float(value) if _finite_number(value) else 0.0
 
     feedback = world.get("earth_system_feedback_history", [])
+    simulation_clock = world.get("simulation_clock", {})
     plate_history = world.get("plate_motion_history", [])
     plates = world.get("plates", [])
     sediment_inventory = world.get("sediment_inventory_model", {})
@@ -370,7 +383,34 @@ def extract_geo_metrics(world: dict[str, Any]) -> dict[str, Any]:
         if isinstance(record, dict)
         and _finite_number(record.get("cumulative_rotation_deg"))
     ] if isinstance(plates, list) else []
+    crust_evolved_cell_count = sum(
+        abs(
+            float(cell.get("crust_age_ma", 0.0))
+            - float(cell.get("initial_crust_age_ma", 0.0))
+        )
+        > 1.0e-6
+        or abs(
+            float(cell.get("crust_thickness_km", 0.0))
+            - float(cell.get("initial_crust_thickness_km", 0.0))
+        )
+        > 1.0e-6
+        or abs(
+            float(cell.get("crust_density", 0.0))
+            - float(cell.get("initial_crust_density", 0.0))
+        )
+        > 1.0e-6
+        for cell in cells
+    )
+    reassigned_plate_cell_count = sum(
+        int(cell.get("plate_assignment_change_count", 0)) > 0 for cell in cells
+    )
     seasonal_area = sum(record["area_km2"] for record in seasonal_range_cells)
+    def clock_value(key: str) -> float:
+        value = simulation_clock.get(key, 0.0) if isinstance(
+            simulation_clock, dict
+        ) else 0.0
+        return float(value) if _finite_number(value) else 0.0
+
     return {
         "cell_count": len(cells),
         "surface_area_km2": round(total_area, 6),
@@ -422,11 +462,24 @@ def extract_geo_metrics(world: dict[str, Any]) -> dict[str, Any]:
         if isinstance(world.get("landmasses"), list)
         else 0,
         "simulation_stage_count": len(feedback) if isinstance(feedback, list) else 0,
+        "maturation_timestep_ma": round(clock_value("nominal_timestep_ma"), 6),
+        "nominal_maturation_duration_ma": round(
+            clock_value("final_nominal_elapsed_time_ma"), 6
+        ),
+        "maturation_timestep_scale": round(
+            clock_value("maturation_timestep_scale"), 6
+        ),
         "plate_motion_transition_count": sum(
             isinstance(record, dict)
             and str(record.get("stage", "")) == "plate_motion_iteration"
             for record in plate_history
         ) if isinstance(plate_history, list) else 0,
+        "crust_evolved_cell_fraction": round(
+            crust_evolved_cell_count / len(cells), 6
+        ),
+        "plate_reassigned_cell_fraction": round(
+            reassigned_plate_cell_count / len(cells), 6
+        ),
         "mean_plate_cumulative_rotation_deg": round(_mean(plate_rotations), 6),
         "mean_erosion_iteration_elevation_change_m": round(
             _mean(erosion_stage_changes), 6
@@ -1029,53 +1082,15 @@ def _validate_geo_world_impl(
 
     mesh_backend = str(world.get("mesh_backend", ""))
     cell_area_model = str(world.get("cell_area_model", ""))
-    area_model_valid = False
-    maximum_cell_area_error_km2 = math.inf
-    face_count = 0
-    if mesh_backend == "fibonacci_sphere" and cell_area_model == "equal_area_fibonacci_quadrature_v1":
-        expected_cell_area = expected_area / len(cells)
-        maximum_cell_area_error_km2 = max(
-            abs(float(cell.get("area_km2", 0.0)) - expected_cell_area) for cell in cells
-        )
-        area_model_valid = maximum_cell_area_error_km2 <= max(0.01, expected_cell_area * 1.0e-8)
-    elif mesh_backend == "geodesic_icosahedron" and cell_area_model == "spherical_barycentric_dual_v1":
-        faces: set[tuple[int, int, int]] = set()
-        for cell_id, neighbors in adjacency.items():
-            sorted_neighbors = sorted(neighbors)
-            for first_index, first_neighbor in enumerate(sorted_neighbors):
-                for second_neighbor in sorted_neighbors[first_index + 1 :]:
-                    if second_neighbor in adjacency.get(first_neighbor, set()):
-                        faces.add(tuple(sorted((cell_id, first_neighbor, second_neighbor))))
-        reconstructed_area_by_cell = {cell_id: 0.0 for cell_id in cells_by_id}
-        for first_id, second_id, third_id in faces:
-            first = [float(value) for value in cells_by_id[first_id]["position_3d"]]
-            second = [float(value) for value in cells_by_id[second_id]["position_3d"]]
-            third = [float(value) for value in cells_by_id[third_id]["position_3d"]]
-            cross_second_third = (
-                second[1] * third[2] - second[2] * third[1],
-                second[2] * third[0] - second[0] * third[2],
-                second[0] * third[1] - second[1] * third[0],
-            )
-            determinant = abs(sum(first[index] * cross_second_third[index] for index in range(3)))
-            denominator = 1.0 + sum(first[index] * second[index] for index in range(3))
-            denominator += sum(second[index] * third[index] for index in range(3))
-            denominator += sum(third[index] * first[index] for index in range(3))
-            face_area_km2 = 2.0 * math.atan2(determinant, max(1.0e-15, denominator)) * radius_km * radius_km
-            share = face_area_km2 / 3.0
-            reconstructed_area_by_cell[first_id] += share
-            reconstructed_area_by_cell[second_id] += share
-            reconstructed_area_by_cell[third_id] += share
-        face_count = len(faces)
-        maximum_cell_area_error_km2 = max(
-            abs(reconstructed_area_by_cell[cell_id] - float(cell.get("area_km2", 0.0)))
-            for cell_id, cell in cells_by_id.items()
-        )
-        expected_face_count = 2 * len(cells) - 4
-        area_model_valid = (
-            face_count == expected_face_count
-            and maximum_cell_area_error_km2
-            <= max(0.01, max(float(cell.get("area_km2", 0.0)) for cell in cells) * 1.0e-6)
-        )
+    control_volume_inspection = inspect_control_volume_geometry(world)
+    control_volume_metrics = control_volume_inspection["metrics"]
+    area_model_valid = bool(control_volume_inspection["passed"])
+    maximum_cell_area_error_km2 = float(
+        control_volume_metrics.get("maximum_area_replay_error_km2", math.inf)
+    )
+    control_volume_edge_pair_count = int(
+        control_volume_metrics.get("control_volume_edge_pair_count", 0)
+    )
     _check(
         checks,
         domain="mesh",
@@ -1085,13 +1100,11 @@ def _validate_geo_world_impl(
         observed={
             "mesh_backend": mesh_backend,
             "cell_area_model": cell_area_model,
-            "face_count": face_count,
+            "control_volume_edge_pair_count": control_volume_edge_pair_count,
             "maximum_cell_area_error_km2": maximum_cell_area_error_km2,
+            "failures": control_volume_inspection["failures"],
         },
-        expected={
-            "fibonacci_model": "equal_area_fibonacci_quadrature_v1",
-            "geodesic_model": "spherical_barycentric_dual_v1",
-        },
+        expected=CONTROL_VOLUME_AREA_MODELS,
     )
 
     edge_records = world.get("cell_adjacency_edges", [])
@@ -1661,6 +1674,7 @@ def _validate_geo_world_impl(
         int(cell.get("basin_id", -1))
         for cell in cells
         if not bool(cell.get("is_water", False))
+        and int(cell.get("basin_id", -1)) >= 0
     }
     invalid_terminal_count = 0
     for cell_id, cell in cells_by_id.items():
@@ -2614,6 +2628,13 @@ def _validate_geo_world_impl(
         subsystem_check = dict(subsystem_check)
         subsystem_check["id"] = len(checks)
         checks.append(subsystem_check)
+    if (
+        world.get("generation_scope") == "geo_only"
+        or "geo_evolution_provenance" in world
+    ):
+        evolution_check = dict(validate_geo_evolution_provenance(world))
+        evolution_check["id"] = len(checks)
+        checks.append(evolution_check)
 
     _validate_realism_evidence(world, checks)
     metrics = extract_geo_metrics(world)
@@ -2644,7 +2665,7 @@ def validate_geo_world(
     a failed contract check, never an exception escaping to the caller.
     """
     try:
-        return _validate_geo_world_impl(world, profile=profile)
+        report = _validate_geo_world_impl(world, profile=profile)
     except Exception as exc:
         checks: list[dict[str, Any]] = []
         _check(
@@ -2656,7 +2677,24 @@ def validate_geo_world(
             observed={"exception_type": type(exc).__name__, "detail": str(exc)},
             expected="all exported natural fields are type-safe and internally coherent",
         )
-        return _finalize_report(profile, {}, checks)
+        report = _finalize_report(profile, {}, checks)
+
+    layer_contracts = evaluate_geo_layer_contracts(world, report["checks"])
+    report["layer_contracts"] = layer_contracts
+    report["summary"]["layer_contract_count"] = layer_contracts["layer_count"]
+    report["summary"]["layer_contract_pass_count"] = layer_contracts[
+        "passed_layer_count"
+    ]
+    report["summary"]["layer_contract_failure_count"] = layer_contracts[
+        "failed_layer_count"
+    ]
+    report["summary"]["all_layer_contracts_passed"] = layer_contracts[
+        "all_layer_contracts_passed"
+    ]
+    report["passed"] = bool(report["passed"]) and bool(
+        layer_contracts["all_layer_contracts_passed"]
+    )
+    return report
 
 
 def _finalize_report(

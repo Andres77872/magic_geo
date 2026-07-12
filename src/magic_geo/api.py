@@ -30,6 +30,7 @@ from .ecosystem_dynamics import enrich_world_with_ecosystem_dynamics
 from .fault_systems import enrich_world_with_fault_systems
 from .geology_realism import enrich_world_with_geology_realism
 from .glacial_landforms import enrich_world_with_glacial_landforms
+from .geo_evolution_provenance import enrich_world_with_geo_evolution_provenance
 from .graph_diagnostics import (
     enrich_world_with_graph_diagnostics,
     enrich_world_with_physical_graph_diagnostics,
@@ -79,9 +80,9 @@ from .wildfire_disturbance import enrich_world_with_wildfire_disturbance
 from .worldbuilding_realism import enrich_world_with_worldbuilding_realism
 
 
-# The native engine still builds its legacy civilization layers as part of a
-# complete world simulation.  The geo API establishes a hard boundary around
-# those fields before any Python natural-system model can observe them.
+# Native geo-only generation skips civilization simulation. The serializer
+# retains stable empty/default schema fields, so the Python geo API removes
+# those placeholders before any natural-system enricher can observe them.
 NATIVE_CIVILIZATION_TOP_LEVEL_FIELDS = frozenset(
     {
         "borders",
@@ -278,13 +279,19 @@ def _strip_native_civilization_outputs(world: dict[str, Any]) -> None:
 def generate_geo_world(config: WorldConfig) -> dict[str, Any]:
     """Generate and enrich a world containing natural systems only.
 
-    The native engine currently returns its legacy civilization layers along
-    with the physical simulation.  They are removed before enrichment so
-    mixed natural models consistently take their documented no-human defaults.
+    Native civilization simulation is skipped. Stable empty/default
+    civilization schema fields are removed before enrichment so mixed natural
+    models consistently take their documented no-human defaults.
     """
-    from .native import generate_world as native_generate_world
+    from .native import generate_geo_world as native_generate_geo_world
 
-    world = native_generate_world(config_to_native(config))
+    if not config.output.include_cells:
+        raise ValueError(
+            "generate_geo_world requires output.include_cells=true because "
+            "natural enrichers and layer validation consume per-cell state"
+        )
+
+    world = native_generate_geo_world(config_to_native(config))
     _strip_native_civilization_outputs(world)
     world["generation_scope"] = "geo_only"
     world["planet_parameters"] = planet_parameter_snapshot(config.planet)
@@ -356,6 +363,7 @@ def generate_geo_world(config: WorldConfig) -> dict[str, Any]:
     # Only physical graph and boundary products are valid in this scope.
     enrich_world_with_physical_graph_diagnostics(world)
     enrich_world_with_physical_boundary_geometry(world)
+    enrich_world_with_geo_evolution_provenance(world)
     return world
 
 

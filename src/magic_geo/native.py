@@ -67,6 +67,7 @@ class NativeConfigV1(ctypes.Structure):
 
 
 class NativeConfigV2(ctypes.Structure):
+    _anonymous_ = ("base",)
     _fields_ = [
         ("base", NativeConfigV1),
         ("compute_backend", ctypes.c_int),
@@ -74,9 +75,17 @@ class NativeConfigV2(ctypes.Structure):
     ]
 
 
+class NativeConfigV3(ctypes.Structure):
+    _anonymous_ = ("base",)
+    _fields_ = [
+        ("base", NativeConfigV2),
+        ("maturation_timestep_ma", ctypes.c_double),
+    ]
+
+
 # Internal compatibility alias for code that imported the previous private
-# class name while V2 was being introduced.
-NativeConfig = NativeConfigV2
+# class name while the versioned ABI was being introduced.
+NativeConfig = NativeConfigV3
 
 
 def _library_path() -> Path:
@@ -108,6 +117,18 @@ def _load_library() -> ctypes.CDLL:
     lib.magic_geo_generate_json.restype = ctypes.c_void_p
     lib.magic_geo_generate_json_v2.argtypes = [ctypes.POINTER(NativeConfigV2)]
     lib.magic_geo_generate_json_v2.restype = ctypes.c_void_p
+    generate_v3 = getattr(lib, "magic_geo_generate_json_v3", None)
+    if generate_v3 is not None:
+        generate_v3.argtypes = [ctypes.POINTER(NativeConfigV3)]
+        generate_v3.restype = ctypes.c_void_p
+    geo_generate = getattr(lib, "magic_geo_generate_geo_json_v2", None)
+    if geo_generate is not None:
+        geo_generate.argtypes = [ctypes.POINTER(NativeConfigV2)]
+        geo_generate.restype = ctypes.c_void_p
+    geo_generate_v3 = getattr(lib, "magic_geo_generate_geo_json_v3", None)
+    if geo_generate_v3 is not None:
+        geo_generate_v3.argtypes = [ctypes.POINTER(NativeConfigV3)]
+        geo_generate_v3.restype = ctypes.c_void_p
     lib.magic_geo_free_string.argtypes = [ctypes.c_void_p]
     lib.magic_geo_free_string.restype = None
     return lib
@@ -128,7 +149,7 @@ def _consume_json_pointer(lib: ctypes.CDLL, ptr: int) -> dict[str, Any]:
     return payload
 
 
-def _native_config(data: dict[str, Any]) -> NativeConfigV2:
+def _native_config(data: dict[str, Any]) -> NativeConfigV3:
     run = data["run"]
     planet = data["planet"]
     mesh = data["mesh"]
@@ -181,10 +202,13 @@ def _native_config(data: dict[str, Any]) -> NativeConfigV2:
         1 if output["include_cells"] else 0,
         int(output["float_precision"]),
     )
-    return NativeConfigV2(
-        base,
-        int(COMPUTE_BACKEND_IDS[str(compute["backend"])]),
-        1 if compute["opencl_prefer_gpu"] else 0,
+    return NativeConfigV3(
+        NativeConfigV2(
+            base,
+            int(COMPUTE_BACKEND_IDS[str(compute["backend"])]),
+            1 if compute["opencl_prefer_gpu"] else 0,
+        ),
+        float(erosion["maturation_timestep_ma"]),
     )
 
 
@@ -195,5 +219,27 @@ def backend_info() -> dict[str, Any]:
 
 def generate_world(data: dict[str, Any]) -> dict[str, Any]:
     lib = _load_library()
+    generate_v3 = getattr(lib, "magic_geo_generate_json_v3", None)
+    if generate_v3 is None:
+        raise RuntimeError(
+            "native library does not support the nominal maturation clock; "
+            "rebuild magic_geo_native from the current source tree"
+        )
     native_config = _native_config(data)
-    return _consume_json_pointer(lib, lib.magic_geo_generate_json_v2(ctypes.byref(native_config)))
+    return _consume_json_pointer(lib, generate_v3(ctypes.byref(native_config)))
+
+
+def generate_geo_world(data: dict[str, Any]) -> dict[str, Any]:
+    lib = _load_library()
+    geo_generate_v3 = getattr(lib, "magic_geo_generate_geo_json_v3", None)
+    if geo_generate_v3 is None:
+        raise RuntimeError(
+            "native library does not support geo-only generation with the "
+            "nominal maturation clock; rebuild "
+            "magic_geo_native from the current source tree"
+        )
+    native_config = _native_config(data)
+    return _consume_json_pointer(
+        lib,
+        geo_generate_v3(ctypes.byref(native_config)),
+    )

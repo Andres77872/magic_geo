@@ -4,30 +4,41 @@
     "runtime_requires_raw_sources": false,
     "source_manifests": [
       {
-        "path": "configs/calibration_sources.natural_earth_110m.json",
+        "path": "calibration_sources.natural_earth_110m.json",
         "sha256": "14c65b4fea2441d7ab61d540b52b078aad1664c291ed0f7e731307287ad90c09"
       },
       {
-        "path": "configs/calibration_sources.etopo_2022_1deg.json",
+        "path": "calibration_sources.etopo_2022_1deg.json",
         "sha256": "0c9d7ef9d0e444bf633bd77ee86f688831e3cbefdc65a9ec7869b7c0d8d33a82"
       },
       {
-        "path": "configs/calibration_sources.worldclim_2_1_10m.json",
+        "path": "calibration_sources.worldclim_2_1_10m.json",
         "sha256": "778494bd423489ccaf0c71c63b1d4bb4fa52dd34e324c8112d02e8397228a9c9"
       },
       {
-        "path": "configs/calibration_sources.hydrobasins_level3.json",
+        "path": "calibration_sources.hydrobasins_level3.json",
         "sha256": "6904025da39ddf45a7c85ba9376d178e066b9f3f4fdfd050fb709ce69c21f155"
       },
       {
-        "path": "configs/calibration_sources.hydrorivers_v10.json",
-        "sha256": "fc9ec2b55866a0196601dfa429952ef98986954245e81057440b6bcf8f44b6e2"
+        "path": "calibration_sources.hydrorivers_v10.json",
+        "sha256": "eb5b5a23b5c7c2ef9e853b1052c105302ea84517120153d6e798f37421858682"
+      },
+      {
+        "path": "calibration_sources.seton_2020_oceanic_age.json",
+        "sha256": "ed1785a300938beee55f0c29ce078f2a09c2a641ea1d88b331e00e9a012fe26b"
       }
     ],
-    "tool": "magic_geo.calibration.derive_calibration_targets"
+    "supplemental_target_derivations": [
+      {
+        "path": "calibration_targets.seton_2020_oceanic_age.json",
+        "sha256": "3e844a2c80ef7ddf4fe94720a40c554bef473ea6579e163b32fcb8a4c2a78fea",
+        "tool": "scripts/derive_seton_oceanic_age_targets.py"
+      }
+    ],
+    "tool": "magic_geo.calibration.derive_calibration_targets plus the listed supplemental derivation"
   },
-  "description": "Compact, precomputed Earth-reference target ranges derived from checksum-pinned Natural Earth, NOAA ETOPO 2022, WorldClim 2.1, HydroBASINS v1.c, and HydroRIVERS v1.0 sources. Raw source data are not required to evaluate these targets.",
-  "name": "canonical_earth_empirical_targets_v1",
+  "description": "Compact, precomputed Earth-reference target ranges derived from checksum-pinned Natural Earth, NOAA ETOPO 2022, WorldClim 2.1, HydroBASINS v1.c, HydroRIVERS v1.0, and Seton et al. 2020 oceanic-age sources. Raw source data are not required to evaluate these targets.",
+  "name": "canonical_earth_empirical_targets_v2",
   "schema_version": 1,
   "sources": {
     "etopo_2022": {
@@ -66,7 +77,7 @@
     },
     "hydrorivers_v10": {
       "dataset": "HydroRIVERS",
-      "layer": "global_terminal_networks_ge_1000000_km2",
+      "layer": "global_exorheic_terminal_backbones_ge_1000000_km2",
       "source": "calibration_data/hydrorivers_v10/HydroRIVERS_v10_shp.zip",
       "source_acquired_on": "2026-07-09",
       "source_archive_url": "https://data.hydrosheds.org/file/HydroRIVERS/HydroRIVERS_v10_shp.zip",
@@ -95,6 +106,22 @@
       "source_sha256": "8689e6932b8e370e2ca4587cf3ba21e460b1235db37b6ed3c172c35b4a6088de",
       "source_url": "https://www.naturalearthdata.com/downloads/110m-physical-vectors/110m-land/",
       "source_version": "4.1.0"
+    },
+    "seton_2020_oceanic_age": {
+      "dataset": "Seton et al. 2020 present-day oceanic crustal age",
+      "layer": "age.2020.1.GeeK2007.6m.xyz",
+      "source": "calibration_data/seton_2020_oceanic_age/age.2020.1.GeeK2007.6m.xyz",
+      "source_acquired_on": "2026-07-11",
+      "source_citation": "Seton, M., Muller, R. D., Zahirovic, S., Williams, S., Wright, N. M., Cannon, J., Whittaker, J. M., Matthews, K. J., and McGirr, R. (2020). A Global Data Set of Present-Day Oceanic Crustal Age and Seafloor Spreading Parameters.",
+      "source_doi": "10.1029/2020GC009214",
+      "source_format": "seton_2020_xyz_gridline_age",
+      "source_horizontal_crs": "WGS 84 geographic longitude/latitude gridline nodes",
+      "source_license": "Creative Commons Attribution 4.0 International",
+      "source_license_url": "https://creativecommons.org/licenses/by/4.0/",
+      "source_native_resolution": "6 arc-minute (0.1 degree) global gridline XYZ",
+      "source_sha256": "56ed93be6b4a9788ed0e18c65f2670fc21eb8adaa06b706632bd109b4ce8f25f",
+      "source_url": "https://www.earthbyte.org/webdav/ftp/earthbyte/agegrid/2020/Grids/age.2020.1.GeeK2007.6m.xyz",
+      "source_version": "Seton et al. 2020 release 2020.1, Gee and Kent 2007 timescale"
     },
     "worldclim_prec": {
       "dataset": "WorldClim 2.1",
@@ -203,32 +230,32 @@
       "tolerance_basis": "Eight-percentage-point endorheic-area model-fit tolerance. Summed terminal-watershed area is compared over generated coverage with centroid latitude at or north of 60 degrees south; HydroBASINS lumping and virtual endorheic connections remain semantic limitations, and this is not a statistical confidence interval."
     },
     {
-      "metric": "watershed_hack_fitted_exponent",
+      "metric": "exorheic_watershed_backbone_hack_fitted_exponent",
       "source_id": "hydrorivers_v10",
       "source_metric": "hydrorivers_hack_fitted_exponent",
       "source_minimum_upstream_area_km2": 1000000.0,
-      "source_processing": "Stream global DBF; select NEXT_DOWN = 0 and UPLAND_SKM >= 1000000; ordinary least-squares fit of log(DIST_UP_KM) on log(UPLAND_SKM)",
+      "source_processing": "Stream global DBF; select NEXT_DOWN = 0, ENDORHEIC = 0, ORD_CLAS = 1, and UPLAND_SKM >= 1000000; ordinary least-squares fit of log(DIST_UP_KM) on log(UPLAND_SKM)",
       "source_sample_record_count": 17,
       "source_statistic": "hydrorivers_hack_fitted_exponent",
       "source_value": 0.455213509131,
       "source_variable_units": "dimensionless exponent from log main-channel length versus log upstream area",
       "target_max": 0.655213509131,
       "target_min": 0.255213509131,
-      "tolerance_basis": "Absolute coarse-network Hack-exponent model-fit tolerance. Source and generated fits use terminal networks/basins above the same one-million-km2 floor; not a statistical confidence interval."
+      "tolerance_basis": "Absolute coarse-network Hack-exponent model-fit tolerance. Generated observations are restricted to explicit ocean-outlet, non-endorheic watershed backbones over the shared catchment-area floor; coarse grid resolution remains a model-fit limitation and this is not a statistical confidence interval."
     },
     {
-      "metric": "watershed_hack_fitted_log_rmse",
+      "metric": "exorheic_watershed_backbone_hack_fitted_log_rmse",
       "source_id": "hydrorivers_v10",
       "source_metric": "hydrorivers_hack_fitted_log_rmse",
       "source_minimum_upstream_area_km2": 1000000.0,
-      "source_processing": "Stream global DBF; select NEXT_DOWN = 0 and UPLAND_SKM >= 1000000; ordinary least-squares fit of log(DIST_UP_KM) on log(UPLAND_SKM)",
+      "source_processing": "Stream global DBF; select NEXT_DOWN = 0, ENDORHEIC = 0, ORD_CLAS = 1, and UPLAND_SKM >= 1000000; ordinary least-squares fit of log(DIST_UP_KM) on log(UPLAND_SKM)",
       "source_sample_record_count": 17,
       "source_statistic": "hydrorivers_hack_fitted_log_rmse",
       "source_value": 0.155416679619,
       "source_variable_units": "natural-log root-mean-square residual around the fitted Hack relation",
       "target_max": 0.405416679619,
       "target_min": 0.0,
-      "tolerance_basis": "Physical-floor interval from zero to the HydroRIVERS natural-log RMSE plus 0.25, allowing coarse generated drainage paths more multiplicative scatter while retaining a bounded comparison; not a statistical confidence interval."
+      "tolerance_basis": "Physical-floor interval from zero to the HydroRIVERS natural-log RMSE plus 0.25, allowing coarse generated ocean-outlet watershed backbones more multiplicative scatter while retaining a bounded comparison; not a statistical confidence interval."
     },
     {
       "metric": "mean_land_annual_temperature_c",
@@ -268,6 +295,149 @@
       "target_max": 968.331993569132,
       "target_min": 580.999196141479,
       "tolerance_basis": "Twenty-five-percent Earth-like land-precipitation model-fit tolerance; not a statistical confidence interval."
+    },
+    {
+      "metric": "initial_oceanic_crust_age_area_weighted_mean_ma",
+      "source_id": "seton_2020_oceanic_age",
+      "source_metric": "seton_grid_area_weighted_mean_age_ma",
+      "source_processing": "Finite 6 arc-minute XYZ nodes weighted by longitude endpoint trapezoids and exact spherical latitude-band area; repository-derived from the pinned grid, not quoted from the paper",
+      "source_sample_record_count": 3189443,
+      "source_statistic": "spherical_grid_node_area_weighted_mean",
+      "source_value": 62.84149091327,
+      "source_variable_units": "Ma",
+      "target_max": 77.84149091327,
+      "target_min": 47.84149091327,
+      "tolerance_basis": "Fifteen-Ma Earth-like procedural-initialization tolerance; not a statistical confidence interval and not a claim of local age-field agreement."
+    },
+    {
+      "metric": "initial_oceanic_crust_age_area_weighted_cdf_le_20_ma",
+      "source_id": "seton_2020_oceanic_age",
+      "source_metric": "seton_grid_area_weighted_cdf_le_20_ma",
+      "source_processing": "Same finite-node spherical quadrature; inclusive age <= 20 Ma",
+      "source_sample_record_count": 3189443,
+      "source_statistic": "repository_derived_spherical_area_cdf",
+      "source_value": 0.203730125937,
+      "source_variable_units": "fraction",
+      "target_max": 0.263730125937,
+      "target_min": 0.143730125937,
+      "tolerance_basis": "Six-percentage-point distributional model-fit tolerance; not a statistical confidence interval."
+    },
+    {
+      "metric": "initial_oceanic_crust_age_area_weighted_cdf_le_40_ma",
+      "source_id": "seton_2020_oceanic_age",
+      "source_metric": "seton_grid_area_weighted_cdf_le_40_ma",
+      "source_processing": "Same finite-node spherical quadrature; inclusive age <= 40 Ma",
+      "source_sample_record_count": 3189443,
+      "source_statistic": "repository_derived_spherical_area_cdf",
+      "source_value": 0.394644471212,
+      "source_variable_units": "fraction",
+      "target_max": 0.454644471212,
+      "target_min": 0.334644471212,
+      "tolerance_basis": "Six-percentage-point distributional model-fit tolerance; not a statistical confidence interval."
+    },
+    {
+      "metric": "initial_oceanic_crust_age_area_weighted_cdf_le_60_ma",
+      "source_id": "seton_2020_oceanic_age",
+      "source_metric": "seton_grid_area_weighted_cdf_le_60_ma",
+      "source_processing": "Same finite-node spherical quadrature; inclusive age <= 60 Ma",
+      "source_sample_record_count": 3189443,
+      "source_statistic": "repository_derived_spherical_area_cdf",
+      "source_value": 0.538535310804,
+      "source_variable_units": "fraction",
+      "target_max": 0.598535310804,
+      "target_min": 0.478535310804,
+      "tolerance_basis": "Six-percentage-point distributional model-fit tolerance; not a statistical confidence interval."
+    },
+    {
+      "metric": "initial_oceanic_crust_age_area_weighted_cdf_le_80_ma",
+      "source_id": "seton_2020_oceanic_age",
+      "source_metric": "seton_grid_area_weighted_cdf_le_80_ma",
+      "source_processing": "Same finite-node spherical quadrature; inclusive age <= 80 Ma",
+      "source_sample_record_count": 3189443,
+      "source_statistic": "repository_derived_spherical_area_cdf",
+      "source_value": 0.668168555856,
+      "source_variable_units": "fraction",
+      "target_max": 0.728168555856,
+      "target_min": 0.608168555856,
+      "tolerance_basis": "Six-percentage-point distributional model-fit tolerance; not a statistical confidence interval."
+    },
+    {
+      "metric": "initial_oceanic_crust_age_area_weighted_cdf_le_100_ma",
+      "source_id": "seton_2020_oceanic_age",
+      "source_metric": "seton_grid_area_weighted_cdf_le_100_ma",
+      "source_processing": "Same finite-node spherical quadrature; inclusive age <= 100 Ma",
+      "source_sample_record_count": 3189443,
+      "source_statistic": "repository_derived_spherical_area_cdf",
+      "source_value": 0.764912127566,
+      "source_variable_units": "fraction",
+      "target_max": 0.824912127566,
+      "target_min": 0.704912127566,
+      "tolerance_basis": "Six-percentage-point distributional model-fit tolerance; not a statistical confidence interval."
+    },
+    {
+      "metric": "initial_oceanic_crust_age_area_weighted_cdf_le_120_ma",
+      "source_id": "seton_2020_oceanic_age",
+      "source_metric": "seton_grid_area_weighted_cdf_le_120_ma",
+      "source_processing": "Same finite-node spherical quadrature; inclusive age <= 120 Ma",
+      "source_sample_record_count": 3189443,
+      "source_statistic": "repository_derived_spherical_area_cdf",
+      "source_value": 0.867648508307,
+      "source_variable_units": "fraction",
+      "target_max": 0.927648508307,
+      "target_min": 0.807648508307,
+      "tolerance_basis": "Six-percentage-point distributional model-fit tolerance; not a statistical confidence interval."
+    },
+    {
+      "metric": "initial_oceanic_crust_age_area_weighted_cdf_le_140_ma",
+      "source_id": "seton_2020_oceanic_age",
+      "source_metric": "seton_grid_area_weighted_cdf_le_140_ma",
+      "source_processing": "Same finite-node spherical quadrature; inclusive age <= 140 Ma",
+      "source_sample_record_count": 3189443,
+      "source_statistic": "repository_derived_spherical_area_cdf",
+      "source_value": 0.934848912501,
+      "source_variable_units": "fraction",
+      "target_max": 0.994848912501,
+      "target_min": 0.874848912501,
+      "tolerance_basis": "Six-percentage-point distributional model-fit tolerance; not a statistical confidence interval."
+    },
+    {
+      "metric": "initial_oceanic_crust_age_area_weighted_cdf_le_160_ma",
+      "source_id": "seton_2020_oceanic_age",
+      "source_metric": "seton_grid_area_weighted_cdf_le_160_ma",
+      "source_processing": "Same finite-node spherical quadrature; inclusive age <= 160 Ma",
+      "source_sample_record_count": 3189443,
+      "source_statistic": "repository_derived_spherical_area_cdf",
+      "source_value": 0.977598316798,
+      "source_variable_units": "fraction",
+      "target_max": 1.0,
+      "target_min": 0.917598316798,
+      "tolerance_basis": "Six-percentage-point distributional model-fit tolerance clipped to the physical fraction range; not a statistical confidence interval."
+    },
+    {
+      "metric": "initial_oceanic_crust_age_area_weighted_cdf_le_180_ma",
+      "source_id": "seton_2020_oceanic_age",
+      "source_metric": "seton_grid_area_weighted_cdf_le_180_ma",
+      "source_processing": "Same finite-node spherical quadrature; inclusive age <= 180 Ma",
+      "source_sample_record_count": 3189443,
+      "source_statistic": "repository_derived_spherical_area_cdf",
+      "source_value": 0.994407372837,
+      "source_variable_units": "fraction",
+      "target_max": 1.0,
+      "target_min": 0.934407372837,
+      "tolerance_basis": "Six-percentage-point distributional model-fit tolerance clipped to the physical fraction range; not a statistical confidence interval."
+    },
+    {
+      "metric": "initial_oceanic_crust_age_area_weighted_cdf_le_200_ma",
+      "source_id": "seton_2020_oceanic_age",
+      "source_metric": "seton_grid_area_weighted_cdf_le_200_ma",
+      "source_processing": "Same finite-node spherical quadrature; inclusive age <= 200 Ma",
+      "source_sample_record_count": 3189443,
+      "source_statistic": "repository_derived_spherical_area_cdf",
+      "source_value": 0.999362742267,
+      "source_variable_units": "fraction",
+      "target_max": 1.0,
+      "target_min": 0.939362742267,
+      "tolerance_basis": "Six-percentage-point distributional model-fit tolerance clipped to the physical fraction range; not a statistical confidence interval."
     }
   ]
 }

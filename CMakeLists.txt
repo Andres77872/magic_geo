@@ -86,6 +86,10 @@ set(
   CACHE PATH
   "Directory for the native shared library"
 )
+set(
+  _MAGIC_GEO_PACKAGE_LIBRARY_OUTPUT_DIRECTORY
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/magic_geo"
+)
 
 add_library(
   magic_geo_native SHARED
@@ -94,21 +98,32 @@ add_library(
   cpp/src/engine/climate.cpp
   cpp/src/engine/civilization.cpp
   cpp/src/engine/core.cpp
+  cpp/src/engine/crust_overlap_candidate_fate.cpp
+  cpp/src/engine/crust_material.cpp
+  cpp/src/engine/crust_reservoir.cpp
+  cpp/src/engine/crust_reservoir_serialization.cpp
+  cpp/src/engine/crust_transport.cpp
   cpp/src/engine/earth_system.cpp
   cpp/src/engine/entity_serialization.cpp
   cpp/src/engine/environment.cpp
   cpp/src/engine/history.cpp
   cpp/src/engine/hydrology.cpp
   cpp/src/engine/mesh.cpp
+  cpp/src/engine/numeric_serialization.cpp
   cpp/src/engine/ocean.cpp
+  cpp/src/engine/oceanic_age_depth.cpp
+  cpp/src/engine/initial_oceanic_age.cpp
   cpp/src/engine/pipeline.cpp
+  cpp/src/engine/plate_boundary_segments.cpp
   cpp/src/engine/process_serialization.cpp
+  cpp/src/engine/sediment_partition.cpp
   cpp/src/engine/settlements.cpp
   cpp/src/engine/summary.cpp
   cpp/src/engine/tectonics.cpp
   cpp/src/engine/water_features.cpp
   cpp/src/engine/world_serialization.cpp
   ${MAGIC_GEO_CUDA_SOURCE}
+  cpp/src/crust_overlap_shadow.cpp
   cpp/src/opencl_compute.cpp
 )
 
@@ -132,6 +147,30 @@ set_target_properties(
     LIBRARY_OUTPUT_DIRECTORY "${MAGIC_GEO_LIBRARY_OUTPUT_DIRECTORY}"
     VISIBILITY_INLINES_HIDDEN YES
 )
+
+# The default Release artifact is staged beside the Python package for the
+# documented editable workflow. Keep every non-package configuration in its
+# own build tree so Debug/RelWithDebInfo/MinSizeRel cannot overwrite that file
+# or silently make another build tree test the wrong binary. An explicitly
+# supplied output directory remains fully caller-controlled.
+if(
+  "${MAGIC_GEO_LIBRARY_OUTPUT_DIRECTORY}"
+  STREQUAL "${_MAGIC_GEO_PACKAGE_LIBRARY_OUTPUT_DIRECTORY}"
+)
+  foreach(_magic_geo_isolated_config Debug RelWithDebInfo MinSizeRel)
+    string(TOUPPER "${_magic_geo_isolated_config}" _magic_geo_config_upper)
+    set_target_properties(
+      magic_geo_native
+      PROPERTIES
+        "LIBRARY_OUTPUT_DIRECTORY_${_magic_geo_config_upper}"
+          "${CMAKE_CURRENT_BINARY_DIR}/native/${_magic_geo_isolated_config}"
+        "RUNTIME_OUTPUT_DIRECTORY_${_magic_geo_config_upper}"
+          "${CMAKE_CURRENT_BINARY_DIR}/native/${_magic_geo_isolated_config}"
+        "ARCHIVE_OUTPUT_DIRECTORY_${_magic_geo_config_upper}"
+          "${CMAKE_CURRENT_BINARY_DIR}/native/${_magic_geo_isolated_config}"
+    )
+  endforeach()
+endif()
 
 if(OpenMP_CXX_FOUND)
   target_link_libraries(magic_geo_native PRIVATE OpenMP::OpenMP_CXX)
@@ -165,6 +204,240 @@ endif()
 install(TARGETS magic_geo_native LIBRARY DESTINATION magic_geo)
 
 if(BUILD_TESTING)
+  add_executable(
+    magic_geo_initial_oceanic_age_test
+    cpp/tests/initial_oceanic_age_test.cpp
+    cpp/src/engine/initial_oceanic_age.cpp
+  )
+  target_include_directories(
+    magic_geo_initial_oceanic_age_test
+    PRIVATE cpp/include cpp/src
+  )
+  target_compile_features(
+    magic_geo_initial_oceanic_age_test PRIVATE cxx_std_20
+  )
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(
+      magic_geo_initial_oceanic_age_test PRIVATE -ffp-contract=off
+    )
+  endif()
+  add_test(
+    NAME magic_geo_initial_oceanic_age
+    COMMAND magic_geo_initial_oceanic_age_test
+  )
+
+  add_executable(
+    magic_geo_oceanic_age_depth_test
+    cpp/tests/oceanic_age_depth_test.cpp
+    cpp/src/engine/oceanic_age_depth.cpp
+  )
+  target_include_directories(
+    magic_geo_oceanic_age_depth_test
+    PRIVATE cpp/include cpp/src
+  )
+  target_compile_features(
+    magic_geo_oceanic_age_depth_test PRIVATE cxx_std_20
+  )
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(
+      magic_geo_oceanic_age_depth_test PRIVATE -ffp-contract=off
+    )
+  endif()
+  add_test(
+    NAME magic_geo_oceanic_age_depth
+    COMMAND magic_geo_oceanic_age_depth_test
+  )
+
+  add_executable(
+    magic_geo_oceanic_age_depth_integration_test
+    cpp/tests/oceanic_age_depth_integration_test.cpp
+  )
+  target_include_directories(
+    magic_geo_oceanic_age_depth_integration_test PRIVATE cpp/include
+  )
+  target_link_libraries(
+    magic_geo_oceanic_age_depth_integration_test
+    PRIVATE magic_geo_native Threads::Threads
+  )
+  if(OpenMP_CXX_FOUND)
+    target_link_libraries(
+      magic_geo_oceanic_age_depth_integration_test
+      PRIVATE OpenMP::OpenMP_CXX
+    )
+  endif()
+  target_compile_features(
+    magic_geo_oceanic_age_depth_integration_test PRIVATE cxx_std_20
+  )
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(
+      magic_geo_oceanic_age_depth_integration_test PRIVATE -ffp-contract=off
+    )
+  endif()
+  add_test(
+    NAME magic_geo_oceanic_age_depth_integration
+    COMMAND magic_geo_oceanic_age_depth_integration_test
+  )
+
+  add_executable(
+    magic_geo_crust_overlap_shadow_test
+    cpp/tests/crust_overlap_shadow_test.cpp
+    cpp/src/crust_overlap_shadow.cpp
+  )
+  target_include_directories(
+    magic_geo_crust_overlap_shadow_test
+    PRIVATE cpp/include cpp/src
+  )
+  target_compile_features(
+    magic_geo_crust_overlap_shadow_test PRIVATE cxx_std_20
+  )
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(
+      magic_geo_crust_overlap_shadow_test PRIVATE -ffp-contract=off
+    )
+  endif()
+  add_test(
+    NAME magic_geo_crust_overlap_shadow
+    COMMAND magic_geo_crust_overlap_shadow_test
+  )
+
+  add_executable(
+    magic_geo_serialization_roundtrip_test
+    cpp/tests/serialization_roundtrip_test.cpp
+    cpp/src/engine/numeric_serialization.cpp
+  )
+  target_include_directories(
+    magic_geo_serialization_roundtrip_test
+    PRIVATE cpp/include cpp/src
+  )
+  target_compile_features(
+    magic_geo_serialization_roundtrip_test PRIVATE cxx_std_20
+  )
+  add_test(
+    NAME magic_geo_serialization_roundtrip
+    COMMAND magic_geo_serialization_roundtrip_test
+  )
+
+  add_executable(
+    magic_geo_plate_boundary_segments_test
+    cpp/tests/plate_boundary_segments_test.cpp
+    cpp/src/engine/plate_boundary_segments.cpp
+  )
+  target_include_directories(
+    magic_geo_plate_boundary_segments_test
+    PRIVATE cpp/include cpp/src
+  )
+  target_compile_features(
+    magic_geo_plate_boundary_segments_test PRIVATE cxx_std_20
+  )
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(
+      magic_geo_plate_boundary_segments_test PRIVATE -ffp-contract=off
+    )
+  endif()
+  add_test(
+    NAME magic_geo_plate_boundary_segments
+    COMMAND magic_geo_plate_boundary_segments_test
+  )
+
+  add_executable(
+    magic_geo_crust_overlap_candidate_fate_test
+    cpp/tests/crust_overlap_candidate_fate_test.cpp
+    cpp/src/engine/crust_overlap_candidate_fate.cpp
+  )
+  target_include_directories(
+    magic_geo_crust_overlap_candidate_fate_test
+    PRIVATE cpp/include cpp/src
+  )
+  target_compile_features(
+    magic_geo_crust_overlap_candidate_fate_test PRIVATE cxx_std_20
+  )
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(
+      magic_geo_crust_overlap_candidate_fate_test PRIVATE -ffp-contract=off
+    )
+  endif()
+  add_test(
+    NAME magic_geo_crust_overlap_candidate_fate
+    COMMAND magic_geo_crust_overlap_candidate_fate_test
+  )
+
+  add_executable(
+    magic_geo_crust_reservoir_test
+    cpp/tests/crust_reservoir_test.cpp
+    cpp/src/engine/crust_reservoir.cpp
+  )
+  target_include_directories(
+    magic_geo_crust_reservoir_test
+    PRIVATE cpp/include cpp/src
+  )
+  target_compile_features(magic_geo_crust_reservoir_test PRIVATE cxx_std_20)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(
+      magic_geo_crust_reservoir_test
+      PRIVATE -ffp-contract=off
+    )
+  endif()
+  add_test(NAME magic_geo_crust_reservoir COMMAND magic_geo_crust_reservoir_test)
+
+  add_executable(
+    magic_geo_crust_reservoir_integration_test
+    cpp/tests/crust_reservoir_integration_test.cpp
+  )
+  target_include_directories(
+    magic_geo_crust_reservoir_integration_test
+    PRIVATE cpp/include
+  )
+  target_link_libraries(
+    magic_geo_crust_reservoir_integration_test
+    PRIVATE magic_geo_native Threads::Threads
+  )
+  if(OpenMP_CXX_FOUND)
+    target_link_libraries(
+      magic_geo_crust_reservoir_integration_test
+      PRIVATE OpenMP::OpenMP_CXX
+    )
+  endif()
+  target_compile_features(
+    magic_geo_crust_reservoir_integration_test PRIVATE cxx_std_20
+  )
+  add_test(
+    NAME magic_geo_crust_reservoir_integration
+    COMMAND magic_geo_crust_reservoir_integration_test
+  )
+
+  add_executable(
+    magic_geo_sediment_partition_test
+    cpp/tests/sediment_partition_test.cpp
+    cpp/src/engine/sediment_partition.cpp
+  )
+  target_include_directories(
+    magic_geo_sediment_partition_test
+    PRIVATE cpp/include cpp/src
+  )
+  target_link_libraries(
+    magic_geo_sediment_partition_test
+    PRIVATE magic_geo_native Threads::Threads
+  )
+  if(OpenMP_CXX_FOUND)
+    target_link_libraries(
+      magic_geo_sediment_partition_test
+      PRIVATE OpenMP::OpenMP_CXX
+    )
+  endif()
+  target_compile_features(
+    magic_geo_sediment_partition_test PRIVATE cxx_std_20
+  )
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(
+      magic_geo_sediment_partition_test
+      PRIVATE -ffp-contract=off
+    )
+  endif()
+  add_test(
+    NAME magic_geo_sediment_partition
+    COMMAND magic_geo_sediment_partition_test
+  )
+
   add_executable(magic_geo_native_api_test cpp/tests/native_api_test.cpp)
   target_include_directories(magic_geo_native_api_test PRIVATE cpp/include)
   target_link_libraries(
@@ -186,6 +459,7 @@ if(BUILD_TESTING)
       magic_geo_cuda_compute_test
       cpp/tests/cuda_compute_test.cpp
       cpp/src/cuda_compute.cu
+      cpp/src/crust_overlap_shadow.cpp
     )
     target_include_directories(
       magic_geo_cuda_compute_test

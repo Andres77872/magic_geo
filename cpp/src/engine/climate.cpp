@@ -461,7 +461,12 @@ void compute_climate(const Params& params, std::vector<Cell>& cells) {
                 cell.orographic_factor * cell.rain_shadow_factor * cell.ocean_current_moisture_factor *
                 cell.advected_moisture_factor * circulation_precip_factor *
                 subtropical_drying_factor * monsoon_precipitation_factor;
-            double monthly_precip = std::max(20.0, annual) / static_cast<double>(params.months);
+            // A configured zero is a true dry boundary condition.  Preserve the
+            // legacy diagnostic 20 mm/y floor for every positive scale so the
+            // Earth reference path remains unchanged.
+            double monthly_precip = params.precipitation_scale == 0.0
+                ? 0.0
+                : std::max(20.0, annual) / static_cast<double>(params.months);
             // Preserve the exact Earth-reference arithmetic path while applying the
             // configured moisture capacity to every monthly value, including the
             // diagnostic minimum-rainfall branch.

@@ -26,6 +26,17 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def _flow_accumulation_scale(cells: list[dict[str, Any]]) -> float:
+    positive = sorted(
+        max(0.0, float(cell.get("flow_accumulation", 0.0)))
+        for cell in cells
+        if max(0.0, float(cell.get("flow_accumulation", 0.0))) > 0.0
+    )
+    if not positive:
+        return 1.0
+    return max(1.0, positive[int(0.95 * (len(positive) - 1))])
+
+
 def _primary_key(counter: Counter[str], fallback: str) -> str:
     if not counter:
         return fallback
@@ -77,7 +88,9 @@ def _ore_deposits_by_cell(world: dict[str, Any]) -> dict[int, list[dict[str, Any
     return by_cell
 
 
-def _cell_indices(cell: dict[str, Any]) -> dict[str, float]:
+def _cell_indices(
+    cell: dict[str, Any], flow_accumulation_scale: float
+) -> dict[str, float]:
     resource = str(cell.get("resource", "none"))
     lithology = str(cell.get("lithology", "unknown"))
     landform = str(cell.get("landform", "unknown"))
@@ -93,7 +106,10 @@ def _cell_indices(cell: dict[str, Any]) -> dict[str, float]:
     crust_age = _clamp(float(cell.get("crust_age_ma", 0.0)) / 2500.0)
     crust_thickness = _clamp(float(cell.get("crust_thickness_km", 0.0)) / 55.0)
     sediment = _clamp(float(cell.get("sediment_thickness_m", 0.0)) / 5.0)
-    flow = _clamp(float(cell.get("flow_accumulation", 0.0)) / 60.0)
+    flow = _clamp(
+        float(cell.get("flow_accumulation", 0.0))
+        / max(1.0, flow_accumulation_scale)
+    )
     river = 1.0 if bool(cell.get("is_river", False)) else 0.0
     relief = _clamp(abs(float(cell.get("elevation_m", 0.0)) - float(cell.get("filled_elevation_m", 0.0))) / 1200.0)
 
@@ -310,7 +326,13 @@ def enrich_world_with_ore_genesis(world: dict[str, Any]) -> dict[str, Any]:
         return world
 
     deposits_by_cell = _ore_deposits_by_cell(world)
-    metrics_by_id = {cell_id: _cell_indices(cell) for cell_id, cell in cells_by_id.items()}
+    flow_accumulation_scale = _flow_accumulation_scale(
+        list(cells_by_id.values())
+    )
+    metrics_by_id = {
+        cell_id: _cell_indices(cell, flow_accumulation_scale)
+        for cell_id, cell in cells_by_id.items()
+    }
     for cell_id, cell in cells_by_id.items():
         metrics = metrics_by_id[cell_id]
         cell["ore_genesis_potential_index"] = _round(metrics["ore"])
@@ -419,6 +441,14 @@ def enrich_world_with_ore_genesis(world: dict[str, Any]) -> dict[str, Any]:
     cell_count = len(cells)
     divisor = float(cell_count) if cell_count else 1.0
     summary = world.setdefault("summary", {})
+    world["ore_genesis_model"] = {
+        "model_type": "causal_tectonic_lithologic_ore_genesis_diagnostics_v2",
+        "flow_accumulation_normalization_model": "positive_cell_p95_v1",
+        "flow_accumulation_scale": _round(flow_accumulation_scale),
+        "flow_accumulation_units": "runoff_mm_y_times_upstream_area_km2",
+        "physical_time_resolved": False,
+        "model_limitation": "diagnostic metallogenic potential without reactive geochemical transport",
+    }
     summary["ore_genesis_system_count"] = len(systems)
     summary["ore_genesis_cell_count"] = sum(1 for cell in cells if int(cell.get("ore_genesis_system_id", -1)) >= 0)
     summary["ore_resource_deposit_count"] = sum(1 for deposits in deposits_by_cell.values() for _deposit in deposits)

@@ -10,6 +10,12 @@ def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
 
 
+def _normalized_overflow_pressure(overflow_index: float) -> float:
+    """Map the native runoff/storage pressure from [0, 50] onto [0, 1]."""
+
+    return _clamp(overflow_index / 4.0, 0.0, 1.0)
+
+
 def _annual_evaporation_loss_km3(basin: dict[str, Any]) -> float:
     lake_area_km2 = max(0.0, float(basin.get("lake_area_km2", 0.0)))
     mean_depth_m = max(0.0, float(basin.get("mean_water_depth_m", 0.0)))
@@ -116,7 +122,9 @@ def _enrich_world_with_overflow_channel_history(
             path_drop_m = max(0.0, float(basin.get("max_depression_depth_m", 0.0)) * 0.15)
         bed_slope = path_drop_m / max(1.0, channel_length_km * 1000.0)
         annual_runoff_km3 = max(1.0, float(basin.get("annual_runoff_km3", 0.0)))
-        overflow_index = _clamp(float(basin.get("overflow_index", 0.0)), 0.0, 1.0)
+        overflow_pressure = _normalized_overflow_pressure(
+            float(basin.get("overflow_index", 0.0))
+        )
         base_avulsion_risk = _clamp(float(basin.get("avulsion_risk", 0.0)), 0.0, 1.0)
         stage_count = max(1, int(basin.get("overflow_stage_count", segment_count)))
         incision_depth_m = max(0.0, float(basin.get("max_depression_depth_m", 0.0)) * 0.01)
@@ -139,7 +147,14 @@ def _enrich_world_with_overflow_channel_history(
             slope_factor = _clamp(bed_slope * 160.0, 0.0, 1.0)
             stage_factor = overflow_stage / stage_count if stage_count > 0 else 0.0
             stream_power_index = (
-                _clamp(0.18 * min(1.0, spill_pressure) + 0.48 * slope_factor + 0.22 * stage_factor + 0.12 * overflow_index, 0.0, 1.0)
+                _clamp(
+                    0.18 * min(1.0, spill_pressure)
+                    + 0.48 * slope_factor
+                    + 0.22 * stage_factor
+                    + 0.12 * overflow_pressure,
+                    0.0,
+                    1.0,
+                )
                 if spill_volume_km3 > 0.0
                 else 0.0
             )

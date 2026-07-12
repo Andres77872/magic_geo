@@ -1,0 +1,66 @@
+{
+  "derivation": {
+    "accumulation": "canonical_file_order_math_fsum_chunks_of_8192",
+    "cdf_rule": "finite_source_age_ma_less_than_or_equal_to_threshold",
+    "derived_on": "2026-07-11",
+    "runtime_requires_raw_sources": false,
+    "tool": "scripts/derive_seton_oceanic_age_targets.py",
+    "weighting": "longitude_endpoint_trapezoid_factor_times_exact_spherical_latitude_band_sine_difference"
+  },
+  "description": "Repository-derived spherical-grid statistics from the checksum-pinned Seton et al. 2020 age grid; the CDF ordinates are not values published in the paper.",
+  "name": "seton_2020_oceanic_crust_age_targets_v1",
+  "schema_version": 1,
+  "source": {
+    "dataset": "Seton et al. 2020 present-day oceanic crustal age",
+    "format": "seton_2020_xyz_gridline_age",
+    "layer": "age.2020.1.GeeK2007.6m.xyz",
+    "source": "calibration_data/seton_2020_oceanic_age/age.2020.1.GeeK2007.6m.xyz",
+    "source_acquired_on": "2026-07-11",
+    "source_citation": "Seton, M., Muller, R. D., Zahirovic, S., Williams, S., Wright, N. M., Cannon, J., Whittaker, J. M., Matthews, K. J., and McGirr, R. (2020). A Global Data Set of Present-Day Oceanic Crustal Age and Seafloor Spreading Parameters.",
+    "source_doi": "10.1029/2020GC009214",
+    "source_finite_maximum_age_ma": 338.683990479,
+    "source_finite_minimum_age_ma": 0.00999999977648,
+    "source_finite_node_count": 3189443,
+    "source_grid_dimensions": [
+      1801,
+      3601
+    ],
+    "source_horizontal_crs": "WGS 84 geographic longitude/latitude gridline nodes",
+    "source_license": "Creative Commons Attribution 4.0 International",
+    "source_license_url": "https://creativecommons.org/licenses/by/4.0/",
+    "source_native_resolution": "6 arc-minute (0.1 degree) global gridline XYZ",
+    "source_processing": "Parse finite ages from the 1801 by 3601 grid in canonical file order; apply longitude endpoint trapezoid factors and exact spherical latitude-band factors; compute the finite-ocean weighted mean and inclusive age<=threshold CDF ordinates.",
+    "source_sha256": "56ed93be6b4a9788ed0e18c65f2670fc21eb8adaa06b706632bd109b4ce8f25f",
+    "source_total_node_count": 6485401,
+    "source_url": "https://www.earthbyte.org/webdav/ftp/earthbyte/agegrid/2020/Grids/age.2020.1.GeeK2007.6m.xyz",
+    "source_variable_units": "Ma",
+    "source_version": "Seton et al. 2020 release 2020.1, Gee and Kent 2007 timescale"
+  },
+  "statistics": {
+    "area_weighted_cdf_le_threshold": [
+      0.203730125937,
+      0.394644471212,
+      0.538535310804,
+      0.668168555856,
+      0.764912127566,
+      0.867648508307,
+      0.934848912501,
+      0.977598316798,
+      0.994407372837,
+      0.999362742267
+    ],
+    "area_weighted_mean_age_ma": 62.84149091327,
+    "cdf_thresholds_ma": [
+      20,
+      40,
+      60,
+      80,
+      100,
+      120,
+      140,
+      160,
+      180,
+      200
+    ]
+  }
+}

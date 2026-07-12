@@ -289,19 +289,22 @@ def enrich_world_with_wildfire_disturbance(world: dict[str, Any]) -> dict[str, A
         wind_alignment = max((_wind_alignment(cell, neighbor) for neighbor in neighbors), default=0.0)
         ignition = _ignition_potential(cell, fuel, firebreak, wind_alignment)
         regime = _regime(cell, ignition, fuel, firebreak, wind_alignment)
-        cell["wildfire_ignition_potential_index"] = round(ignition, 6)
-        cell["wildfire_fuel_continuity_index"] = round(fuel, 6)
+        rounded_ignition = round(ignition, 6)
+        rounded_fuel = round(fuel, 6)
+        rounded_firebreak = round(firebreak, 6)
+        cell["wildfire_ignition_potential_index"] = rounded_ignition
+        cell["wildfire_fuel_continuity_index"] = rounded_fuel
         cell["wildfire_wind_alignment_index"] = round(wind_alignment, 6)
-        cell["wildfire_firebreak_index"] = round(firebreak, 6)
+        cell["wildfire_firebreak_index"] = rounded_firebreak
         cell["wildfire_disturbance_regime"] = regime
         cell["wildfire_spread_history_ids"] = []
         ignition_sum += ignition
         fuel_sum += fuel
         wind_sum += wind_alignment
         firebreak_sum += firebreak
-        high_ignition_count += 1 if ignition >= IGNITION_THRESHOLD else 0
-        high_fuel_count += 1 if fuel >= HIGH_FUEL_THRESHOLD else 0
-        high_firebreak_count += 1 if firebreak >= HIGH_FIREBREAK_THRESHOLD else 0
+        high_ignition_count += 1 if rounded_ignition >= IGNITION_THRESHOLD else 0
+        high_fuel_count += 1 if rounded_fuel >= HIGH_FUEL_THRESHOLD else 0
+        high_firebreak_count += 1 if rounded_firebreak >= HIGH_FIREBREAK_THRESHOLD else 0
         regime_counts[regime] += 1
 
     assigned_cell_ids: set[int] = set()

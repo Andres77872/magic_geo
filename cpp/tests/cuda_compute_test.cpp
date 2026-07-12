@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -16,7 +17,10 @@ namespace {
 
 using magic_geo::detail::Cell;
 using magic_geo::detail::CudaComputeSession;
+using magic_geo::detail::CrustTransportPlan;
 using magic_geo::detail::Vec3;
+using magic_geo::detail::replay_crust_overlap_continuous_reduction_cpu;
+using magic_geo::detail::validate_crust_overlap_continuous_shadow_result;
 
 [[noreturn]] void fail(const std::string& message) {
     throw std::runtime_error(message);
@@ -251,6 +255,120 @@ int main() {
             "fused smoothing field C"
         );
 
+        // This is a shadow replay of the many-contributor conservative v3 CSR,
+        // not the legacy nearest-donor primitive tested below. Device results
+        // are validated and discarded by the production reconciliation path.
+        std::vector<Cell> shadow_cells = make_cells(33);
+        std::vector<double> shadow_thickness(shadow_cells.size());
+        std::vector<double> shadow_density(shadow_cells.size());
+        std::vector<double> shadow_age(shadow_cells.size());
+        for (std::size_t index = 0; index < shadow_cells.size(); ++index) {
+            shadow_cells[index].area_km2 = 10.0 +
+                static_cast<double>(index % 3U) * 0.5;
+            shadow_thickness[index] = 1.0 +
+                static_cast<double>(index % 7U) * 0.25;
+            shadow_density[index] = 2.5 +
+                static_cast<double>(index % 5U) * 0.125;
+            shadow_age[index] = static_cast<double>(index) * 3.5;
+        }
+        CrustTransportPlan shadow_plan;
+        shadow_plan.destination_offsets.assign(shadow_cells.size() + 1U, 0);
+        auto append_shadow_edge = [&](std::size_t destination, int source, double area) {
+            shadow_plan.source_cell_ids.push_back(source);
+            shadow_plan.overlap_area_km2.push_back(area);
+            shadow_plan.destination_offsets[destination + 1U] =
+                static_cast<int>(shadow_plan.source_cell_ids.size());
+        };
+        append_shadow_edge(0, 0, shadow_cells[0].area_km2);
+        append_shadow_edge(1, 0, 2.0);
+        append_shadow_edge(1, 1, 3.0);
+        shadow_plan.destination_offsets[3] = shadow_plan.destination_offsets[2];
+        for (int source = 0; source < 24; ++source) {
+            append_shadow_edge(3, source, 0.5);
+        }
+        for (std::size_t destination = 4;
+             destination < shadow_cells.size();
+             ++destination) {
+            append_shadow_edge(
+                destination,
+                static_cast<int>(destination),
+                shadow_cells[destination].area_km2
+            );
+        }
+        const auto shadow_reference =
+            replay_crust_overlap_continuous_reduction_cpu(
+                shadow_plan,
+                shadow_cells,
+                shadow_thickness,
+                shadow_density,
+                shadow_age
+            );
+        shadow_plan.remapped_crust_thickness_km_by_cell =
+            shadow_reference.remapped_crust_thickness_km_by_destination;
+        shadow_plan.remapped_crust_density_by_cell =
+            shadow_reference.remapped_crust_density_by_destination;
+        shadow_plan.remapped_crust_age_ma_by_cell =
+            shadow_reference.remapped_crust_age_ma_by_destination;
+        for (std::size_t destination = 0;
+             destination < shadow_cells.size();
+             ++destination) {
+            shadow_plan.transported_crust_volume_km3 +=
+                shadow_reference.crust_volume_km3_by_destination[destination];
+            shadow_plan.transported_density_weighted_crust_volume +=
+                shadow_reference.
+                    density_weighted_crust_volume_by_destination[destination];
+            shadow_plan.transported_crust_age_volume_moment +=
+                shadow_reference.
+                    crust_age_volume_moment_by_destination[destination];
+        }
+        magic_geo::detail::CrustOverlapContinuousShadowResult shadow_output;
+        session.run_crust_overlap_continuous_shadow(
+            shadow_plan,
+            shadow_cells,
+            shadow_thickness,
+            shadow_density,
+            shadow_age,
+            shadow_output
+        );
+        const auto shadow_validation =
+            validate_crust_overlap_continuous_shadow_result(
+                shadow_plan,
+                shadow_cells,
+                shadow_thickness,
+                shadow_density,
+                shadow_age,
+                shadow_output
+            );
+        check(shadow_validation.passed, shadow_validation.failure);
+        check(shadow_output.crust_volume_km3_by_destination[2] == 0.0,
+              "CUDA shadow empty row did not preserve a zero volume");
+        check(shadow_output.remapped_crust_density_by_destination[2] ==
+                  shadow_density[2],
+              "CUDA shadow empty row did not preserve fallback density");
+        CrustTransportPlan invalid_shadow_plan = shadow_plan;
+        invalid_shadow_plan.overlap_area_km2[0] =
+            std::numeric_limits<double>::quiet_NaN();
+        bool invalid_shadow_rejected = false;
+        try {
+            session.run_crust_overlap_continuous_shadow(
+                invalid_shadow_plan,
+                shadow_cells,
+                shadow_thickness,
+                shadow_density,
+                shadow_age,
+                shadow_output
+            );
+        } catch (const std::exception&) {
+            invalid_shadow_rejected = true;
+        }
+        check(invalid_shadow_rejected,
+              "CUDA shadow accepted a non-finite overlap operand");
+        check(session.telemetry().crust_overlap_continuous_shadow_dispatch_count == 1,
+              "rejected CUDA shadow input incremented its dispatch count");
+
+        // Retained low-level compatibility coverage for the legacy nearest-source
+        // primitive. Production v3 crust transport uses CPU spherical overlaps and
+        // never dispatches this kernel from the world pipeline.
         std::vector<std::vector<int>> candidates_by_plate(4);
         for (std::size_t index = 0; index < cells.size(); ++index) {
             const int plate_id = cells[index].plate_id;
@@ -302,6 +420,8 @@ int main() {
               "unexpected fused-smoothing dispatch count");
         check(telemetry.crust_source_remap_dispatch_count == 1,
               "unexpected remap dispatch count");
+        check(telemetry.crust_overlap_continuous_shadow_dispatch_count == 1,
+              "unexpected conservative-overlap shadow dispatch count");
         check(telemetry.last_threads_per_block == 256,
               "CUDA launch geometry is not the audited 256-thread block");
 

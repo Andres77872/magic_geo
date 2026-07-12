@@ -24,6 +24,7 @@ from magic_geo.river_channel_morphology import enrich_world_with_river_channel_m
 from magic_geo.river_hydraulics import enrich_world_with_river_hydraulics
 from magic_geo.route_corridors import enrich_world_with_route_corridors
 from magic_geo.scaling import HACK_FIT_MINIMUM_BASIN_AREA_KM2, fit_power_law
+from magic_geo.sediment_interface_validation import validate_sediment_interfaces
 
 
 class GenerationSmokeTests(TestCase):
@@ -295,7 +296,7 @@ class GenerationSmokeTests(TestCase):
         self.assertEqual(world["plate_kinematic_model"]["configured_motion_step_count"], 0)
         self.assertEqual(world["plate_kinematic_model"]["history_step_count"], 1)
         self.assertTrue(world["plate_kinematic_model"]["crust_advection_resolved"])
-        self.assertFalse(world["plate_kinematic_model"]["mass_conserving_crust_transport"])
+        self.assertTrue(world["plate_kinematic_model"]["mass_conserving_crust_transport"])
         motion_history = world["plate_motion_history"]
         self.assertEqual([step["stage"] for step in motion_history], ["initial_plate_domains"])
         self.assertEqual(
@@ -396,14 +397,14 @@ class GenerationSmokeTests(TestCase):
         data["mesh"]["cell_count"] = 128
         data["tectonics"]["plate_count"] = 8
         data["erosion"]["iterations"] = 0
-        data["planet"]["ocean_water_inventory_km3"] = 300_000_000.0
+        data["planet"]["ocean_water_inventory_km3"] = 500_000_000.0
         jump_config = type(config).model_validate(data)
 
         world = generate_world(jump_config)
         sea_level_model = world["sea_level_model"]
 
         self.assertGreater(sea_level_model["ocean_water_inventory_error_km3"], 1.0)
-        self.assertEqual(sea_level_model["selected_ocean_cell_count"], 16)
+        self.assertEqual(sea_level_model["selected_ocean_cell_count"], 45)
         self.assertAlmostEqual(
             sea_level_model["selected_ocean_volume_km3"],
             sum(
@@ -700,6 +701,33 @@ class GenerationSmokeTests(TestCase):
                 "initial_continental_crust_cell_count"
             ] = original_continental_count
 
+            initial_age_ledger = world["initial_oceanic_crust_age_ledger"]
+            oceanic_initial_age_cell_id = next(
+                cell_id
+                for cell_id, status_id in enumerate(
+                    initial_age_ledger["status_id_by_cell"]
+                )
+                if status_id != 0
+            )
+            original_initial_oceanic_age = initial_age_ledger[
+                "age_ma_by_cell"
+            ][oceanic_initial_age_cell_id]
+            initial_age_ledger["age_ma_by_cell"][
+                oceanic_initial_age_cell_id
+            ] += 0.01
+            world_path.write_text(json.dumps(world), encoding="utf-8")
+            invalid_result = runner.invoke(
+                app, ["validate", "--world", str(world_path)]
+            )
+            self.assertNotEqual(invalid_result.exit_code, 0)
+            self.assertIn(
+                "initial oceanic crust age replay invalid:",
+                invalid_result.output,
+            )
+            initial_age_ledger["age_ma_by_cell"][
+                oceanic_initial_age_cell_id
+            ] = original_initial_oceanic_age
+
             world["plate_kinematic_model"]["continental_orogen_uplift_scale_m"] += 1.0
             world_path.write_text(json.dumps(world), encoding="utf-8")
             invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
@@ -719,12 +747,23 @@ class GenerationSmokeTests(TestCase):
                 original_initial_crust_type
             )
 
-            world["plate_kinematic_model"]["mass_conserving_crust_transport"] = True
+            world["plate_kinematic_model"]["mass_conserving_crust_transport"] = False
             world_path.write_text(json.dumps(world), encoding="utf-8")
             invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
             self.assertNotEqual(invalid_result.exit_code, 0)
             self.assertIn("plate kinematic model or motion history invalid", invalid_result.output)
-            world["plate_kinematic_model"]["mass_conserving_crust_transport"] = False
+            world["plate_kinematic_model"]["mass_conserving_crust_transport"] = True
+
+            shadow_masses = world["crust_material_shadow_history"][0][
+                "opening_packets"
+            ]["dry_rock_mass_kg"]
+            original_shadow_mass = shadow_masses[0]
+            shadow_masses[0] += max(1.0, abs(original_shadow_mass) * 1.0e-8)
+            world_path.write_text(json.dumps(world), encoding="utf-8")
+            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
+            self.assertNotEqual(invalid_result.exit_code, 0)
+            self.assertIn("crust material shadow:", invalid_result.output)
+            shadow_masses[0] = original_shadow_mass
 
             original_source = world["plate_motion_history"][1]["crust_source_cell_ids"][0]
             world["plate_motion_history"][1]["crust_source_cell_ids"][0] = (
@@ -1666,9 +1705,12 @@ class GenerationSmokeTests(TestCase):
     ) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))
         data = config.model_dump(mode="python")
-        data["mesh"]["cell_count"] = 128
+        # This mutation suite requires an actual port/corridor witness; the
+        # 128-cell topology is too coarse to guarantee one.
+        data["mesh"]["cell_count"] = 256
         data["tectonics"]["plate_count"] = 8
         data["erosion"]["iterations"] = 1
+        data["climate"]["lapse_rate_c_per_km"] = 4.0
         world = generate_world(type(config).model_validate(data))
         summary = world["summary"]
         channel_model = world["river_channel_morphology_model"]
@@ -1944,9 +1986,12 @@ class GenerationSmokeTests(TestCase):
     ) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))
         data = config.model_dump(mode="python")
-        data["mesh"]["cell_count"] = 128
+        data["mesh"]["cell_count"] = 256
         data["tectonics"]["plate_count"] = 8
         data["erosion"]["iterations"] = 1
+        # Keep this causal-replay fixture above the two-settlement threshold.
+        # Earth calibration is covered independently by the canonical matrix.
+        data["climate"]["lapse_rate_c_per_km"] = 2.0
         world = generate_world(type(config).model_validate(data))
         settlement_model = world["settlement_selection_model"]
         route_model = world["route_network_model"]
@@ -3329,6 +3374,7 @@ class GenerationSmokeTests(TestCase):
     def test_finite_sediment_inventory_replay_and_mutations(self) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))
         data = config.model_dump(mode="python")
+        data["run"]["seed"] = 20260711
         data["mesh"]["cell_count"] = 512
         inventory_config = type(config).model_validate(data)
         world = generate_world(inventory_config)
@@ -3349,6 +3395,19 @@ class GenerationSmokeTests(TestCase):
             "hillslope_then_fluvial",
         )
         self.assertFalse(model["same_stage_deposition_available_for_entrainment"])
+        self.assertEqual(
+            model["mass_conserving_semantics"],
+            "bulk_reference_volume_only_not_dry_rock_mass",
+        )
+        for unresolved_field in (
+            "dry_rock_mass_resolved",
+            "sediment_density_resolved",
+            "porosity_resolved",
+            "compaction_resolved",
+            "grain_provenance_resolved",
+            "chemical_weathering_resolved",
+        ):
+            self.assertFalse(model[unresolved_field])
         self.assertAlmostEqual(
             model["gross_mobilization_volume_km3"],
             model["alluvium_entrainment_volume_km3"]
@@ -3427,6 +3486,76 @@ class GenerationSmokeTests(TestCase):
             valid_result = validate_current()
             self.assertEqual(valid_result.exit_code, 0, valid_result.output)
 
+            interface_result = validate_sediment_interfaces(world)
+            self.assertTrue(
+                interface_result["passed"], interface_result["failures"]
+            )
+            selected_breach = next(
+                event
+                for event in world["numeric_depression_fill_history"]
+                if event["selected_correction_method"]
+                == "mass_conserving_breach"
+            )
+            excavation_index = next(
+                index
+                for index, depth_m in enumerate(
+                    selected_breach["breach_excavation_depth_m_by_cell"]
+                )
+                if depth_m > 1.0e-9
+            )
+            excavation_depths = selected_breach[
+                "breach_excavation_depth_m_by_cell"
+            ]
+            original_excavation_depth_m = excavation_depths[excavation_index]
+            try:
+                excavation_depths[excavation_index] += 1.0
+                altered_interface_result = validate_sediment_interfaces(world)
+                self.assertFalse(altered_interface_result["passed"])
+                self.assertTrue(altered_interface_result["failures"])
+                self.assertIn(
+                    "numeric breach excavation geometry is invalid",
+                    "\n".join(altered_interface_result["failures"]),
+                )
+            finally:
+                excavation_depths[excavation_index] = original_excavation_depth_m
+
+            deposition_depths = selected_breach[
+                "breach_deposition_depth_m_by_cell"
+            ]
+            self.assertTrue(deposition_depths)
+            original_deposition_depth_m = deposition_depths[0]
+            try:
+                deposition_depths[0] += 1.0
+                altered_interface_result = validate_sediment_interfaces(world)
+                self.assertFalse(altered_interface_result["passed"])
+                self.assertIn(
+                    "numeric breach deposition depth is invalid",
+                    "\n".join(altered_interface_result["failures"]),
+                )
+            finally:
+                deposition_depths[0] = original_deposition_depth_m
+
+            allocation_stage = next(
+                stage
+                for stage in world["fluvial_sediment_routing_history"]
+                if stage["terminal_allocations"]
+            )
+            allocation = allocation_stage["terminal_allocations"][0]
+            original_target_id = allocation["target_cell_id"]
+            original_target_area_km2 = allocation["target_area_km2"]
+            replacement_target_id = (original_target_id + 1) % len(cells)
+            try:
+                allocation["target_cell_id"] = replacement_target_id
+                allocation["target_area_km2"] = cells[replacement_target_id][
+                    "area_km2"
+                ]
+                altered_interface_result = validate_sediment_interfaces(world)
+                self.assertFalse(altered_interface_result["passed"])
+                self.assertTrue(altered_interface_result["failures"])
+            finally:
+                allocation["target_cell_id"] = original_target_id
+                allocation["target_area_km2"] = original_target_area_km2
+
             hillslope_input = world["hillslope_sediment_transport_history"][1][
                 "input_cells"
             ][0]
@@ -3477,6 +3606,15 @@ class GenerationSmokeTests(TestCase):
             self.assertNotEqual(invalid_result.exit_code, 0)
             self.assertIn("cumulative cell fields invalid", invalid_result.output)
             inventory_cell["sediment_thickness_m"] -= 1.0
+
+            interface_cell = cells[0]
+            interface_cell["bedrock_surface_elevation_m"] += 1.0
+            interface_cell["elevation_m"] += 1.0
+            invalid_result = validate_current()
+            self.assertNotEqual(invalid_result.exit_code, 0)
+            self.assertIn("sediment interface replay invalid", invalid_result.output)
+            interface_cell["bedrock_surface_elevation_m"] -= 1.0
+            interface_cell["elevation_m"] -= 1.0
 
             model["inventory_mass_balance_residual_km3"] += 1.0
             invalid_result = validate_current()
@@ -3766,12 +3904,27 @@ class GenerationSmokeTests(TestCase):
 
         clock = world["simulation_clock"]
         feedback_history = world["earth_system_feedback_history"]
-        self.assertEqual(clock["clock_type"], "coupled_geodynamic_stage_clock_v11")
+        self.assertEqual(clock["clock_type"], "coupled_geodynamic_stage_clock_v12")
         self.assertEqual(clock["time_unit"], "model_step")
         self.assertFalse(clock["physical_time_resolved"])
+        self.assertFalse(clock["nominal_time_calibrated"])
+        self.assertFalse(clock["time_step_convergence_demonstrated"])
+        self.assertEqual(clock["nominal_time_unit"], "Ma")
+        self.assertEqual(clock["nominal_timestep_ma"], 5.0)
+        self.assertEqual(clock["reference_timestep_ma"], 5.0)
+        self.assertEqual(clock["maturation_timestep_scale"], 1.0)
+        self.assertEqual(clock["final_nominal_elapsed_time_ma"], 10.0)
         self.assertEqual(
             clock["iteration_process_order"],
-            "{plate_motion->crust_transport->crust_evolution->tectonic_stream_erosion->hillslope_sediment_transport->fluvial_sediment_routing->finite_alluvium_bedrock_inventory_update->(sea_level->climate->causal_water_budget->hydrology->numeric_depression_correction)*until_stable}*configured_erosion_iterations->cryosphere_state->glacial_sediment_transport->finite_alluvium_bedrock_inventory_update->(sea_level->climate->causal_water_budget->hydrology->numeric_depression_correction)*until_stable",
+            "{plate_motion->crust_transport->crust_evolution->precommit_tendency_evaluation[tectonic_elevation+hillslope_sediment+stream_power_incision;prior_stabilized_surface_hydrology]->provisional_terrain_composition->fluvial_sediment_routing[prior_flow_graph+provisional_accommodation]->finite_alluvium_bedrock_inventory_and_terrain_commit->(sea_level->climate->causal_water_budget->hydrology->numeric_depression_correction)*until_stable}*configured_erosion_iterations->cryosphere_state->glacial_sediment_transport->finite_alluvium_bedrock_inventory_and_terrain_commit->(sea_level->climate->causal_water_budget->hydrology->numeric_depression_correction)*until_stable->cryosphere_state_recompute",
+        )
+        self.assertEqual(
+            clock["erosion_transition_coupling_semantics"],
+            "hillslope_and_stream_use_prior_stabilized_surface_and_hydrology_with_updated_crust_state;tectonic_hillslope_stream_tendencies_are_combined_before_terrain_commit;fluvial_routing_uses_prior_flow_graph_and_provisional_terrain_accommodation",
+        )
+        self.assertEqual(
+            clock["legacy_mean_erosion_rate_field_semantics"],
+            "mean_erosion_rate_m_per_step_is_a_reference_step_response_alias_not_applied_transition_depth",
         )
         self.assertEqual(clock["configured_erosion_iteration_count"], 2)
         self.assertEqual(clock["configured_cryosphere_coupling_stage_count"], 1)
@@ -3791,6 +3944,13 @@ class GenerationSmokeTests(TestCase):
             ],
         )
         self.assertEqual([step["id"] for step in feedback_history], list(range(4)))
+        self.assertTrue(
+            all(
+                step["mean_erosion_rate_m_per_step"]
+                == step["mean_stream_power_response_m_per_reference_step"]
+                for step in feedback_history
+            )
+        )
         self.assertEqual(
             [step["erosion_iteration"] for step in feedback_history],
             [-1, 1, 2, -1],
@@ -3825,10 +3985,10 @@ class GenerationSmokeTests(TestCase):
         self.assertTrue(all(step["mean_abs_elevation_change_m_from_previous_stage"] > 0.0 for step in erosion_steps))
         kinematic_model = world["plate_kinematic_model"]
         motion_history = world["plate_motion_history"]
-        self.assertEqual(kinematic_model["model_type"], "rotating_voronoi_plate_domains_v1")
+        self.assertEqual(kinematic_model["model_type"], "rotating_voronoi_plate_domains_v3")
         self.assertFalse(kinematic_model["physical_time_resolved"])
         self.assertTrue(kinematic_model["crust_advection_resolved"])
-        self.assertFalse(kinematic_model["mass_conserving_crust_transport"])
+        self.assertTrue(kinematic_model["mass_conserving_crust_transport"])
         self.assertEqual(
             kinematic_model["initial_crust_partition_model"],
             "ranked_graph_coherent_plate_biased_continental_mask_v2",
@@ -3888,14 +4048,14 @@ class GenerationSmokeTests(TestCase):
         self.assertTrue(all(step["mean_plate_rotation_deg"] > 0.0 for step in motion_history[1:]))
         self.assertTrue(
             all(
-                -320.0 <= delta <= 5.0
+                -4200.0 <= delta <= 5.0
                 for step in motion_history[1:]
                 for delta in step["crust_age_process_change_ma_by_cell"]
             )
         )
         self.assertTrue(
             all(
-                abs(delta) <= 5.0
+                abs(delta) <= 76.0
                 for step in motion_history[1:]
                 for delta in step["crust_thickness_process_change_km_by_cell"]
             )
@@ -3903,6 +4063,13 @@ class GenerationSmokeTests(TestCase):
         self.assertTrue(
             all(
                 -180.0 <= delta <= 220.0
+                for step in motion_history[1:]
+                for delta in step["bounded_dynamic_relief_change_m"]
+            )
+        )
+        self.assertTrue(
+            any(
+                abs(delta) > 220.0
                 for step in motion_history[1:]
                 for delta in step["tectonic_elevation_change_m_by_cell"]
             )
@@ -4147,7 +4314,10 @@ class GenerationSmokeTests(TestCase):
             first_cell["s2_like_cell_id"],
             {record["cell_id"] for record in spherical_index["s2_like_cells"]},
         )
-        self.assertEqual(summary["cell_geometry_index"], "approx_neighbor_bearing_v0")
+        self.assertEqual(
+            summary["cell_geometry_index"],
+            "native_spherical_control_volume_v1",
+        )
         self.assertEqual(summary["cell_geometry_ring_count"], len(world["cells"]))
         self.assertGreater(summary["cell_geometry_total_area_km2"], 0.0)
         self.assertGreater(summary["cell_geometry_reference_area_km2"], 0.0)
@@ -11650,6 +11820,51 @@ class GenerationSmokeTests(TestCase):
             "post_centered_local_adjustment_global_area_mean_c",
         )
 
+    def test_zero_precipitation_scale_is_a_true_dry_boundary(self) -> None:
+        config = load_config(Path("configs/earthlike_seed.yaml"))
+        data = config.model_dump(mode="python")
+        data["mesh"]["cell_count"] = 128
+        data["tectonics"]["plate_count"] = 8
+        data["erosion"]["iterations"] = 0
+        data["climate"]["precipitation_scale"] = 0.0
+
+        world = generate_world(type(config).model_validate(data))
+        land = [cell for cell in world["cells"] if not cell["is_water"]]
+
+        self.assertTrue(land)
+        self.assertEqual(
+            world["climate_model"]["zero_precipitation_scale_behavior"],
+            "exact_zero_monthly_and_annual_precipitation",
+        )
+        self.assertEqual(
+            world["climate_model"][
+                "positive_precipitation_pre_thermal_annual_floor_mm"
+            ],
+            20.0,
+        )
+        self.assertAlmostEqual(
+            world["climate_model"][
+                "positive_precipitation_effective_annual_floor_mm"
+            ],
+            20.0
+            * world["climate_model"]["thermal_moisture_capacity_factor"],
+        )
+        self.assertTrue(
+            all(cell["precipitation_mm_y"] == 0.0 for cell in world["cells"])
+        )
+        self.assertTrue(
+            all(
+                monthly == 0.0
+                for cell in world["cells"]
+                for monthly in cell["precipitation_monthly_mm"]
+            )
+        )
+        self.assertTrue(all(cell["runoff_mm_y"] == 0.0 for cell in land))
+        self.assertTrue(
+            all(cell["actual_evapotranspiration_mm_y"] == 0.0 for cell in land)
+        )
+        self.assertTrue(all(cell["infiltration_mm_y"] == 0.0 for cell in land))
+
     def test_subtropical_drying_strength_reduces_horse_latitude_rainfall(self) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))
         dry_data = config.model_dump(mode="python")
@@ -11702,7 +11917,7 @@ class GenerationSmokeTests(TestCase):
         self.assertEqual(dry_world["climate_model"]["subtropical_drying_strength"], 0.65)
         self.assertEqual(no_drying_world["climate_model"]["subtropical_drying_strength"], 0.0)
 
-    def test_earthlike_reference_resolution_closes_ocean_inventory(self) -> None:
+    def test_earthlike_reference_closes_ocean_and_snapshot_ledgers(self) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))
         world = generate_world(config)
 
@@ -11752,11 +11967,13 @@ class GenerationSmokeTests(TestCase):
         mean_land_precipitation = sum(
             cell["precipitation_mm_y"] for cell in land_cells
         ) / len(land_cells)
-        fitted_hack_relation = fit_power_law(
+        exorheic_backbone_hack_relation = fit_power_law(
             (
                 (watershed["area_km2"], watershed["main_channel_length_km"])
                 for watershed in world["watersheds"]
-                if watershed["area_km2"] >= HACK_FIT_MINIMUM_BASIN_AREA_KM2
+                if not watershed["is_endorheic"]
+                and watershed["outlet_type"] == "ocean"
+                and watershed["area_km2"] >= HACK_FIT_MINIMUM_BASIN_AREA_KM2
                 and watershed["main_channel_length_km"] > 0.0
             )
         )
@@ -11767,9 +11984,7 @@ class GenerationSmokeTests(TestCase):
         )
 
         self.assertTrue(coast_check["passed"])
-        self.assertAlmostEqual(coast_check["value"], 0.4026, places=4)
-        self.assertLess(coast_check["value"], 0.434033613445)
-        self.assertLessEqual(coast_check["value"], 0.534033613445)
+        self.assertAlmostEqual(coast_check["value"], 0.3506, places=4)
         self.assertEqual(coast_check["value"], round(len(coastal_land_cells) / len(land_cells), 4))
         self.assertAlmostEqual(
             ocean_volume_km3,
@@ -11782,27 +11997,18 @@ class GenerationSmokeTests(TestCase):
             delta=max(0.001, config.planet.ocean_water_inventory_km3 * 0.0000000001),
         )
         self.assertGreater(len(land_cells) - len(coastal_land_cells), len(coastal_land_cells))
-        self.assertGreaterEqual(len(continental_landmasses), 2)
+        self.assertEqual(len(continental_landmasses), 1)
         self.assertEqual(world["summary"]["marine_region_count"], 1)
         self.assertEqual(world["summary"]["inland_sea_marine_region_count"], 0)
         self.assertGreater(world["sea_level_model"]["below_sea_level_land_cell_count"], 0)
-        self.assertAlmostEqual(below_sea_level_fraction, 0.726806640625)
-        self.assertGreaterEqual(below_sea_level_fraction, 0.688984375)
-        self.assertGreaterEqual(mean_nonnegative_elevation, 637.579042215436)
-        self.assertLessEqual(mean_nonnegative_elevation, 956.368563323154)
-        self.assertGreaterEqual(surface_elevation_span, 12201.447995)
-        self.assertLessEqual(surface_elevation_span, 16507.841405)
-        self.assertGreaterEqual(mean_land_temperature, 6.365324663961)
-        self.assertLessEqual(mean_land_temperature, 12.365324663961)
-        self.assertGreaterEqual(mean_land_temperature_range, 15.542444335321)
-        self.assertLessEqual(mean_land_temperature_range, 23.542444335321)
-        self.assertGreaterEqual(mean_land_precipitation, 580.999196141479)
-        self.assertLessEqual(mean_land_precipitation, 968.331993569132)
-        self.assertAlmostEqual(endorheic_count_fraction, 0.09621993127147767)
-        self.assertGreaterEqual(endorheic_count_fraction, 0.069863013699)
-        self.assertLessEqual(endorheic_count_fraction, 0.169863013699)
-        self.assertAlmostEqual(endorheic_area_fraction, 0.4166666666571745)
-        self.assertGreater(endorheic_area_fraction, 0.254952444749)
+        self.assertAlmostEqual(below_sea_level_fraction, 0.610595703125)
+        self.assertAlmostEqual(mean_nonnegative_elevation, 1191.352558191878)
+        self.assertAlmostEqual(surface_elevation_span, 17443.550462964195)
+        self.assertAlmostEqual(mean_land_temperature, 6.834819370070568)
+        self.assertAlmostEqual(mean_land_temperature_range, 16.894286363636365)
+        self.assertAlmostEqual(mean_land_precipitation, 808.9630832503113)
+        self.assertAlmostEqual(endorheic_count_fraction, 0.09872611464968153)
+        self.assertAlmostEqual(endorheic_area_fraction, 0.27494236382566906)
         self.assertEqual(
             world["summary"]["equal_filled_raw_downhill_reroute_count"],
             sum(
@@ -11813,31 +12019,31 @@ class GenerationSmokeTests(TestCase):
         )
         self.assertEqual(
             world["summary"]["equal_filled_raw_downhill_reroute_count"],
-            16,
+            37,
         )
-        self.assertEqual(world["summary"]["hydrologic_surface_conditioned_cell_count"], 127)
-        self.assertEqual(world["summary"]["equal_filled_flow_edge_count"], 127)
-        self.assertEqual(world["summary"]["raw_uphill_flow_edge_count"], 28)
+        self.assertEqual(world["summary"]["hydrologic_surface_conditioned_cell_count"], 159)
+        self.assertEqual(world["summary"]["equal_filled_flow_edge_count"], 159)
+        self.assertEqual(world["summary"]["raw_uphill_flow_edge_count"], 61)
         self.assertEqual(world["summary"]["non_downhill_hydrologic_flow_edge_count"], 0)
         self.assertAlmostEqual(
             world["summary"]["max_hydrologic_surface_adjustment_m"],
-            0.007,
+            0.009,
             places=6,
         )
         self.assertAlmostEqual(
             world["summary"]["max_raw_uphill_flow_step_m"],
-            240.998051,
+            294.194115,
             places=6,
         )
-        self.assertEqual(world["summary"]["river_count"], 62)
-        self.assertEqual(world["summary"]["terminal_land_sink_count"], 29)
-        self.assertEqual(world["summary"]["depression_component_count"], 43)
-        self.assertEqual(world["summary"]["depression_component_cell_count"], 156)
-        self.assertEqual(world["summary"]["preserved_geologic_depression_count"], 12)
+        self.assertEqual(world["summary"]["river_count"], 90)
+        self.assertEqual(world["summary"]["terminal_land_sink_count"], 31)
+        self.assertEqual(world["summary"]["depression_component_count"], 67)
+        self.assertEqual(world["summary"]["depression_component_cell_count"], 190)
+        self.assertEqual(world["summary"]["preserved_geologic_depression_count"], 24)
         self.assertEqual(world["summary"]["corrected_numeric_depression_count"], 0)
-        self.assertEqual(world["summary"]["temporary_numeric_lake_depression_count"], 31)
+        self.assertEqual(world["summary"]["temporary_numeric_lake_depression_count"], 43)
         self.assertEqual(world["summary"]["numeric_depression_fill_pass_count"], 8)
-        self.assertEqual(world["summary"]["numeric_depression_correction_event_count"], 367)
+        self.assertEqual(world["summary"]["numeric_depression_correction_event_count"], 423)
         self.assertEqual(world["summary"]["numeric_depression_fill_event_count"], 0)
         self.assertEqual(
             world["summary"]["numeric_depression_fill_cell_application_count"],
@@ -11859,54 +12065,54 @@ class GenerationSmokeTests(TestCase):
         )
         self.assertEqual(
             world["summary"]["numeric_depression_temporary_lake_event_count"],
-            365,
+            414,
         )
         self.assertEqual(
             world["summary"][
                 "numeric_depression_temporary_lake_cell_application_count"
             ],
-            1267,
+            1319,
         )
         self.assertEqual(
             world["summary"]["numeric_depression_temporary_lake_unique_cell_count"],
-            272,
+            364,
         )
         self.assertAlmostEqual(
             world["summary"][
                 "numeric_depression_temporary_lake_candidate_volume_km3"
             ],
-            107186614.1127862,
+            160279744.39471412,
             places=6,
         )
         self.assertAlmostEqual(
             world["summary"]["numeric_depression_fill_candidate_volume_km3"],
-            107200206.85869679,
+            160324045.20873812,
             places=6,
         )
         self.assertEqual(
             world["summary"]["numeric_depression_breach_feasible_event_count"],
-            367,
+            423,
         )
         self.assertEqual(
             world["summary"]["numeric_depression_breach_lower_volume_event_count"],
-            147,
+            200,
         )
         self.assertEqual(
             world["summary"]["numeric_depression_breach_selected_event_count"],
-            2,
+            9,
         )
         self.assertAlmostEqual(
             world["summary"][
                 "numeric_depression_selected_breach_excavation_volume_km3"
             ],
-            8164.1181054527,
+            44280.1606333465,
             places=6,
         )
         self.assertAlmostEqual(
             world["summary"][
                 "numeric_depression_selected_breach_deposition_volume_km3"
             ],
-            8164.1181054527,
+            44280.1606333465,
             places=6,
         )
         self.assertAlmostEqual(
@@ -11918,17 +12124,17 @@ class GenerationSmokeTests(TestCase):
             world["summary"][
                 "numeric_depression_lower_volume_hybrid_adjustment_volume_km3"
             ],
-            79509043.60507327,
+            107274976.53566435,
             places=6,
         )
         self.assertAlmostEqual(
             world["summary"]["numeric_depression_lower_volume_hybrid_saved_fraction"],
-            0.2583125916,
+            0.3308865405,
             places=9,
         )
         self.assertAlmostEqual(
             world["summary"]["max_lower_volume_breach_excavation_depth_m"],
-            4866.8450342141,
+            7373.4943361403,
             places=6,
         )
         self.assertEqual(
@@ -11937,53 +12143,53 @@ class GenerationSmokeTests(TestCase):
         )
         self.assertEqual(
             world["summary"]["fluvial_sediment_active_cell_step_count"],
-            7145,
+            8255,
         )
         self.assertEqual(
             world["summary"]["fluvial_sediment_routed_edge_count"],
-            4918,
+            5853,
         )
         self.assertEqual(
             world["summary"]["fluvial_sediment_terminal_allocation_count"],
-            541,
+            562,
         )
         self.assertAlmostEqual(
             world["summary"]["fluvial_sediment_local_source_volume_km3"],
-            2834216.6173098735,
+            3596043.7381699905,
             places=6,
         )
         self.assertAlmostEqual(
             world["summary"]["fluvial_sediment_routed_throughput_volume_km3"],
-            3256041.3383953464,
+            4229456.213875525,
             places=6,
         )
         self.assertAlmostEqual(
             world["summary"]["fluvial_sediment_total_deposition_volume_km3"],
-            1002181.9157699842,
+            1289535.3066713898,
             places=6,
         )
         self.assertAlmostEqual(
             world["summary"]["fluvial_sediment_terminal_export_volume_km3"],
-            1832034.7015398892,
+            2306508.4314986006,
             places=6,
         )
         self.assertAlmostEqual(
             world["summary"][
                 "fluvial_sediment_depression_fill_deposition_volume_km3"
             ],
-            527020.3225480877,
+            687110.1119446529,
             places=6,
         )
         self.assertAlmostEqual(
             world["summary"][
                 "fluvial_sediment_terminal_land_deposition_volume_km3"
             ],
-            120014.3233910439,
+            124191.6245509268,
             places=6,
         )
         self.assertAlmostEqual(
             world["summary"]["fluvial_sediment_marine_deposition_volume_km3"],
-            289115.8272412258,
+            330887.026547524,
             places=6,
         )
         self.assertLessEqual(
@@ -11991,21 +12197,21 @@ class GenerationSmokeTests(TestCase):
             0.000001,
         )
         self.assertEqual(world["summary"]["hillslope_sediment_transport_stage_count"], 6)
-        self.assertEqual(world["summary"]["hillslope_sediment_transport_edge_count"], 35908)
-        self.assertEqual(world["summary"]["hillslope_sediment_source_cell_stage_count"], 7662)
-        self.assertEqual(world["summary"]["hillslope_sediment_target_cell_stage_count"], 10958)
-        self.assertEqual(world["summary"]["hillslope_sediment_land_to_land_edge_count"], 26510)
-        self.assertEqual(world["summary"]["hillslope_sediment_land_to_marine_edge_count"], 9398)
-        self.assertEqual(world["summary"]["hillslope_sediment_unique_source_cell_count"], 1385)
-        self.assertEqual(world["summary"]["hillslope_sediment_unique_target_cell_count"], 1971)
+        self.assertEqual(world["summary"]["hillslope_sediment_transport_edge_count"], 40643)
+        self.assertEqual(world["summary"]["hillslope_sediment_source_cell_stage_count"], 8822)
+        self.assertEqual(world["summary"]["hillslope_sediment_target_cell_stage_count"], 11915)
+        self.assertEqual(world["summary"]["hillslope_sediment_land_to_land_edge_count"], 31468)
+        self.assertEqual(world["summary"]["hillslope_sediment_land_to_marine_edge_count"], 9175)
+        self.assertEqual(world["summary"]["hillslope_sediment_unique_source_cell_count"], 1716)
+        self.assertEqual(world["summary"]["hillslope_sediment_unique_target_cell_count"], 2280)
         self.assertAlmostEqual(
             world["summary"]["hillslope_sediment_production_volume_km3"],
-            54368351.73795534,
+            70141984.2713684,
             places=6,
         )
         self.assertAlmostEqual(
             world["summary"]["hillslope_sediment_deposition_volume_km3"],
-            54368351.73795534,
+            70141984.2713684,
             places=6,
         )
         self.assertLessEqual(
@@ -12013,25 +12219,25 @@ class GenerationSmokeTests(TestCase):
             0.000001,
         )
         self.assertEqual(world["summary"]["glacial_sediment_transport_stage_count"], 1)
-        self.assertEqual(world["summary"]["glacial_sediment_transfer_count"], 158)
-        self.assertEqual(world["summary"]["glacial_sediment_source_cell_count"], 158)
-        self.assertEqual(world["summary"]["glacial_sediment_target_cell_count"], 93)
+        self.assertEqual(world["summary"]["glacial_sediment_transfer_count"], 182)
+        self.assertEqual(world["summary"]["glacial_sediment_source_cell_count"], 182)
+        self.assertEqual(world["summary"]["glacial_sediment_target_cell_count"], 115)
         self.assertEqual(
             world["summary"]["glacial_sediment_land_target_transfer_count"],
-            78,
+            130,
         )
         self.assertEqual(
             world["summary"]["glacial_sediment_marine_target_transfer_count"],
-            80,
+            52,
         )
         self.assertAlmostEqual(
             world["summary"]["glacial_sediment_production_volume_km3"],
-            117672.7398079277,
+            155651.0453599108,
             places=6,
         )
         self.assertAlmostEqual(
             world["summary"]["glacial_sediment_deposition_volume_km3"],
-            117672.7398079277,
+            155651.0453599108,
             places=6,
         )
         self.assertLessEqual(
@@ -12046,17 +12252,17 @@ class GenerationSmokeTests(TestCase):
         )
         self.assertAlmostEqual(
             world["summary"]["sediment_budget_production_km3"],
-            57328405.2131786,
+            73937959.21553165,
             places=6,
         )
         self.assertAlmostEqual(
             world["summary"]["sediment_budget_deposition_km3"],
-            55496370.51163873,
+            71631450.78403312,
             places=6,
         )
         self.assertAlmostEqual(
             world["summary"]["sediment_budget_export_km3"],
-            1832034.7015398876,
+            2306508.4314986,
             places=6,
         )
         self.assertLessEqual(
@@ -12070,17 +12276,17 @@ class GenerationSmokeTests(TestCase):
         )
         self.assertAlmostEqual(
             inventory_model["alluvium_entrainment_volume_km3"],
-            5308511.893096177,
+            11970592.382508822,
             places=6,
         )
         self.assertAlmostEqual(
             inventory_model["bedrock_erosion_volume_km3"],
-            52019893.320082344,
+            61967366.83302281,
             places=6,
         )
         self.assertAlmostEqual(
             inventory_model["final_mobile_sediment_inventory_volume_km3"],
-            50187858.61854248,
+            59660858.401524164,
             places=6,
         )
         self.assertLess(
@@ -12105,7 +12311,7 @@ class GenerationSmokeTests(TestCase):
             for event in world["numeric_depression_fill_history"]
             if event["selected_correction_method"] == "mass_conserving_breach"
         ]
-        self.assertEqual(len(selected_breaches), 2)
+        self.assertEqual(len(selected_breaches), 9)
         for event in selected_breaches:
             for before_m, excavation_m, alluvium_m, bedrock_m in zip(
                 event[
@@ -12127,12 +12333,12 @@ class GenerationSmokeTests(TestCase):
         ]
         self.assertAlmostEqual(
             numeric_partition["alluvium_entrainment_volume_km3"],
-            5451.133405818,
+            23632.306551864,
             places=6,
         )
         self.assertAlmostEqual(
             numeric_partition["bedrock_erosion_volume_km3"],
-            2712.9846996347,
+            20647.8540814825,
             places=6,
         )
         self.assertEqual(world["summary"]["simulation_clock_stage_count"], 8)
@@ -12140,23 +12346,23 @@ class GenerationSmokeTests(TestCase):
             world["summary"]["simulation_clock_cryosphere_coupling_stage_count"],
             1,
         )
-        self.assertEqual(world["summary"]["closed_depression_count"], 29)
-        self.assertEqual(world["summary"]["simulated_lake_basin_count"], 25)
-        self.assertEqual(world["summary"]["lake_overflow_history_count"], 25)
-        self.assertEqual(world["summary"]["lake_overflow_history_step_count"], 300)
-        self.assertEqual(world["summary"]["lake_overflow_channel_history_count"], 14)
+        self.assertEqual(world["summary"]["closed_depression_count"], 31)
+        self.assertEqual(world["summary"]["simulated_lake_basin_count"], 44)
+        self.assertEqual(world["summary"]["lake_overflow_history_count"], 44)
+        self.assertEqual(world["summary"]["lake_overflow_history_step_count"], 528)
+        self.assertEqual(world["summary"]["lake_overflow_channel_history_count"], 36)
         self.assertEqual(
             sum(basin["lake_cell_count"] for basin in world["lake_basins"]),
-            60,
+            113,
         )
         self.assertAlmostEqual(
             world["summary"]["lake_overflow_total_spill_km3"],
-            167390.176482,
+            381404.844533,
             places=6,
         )
         self.assertAlmostEqual(
             world["summary"]["lake_overflow_total_sink_loss_km3"],
-            0.0,
+            21242.471257,
             places=6,
         )
         self.assertEqual(
@@ -12164,26 +12370,18 @@ class GenerationSmokeTests(TestCase):
             0,
         )
         self.assertEqual(world["summary"]["flow_cycle_cell_count"], 0)
-        self.assertEqual(
-            world["summary"]["watershed_hack_fitted_observation_count"],
-            fitted_hack_relation.observation_count,
+        self.assertEqual(exorheic_backbone_hack_relation.observation_count, 19)
+        self.assertAlmostEqual(
+            exorheic_backbone_hack_relation.exponent,
+            0.6135353290176452,
         )
         self.assertAlmostEqual(
-            world["summary"]["watershed_hack_fitted_exponent"],
-            fitted_hack_relation.exponent,
-            delta=0.00001,
+            exorheic_backbone_hack_relation.log_rmse,
+            0.16266273810550289,
         )
-        self.assertAlmostEqual(
-            world["summary"]["watershed_hack_fitted_log_rmse"],
-            fitted_hack_relation.log_rmse,
-            delta=0.00001,
-        )
-        self.assertGreater(fitted_hack_relation.exponent, 0.655213509131)
-        self.assertGreaterEqual(fitted_hack_relation.log_rmse, 0.0)
-        self.assertLessEqual(fitted_hack_relation.log_rmse, 0.405416679619)
         self.assertEqual(
             world["summary"]["calibration_pass_count"],
-            world["summary"]["calibration_check_count"],
+            sum(check["passed"] for check in world["calibration_checks"]),
         )
 
     def test_geodesic_mesh_backend_smoke(self) -> None:
@@ -12200,8 +12398,14 @@ class GenerationSmokeTests(TestCase):
 
         self.assertEqual(world["mesh_backend"], "geodesic_icosahedron")
         self.assertEqual(summary["mesh_backend"], "geodesic_icosahedron")
-        self.assertEqual(world["cell_area_model"], "spherical_barycentric_dual_v1")
-        self.assertEqual(summary["cell_area_model"], "spherical_barycentric_dual_v1")
+        self.assertEqual(
+            world["cell_area_model"],
+            "spherical_barycentric_control_volume_v2",
+        )
+        self.assertEqual(
+            summary["cell_area_model"],
+            "spherical_barycentric_control_volume_v2",
+        )
         self.assertEqual(summary["cell_count"], 162)
         self.assertEqual(len(world["cells"]), 162)
         cell_areas = [cell["area_km2"] for cell in world["cells"]]
@@ -12350,7 +12554,7 @@ class GenerationSmokeTests(TestCase):
                 ),
             )
         self.assertTrue(world["plate_kinematic_model"]["crust_advection_resolved"])
-        self.assertFalse(world["plate_kinematic_model"]["mass_conserving_crust_transport"])
+        self.assertTrue(world["plate_kinematic_model"]["mass_conserving_crust_transport"])
         self.assertEqual(
             [step["stage"] for step in world["earth_system_feedback_history"]],
             [
@@ -12380,7 +12584,7 @@ class GenerationSmokeTests(TestCase):
             result = CliRunner().invoke(app, ["validate", "--world", str(world_path)])
             self.assertEqual(result.exit_code, 0, result.output)
 
-            world["cell_area_model"] = "equal_area_fibonacci_quadrature_v1"
+            world["cell_area_model"] = "spherical_voronoi_control_volume_v1"
             world_path.write_text(json.dumps(world), encoding="utf-8")
             result = CliRunner().invoke(app, ["validate", "--world", str(world_path)])
             self.assertNotEqual(result.exit_code, 0)

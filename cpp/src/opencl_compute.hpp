@@ -1,5 +1,6 @@
 #pragma once
 
+#include "crust_overlap_shadow.hpp"
 #include "engine/model.hpp"
 
 #include <memory>
@@ -66,6 +67,23 @@ bool try_accelerated_remap_crust_sources(
     const std::vector<std::vector<int>>& previous_cells_by_plate,
     std::vector<int>& source_cell_ids
 );
+
+// Run a diagnostic-only device replay of the continuous extensive-state
+// reduction over a CPU-authoritative spherical-overlap CSR. Device output is
+// validated against the CPU plan and discarded; this function never mutates
+// the plan, cells, categorical state, or coverage geometry.
+void reconcile_accelerated_crust_overlap_continuous_shadow(
+    const CrustTransportPlan& transport,
+    const std::vector<Cell>& cells,
+    const std::vector<double>& source_crust_thickness_km,
+    const std::vector<double>& source_crust_density,
+    const std::vector<double>& source_crust_age_ma
+);
+
+// Record one successfully constructed CPU-authoritative conservative overlap
+// plan in the active generation session. This is measured execution telemetry,
+// not a copy of the configured iteration count.
+void record_cpu_conservative_crust_overlap_transition();
 
 // During generation this describes the active ComputeSession. Outside a
 // generation it performs a capability-only probe and reports CPU as active.

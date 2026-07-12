@@ -9,7 +9,7 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from './vendor/OrbitControls.js';
-import { describeLayer, docsCoverage, UI_GUIDE, KEY_REFERENCE } from './layer_docs.js';
+import { describeLayer, docsCoverage, layerTooltip, searchTerms, UI_GUIDE, KEY_REFERENCE } from './layer_docs.js';
 
 const MISSING_SENTINEL = 3.0e38;   // NaN replacement survives every GPU driver
 const PLANE_SCALE = new THREE.Vector2(2.0, 1.0); // equirect/mollweide plane half-extent
@@ -200,6 +200,7 @@ const state = {
   morph: { value: 0, target: 0, proj2D: 0, proj2DTarget: 0 },
   values: null,             // Float32Array currently displayed
   layerCache: new Map(),    // key -> Float32Array (LRU)
+  fetchSeq: 0,              // monotonic activateLayer counter; stale responses bail
   overlays: { wireframe: false, plates: false, graticule: false },
   pickDirty: true,
   hoverCell: -1,
@@ -228,12 +229,16 @@ async function fetchJson(url) {
   return response.json();
 }
 
-function layerCacheKey(layerId, stage, month) {
-  return `${layerId}|${stage}|${month}`;
+function layerCacheKey(layer, stage, month) {
+  // Only the axis the layer actually varies along participates in the key, so
+  // the same buffer is reused no matter what the other axis was when fetched.
+  const stageKey = layer.kind === 'numeric_stage' ? stage : 0;
+  const monthKey = layer.kind === 'numeric_monthly' ? month : 0;
+  return `${layer.id}|${stageKey}|${monthKey}`;
 }
 
 async function fetchLayerValues(layer, stage, month) {
-  const key = layerCacheKey(layer.id, stage, month);
+  const key = layerCacheKey(layer, stage, month);
   if (state.layerCache.has(key)) {
     const cached = state.layerCache.get(key);
     state.layerCache.delete(key);
@@ -261,8 +266,8 @@ function prefetchNeighborStages(layer, stage) {
   const count = layer.stage_count || 1;
   for (const delta of [1, -1, 2, -2]) {
     const neighbor = stage + delta;
-    if (neighbor >= 0 && neighbor < count && !state.layerCache.has(layerCacheKey(layer.id, neighbor, 0))) {
-      fetchLayerValues(layer, neighbor, 0).catch(() => {});
+    if (neighbor >= 0 && neighbor < count && !state.layerCache.has(layerCacheKey(layer, neighbor, state.month))) {
+      fetchLayerValues(layer, neighbor, state.month).catch(() => {});
     }
   }
 }
@@ -563,54 +568,6 @@ function updateLegend(layer) {
   maxEl.title = hiClip ? `clipped — true max ${formatValue(stats.max)}` : '';
 }
 
-// ---------------------------------------------------------------------------
-// Docs helper: per-layer doc card + help overlay (content from docs.js)
-
-function renderLayerDoc(layer) {
-  const card = $('#layer-doc');
-  card.classList.toggle('hidden', !state.docCard || !layer);
-  $('#legend-info').classList.toggle('active', state.docCard);
-  if (!state.docCard || !layer) return;
-  const doc = layerDoc(layer);
-  const parts = [];
-  parts.push(`<h4>${escapeHtml(doc.id)}</h4>`);
-  const topicBits = [doc.topic, doc.kindLabel].filter(Boolean);
-  if (doc.unit) topicBits.push(`unit: <span class="doc-unit">${escapeHtml(doc.unit)}</span>`);
-  parts.push(`<div class="doc-topic">${topicBits.join(' · ')}</div>`);
-  if (doc.summary) parts.push(`<p>${escapeHtml(doc.summary)}</p>`);
-  else if (doc.unitMeaning) parts.push(`<p class="doc-dim">${escapeHtml(doc.unitMeaning)}.</p>`);
-  if (layer.stats) {
-    const stats = layer.stats;
-    parts.push('<table>'
-      + `<tr><td>min / max</td><td>${formatValue(stats.min)} … ${formatValue(stats.max)}</td></tr>`
-      + `<tr><td>legend (p2 / p98)</td><td>${formatValue(stats.p2)} … ${formatValue(stats.p98)}</td></tr>`
-      + '</table>');
-  }
-  if (layer.kind === 'categorical') {
-    parts.push(`<p class="doc-dim">${layer.categories.length} categories — see legend chips.</p>`);
-  }
-  if (doc.topicDoc) parts.push(`<p class="doc-dim">${escapeHtml(doc.topicDoc)}</p>`);
-  if (doc.sourceDoc) parts.push(`<p class="doc-dim">${escapeHtml(doc.sourceDoc)}</p>`);
-  card.innerHTML = parts.join('');
-}
-
-function toggleDocCard(force) {
-  state.docCard = force !== undefined ? force : !state.docCard;
-  localStorage.setItem('magicGeoDocCard', state.docCard ? '1' : '0');
-  renderLayerDoc(state.activeLayer);
-}
-
-function toggleHelp(force) {
-  state.helpOpen = force !== undefined ? force : !state.helpOpen;
-  const overlay = $('#help-overlay');
-  if (state.helpOpen && !overlay.dataset.built) {
-    $('#help-body').innerHTML = helpHtml(state.manifest);
-    overlay.dataset.built = '1';
-  }
-  overlay.classList.toggle('hidden', !state.helpOpen);
-  $('#toggle-help').classList.toggle('active', state.helpOpen);
-}
-
 function layerRange(layer) {
   const stats = layer.stats || {};
   let lo = stats.p2 ?? stats.min ?? 0;
@@ -733,6 +690,7 @@ function setHelpVisible(visible) {
   const overlay = $('#help-overlay');
   if (visible) buildHelpOverlay();
   overlay.classList.toggle('hidden', !visible);
+  $('#toggle-help').classList.toggle('active', visible);
 }
 
 async function activateLayer(layer, { stage = null, month = null } = {}) {
@@ -746,8 +704,9 @@ async function activateLayer(layer, { stage = null, month = null } = {}) {
     item.classList.toggle('active', item.dataset.layerId === layer.id);
   });
 
+  const requestSeq = ++state.fetchSeq;
   const values = await fetchLayerValues(layer, state.stage, state.month);
-  if (state.activeLayer !== layer) return;   // superseded while fetching
+  if (requestSeq !== state.fetchSeq) return;   // superseded (layer, stage, or month changed)
   uploadValues(values);
 
   const [lo, hi] = layerRange(layer);
@@ -1045,12 +1004,8 @@ function wireEvents() {
 
   $('#layer-search').addEventListener('input', (event) => filterLayerList(event.target.value));
 
-  $('#toggle-help').addEventListener('click', () => toggleHelp());
-  $('#help-close').addEventListener('click', () => toggleHelp(false));
-  $('#help-overlay').addEventListener('click', (event) => {
-    if (event.target === $('#help-overlay')) toggleHelp(false);
-  });
-  $('#legend-info').addEventListener('click', () => toggleDocCard());
+  $('#toggle-help').addEventListener('click', () => setHelpVisible($('#help-overlay').classList.contains('hidden')));
+  $('#legend-info').addEventListener('click', () => setDocsVisible(!state.docsVisible));
 
   const slider = $('#stage-slider');
   const number = $('#stage-number');

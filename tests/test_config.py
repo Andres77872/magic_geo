@@ -2,7 +2,9 @@ from pathlib import Path
 import ctypes
 import math
 from unittest import TestCase
+from unittest.mock import patch
 
+import magic_geo.native as native_module
 from magic_geo.api import generate_world
 from magic_geo.config import (
     MAX_ANGULAR_SPEED,
@@ -17,10 +19,44 @@ from magic_geo.config import (
     MAX_STELLAR_LUMINOSITY,
     load_config,
 )
-from magic_geo.native import NativeConfigV1, NativeConfigV2, _native_config
+from magic_geo.native import (
+    NativeConfigV1,
+    NativeConfigV2,
+    NativeConfigV3,
+    _native_config,
+)
 
 
 class ConfigTests(TestCase):
+    def test_legacy_native_library_can_load_without_geo_only_symbol(self) -> None:
+        class FakeFunction:
+            argtypes: list | None = None
+            restype: object | None = None
+
+        class LegacyLibrary:
+            magic_geo_backend_info_json = FakeFunction()
+            magic_geo_generate_json = FakeFunction()
+            magic_geo_generate_json_v2 = FakeFunction()
+            magic_geo_free_string = FakeFunction()
+
+        legacy = LegacyLibrary()
+        with (
+            patch.object(
+                native_module, "_library_path", return_value=Path("legacy.so")
+            ),
+            patch.object(native_module.ctypes, "CDLL", return_value=legacy),
+        ):
+            loaded = native_module._load_library()
+            self.assertIs(loaded, legacy)
+            with self.assertRaisesRegex(
+                RuntimeError, "does not support the nominal maturation clock"
+            ):
+                native_module.generate_world({})
+            with self.assertRaisesRegex(
+                RuntimeError, "does not support geo-only generation"
+            ):
+                native_module.generate_geo_world({})
+
     def test_seed_config_loads(self) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))
 
@@ -28,8 +64,9 @@ class ConfigTests(TestCase):
         self.assertEqual(config.mesh.backend, "fibonacci_sphere")
         self.assertEqual(config.mesh.cell_count, 4096)
         self.assertLess(config.tectonics.plate_count, config.mesh.cell_count)
-        self.assertEqual(config.tectonics.plate_motion_scale_deg_per_step, 2.0)
+        self.assertEqual(config.tectonics.plate_motion_scale_deg_per_step, 4.0)
         self.assertEqual(config.tectonics.oceanic_crust_aging_ma_per_step, 5.0)
+        self.assertEqual(config.erosion.maturation_timestep_ma, 5.0)
         self.assertEqual(config.tectonics.continental_crust_fraction_target, 0.34)
         self.assertEqual(config.planet.ocean_water_inventory_km3, 1_338_000_000.0)
         self.assertEqual(config.climate.subtropical_drying_strength, 0.65)
@@ -52,6 +89,15 @@ class ConfigTests(TestCase):
         with self.assertRaises(ValueError):
             type(config).model_validate(data)
 
+    def test_maturation_timestep_is_positive_and_refinement_only(self) -> None:
+        config = load_config(Path("configs/earthlike_seed.yaml"))
+        for invalid_timestep in (0.0, 5.000001):
+            data = config.model_dump(mode="python")
+            data["erosion"]["maturation_timestep_ma"] = invalid_timestep
+            with self.subTest(invalid_timestep=invalid_timestep):
+                with self.assertRaises(ValueError):
+                    type(config).model_validate(data)
+
     def test_ocean_water_inventory_is_bounded(self) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))
         data = config.model_dump(mode="python")
@@ -72,9 +118,13 @@ class ConfigTests(TestCase):
         self.assertEqual(native.opencl_prefer_gpu, 0)
         self.assertEqual(ctypes.sizeof(NativeConfigV1), 304)
         self.assertEqual(ctypes.sizeof(NativeConfigV2), 312)
+        self.assertEqual(ctypes.sizeof(NativeConfigV3), 320)
         self.assertEqual(NativeConfigV2.base.offset, 0)
         self.assertEqual(NativeConfigV2.compute_backend.offset, 304)
         self.assertEqual(NativeConfigV2.opencl_prefer_gpu.offset, 308)
+        self.assertEqual(NativeConfigV3.base.offset, 0)
+        self.assertEqual(NativeConfigV3.maturation_timestep_ma.offset, 312)
+        self.assertEqual(native.maturation_timestep_ma, 5.0)
 
         data["compute"]["backend"] = "cuda"
         cuda_native = _native_config(data)

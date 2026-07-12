@@ -156,24 +156,74 @@ def _neighbor_relief(cell: dict[str, Any], cells_by_id: dict[int, dict[str, Any]
     return _clamp(relief / 1800.0, 0.0, 1.0)
 
 
-def _sorted_eras(world: dict[str, Any]) -> list[dict[str, Any]]:
+def _pedogenesis_stages(world: dict[str, Any]) -> list[dict[str, Any]]:
+    if world.get("generation_scope") == "geo_only":
+        feedback = world.get("earth_system_feedback_history", [])
+        if isinstance(feedback, list) and feedback and all(
+            isinstance(step, dict) for step in feedback
+        ):
+            return [
+                {
+                    "id": int(step.get("id", index)),
+                    "time_basis": "natural_simulation_stage",
+                    "natural_stage_id": int(step.get("id", index)),
+                    "natural_stage_name": str(step.get("stage", "unknown")),
+                    "start_model_step": index,
+                    "end_model_step": index + 1,
+                    "physical_time_resolved": False,
+                    "nominal_time_link_available": all(
+                        key in step
+                        for key in (
+                            "nominal_time_basis",
+                            "nominal_interval_start_ma",
+                            "nominal_interval_end_ma",
+                            "nominal_interval_duration_ma",
+                        )
+                    ),
+                    "nominal_time_basis": step.get("nominal_time_basis"),
+                    "nominal_time_source_parameter": step.get(
+                        "nominal_time_source_parameter"
+                    ),
+                    "nominal_interval_start_ma": step.get(
+                        "nominal_interval_start_ma"
+                    ),
+                    "nominal_interval_end_ma": step.get(
+                        "nominal_interval_end_ma"
+                    ),
+                    "nominal_interval_duration_ma": step.get(
+                        "nominal_interval_duration_ma"
+                    ),
+                    "nominal_time_calibrated": False,
+                }
+                for index, step in enumerate(feedback)
+            ]
+
     eras = world.get("historical_eras", [])
     if not isinstance(eras, list) or not eras:
         return [
             {
                 "id": 0,
+                "time_basis": "undated_diagnostic_step",
                 "start_year_bp": 1.0,
                 "end_year_bp": 0.0,
                 "dominant_process": "undated",
+                "physical_time_resolved": False,
             }
         ]
-    return sorted(
-        eras,
-        key=lambda era: (
-            -float(era.get("start_year_bp", 0.0)),
-            int(era.get("id", 0)),
-        ),
-    )
+    return [
+        {
+            **era,
+            "time_basis": "historical_year_bp",
+            "physical_time_resolved": False,
+        }
+        for era in sorted(
+            eras,
+            key=lambda era: (
+                -float(era.get("start_year_bp", 0.0)),
+                int(era.get("id", 0)),
+            ),
+        )
+    ]
 
 
 def _classify_texture(
@@ -231,6 +281,13 @@ def enrich_world_with_soil_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
         world["soil_profiles"] = []
         world["soil_horizons"] = []
         world["soil_profile_histories"] = []
+        world["soil_pedogenesis_model"] = {
+            "model_type": "posthoc_final_state_profile_reconstruction_v2",
+            "time_basis": "unavailable_without_cells",
+            "stage_source": "none",
+            "physical_time_resolved": False,
+            "state_mutation_evidence": False,
+        }
         return world
 
     cells_by_id = {int(cell.get("id", index)): cell for index, cell in enumerate(cells)}
@@ -456,7 +513,15 @@ def enrich_world_with_soil_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
         shallow_profile_count += 1 if depth <= 0.55 else 0
 
     soil_profile_histories: list[dict[str, Any]] = []
-    eras = _sorted_eras(world)
+    time_stages = _pedogenesis_stages(world)
+    natural_stage_timing = bool(time_stages) and all(
+        str(stage.get("time_basis", "")) == "natural_simulation_stage"
+        for stage in time_stages
+    )
+    natural_advancing_stage_count = sum(
+        float(stage.get("nominal_interval_duration_ma") or 0.0) > 0.0
+        for stage in time_stages
+    ) if natural_stage_timing else 0
     pedogenic_weathering_sum = 0.0
     pedogenic_leaching_sum = 0.0
     pedogenic_bioturbation_sum = 0.0
@@ -492,6 +557,8 @@ def enrich_world_with_soil_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
             0.18,
             0.86,
         )
+        if natural_stage_timing and natural_advancing_stage_count == 0:
+            initial_depth = total_depth
         previous_depth = initial_depth
         steps: list[dict[str, Any]] = []
         history_soil_production = 0.0
@@ -502,10 +569,22 @@ def enrich_world_with_soil_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
         step_differentiation_sum = 0.0
         step_flux_sum = 0.0
         high_erosion = False
+        advancing_stage_index = 0
 
-        for index, era in enumerate(eras):
+        for index, era in enumerate(time_stages):
             stage_index = index + 1
-            progress = stage_index / max(1, len(eras))
+            time_basis = str(era.get("time_basis", "undated_diagnostic_step"))
+            advances_natural_time = (
+                time_basis == "natural_simulation_stage"
+                and float(era.get("nominal_interval_duration_ma") or 0.0) > 0.0
+            )
+            if time_basis != "natural_simulation_stage" or advances_natural_time:
+                advancing_stage_index += 1
+            progress = (
+                advancing_stage_index / max(1, natural_advancing_stage_count)
+                if time_basis == "natural_simulation_stage"
+                else stage_index / max(1, len(time_stages))
+            )
             start_depth = previous_depth
             end_depth = initial_depth + (total_depth - initial_depth) * progress
             erosion_pressure = _clamp(
@@ -517,8 +596,33 @@ def enrich_world_with_soil_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
                 0.0,
                 1.0,
             )
-            era_span_ky = max(0.001, (float(era.get("start_year_bp", 0.0)) - float(era.get("end_year_bp", 0.0))) / 1000.0)
-            erosion_loss = total_depth * erosion_pressure * (0.0035 + 0.0015 * era_span_ky)
+            era_span_ky = (
+                max(
+                    0.001,
+                    (
+                        float(era.get("start_year_bp", 0.0))
+                        - float(era.get("end_year_bp", 0.0))
+                    )
+                    / 1000.0,
+                )
+                if time_basis == "historical_year_bp"
+                else 0.0
+            )
+            if time_basis == "natural_simulation_stage":
+                erosion_loss = (
+                    total_depth
+                    * erosion_pressure
+                    * 0.0035
+                    / max(1, natural_advancing_stage_count)
+                    if advances_natural_time
+                    else 0.0
+                )
+            else:
+                erosion_loss = (
+                    total_depth
+                    * erosion_pressure
+                    * (0.0035 + 0.0015 * era_span_ky)
+                )
             soil_production = max(0.0, end_depth - start_depth + erosion_loss)
             organic_accumulation = _clamp(
                 organic * 1.45 + bioturbation * 0.18 + moisture * 0.14 - salinity * 0.18 - erosion_pressure * 0.08,
@@ -559,45 +663,100 @@ def enrich_world_with_soil_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
                 0.0,
                 1.0,
             )
+            if time_basis == "natural_simulation_stage" and not advances_natural_time:
+                pedogenic_flux = 0.0
             step_weathering = _clamp(weathering * (0.74 + progress * 0.26), 0.0, 1.0)
             step_leaching = _clamp(leaching * (0.78 + progress * 0.22), 0.0, 1.0)
             step_bioturbation = _clamp(bioturbation * (0.82 + progress * 0.18), 0.0, 1.0)
-            steps.append(
-                {
-                    "era_id": int(era.get("id", -1)),
-                    "stage_index": stage_index,
-                    "start_year_bp": round(float(era.get("start_year_bp", 0.0)), 6),
-                    "end_year_bp": round(float(era.get("end_year_bp", 0.0)), 6),
-                    "start_depth_m": round(start_depth, 6),
-                    "end_depth_m": round(end_depth, 6),
-                    "soil_production_m": round(soil_production, 6),
-                    "erosion_loss_m": round(erosion_loss, 6),
-                    "weathering_index": round(step_weathering, 6),
-                    "leaching_index": round(step_leaching, 6),
-                    "bioturbation_index": round(step_bioturbation, 6),
-                    "organic_accumulation_index": round(organic_accumulation, 6),
-                    "horizon_differentiation_index": round(horizon_differentiation, 6),
-                    "clay_translocation_index": round(clay_translocation, 6),
-                    "carbonate_mobilization_index": round(carbonate_mobilization, 6),
-                    "salinization_index": round(salinization, 6),
-                    "erosion_pressure_index": round(erosion_pressure, 6),
-                    "pedogenic_flux_index": round(pedogenic_flux, 6),
-                }
-            )
+            step_record = {
+                "era_id": (
+                    int(era.get("id", -1))
+                    if time_basis == "historical_year_bp"
+                    else -1
+                ),
+                "stage_index": stage_index,
+                "time_basis": time_basis,
+                "physical_time_resolved": False,
+                "start_depth_m": round(start_depth, 6),
+                "end_depth_m": round(end_depth, 6),
+                "soil_production_m": round(soil_production, 6),
+                "erosion_loss_m": round(erosion_loss, 6),
+                "weathering_index": round(step_weathering, 6),
+                "leaching_index": round(step_leaching, 6),
+                "bioturbation_index": round(step_bioturbation, 6),
+                "organic_accumulation_index": round(organic_accumulation, 6),
+                "horizon_differentiation_index": round(
+                    horizon_differentiation, 6
+                ),
+                "clay_translocation_index": round(clay_translocation, 6),
+                "carbonate_mobilization_index": round(
+                    carbonate_mobilization, 6
+                ),
+                "salinization_index": round(salinization, 6),
+                "erosion_pressure_index": round(erosion_pressure, 6),
+                "pedogenic_flux_index": round(pedogenic_flux, 6),
+            }
+            if time_basis == "natural_simulation_stage":
+                step_record.update(
+                    {
+                        "natural_stage_id": int(era.get("natural_stage_id", -1)),
+                        "natural_stage_name": str(
+                            era.get("natural_stage_name", "unknown")
+                        ),
+                        "start_model_step": int(era.get("start_model_step", index)),
+                        "end_model_step": int(era.get("end_model_step", index + 1)),
+                        "nominal_time_link_available": bool(
+                            era.get("nominal_time_link_available", False)
+                        ),
+                        "nominal_time_basis": era.get("nominal_time_basis"),
+                        "nominal_time_source_parameter": era.get(
+                            "nominal_time_source_parameter"
+                        ),
+                        "nominal_interval_start_ma": era.get(
+                            "nominal_interval_start_ma"
+                        ),
+                        "nominal_interval_end_ma": era.get(
+                            "nominal_interval_end_ma"
+                        ),
+                        "nominal_interval_duration_ma": era.get(
+                            "nominal_interval_duration_ma"
+                        ),
+                        "nominal_time_calibrated": False,
+                        "start_year_bp": None,
+                        "end_year_bp": None,
+                    }
+                )
+            else:
+                step_record.update(
+                    {
+                        "start_year_bp": round(
+                            float(era.get("start_year_bp", 0.0)), 6
+                        ),
+                        "end_year_bp": round(
+                            float(era.get("end_year_bp", 0.0)), 6
+                        ),
+                    }
+                )
+            steps.append(step_record)
             previous_depth = end_depth
             history_soil_production += soil_production
             history_erosion_loss += erosion_loss
-            step_weathering_sum += step_weathering
-            step_leaching_sum += step_leaching
-            step_bioturbation_sum += step_bioturbation
-            step_differentiation_sum += horizon_differentiation
-            step_flux_sum += pedogenic_flux
-            if erosion_pressure >= 0.65:
-                high_erosion = True
+            if time_basis != "natural_simulation_stage" or advances_natural_time:
+                step_weathering_sum += step_weathering
+                step_leaching_sum += step_leaching
+                step_bioturbation_sum += step_bioturbation
+                step_differentiation_sum += horizon_differentiation
+                step_flux_sum += pedogenic_flux
+                if erosion_pressure >= 0.65:
+                    high_erosion = True
 
         if steps:
             steps[-1]["end_depth_m"] = round(total_depth, 6)
-        step_divisor = len(steps) if steps else 1
+        step_divisor = (
+            max(1, natural_advancing_stage_count)
+            if natural_stage_timing
+            else (len(steps) if steps else 1)
+        )
         mean_weathering = step_weathering_sum / step_divisor if steps else 0.0
         mean_leaching = step_leaching_sum / step_divisor if steps else 0.0
         mean_bioturbation = step_bioturbation_sum / step_divisor if steps else 0.0
@@ -641,6 +800,42 @@ def enrich_world_with_soil_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
     world["soil_profiles"] = soil_profiles
     world["soil_horizons"] = soil_horizons
     world["soil_profile_histories"] = soil_profile_histories
+    pedogenesis_time_basis = str(
+        time_stages[0].get("time_basis", "undated_diagnostic_step")
+    )
+    world["soil_pedogenesis_model"] = {
+        "model_type": "posthoc_final_state_profile_reconstruction_v2",
+        "time_basis": pedogenesis_time_basis,
+        "stage_source": (
+            "earth_system_feedback_history"
+            if pedogenesis_time_basis == "natural_simulation_stage"
+            else (
+                "historical_eras"
+                if pedogenesis_time_basis == "historical_year_bp"
+                else "synthetic_fallback"
+            )
+        ),
+        "stage_count": len(time_stages),
+        "physical_time_resolved": False,
+        "linked_nominal_time_coordinate_available": (
+            pedogenesis_time_basis == "natural_simulation_stage"
+            and all(
+                bool(stage.get("nominal_time_link_available", False))
+                for stage in time_stages
+            )
+        ),
+        "nominal_time_calibrated": False,
+        "state_mutation_evidence": False,
+        "natural_stage_flux_partition": (
+            "normalized_across_nominally_advancing_erosion_intervals"
+            if pedogenesis_time_basis == "natural_simulation_stage"
+            else "not_applicable"
+        ),
+        "limitation": (
+            "depth and process indices are reconstructed from final cell state; "
+            "steps do not mutate soil, water, vegetation, or climate pools"
+        ),
+    }
     summary = world.setdefault("summary", {})
     summary["soil_diagnostic_cell_count"] = soil_count
     summary["soil_texture_counts"] = dict(sorted(texture_counts.items()))
@@ -648,6 +843,8 @@ def enrich_world_with_soil_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
     summary["soil_horizon_count"] = len(soil_horizons)
     summary["soil_profile_history_count"] = len(soil_profile_histories)
     summary["soil_pedogenesis_step_count"] = sum(int(history.get("step_count", 0)) for history in soil_profile_histories)
+    summary["soil_pedogenesis_time_basis"] = pedogenesis_time_basis
+    summary["soil_pedogenesis_stage_count"] = len(time_stages)
     summary["soil_profile_class_counts"] = dict(sorted(profile_class_counts.items()))
     divisor = float(soil_count) if soil_count else 1.0
     summary["mean_soil_drainage_index"] = round(drainage_sum / divisor, 6) if soil_count else 0.0

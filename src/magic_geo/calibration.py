@@ -1432,21 +1432,43 @@ def _hydrorivers_archive_summary(path_text: str, minimum_upstream_area_km2: floa
             source_label = f"{path}!{member.filename}"
             active_record_count = 0
             terminal_record_count = 0
+            exorheic_terminal_record_count = 0
+            exorheic_backbone_terminal_record_count = 0
             observations: list[tuple[float, float]] = []
             with archive.open(member) as dbf_stream:
                 for record in _iter_dbf_numeric_records(
                     dbf_stream,
                     source_label,
-                    ["NEXT_DOWN", "UPLAND_SKM", "DIST_UP_KM"],
+                    [
+                        "NEXT_DOWN",
+                        "ENDORHEIC",
+                        "ORD_CLAS",
+                        "UPLAND_SKM",
+                        "DIST_UP_KM",
+                    ],
                 ):
                     active_record_count += 1
                     next_down = record["NEXT_DOWN"]
+                    endorheic = record["ENDORHEIC"]
+                    order_class = record["ORD_CLAS"]
                     upstream_area = record["UPLAND_SKM"]
                     upstream_distance = record["DIST_UP_KM"]
                     if (
-                        not all(math.isfinite(value) for value in (next_down, upstream_area, upstream_distance))
+                        not all(
+                            math.isfinite(value)
+                            for value in (
+                                next_down,
+                                endorheic,
+                                order_class,
+                                upstream_area,
+                                upstream_distance,
+                            )
+                        )
                         or next_down < 0.0
                         or not next_down.is_integer()
+                        or endorheic not in (0.0, 1.0)
+                        or not order_class.is_integer()
+                        or order_class < 1.0
                         or upstream_area < 0.0
                         or upstream_distance < 0.0
                     ):
@@ -1454,6 +1476,12 @@ def _hydrorivers_archive_summary(path_text: str, minimum_upstream_area_km2: floa
                     if int(next_down) != 0:
                         continue
                     terminal_record_count += 1
+                    if int(endorheic) != 0:
+                        continue
+                    exorheic_terminal_record_count += 1
+                    if int(order_class) != 1:
+                        continue
+                    exorheic_backbone_terminal_record_count += 1
                     if upstream_area >= minimum_upstream_area_km2 and upstream_distance > 0.0:
                         observations.append((upstream_area, upstream_distance))
     except BadZipFile as exc:
@@ -1472,6 +1500,10 @@ def _hydrorivers_archive_summary(path_text: str, minimum_upstream_area_km2: floa
         "archive_member_uncompressed_bytes": member.file_size,
         "active_reach_record_count": active_record_count,
         "terminal_reach_record_count": terminal_record_count,
+        "exorheic_terminal_reach_record_count": exorheic_terminal_record_count,
+        "exorheic_backbone_terminal_reach_record_count": (
+            exorheic_backbone_terminal_record_count
+        ),
         "minimum_upstream_area_km2": minimum_upstream_area_km2,
         "sample_network_count": fit.observation_count,
         "sample_min_upstream_area_km2": min(areas),
@@ -1482,7 +1514,10 @@ def _hydrorivers_archive_summary(path_text: str, minimum_upstream_area_km2: floa
         "hack_fitted_coefficient": fit.coefficient,
         "hack_fitted_log_rmse": fit.log_rmse,
         "fit_model": "ordinary_least_squares_log_length_on_log_upstream_area_v1",
-        "network_selection": "terminal_reaches_with_minimum_upstream_area_v1",
+        "network_selection": (
+            "next_down_zero_endorheic_zero_order_class_one_with_minimum_"
+            "upstream_area_v2"
+        ),
     }
 
 
@@ -1782,6 +1817,129 @@ def _world_metric_values(world: dict[str, Any]) -> dict[str, float]:
                     raise CalibrationError(f"world calibration metric '{metric}' conflicts with cell-derived value")
                 values.setdefault(metric, derived_value)
 
+        initial_age_ledger = world.get("initial_oceanic_crust_age_ledger")
+        if initial_age_ledger is not None:
+            if not isinstance(initial_age_ledger, dict):
+                raise CalibrationError(
+                    "world initial_oceanic_crust_age_ledger must be an object"
+                )
+            ages = initial_age_ledger.get("age_ma_by_cell")
+            statuses = initial_age_ledger.get("status_id_by_cell")
+            thresholds = initial_age_ledger.get("cdf_thresholds_ma")
+            recorded_cdf = initial_age_ledger.get(
+                "area_weighted_cdf_le_threshold"
+            )
+            if (
+                not isinstance(ages, list)
+                or not isinstance(statuses, list)
+                or len(ages) != len(cells)
+                or len(statuses) != len(cells)
+                or not isinstance(thresholds, list)
+                or not isinstance(recorded_cdf, list)
+                or len(thresholds) != len(recorded_cdf)
+            ):
+                raise CalibrationError(
+                    "world initial oceanic crust age ledger has invalid cardinality"
+                )
+            expected_thresholds = [
+                20.0,
+                40.0,
+                60.0,
+                80.0,
+                100.0,
+                120.0,
+                140.0,
+                160.0,
+                180.0,
+                200.0,
+            ]
+            try:
+                age_values = [float(value) for value in ages]
+                status_values = [int(value) for value in statuses]
+                threshold_values = [float(value) for value in thresholds]
+                recorded_cdf_values = [float(value) for value in recorded_cdf]
+                cell_areas = [float(cell["area_km2"]) for cell in cells]
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                raise CalibrationError(
+                    "world initial oceanic crust age ledger must be numeric"
+                ) from exc
+            if (
+                threshold_values != expected_thresholds
+                or any(
+                    not math.isfinite(age) or age < 0.0
+                    for age in age_values
+                )
+                or any(status not in range(5) for status in status_values)
+                or any(
+                    not math.isfinite(area) or area <= 0.0
+                    for area in cell_areas
+                )
+                or any(
+                    not math.isfinite(value) or not 0.0 <= value <= 1.0
+                    for value in recorded_cdf_values
+                )
+            ):
+                raise CalibrationError(
+                    "world initial oceanic crust age ledger values are invalid"
+                )
+            oceanic_rows = [
+                (age, area)
+                for age, area, status in zip(
+                    age_values,
+                    cell_areas,
+                    status_values,
+                    strict=True,
+                )
+                if status != 0
+            ]
+            if not oceanic_rows:
+                raise CalibrationError(
+                    "world initial oceanic crust age ledger has no oceanic-like cells"
+                )
+            total_oceanic_area = math.fsum(area for _, area in oceanic_rows)
+            mean_age = math.fsum(
+                age * area for age, area in oceanic_rows
+            ) / total_oceanic_area
+            derived_cdf = [
+                math.fsum(
+                    area
+                    for age, area in oceanic_rows
+                    if age <= threshold
+                )
+                / total_oceanic_area
+                for threshold in threshold_values
+            ]
+            recorded_mean = float(
+                initial_age_ledger.get("area_weighted_mean_age_ma", math.nan)
+            )
+            if (
+                not math.isfinite(recorded_mean)
+                or abs(recorded_mean - mean_age) > 1.0e-9
+                or any(
+                    abs(recorded - derived) > 1.0e-12
+                    for recorded, derived in zip(
+                        recorded_cdf_values,
+                        derived_cdf,
+                        strict=True,
+                    )
+                )
+            ):
+                raise CalibrationError(
+                    "world initial oceanic crust age ledger summaries conflict with cell-derived values"
+                )
+            values[
+                "initial_oceanic_crust_age_area_weighted_mean_ma"
+            ] = mean_age
+            for threshold, cdf_value in zip(
+                threshold_values,
+                derived_cdf,
+                strict=True,
+            ):
+                values[
+                    "initial_oceanic_crust_age_area_weighted_cdf_le_"
+                    f"{int(threshold)}_ma"
+                ] = cdf_value
+
         annual_land_temperatures: list[float] = []
         annual_land_temperature_ranges: list[float] = []
         annual_land_precipitation: list[float] = []
@@ -1825,7 +1983,16 @@ def _world_metric_values(world: dict[str, Any]) -> dict[str, float]:
         hack_length_presence = ["main_channel_length_km" in watershed for watershed in watersheds]
         if any(hack_length_presence) and not all(hack_length_presence):
             raise CalibrationError("world watersheds must provide main_channel_length_km consistently")
+        outlet_semantics_presence = [
+            "is_endorheic" in watershed and "outlet_type" in watershed
+            for watershed in watersheds
+        ]
+        if any(outlet_semantics_presence) and not all(outlet_semantics_presence):
+            raise CalibrationError(
+                "world watersheds must provide is_endorheic and outlet_type consistently"
+            )
         hack_observations: list[tuple[float, float]] = []
+        exorheic_backbone_hack_observations: list[tuple[float, float]] = []
         watershed_count = 0
         endorheic_count = 0
         watershed_area = 0.0
@@ -1853,7 +2020,38 @@ def _world_metric_values(world: dict[str, Any]) -> dict[str, float]:
                     and area >= HACK_FIT_MINIMUM_BASIN_AREA_KM2
                 ):
                     hack_observations.append((area, main_channel_length))
-            is_endorheic = bool(watershed.get("is_endorheic", False))
+            if all(outlet_semantics_presence):
+                is_endorheic_raw = watershed["is_endorheic"]
+                outlet_type_raw = watershed["outlet_type"]
+                if not isinstance(is_endorheic_raw, bool):
+                    raise CalibrationError(
+                        "world watershed is_endorheic must be boolean"
+                    )
+                if not isinstance(outlet_type_raw, str) or not outlet_type_raw:
+                    raise CalibrationError(
+                        "world watershed outlet_type must be a non-empty string"
+                    )
+                is_endorheic = is_endorheic_raw
+                outlet_type = outlet_type_raw
+                if (outlet_type == "ocean") == is_endorheic:
+                    raise CalibrationError(
+                        "world watershed ocean outlet_type conflicts with is_endorheic"
+                    )
+                if (
+                    all(hack_length_presence)
+                    and not is_endorheic
+                    and outlet_type == "ocean"
+                    and main_channel_length > 0.0
+                    and area >= HACK_FIT_MINIMUM_BASIN_AREA_KM2
+                ):
+                    exorheic_backbone_hack_observations.append(
+                        (area, main_channel_length)
+                    )
+            else:
+                # Legacy worlds may omit outlet semantics. Their all-terminal
+                # diagnostics remain reconstructible, but they cannot be used
+                # for the source-matched HydroRIVERS exorheic population.
+                is_endorheic = bool(watershed.get("is_endorheic", False))
             watershed_count += 1
             watershed_area += area
             if is_endorheic:
@@ -1910,6 +2108,34 @@ def _world_metric_values(world: dict[str, Any]) -> dict[str, float]:
                     "watershed_hack_fitted_coefficient": hack_fit.coefficient,
                     "watershed_hack_fitted_log_rmse": hack_fit.log_rmse,
                     "watershed_hack_fitted_observation_count": float(hack_fit.observation_count),
+                }
+            )
+        if (
+            len(exorheic_backbone_hack_observations) >= 2
+            and len({area for area, _ in exorheic_backbone_hack_observations}) >= 2
+        ):
+            try:
+                exorheic_hack_fit = fit_power_law(
+                    exorheic_backbone_hack_observations
+                )
+            except ValueError as exc:
+                raise CalibrationError(
+                    "world exorheic watershed-backbone Hack fit is invalid"
+                ) from exc
+            derived_watershed_values.update(
+                {
+                    "exorheic_watershed_backbone_hack_fitted_exponent": (
+                        exorheic_hack_fit.exponent
+                    ),
+                    "exorheic_watershed_backbone_hack_fitted_coefficient": (
+                        exorheic_hack_fit.coefficient
+                    ),
+                    "exorheic_watershed_backbone_hack_fitted_log_rmse": (
+                        exorheic_hack_fit.log_rmse
+                    ),
+                    "exorheic_watershed_backbone_hack_fitted_observation_count": float(
+                        exorheic_hack_fit.observation_count
+                    ),
                 }
             )
         for metric, derived_value in derived_watershed_values.items():

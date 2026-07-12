@@ -53,6 +53,12 @@ Params params_from_c_config(const CConfig& cfg) {
     return params;
 }
 
+Params params_from_c_config(const CConfigV3& cfg) {
+    Params params = params_from_c_config(cfg.base.base);
+    params.maturation_timestep_ma = cfg.maturation_timestep_ma;
+    return params;
+}
+
 ComputeOptions compute_options_from_c_config(const CConfigV2& cfg) {
     ComputeOptions options;
     options.compute_backend = cfg.compute_backend;
@@ -122,6 +128,58 @@ extern "C" const char* magic_geo_generate_json_v2(const magic_geo::CConfigV2* cf
         return copy_string(error_json(exc.what()));
     } catch (...) {
         return copy_string(error_json("unknown generation failure"));
+    }
+}
+
+extern "C" const char* magic_geo_generate_json_v3(const magic_geo::CConfigV3* cfg) {
+    try {
+        if (cfg == nullptr) {
+            return copy_string(error_json("null config pointer"));
+        }
+        return copy_string(magic_geo::generate_world_json(
+            magic_geo::params_from_c_config(*cfg),
+            magic_geo::compute_options_from_c_config(cfg->base)
+        ));
+    } catch (const std::exception& exc) {
+        return copy_string(error_json(exc.what()));
+    } catch (...) {
+        return copy_string(error_json("unknown generation failure"));
+    }
+}
+
+extern "C" const char* magic_geo_generate_geo_json_v2(
+    const magic_geo::CConfigV2* cfg
+) {
+    try {
+        if (cfg == nullptr) {
+            return copy_string(error_json("null config pointer"));
+        }
+        return copy_string(magic_geo::generate_geo_world_json(
+            magic_geo::params_from_c_config(cfg->base),
+            magic_geo::compute_options_from_c_config(*cfg)
+        ));
+    } catch (const std::exception& exc) {
+        return copy_string(error_json(exc.what()));
+    } catch (...) {
+        return copy_string(error_json("unknown geo generation failure"));
+    }
+}
+
+extern "C" const char* magic_geo_generate_geo_json_v3(
+    const magic_geo::CConfigV3* cfg
+) {
+    try {
+        if (cfg == nullptr) {
+            return copy_string(error_json("null config pointer"));
+        }
+        return copy_string(magic_geo::generate_geo_world_json(
+            magic_geo::params_from_c_config(*cfg),
+            magic_geo::compute_options_from_c_config(cfg->base)
+        ));
+    } catch (const std::exception& exc) {
+        return copy_string(error_json(exc.what()));
+    } catch (...) {
+        return copy_string(error_json("unknown geo generation failure"));
     }
 }
 

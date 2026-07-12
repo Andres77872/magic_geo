@@ -108,6 +108,7 @@ class ErosionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     iterations: int = Field(6, ge=0, le=250)
+    maturation_timestep_ma: float = Field(5.0, gt=0.0, le=5.0)
     stream_power_coefficient: float = Field(7.5, ge=0.0, le=1000.0)
     drainage_exponent: float = Field(0.5, ge=0.0, le=2.0)
     slope_exponent: float = Field(1.0, ge=0.0, le=3.0)

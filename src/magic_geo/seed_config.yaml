@@ -28,7 +28,7 @@ tectonics:
   min_angular_speed: 0.03
   max_angular_speed: 0.95
   boundary_smoothing_steps: 5
-  plate_motion_scale_deg_per_step: 2.0
+  plate_motion_scale_deg_per_step: 4.0
   oceanic_crust_aging_ma_per_step: 5.0
 
 climate:
@@ -44,6 +44,7 @@ hydrology:
 
 erosion:
   iterations: 6
+  maturation_timestep_ma: 5.0
   stream_power_coefficient: 7.5
   drainage_exponent: 0.5
   slope_exponent: 1.0

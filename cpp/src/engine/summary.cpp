@@ -14,6 +14,166 @@ std::string counts_json(const std::map<std::string, int>& counts) {
     return out;
 }
 
+std::string summary_with_crust_material_shadow_json(
+    std::string summary,
+    const std::vector<CrustMaterialShadowStep>& history
+) {
+    if (summary.size() < 2 || summary.front() != '{' || summary.back() != '}') {
+        throw std::runtime_error(
+            "crust material shadow summary extension requires a JSON object"
+        );
+    }
+    summary.pop_back();
+    bool first = summary.size() == 1;
+
+    std::uint64_t total_opening_packet_count = 0;
+    std::uint64_t total_transported_packet_count = 0;
+    std::uint64_t total_closing_packet_count = 0;
+    std::uint64_t total_source_adjustment_count = 0;
+    std::uint64_t total_sink_adjustment_count = 0;
+    std::uint64_t maximum_opening_packet_count_per_step = 0;
+    std::uint64_t maximum_transported_packet_count_per_step = 0;
+    std::uint64_t maximum_closing_packet_count_per_step = 0;
+    std::uint64_t maximum_source_adjustment_count_per_step = 0;
+    std::uint64_t maximum_sink_adjustment_count_per_step = 0;
+    double cumulative_unresolved_source_mass_kg = 0.0;
+    double cumulative_unresolved_sink_mass_kg = 0.0;
+    double maximum_absolute_transport_raw_residual_kg = 0.0;
+    double maximum_closing_scalar_relative_residual = 0.0;
+    double maximum_absolute_adjustment_reconciliation_residual_kg = 0.0;
+
+    for (const CrustMaterialShadowStep& step : history) {
+        const std::uint64_t opening_packet_count =
+            static_cast<std::uint64_t>(step.opening_packet_count);
+        const std::uint64_t transported_packet_count =
+            static_cast<std::uint64_t>(step.transported_packet_count);
+        const std::uint64_t closing_packet_count =
+            static_cast<std::uint64_t>(step.closing_packet_count);
+        const std::uint64_t source_adjustment_count =
+            static_cast<std::uint64_t>(
+                step.unresolved_source_adjustment_count
+            );
+        const std::uint64_t sink_adjustment_count =
+            static_cast<std::uint64_t>(
+                step.unresolved_sink_adjustment_count
+            );
+        total_opening_packet_count += opening_packet_count;
+        total_transported_packet_count += transported_packet_count;
+        total_closing_packet_count += closing_packet_count;
+        total_source_adjustment_count += source_adjustment_count;
+        total_sink_adjustment_count += sink_adjustment_count;
+        maximum_opening_packet_count_per_step = std::max(
+            maximum_opening_packet_count_per_step,
+            opening_packet_count
+        );
+        maximum_transported_packet_count_per_step = std::max(
+            maximum_transported_packet_count_per_step,
+            transported_packet_count
+        );
+        maximum_closing_packet_count_per_step = std::max(
+            maximum_closing_packet_count_per_step,
+            closing_packet_count
+        );
+        maximum_source_adjustment_count_per_step = std::max(
+            maximum_source_adjustment_count_per_step,
+            source_adjustment_count
+        );
+        maximum_sink_adjustment_count_per_step = std::max(
+            maximum_sink_adjustment_count_per_step,
+            sink_adjustment_count
+        );
+        cumulative_unresolved_source_mass_kg +=
+            step.unresolved_source_mass_kg;
+        cumulative_unresolved_sink_mass_kg +=
+            step.unresolved_sink_mass_kg;
+        maximum_absolute_transport_raw_residual_kg = std::max(
+            maximum_absolute_transport_raw_residual_kg,
+            std::abs(step.shadow_minus_raw_transport_mass_kg)
+        );
+        maximum_closing_scalar_relative_residual = std::max(
+            maximum_closing_scalar_relative_residual,
+            std::abs(step.post_scalar_mirror_residual_kg) /
+                std::max(1.0, std::abs(step.closing_scalar_mass_kg))
+        );
+        maximum_absolute_adjustment_reconciliation_residual_kg = std::max(
+            maximum_absolute_adjustment_reconciliation_residual_kg,
+            std::abs(step.ordered_adjustment_reconciliation_residual_kg)
+        );
+    }
+
+    const std::uint64_t total_packet_count =
+        total_opening_packet_count +
+        total_transported_packet_count +
+        total_closing_packet_count;
+    const std::uint64_t maximum_packet_count_per_table = std::max({
+        maximum_opening_packet_count_per_step,
+        maximum_transported_packet_count_per_step,
+        maximum_closing_packet_count_per_step,
+    });
+    const std::uint64_t total_adjustment_count =
+        total_source_adjustment_count + total_sink_adjustment_count;
+    const std::uint64_t maximum_adjustment_count_per_table = std::max(
+        maximum_source_adjustment_count_per_step,
+        maximum_sink_adjustment_count_per_step
+    );
+    constexpr int mass_precision =
+        std::numeric_limits<double>::max_digits10;
+    add_u64(summary, first, "crust_material_shadow_history_step_count",
+        static_cast<std::uint64_t>(history.size()));
+    add_u64(summary, first, "total_crust_material_shadow_packet_count",
+        total_packet_count);
+    add_u64(summary, first,
+        "maximum_crust_material_shadow_packet_count_per_table",
+        maximum_packet_count_per_table);
+    add_u64(summary, first,
+        "total_crust_material_shadow_opening_packet_count",
+        total_opening_packet_count);
+    add_u64(summary, first,
+        "total_crust_material_shadow_transported_packet_count",
+        total_transported_packet_count);
+    add_u64(summary, first,
+        "total_crust_material_shadow_closing_packet_count",
+        total_closing_packet_count);
+    add_u64(summary, first,
+        "maximum_crust_material_shadow_opening_packet_count_per_step",
+        maximum_opening_packet_count_per_step);
+    add_u64(summary, first,
+        "maximum_crust_material_shadow_transported_packet_count_per_step",
+        maximum_transported_packet_count_per_step);
+    add_u64(summary, first,
+        "maximum_crust_material_shadow_closing_packet_count_per_step",
+        maximum_closing_packet_count_per_step);
+    add_u64(summary, first, "total_crust_material_shadow_adjustment_count",
+        total_adjustment_count);
+    add_u64(summary, first,
+        "maximum_crust_material_shadow_adjustment_count_per_table",
+        maximum_adjustment_count_per_table);
+    add_u64(summary, first,
+        "total_crust_material_shadow_unresolved_source_adjustment_count",
+        total_source_adjustment_count);
+    add_u64(summary, first,
+        "total_crust_material_shadow_unresolved_sink_adjustment_count",
+        total_sink_adjustment_count);
+    add_double(summary, first,
+        "cumulative_crust_material_shadow_unresolved_source_mass_kg",
+        cumulative_unresolved_source_mass_kg, mass_precision);
+    add_double(summary, first,
+        "cumulative_crust_material_shadow_unresolved_sink_mass_kg",
+        cumulative_unresolved_sink_mass_kg, mass_precision);
+    add_double(summary, first,
+        "maximum_absolute_crust_material_shadow_transport_raw_residual_kg",
+        maximum_absolute_transport_raw_residual_kg, mass_precision);
+    add_double(summary, first,
+        "maximum_crust_material_shadow_closing_scalar_relative_residual",
+        maximum_closing_scalar_relative_residual, mass_precision);
+    add_double(summary, first,
+        "maximum_absolute_crust_material_shadow_adjustment_reconciliation_residual_kg",
+        maximum_absolute_adjustment_reconciliation_residual_kg,
+        mass_precision);
+    summary += "}";
+    return summary;
+}
+
 std::string summary_json(
     const Params& params,
     const std::vector<Cell>& cells,
@@ -954,6 +1114,26 @@ std::string summary_json(
     int total_rejuvenated_oceanic_events = 0;
     int total_subducted_oceanic_events = 0;
     int final_accreted_terrane_cell_count = 0;
+    std::uint64_t total_crust_overlap_sparse_edge_count = 0;
+    std::uint64_t total_crust_mixed_destination_count = 0;
+    int maximum_crust_coverage_multiplicity = 0;
+    int maximum_crust_coverage_arrangement_line_count = 0;
+    int maximum_crust_coverage_arrangement_fragment_count = 0;
+    double maximum_crust_source_area_closure_error_km2 = 0.0;
+    double maximum_crust_source_area_relative_closure_error = 0.0;
+    double maximum_crust_destination_partition_closure_error_km2 = 0.0;
+    double total_crust_uncovered_gap_area_km2 = 0.0;
+    double total_crust_overlap_excess_area_km2 = 0.0;
+    double maximum_crust_transport_inventory_relative_closure_error = 0.0;
+    double cumulative_absolute_tectonic_process_crust_volume_change_km3 = 0.0;
+    double net_tectonic_process_crust_volume_change_km3 = 0.0;
+    double cumulative_absolute_tectonic_process_density_weighted_crust_volume_change_g_cm3_km3 = 0.0;
+    double net_tectonic_process_density_weighted_crust_volume_change_g_cm3_km3 = 0.0;
+    double cumulative_absolute_tectonic_process_crust_age_volume_moment_change_km3_ma = 0.0;
+    double net_tectonic_process_crust_age_volume_moment_change_km3_ma = 0.0;
+    int total_tectonic_process_reason_record_count = 0;
+    int active_tectonic_process_reason_record_count = 0;
+    double maximum_tectonic_process_attribution_relative_closure_residual = 0.0;
     double plate_motion_abs_age_change_sum = 0.0;
     double plate_motion_abs_thickness_change_sum = 0.0;
     double plate_motion_abs_density_change_sum = 0.0;
@@ -979,6 +1159,129 @@ std::string summary_json(
         total_aged_oceanic_events += step.aged_oceanic_cell_count;
         total_rejuvenated_oceanic_events += step.rejuvenated_oceanic_cell_count;
         total_subducted_oceanic_events += step.subducted_oceanic_cell_count;
+        const CrustTransportPlan& transport = step.transport_plan;
+        total_crust_overlap_sparse_edge_count += transport.source_cell_ids.size();
+        total_crust_mixed_destination_count += static_cast<std::uint64_t>(
+            std::count_if(
+                transport.contributor_count_by_cell.begin(),
+                transport.contributor_count_by_cell.end(),
+                [](int contributor_count) { return contributor_count > 1; }
+            )
+        );
+        if (!transport.maximum_coverage_multiplicity_by_cell.empty()) {
+            maximum_crust_coverage_multiplicity = std::max(
+                maximum_crust_coverage_multiplicity,
+                *std::max_element(
+                    transport.maximum_coverage_multiplicity_by_cell.begin(),
+                    transport.maximum_coverage_multiplicity_by_cell.end()
+                )
+            );
+        }
+        maximum_crust_coverage_arrangement_line_count = std::max(
+            maximum_crust_coverage_arrangement_line_count,
+            transport.maximum_coverage_arrangement_line_count
+        );
+        maximum_crust_coverage_arrangement_fragment_count = std::max(
+            maximum_crust_coverage_arrangement_fragment_count,
+            transport.maximum_coverage_arrangement_fragment_count
+        );
+        maximum_crust_source_area_closure_error_km2 = std::max(
+            maximum_crust_source_area_closure_error_km2,
+            transport.maximum_source_area_closure_error_km2
+        );
+        maximum_crust_source_area_relative_closure_error = std::max(
+            maximum_crust_source_area_relative_closure_error,
+            transport.maximum_source_area_relative_closure_error
+        );
+        maximum_crust_destination_partition_closure_error_km2 = std::max(
+            maximum_crust_destination_partition_closure_error_km2,
+            transport.maximum_destination_partition_closure_error_km2
+        );
+        total_crust_uncovered_gap_area_km2 +=
+            transport.global_uncovered_gap_area_km2;
+        total_crust_overlap_excess_area_km2 +=
+            transport.global_overlap_excess_area_km2;
+        maximum_crust_transport_inventory_relative_closure_error = std::max({
+            maximum_crust_transport_inventory_relative_closure_error,
+            std::abs(
+                transport.transported_crust_volume_km3 -
+                transport.initial_crust_volume_km3
+            ) / std::max(1.0, std::abs(transport.initial_crust_volume_km3)),
+            std::abs(
+                transport.transported_density_weighted_crust_volume -
+                transport.initial_density_weighted_crust_volume
+            ) / std::max(
+                1.0,
+                std::abs(transport.initial_density_weighted_crust_volume)
+            ),
+            std::abs(
+                transport.transported_crust_age_volume_moment -
+                transport.initial_crust_age_volume_moment
+            ) / std::max(
+                1.0,
+                std::abs(transport.initial_crust_age_volume_moment)
+            ),
+        });
+        const double process_crust_volume_change_km3 =
+            step.post_process_crust_volume_km3 -
+            transport.transported_crust_volume_km3;
+        const double process_density_weighted_crust_volume_change_g_cm3_km3 =
+            step.post_process_density_weighted_crust_volume -
+            transport.transported_density_weighted_crust_volume;
+        const double process_crust_age_volume_moment_change_km3_ma =
+            step.post_process_crust_age_volume_moment -
+            transport.transported_crust_age_volume_moment;
+        double attributed_process_crust_volume_change_km3 = 0.0;
+        double attributed_process_density_weighted_crust_volume_change = 0.0;
+        double attributed_process_crust_age_volume_moment_change = 0.0;
+        for (const CrustProcessInventoryDelta& reason :
+             step.process_inventory_delta_by_reason) {
+            total_tectonic_process_reason_record_count++;
+            active_tectonic_process_reason_record_count +=
+                reason.triggered_cell_count > 0 ? 1 : 0;
+            attributed_process_crust_volume_change_km3 +=
+                reason.crust_volume_km3;
+            attributed_process_density_weighted_crust_volume_change +=
+                reason.density_weighted_crust_volume;
+            attributed_process_crust_age_volume_moment_change +=
+                reason.crust_age_volume_moment_km3_ma;
+        }
+        maximum_tectonic_process_attribution_relative_closure_residual =
+            std::max({
+                maximum_tectonic_process_attribution_relative_closure_residual,
+                std::abs(
+                    process_crust_volume_change_km3 -
+                    attributed_process_crust_volume_change_km3
+                ) / std::max(1.0, std::abs(process_crust_volume_change_km3)),
+                std::abs(
+                    process_density_weighted_crust_volume_change_g_cm3_km3 -
+                    attributed_process_density_weighted_crust_volume_change
+                ) / std::max(
+                    1.0,
+                    std::abs(
+                        process_density_weighted_crust_volume_change_g_cm3_km3
+                    )
+                ),
+                std::abs(
+                    process_crust_age_volume_moment_change_km3_ma -
+                    attributed_process_crust_age_volume_moment_change
+                ) / std::max(
+                    1.0,
+                    std::abs(process_crust_age_volume_moment_change_km3_ma)
+                ),
+            });
+        cumulative_absolute_tectonic_process_crust_volume_change_km3 +=
+            std::abs(process_crust_volume_change_km3);
+        net_tectonic_process_crust_volume_change_km3 +=
+            process_crust_volume_change_km3;
+        cumulative_absolute_tectonic_process_density_weighted_crust_volume_change_g_cm3_km3 +=
+            std::abs(process_density_weighted_crust_volume_change_g_cm3_km3);
+        net_tectonic_process_density_weighted_crust_volume_change_g_cm3_km3 +=
+            process_density_weighted_crust_volume_change_g_cm3_km3;
+        cumulative_absolute_tectonic_process_crust_age_volume_moment_change_km3_ma +=
+            std::abs(process_crust_age_volume_moment_change_km3_ma);
+        net_tectonic_process_crust_age_volume_moment_change_km3_ma +=
+            process_crust_age_volume_moment_change_km3_ma;
         plate_motion_abs_age_change_sum += step.mean_abs_crust_age_change_ma;
         plate_motion_abs_thickness_change_sum += step.mean_abs_crust_thickness_change_km;
         plate_motion_abs_density_change_sum += step.mean_abs_crust_density_change;
@@ -1242,6 +1545,71 @@ std::string summary_json(
     add_int(out, first, "total_aged_oceanic_event_count", total_aged_oceanic_events);
     add_int(out, first, "total_rejuvenated_oceanic_event_count", total_rejuvenated_oceanic_events);
     add_int(out, first, "total_subducted_oceanic_event_count", total_subducted_oceanic_events);
+    add_u64(out, first, "total_crust_overlap_sparse_edge_count",
+        total_crust_overlap_sparse_edge_count);
+    add_u64(out, first, "total_crust_mixed_destination_count",
+        total_crust_mixed_destination_count);
+    add_int(out, first, "maximum_crust_coverage_multiplicity",
+        maximum_crust_coverage_multiplicity);
+    add_int(out, first, "maximum_crust_coverage_arrangement_line_count",
+        maximum_crust_coverage_arrangement_line_count);
+    add_int(out, first, "maximum_crust_coverage_arrangement_fragment_count",
+        maximum_crust_coverage_arrangement_fragment_count);
+    const int crust_transport_diagnostic_precision =
+        std::numeric_limits<double>::max_digits10;
+    add_double(out, first, "maximum_crust_source_area_closure_error_km2",
+        maximum_crust_source_area_closure_error_km2,
+        crust_transport_diagnostic_precision);
+    add_double(out, first,
+        "maximum_crust_source_area_relative_closure_error",
+        maximum_crust_source_area_relative_closure_error,
+        crust_transport_diagnostic_precision);
+    add_double(out, first,
+        "maximum_crust_destination_partition_closure_error_km2",
+        maximum_crust_destination_partition_closure_error_km2,
+        crust_transport_diagnostic_precision);
+    add_double(out, first, "total_crust_uncovered_gap_area_km2",
+        total_crust_uncovered_gap_area_km2,
+        crust_transport_diagnostic_precision);
+    add_double(out, first, "total_crust_overlap_excess_area_km2",
+        total_crust_overlap_excess_area_km2,
+        crust_transport_diagnostic_precision);
+    add_double(out, first,
+        "maximum_crust_transport_inventory_relative_closure_error",
+        maximum_crust_transport_inventory_relative_closure_error,
+        crust_transport_diagnostic_precision);
+    add_double(out, first,
+        "cumulative_absolute_tectonic_process_crust_volume_change_km3",
+        cumulative_absolute_tectonic_process_crust_volume_change_km3,
+        crust_transport_diagnostic_precision);
+    add_double(out, first,
+        "net_tectonic_process_crust_volume_change_km3",
+        net_tectonic_process_crust_volume_change_km3,
+        crust_transport_diagnostic_precision);
+    add_double(out, first,
+        "cumulative_absolute_tectonic_process_density_weighted_crust_volume_change_g_cm3_km3",
+        cumulative_absolute_tectonic_process_density_weighted_crust_volume_change_g_cm3_km3,
+        crust_transport_diagnostic_precision);
+    add_double(out, first,
+        "net_tectonic_process_density_weighted_crust_volume_change_g_cm3_km3",
+        net_tectonic_process_density_weighted_crust_volume_change_g_cm3_km3,
+        crust_transport_diagnostic_precision);
+    add_double(out, first,
+        "cumulative_absolute_tectonic_process_crust_age_volume_moment_change_km3_ma",
+        cumulative_absolute_tectonic_process_crust_age_volume_moment_change_km3_ma,
+        crust_transport_diagnostic_precision);
+    add_double(out, first,
+        "net_tectonic_process_crust_age_volume_moment_change_km3_ma",
+        net_tectonic_process_crust_age_volume_moment_change_km3_ma,
+        crust_transport_diagnostic_precision);
+    add_int(out, first, "total_tectonic_process_reason_record_count",
+        total_tectonic_process_reason_record_count);
+    add_int(out, first, "active_tectonic_process_reason_record_count",
+        active_tectonic_process_reason_record_count);
+    add_double(out, first,
+        "maximum_tectonic_process_attribution_relative_closure_residual",
+        maximum_tectonic_process_attribution_relative_closure_residual,
+        crust_transport_diagnostic_precision);
     add_int(out, first, "accreted_terrane_cell_count", final_accreted_terrane_cell_count);
     add_double(out, first, "mean_plate_cumulative_rotation_deg", mean_plate_cumulative_rotation_deg, params.float_precision);
     add_double(out, first, "max_plate_cumulative_rotation_deg", max_plate_cumulative_rotation_deg, params.float_precision);

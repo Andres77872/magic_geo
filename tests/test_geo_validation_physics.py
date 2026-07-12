@@ -36,7 +36,7 @@ class GeoPhysicsReplayValidationTests(TestCase):
     def test_generated_geo_world_passes_all_physics_replays(self) -> None:
         checks = validate_physics_replays(self.world)
 
-        self.assertEqual(len(checks), 4)
+        self.assertEqual(len(checks), 13)
         self.assertTrue(all(check["passed"] for check in checks))
         for index, check in enumerate(checks):
             self.assertEqual(check["id"], index)
@@ -93,6 +93,97 @@ class GeoPhysicsReplayValidationTests(TestCase):
                 for violation in check["evidence"]["violations"]
             )
         )
+
+    def test_boundary_segment_mutation_is_a_distinct_fatal_replay(self) -> None:
+        altered = deepcopy(self.world)
+        segment = altered["plate_motion_history"][0]["boundary_segments"][0]
+        segment["midpoint_unit_x"] += 0.001
+
+        check = _check(
+            validate_physics_replays(altered),
+            "tectonics",
+            "exact_directed_plate_boundary_segment_replay",
+        )
+
+        self.assertFalse(check["passed"])
+        self.assertEqual(check["status"], "failed")
+        self.assertIn("reciprocal control-volume segment", check["message"])
+        self.assertTrue(check["evidence"]["violations"])
+
+    def test_boundary_candidate_cannot_be_promoted_to_physical_polarity(self) -> None:
+        altered = deepcopy(self.world)
+        segment = next(
+            record
+            for step in altered["plate_motion_history"]
+            for record in step["boundary_segments"]
+            if record["direct_boundary_class"] == "convergent"
+        )
+        segment["physical_polarity_source"] = "oceanic_side_candidate"
+        segment["physical_polarity_confidence"] = 1.0e-13
+
+        check = _check(
+            validate_physics_replays(altered),
+            "tectonics",
+            "exact_directed_plate_boundary_segment_replay",
+        )
+
+        self.assertFalse(check["passed"])
+        self.assertEqual(check["status"], "failed")
+        self.assertTrue(check["evidence"]["violations"])
+
+    def test_overlap_candidate_fate_mutation_is_a_distinct_fatal_replay(self) -> None:
+        altered = deepcopy(self.world)
+        record = next(
+            candidate
+            for step in altered["plate_motion_history"]
+            for candidate in step["crust_overlap_candidate_fate_ledger"][
+                "overlap_class_candidates"
+            ]
+        )
+        record["membership_area_class_id"] += 1
+
+        check = _check(
+            validate_physics_replays(altered),
+            "tectonics",
+            "overlap_candidate_fate_crosswalk_replay",
+        )
+
+        self.assertFalse(check["passed"])
+        self.assertEqual(check["status"], "failed")
+        self.assertIn("diagnostic overlap-excess partition", check["message"])
+        self.assertTrue(check["evidence"]["violations"])
+
+    def test_oceanic_age_depth_mutation_is_a_distinct_fatal_replay(self) -> None:
+        altered = deepcopy(self.world)
+        altered["plate_motion_history"][-1][
+            "post_process_local_thermal_subsidence_target_m"
+        ][0] += 1.0e-6
+
+        check = _check(
+            validate_physics_replays(altered),
+            "tectonics",
+            "oceanic_age_depth_thermal_target_replay",
+        )
+
+        self.assertFalse(check["passed"])
+        self.assertEqual(check["status"], "failed")
+        self.assertIn("equilibrium targets", check["message"])
+        self.assertTrue(check["evidence"]["violations"])
+
+    def test_initial_oceanic_age_mutation_is_a_distinct_fatal_replay(self) -> None:
+        altered = deepcopy(self.world)
+        altered["initial_oceanic_crust_age_ledger"]["age_ma_by_cell"][0] += 0.01
+
+        check = _check(
+            validate_physics_replays(altered),
+            "tectonics",
+            "initial_oceanic_crust_age_graph_replay",
+        )
+
+        self.assertFalse(check["passed"])
+        self.assertEqual(check["status"], "failed")
+        self.assertIn("multi-source Dijkstra path witness", check["message"])
+        self.assertTrue(check["evidence"]["violations"])
 
     def test_colluding_negative_energy_mirrors_fail_equation_replay(self) -> None:
         altered = deepcopy(self.world)
@@ -161,8 +252,103 @@ class GeoPhysicsReplayValidationTests(TestCase):
         self.assertFalse(check["passed"])
         self.assertGreaterEqual(check["observed"]["violation_count"], 2)
 
+    def test_process_order_and_reference_erosion_alias_mutations_fail(
+        self,
+    ) -> None:
+        altered = deepcopy(self.world)
+        altered["simulation_clock"]["iteration_process_order"] = "tampered"
+        altered["simulation_clock"][
+            "erosion_transition_coupling_semantics"
+        ] = "tampered"
+        altered["earth_system_feedback_history"][0][
+            "mean_stream_power_response_m_per_reference_step"
+        ] += 1.0
+
+        check = _check(
+            validate_physics_replays(altered),
+            "simulation",
+            "coupled_stage_feedback_replay",
+        )
+
+        self.assertFalse(check["passed"])
+        self.assertGreaterEqual(check["observed"]["violation_count"], 2)
+
+    def test_crust_material_shadow_mutation_is_a_distinct_fatal_replay(self) -> None:
+        altered = deepcopy(self.world)
+        masses = altered["crust_material_shadow_history"][0][
+            "opening_packets"
+        ]["dry_rock_mass_kg"]
+        masses[0] += max(1.0, abs(masses[0]) * 1.0e-8)
+
+        check = _check(
+            validate_physics_replays(altered),
+            "tectonics",
+            "persistent_crust_material_shadow_replay",
+        )
+
+        self.assertFalse(check["passed"])
+        self.assertEqual(check["status"], "failed")
+        self.assertIn("diagnostic shadow", check["message"])
+        self.assertTrue(check["evidence"]["violations"])
+
+    def test_finite_crust_accounting_mutation_is_a_distinct_fatal_replay(
+        self,
+    ) -> None:
+        altered = deepcopy(self.world)
+        altered["crust_dry_rock_accounting_model"][
+            "upper_mantle_exchange_reservoir_resolved"
+        ] = True
+
+        check = _check(
+            validate_physics_replays(altered),
+            "tectonics",
+            "finite_crust_dry_rock_accounting_replay",
+        )
+
+        self.assertFalse(check["passed"])
+        self.assertEqual(check["status"], "failed")
+        self.assertIn("counter-model", check["message"])
+        self.assertTrue(check["evidence"]["violations"])
+
+    def test_sediment_partition_mutation_is_a_distinct_fatal_replay(
+        self,
+    ) -> None:
+        altered = deepcopy(self.world)
+        altered["fluvial_sediment_routing_model"][
+            "source_partition_audit_is_mass_claim"
+        ] = True
+
+        check = _check(
+            validate_physics_replays(altered),
+            "sediment",
+            "sediment_alluvium_bedrock_source_partition_replay",
+        )
+
+        self.assertFalse(check["passed"])
+        self.assertEqual(check["status"], "failed")
+        self.assertIn("non-mass", check["message"])
+        self.assertTrue(check["evidence"]["violations"])
+
+    def test_sediment_interface_mutation_is_a_distinct_fatal_replay(
+        self,
+    ) -> None:
+        altered = deepcopy(self.world)
+        altered["cells"][0]["bedrock_surface_elevation_m"] += 0.01
+        altered["cells"][0]["elevation_m"] += 0.01
+
+        check = _check(
+            validate_physics_replays(altered),
+            "sediment",
+            "bedrock_mobile_sediment_interface_replay",
+        )
+
+        self.assertFalse(check["passed"])
+        self.assertEqual(check["status"], "failed")
+        self.assertIn("canonical bedrock surface", check["message"])
+        self.assertTrue(check["evidence"]["violations"])
+
     def test_malformed_root_is_reported_without_conversion_errors(self) -> None:
         checks = validate_physics_replays({"cells": "not-a-list"})
 
-        self.assertEqual(len(checks), 4)
+        self.assertEqual(len(checks), 13)
         self.assertTrue(all(not check["passed"] for check in checks))

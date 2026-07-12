@@ -1016,9 +1016,25 @@ class CalibrationSourceTests(TestCase):
             _write_dbf_table(
                 dbf_path,
                 {
-                    "NEXT_DOWN": [0.0, 123.0, 0.0, 0.0],
-                    "UPLAND_SKM": [1_000_000.0, 1_440_000.0, 1_690_000.0, 2_560_000.0],
-                    "DIST_UP_KM": [2_000.0, 2_300.0, 2_600.0, 3_200.0],
+                    "NEXT_DOWN": [0.0, 123.0, 0.0, 0.0, 0.0, 0.0],
+                    "ENDORHEIC": [0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                    "ORD_CLAS": [1.0, 1.0, 1.0, 2.0, 1.0, 1.0],
+                    "UPLAND_SKM": [
+                        1_000_000.0,
+                        1_440_000.0,
+                        1_690_000.0,
+                        2_560_000.0,
+                        3_240_000.0,
+                        4_000_000.0,
+                    ],
+                    "DIST_UP_KM": [
+                        2_000.0,
+                        2_300.0,
+                        2_600.0,
+                        3_200.0,
+                        3_600.0,
+                        4_000.0,
+                    ],
                 },
             )
             archive_path = root / "HydroRIVERS_v10_test_shp.zip"
@@ -1038,13 +1054,17 @@ class CalibrationSourceTests(TestCase):
                 {
                     **common,
                     "metric": "hydrorivers_hack_fitted_exponent",
-                    "world_metric": "watershed_hack_fitted_exponent",
+                    "world_metric": (
+                        "exorheic_watershed_backbone_hack_fitted_exponent"
+                    ),
                     "statistic": "hydrorivers_hack_fitted_exponent",
                 },
                 {
                     **common,
                     "metric": "hydrorivers_hack_fitted_log_rmse",
-                    "world_metric": "watershed_hack_fitted_log_rmse",
+                    "world_metric": (
+                        "exorheic_watershed_backbone_hack_fitted_log_rmse"
+                    ),
                     "statistic": "hydrorivers_hack_fitted_log_rmse",
                 },
             ]
@@ -1056,6 +1076,8 @@ class CalibrationSourceTests(TestCase):
                 incomplete_dbf,
                 {
                     "NEXT_DOWN": [0.0, 0.0, 0.0],
+                    "ENDORHEIC": [0.0, 0.0, 0.0],
+                    "ORD_CLAS": [1.0, 1.0, 1.0],
                     "UPLAND_SKM": [100.0, None, 900.0],
                     "DIST_UP_KM": [20.0, 40.0, 60.0],
                 },
@@ -1076,24 +1098,96 @@ class CalibrationSourceTests(TestCase):
                 )
 
         targets = {target["metric"]: target for target in report["targets"]}
-        exponent = targets["watershed_hack_fitted_exponent"]
-        log_rmse = targets["watershed_hack_fitted_log_rmse"]
+        exponent = targets[
+            "exorheic_watershed_backbone_hack_fitted_exponent"
+        ]
+        log_rmse = targets[
+            "exorheic_watershed_backbone_hack_fitted_log_rmse"
+        ]
         self.assertAlmostEqual(exponent["source_value"], 0.5, places=9)
         self.assertAlmostEqual(log_rmse["source_value"], 0.0, places=9)
-        self.assertEqual(exponent["source_active_reach_record_count"], 4)
-        self.assertEqual(exponent["source_terminal_reach_record_count"], 3)
+        self.assertEqual(exponent["source_active_reach_record_count"], 6)
+        self.assertEqual(exponent["source_terminal_reach_record_count"], 5)
+        self.assertEqual(
+            exponent["source_exorheic_terminal_reach_record_count"], 4
+        )
+        self.assertEqual(
+            exponent[
+                "source_exorheic_backbone_terminal_reach_record_count"
+            ],
+            3,
+        )
         self.assertEqual(exponent["source_sample_network_count"], 3)
+        self.assertEqual(
+            exponent["source_network_selection"],
+            "next_down_zero_endorheic_zero_order_class_one_with_minimum_upstream_area_v2",
+        )
         self.assertEqual(exponent["source_sample_record_count"], 3)
-        self.assertEqual(exponent["source_network_selection"], "terminal_reaches_with_minimum_upstream_area_v1")
 
         world = {
             "calibration_checks": [],
             "watersheds": [
-                {"area_km2": 1_690_000.0, "main_channel_length_km": 2_600.0},
-                {"area_km2": 1_000_000.0, "main_channel_length_km": 2_000.0},
-                {"area_km2": 2_560_000.0, "main_channel_length_km": 3_200.0},
+                {
+                    "area_km2": 1_690_000.0,
+                    "main_channel_length_km": 2_600.0,
+                    "is_endorheic": False,
+                    "outlet_type": "ocean",
+                },
+                {
+                    "area_km2": 1_000_000.0,
+                    "main_channel_length_km": 2_000.0,
+                    "is_endorheic": False,
+                    "outlet_type": "ocean",
+                },
+                {
+                    "area_km2": 2_560_000.0,
+                    "main_channel_length_km": 3_200.0,
+                    "is_endorheic": False,
+                    "outlet_type": "ocean",
+                },
+                {
+                    "area_km2": 4_000_000.0,
+                    "main_channel_length_km": 50.0,
+                    "is_endorheic": True,
+                    "outlet_type": "closed_land",
+                },
             ],
         }
         evaluation = evaluate_calibration_targets(world, report["targets"])
         self.assertEqual(evaluation["summary"]["external_calibration_pass_count"], 2)
         self.assertTrue(evaluation["summary"]["external_calibration_complete"])
+        self.assertAlmostEqual(
+            evaluation["checks"][0]["value"],
+            0.5,
+            places=12,
+        )
+
+        legacy_world = {
+            "calibration_checks": [],
+            "watersheds": [
+                {
+                    "area_km2": watershed["area_km2"],
+                    "main_channel_length_km": watershed["main_channel_length_km"],
+                }
+                for watershed in world["watersheds"]
+            ],
+        }
+        missing_evaluation = evaluate_calibration_targets(
+            legacy_world,
+            report["targets"],
+        )
+        self.assertEqual(
+            missing_evaluation["summary"]["external_calibration_missing_metric_count"],
+            2,
+        )
+        self.assertFalse(
+            missing_evaluation["summary"]["external_calibration_complete"]
+        )
+
+        conflicting_world = json.loads(json.dumps(world))
+        conflicting_world["watersheds"][0]["is_endorheic"] = True
+        with self.assertRaisesRegex(
+            CalibrationError,
+            "ocean outlet_type conflicts with is_endorheic",
+        ):
+            evaluate_calibration_targets(conflicting_world, report["targets"])

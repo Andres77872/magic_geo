@@ -23,6 +23,7 @@ magic-geo serve -d runs/earthlike/debug                       # → http://127.0
 Optional companion viewers from the same artifacts:
 
 ```bash
+pip install rerun-sdk                                         # not part of the [debug] extra
 magic-geo export-rerun --world runs/earthlike/world.json      # → world.rrd  (rerun world.rrd)
 paraview runs/earthlike/debug/world.pvd                       # VCR stage-stepping in ParaView
 ```
@@ -89,7 +90,7 @@ guess what a field means. It resolves docs for the active layer in decreasing sp
 curated paragraph, then the field-naming convention (`*_id`, `*_index`, `*_mm_y`, `initial_*`,
 `cumulative_*`, `*_residual_*`, …), then the record-family description, then a generated fallback
 that infers the unit from the name suffix and reports the value range from manifest stats. On the
-default earthlike run this documents all 446 layers with only ~19 falling to the pure generated
+default earthlike run this documents all 446 layers with only 12 falling to the pure generated
 fallback; the exact split is shown in the help overlay's "Docs coverage" box.
 
 - **Docs card** (under the layer panel, toggle `d`): the active layer's name, a role badge

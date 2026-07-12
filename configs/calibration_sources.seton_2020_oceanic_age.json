@@ -1,0 +1,25 @@
+{
+  "description": "Checksum-pinned present-day oceanic crustal age distribution used only as an external Earth validation target.",
+  "sources": [
+    {
+      "cdf_thresholds_ma": [20, 40, 60, 80, 100, 120, 140, 160, 180, 200],
+      "dataset": "Seton et al. 2020 present-day oceanic crustal age",
+      "format": "seton_2020_xyz_gridline_age",
+      "layer": "age.2020.1.GeeK2007.6m.xyz",
+      "path": "../calibration_data/seton_2020_oceanic_age/age.2020.1.GeeK2007.6m.xyz",
+      "source_acquired_on": "2026-07-11",
+      "source_citation": "Seton, M., Muller, R. D., Zahirovic, S., Williams, S., Wright, N. M., Cannon, J., Whittaker, J. M., Matthews, K. J., and McGirr, R. (2020). A Global Data Set of Present-Day Oceanic Crustal Age and Seafloor Spreading Parameters.",
+      "source_doi": "10.1029/2020GC009214",
+      "source_grid_dimensions": [1801, 3601],
+      "source_horizontal_crs": "WGS 84 geographic longitude/latitude gridline nodes",
+      "source_license": "Creative Commons Attribution 4.0 International",
+      "source_license_url": "https://creativecommons.org/licenses/by/4.0/",
+      "source_native_resolution": "6 arc-minute (0.1 degree) global gridline XYZ",
+      "source_processing": "Parse finite ages from the 1801 by 3601 grid in canonical file order; apply longitude endpoint trapezoid factors and exact spherical latitude-band factors; compute the finite-ocean weighted mean and inclusive age<=threshold CDF ordinates.",
+      "source_sha256": "56ed93be6b4a9788ed0e18c65f2670fc21eb8adaa06b706632bd109b4ce8f25f",
+      "source_url": "https://www.earthbyte.org/webdav/ftp/earthbyte/agegrid/2020/Grids/age.2020.1.GeeK2007.6m.xyz",
+      "source_variable_units": "Ma",
+      "source_version": "Seton et al. 2020 release 2020.1, Gee and Kent 2007 timescale"
+    }
+  ]
+}

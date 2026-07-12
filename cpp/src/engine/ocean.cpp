@@ -33,7 +33,11 @@ double apply_sea_level(const Params& params, std::vector<Cell>& cells) {
             -std::numeric_limits<double>::infinity()
         );
         for (Cell& cell : cells) {
-            cell.elevation_m -= sea_level;
+            shift_sediment_interface_datum(
+                cell,
+                -sea_level,
+                "zero-ocean sea-level datum"
+            );
             cell.is_water = false;
             cell.water_depth_m = 0.0;
             cell.water_body = 0;
@@ -237,10 +241,32 @@ double apply_sea_level(const Params& params, std::vector<Cell>& cells) {
     for (int cell_id : ocean_component) {
         is_ocean[static_cast<std::size_t>(cell_id)] = true;
     }
-#pragma omp parallel for schedule(static)
     for (int i = 0; i < n; ++i) {
-        cells[i].elevation_m -= sea_level;
+        shift_sediment_interface_datum(
+            cells[i],
+            -sea_level,
+            "sea-level datum"
+        );
         cells[i].is_water = is_ocean[static_cast<std::size_t>(i)];
+        if (cells[i].is_water && !(cells[i].elevation_m < 0.0)) {
+            // The flood interval selects cells strictly below best_sea_level,
+            // but independently rounded bedrock and mobile-sediment operands
+            // can cancel back to signed zero when the datum is composed. Move
+            // only the bedrock operand to the immediately lower representable
+            // value so the canonical interface preserves the discrete wet
+            // decision without a finite empirical depth adjustment.
+            cells[i].bedrock_surface_elevation_m = std::nextafter(
+                -cells[i].sediment_thickness_m,
+                -std::numeric_limits<double>::infinity()
+            );
+            cells[i].elevation_m =
+                cells[i].bedrock_surface_elevation_m +
+                cells[i].sediment_thickness_m;
+            validate_sediment_interface(
+                cells[i],
+                "sea-level selected-ocean strict-depth tie"
+            );
+        }
         cells[i].water_depth_m = cells[i].is_water ? -cells[i].elevation_m : 0.0;
         cells[i].water_body = cells[i].is_water ? 1 : 0;
         cells[i].is_lake = false;
