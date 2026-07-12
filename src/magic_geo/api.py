@@ -368,4 +368,12 @@ def generate_geo_world(config: WorldConfig) -> dict[str, Any]:
 
 
 def generate_from_file(path: Path) -> dict[str, Any]:
+    """Load a YAML file and generate the complete world feature set."""
+
     return generate_world(load_config(path))
+
+
+def generate_geo_from_file(path: Path) -> dict[str, Any]:
+    """Load a YAML file and generate only natural-geography systems."""
+
+    return generate_geo_world(load_config(path))

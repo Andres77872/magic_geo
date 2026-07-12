@@ -109,6 +109,7 @@ add_library(
   cpp/src/engine/history.cpp
   cpp/src/engine/hydrology.cpp
   cpp/src/engine/mesh.cpp
+  cpp/src/engine/messagepack.cpp
   cpp/src/engine/numeric_serialization.cpp
   cpp/src/engine/ocean.cpp
   cpp/src/engine/oceanic_age_depth.cpp
@@ -145,6 +146,7 @@ set_target_properties(
     CXX_VISIBILITY_PRESET hidden
     OUTPUT_NAME "magic_geo_native"
     LIBRARY_OUTPUT_DIRECTORY "${MAGIC_GEO_LIBRARY_OUTPUT_DIRECTORY}"
+    RUNTIME_OUTPUT_DIRECTORY "${MAGIC_GEO_LIBRARY_OUTPUT_DIRECTORY}"
     VISIBILITY_INLINES_HIDDEN YES
 )
 
@@ -157,6 +159,17 @@ if(
   "${MAGIC_GEO_LIBRARY_OUTPUT_DIRECTORY}"
   STREQUAL "${_MAGIC_GEO_PACKAGE_LIBRARY_OUTPUT_DIRECTORY}"
 )
+  # Multi-config generators append a configuration directory unless the
+  # per-config property is explicit. Keep the production DLL/dylib beside the
+  # Python package on Windows/macOS just like the single-config Linux build.
+  set_target_properties(
+    magic_geo_native
+    PROPERTIES
+      LIBRARY_OUTPUT_DIRECTORY_RELEASE
+        "${_MAGIC_GEO_PACKAGE_LIBRARY_OUTPUT_DIRECTORY}"
+      RUNTIME_OUTPUT_DIRECTORY_RELEASE
+        "${_MAGIC_GEO_PACKAGE_LIBRARY_OUTPUT_DIRECTORY}"
+  )
   foreach(_magic_geo_isolated_config Debug RelWithDebInfo MinSizeRel)
     string(TOUPPER "${_magic_geo_isolated_config}" _magic_geo_config_upper)
     set_target_properties(
@@ -201,7 +214,11 @@ if(MAGIC_GEO_CUDA_ENABLED)
   )
 endif()
 
-install(TARGETS magic_geo_native LIBRARY DESTINATION magic_geo)
+install(
+  TARGETS magic_geo_native
+  LIBRARY DESTINATION magic_geo
+  RUNTIME DESTINATION magic_geo
+)
 
 if(BUILD_TESTING)
   add_executable(
@@ -303,6 +320,7 @@ if(BUILD_TESTING)
   add_executable(
     magic_geo_serialization_roundtrip_test
     cpp/tests/serialization_roundtrip_test.cpp
+    cpp/src/engine/messagepack.cpp
     cpp/src/engine/numeric_serialization.cpp
   )
   target_include_directories(

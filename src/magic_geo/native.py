@@ -3,8 +3,11 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
+
+import msgpack
 
 
 MESH_BACKEND_IDS = {
@@ -18,6 +21,23 @@ COMPUTE_BACKEND_IDS = {
     "opencl": 2,
     "cuda": 3,
 }
+
+
+def _native_library_names() -> tuple[str]:
+    """Return only the shared-library filename native to this host."""
+
+    if sys.platform == "win32":
+        return ("magic_geo_native.dll",)
+    if sys.platform == "darwin":
+        return ("libmagic_geo_native.dylib",)
+    return ("libmagic_geo_native.so",)
+
+
+def _reject_msgpack_extension(code: int, data: bytes) -> Any:
+    del data
+    raise ValueError(
+        f"MessagePack extension type {code} is not valid in a native world"
+    )
 
 
 class NativeConfigV1(ctypes.Structure):
@@ -97,9 +117,8 @@ def _library_path() -> Path:
                 f"MAGIC_GEO_NATIVE_LIBRARY does not name a file: {candidate}"
             )
         return candidate
-    suffixes = ["libmagic_geo_native.so", "magic_geo_native.dll", "libmagic_geo_native.dylib"]
     package_dir = Path(__file__).resolve().parent
-    for suffix in suffixes:
+    for suffix in _native_library_names():
         candidate = package_dir / suffix
         if candidate.exists():
             return candidate
@@ -129,8 +148,30 @@ def _load_library() -> ctypes.CDLL:
     if geo_generate_v3 is not None:
         geo_generate_v3.argtypes = [ctypes.POINTER(NativeConfigV3)]
         geo_generate_v3.restype = ctypes.c_void_p
+    msgpack_generate_v3 = getattr(lib, "magic_geo_generate_msgpack_v3", None)
+    if msgpack_generate_v3 is not None:
+        msgpack_generate_v3.argtypes = [
+            ctypes.POINTER(NativeConfigV3),
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
+        msgpack_generate_v3.restype = ctypes.c_void_p
+    geo_msgpack_generate_v3 = getattr(
+        lib,
+        "magic_geo_generate_geo_msgpack_v3",
+        None,
+    )
+    if geo_msgpack_generate_v3 is not None:
+        geo_msgpack_generate_v3.argtypes = [
+            ctypes.POINTER(NativeConfigV3),
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
+        geo_msgpack_generate_v3.restype = ctypes.c_void_p
     lib.magic_geo_free_string.argtypes = [ctypes.c_void_p]
     lib.magic_geo_free_string.restype = None
+    free_buffer = getattr(lib, "magic_geo_free_buffer", None)
+    if free_buffer is not None:
+        free_buffer.argtypes = [ctypes.c_void_p]
+        free_buffer.restype = None
     return lib
 
 
@@ -145,6 +186,60 @@ def _consume_json_pointer(lib: ctypes.CDLL, ptr: int) -> dict[str, Any]:
     finally:
         lib.magic_geo_free_string(ptr)
     if isinstance(payload, dict) and "error" in payload:
+        raise RuntimeError(str(payload["error"]))
+    return payload
+
+
+def _consume_msgpack_pointer(
+    lib: ctypes.CDLL,
+    ptr: int,
+    size: int,
+) -> dict[str, Any]:
+    free_buffer = getattr(lib, "magic_geo_free_buffer", None)
+    if free_buffer is None:
+        raise RuntimeError(
+            "native library exposes MessagePack generation without its buffer releaser"
+        )
+    if not ptr:
+        raise RuntimeError("native library returned a null MessagePack pointer")
+    if size <= 0:
+        free_buffer(ptr)
+        raise RuntimeError("native library returned an empty MessagePack buffer")
+
+    view: memoryview | None = None
+    try:
+        native_array = (ctypes.c_ubyte * size).from_address(int(ptr))
+        view = memoryview(native_array).cast("B")
+        try:
+            payload = msgpack.unpackb(
+                view,
+                raw=False,
+                use_list=True,
+                strict_map_key=True,
+                ext_hook=_reject_msgpack_extension,
+                max_str_len=size,
+                max_bin_len=0,
+                max_array_len=size,
+                max_map_len=size,
+                max_ext_len=0,
+            )
+        except (
+            msgpack.ExtraData,
+            msgpack.FormatError,
+            msgpack.StackError,
+            UnicodeDecodeError,
+            ValueError,
+        ) as exc:
+            raise RuntimeError(
+                f"native library returned invalid MessagePack: {exc}"
+            ) from exc
+    finally:
+        if view is not None:
+            view.release()
+        free_buffer(ptr)
+    if not isinstance(payload, dict):
+        raise RuntimeError("native MessagePack root is not an object")
+    if "error" in payload:
         raise RuntimeError(str(payload["error"]))
     return payload
 
@@ -217,7 +312,11 @@ def backend_info() -> dict[str, Any]:
     return _consume_json_pointer(lib, lib.magic_geo_backend_info_json())
 
 
-def generate_world(data: dict[str, Any]) -> dict[str, Any]:
+def generate_world(
+    data: dict[str, Any],
+    *,
+    serialization: str = "auto",
+) -> dict[str, Any]:
     lib = _load_library()
     generate_v3 = getattr(lib, "magic_geo_generate_json_v3", None)
     if generate_v3 is None:
@@ -226,10 +325,31 @@ def generate_world(data: dict[str, Any]) -> dict[str, Any]:
             "rebuild magic_geo_native from the current source tree"
         )
     native_config = _native_config(data)
+    if serialization not in {"auto", "json", "msgpack"}:
+        raise ValueError("serialization must be auto, json, or msgpack")
+    msgpack_generate_v3 = getattr(lib, "magic_geo_generate_msgpack_v3", None)
+    free_buffer = getattr(lib, "magic_geo_free_buffer", None)
+    if serialization == "msgpack" and (
+        msgpack_generate_v3 is None or free_buffer is None
+    ):
+        raise RuntimeError(
+            "native library does not support MessagePack generation; rebuild "
+            "magic_geo_native from the current source tree"
+        )
+    if msgpack_generate_v3 is not None and free_buffer is not None and (
+        serialization in {"auto", "msgpack"}
+    ):
+        size = ctypes.c_size_t()
+        ptr = msgpack_generate_v3(ctypes.byref(native_config), ctypes.byref(size))
+        return _consume_msgpack_pointer(lib, ptr, size.value)
     return _consume_json_pointer(lib, generate_v3(ctypes.byref(native_config)))
 
 
-def generate_geo_world(data: dict[str, Any]) -> dict[str, Any]:
+def generate_geo_world(
+    data: dict[str, Any],
+    *,
+    serialization: str = "auto",
+) -> dict[str, Any]:
     lib = _load_library()
     geo_generate_v3 = getattr(lib, "magic_geo_generate_geo_json_v3", None)
     if geo_generate_v3 is None:
@@ -239,6 +359,30 @@ def generate_geo_world(data: dict[str, Any]) -> dict[str, Any]:
             "magic_geo_native from the current source tree"
         )
     native_config = _native_config(data)
+    if serialization not in {"auto", "json", "msgpack"}:
+        raise ValueError("serialization must be auto, json, or msgpack")
+    geo_msgpack_generate_v3 = getattr(
+        lib,
+        "magic_geo_generate_geo_msgpack_v3",
+        None,
+    )
+    free_buffer = getattr(lib, "magic_geo_free_buffer", None)
+    if serialization == "msgpack" and (
+        geo_msgpack_generate_v3 is None or free_buffer is None
+    ):
+        raise RuntimeError(
+            "native library does not support geo-only MessagePack generation; "
+            "rebuild magic_geo_native from the current source tree"
+        )
+    if geo_msgpack_generate_v3 is not None and free_buffer is not None and (
+        serialization in {"auto", "msgpack"}
+    ):
+        size = ctypes.c_size_t()
+        ptr = geo_msgpack_generate_v3(
+            ctypes.byref(native_config),
+            ctypes.byref(size),
+        )
+        return _consume_msgpack_pointer(lib, ptr, size.value)
     return _consume_json_pointer(
         lib,
         geo_generate_v3(ctypes.byref(native_config)),

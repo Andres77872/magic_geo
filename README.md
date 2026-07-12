@@ -1,8 +1,16 @@
 # magic-geo
 
-`magic-geo` is a CLI-first causal planet generator. The Python layer owns configuration, validation, orchestration, and file output. The heavy planet generation work runs in a C++ shared library loaded through `ctypes`: spherical mesh construction, plate assignment, boundary classification, topography, climate fields, hydrology, erosion, cryosphere, soils, biomes, resources, settlements, routes, political geography, cultures, languages, population pressure, conflicts, dynasties, logistics, markets, campaigns, and ruins.
+`magic-geo` is a causal planet generator with equivalent CLI, Python, and local
+web-workbench entry points. The Python layer owns configuration, validation,
+orchestration, and file output. The heavy planet generation work runs in a C++
+shared library loaded through `ctypes`: spherical mesh construction, plate
+assignment, boundary classification, topography, climate fields, hydrology,
+erosion, cryosphere, soils, biomes, resources, settlements, routes, political
+geography, cultures, languages, population pressure, conflicts, dynasties,
+logistics, markets, campaigns, and ruins.
 
-The project intentionally has no GUI. The first interface is the CLI plus a seed YAML config.
+The browser UI is local and self-hosted; it does not upload worlds or configs to
+an external service.
 
 ## Quick Start
 
@@ -22,10 +30,125 @@ For a smaller smoke run:
 magic-geo generate --config configs/earthlike_seed.yaml --cells 512 --output /tmp/world.json
 ```
 
+Wheel builds intentionally require the platform's native library to be staged
+first (`cmake --build build --config Release` is the documented production
+workflow). Setuptools loads that library and checks required ABI symbols before
+emitting a platform-tagged, Python-ABI-independent wheel; it never labels a
+bundled ELF/DLL/dylib as `py3-none-any`. A source archive contains CMake/C++
+sources and no staged host binary, so build the extracted source with CMake
+before requesting its wheel. A locally produced Linux tag such as
+`linux_x86_64` is not a manylinux portability claim: its glibc/libstdc++ and
+`libgomp` requirements follow the build host/toolchain.
+
+## Web Workbench
+
+Install the optional web dependencies and start it without any required cache
+argument:
+
+```bash
+python -m pip install -e '.[debug]'
+magic-geo serve
+# http://127.0.0.1:8642
+```
+
+`serve` works before a world exists. The Config view creates and validates YAML;
+Operations runs generation, validation, calibration, SVG/raster rendering, and
+debug/Rerun exports as typed background jobs; Data browses every exported
+scalar, layer, stage summary and retained stage extra, complete nested record
+family, model section, and skipped-output diagnostic. A successful Generate job can prepare a debug cache
+and open it in the map automatically. Browser output defaults are rooted at the
+configured workspace: the prepared-cache and browser
+`export-debug` default is `<workspace>/debug` (`runs/debug` by default). This is
+different from CLI `export-debug` with no `--output`, which uses
+`<world parent>/debug`. Use `-d <cache>` only to select a custom existing cache,
+and `--workspace <dir>` to change and confine browser-created outputs.
+
+Browser cache exports are built in staging and published only after success, so
+a failed or cancelled replacement does not damage the selected cache. File
+download links serve immutable per-job snapshots; reports produced by a
+validation or calibration policy remain downloadable even when that policy
+makes the job exit nonzero.
+
+Cache-backed browser requests carry the selected manifest revision; a publish
+or hot reload makes stale reads fail and retry after status refresh instead of
+mixing mesh/table data from two worlds. JSON cache views normalize non-finite
+Parquet values to `null`, while binary Float32/Arrow layer responses retain
+their numeric missing-value semantics.
+
+The workbench is a trusted-local, single-user tool. It has no authentication or
+user isolation, so keep the default loopback binding unless a trusted network
+boundary or authenticating reverse proxy protects it.
+
+See the [web workbench architecture](https://github.com/Andres77872/magic_geo/blob/master/docs/debugger.md),
+[UI guide](https://github.com/Andres77872/magic_geo/blob/master/docs/debug_ui_guide.md),
+[deep refactor review](https://github.com/Andres77872/magic_geo/blob/master/docs/web_refactor_review.md), and live Swagger
+documentation at `/api/docs`.
+
+## YAML and Python configuration helpers
+
+Create a calibrated Earth-like config, a fast smoke config, or a neutral schema
+default, with typed repeatable overrides:
+
+```bash
+magic-geo init-config
+magic-geo generate --output runs/world.json  # reads ./magic-geo.yaml by default
+magic-geo init-config --profile smoke --output runs/configs/smoke.yaml
+magic-geo init-config --profile earthlike \
+  --set mesh.cell_count=1024 \
+  --set hydrology.preserve_geologic_depressions=false \
+  --output runs/configs/custom.yaml
+```
+
+The same schema/profile/parse/dump/override/write helpers are public Python
+APIs. Duplicate YAML keys and unknown properties are rejected, all 44 fields
+carry JSON-Schema descriptions, and `write_config`/CLI/web saves use validated
+atomic publication. See the
+[configuration helper guide](https://github.com/Andres77872/magic_geo/blob/master/docs/configuration_helpers.md) and the
+[complete property reference](https://github.com/Andres77872/magic_geo/blob/master/docs/configuration_reference.md).
+
+## Example World Seeds
+
+In a source checkout, nine complete, original presets are available under
+[`configs/seeds`](https://github.com/Andres77872/magic_geo/tree/master/configs/seeds),
+covering a land-rich continental realm, dry desert planet, pelagic archipelago,
+cryogenic slushball, young volcanic world, verdant hothouse, high-obliquity
+seasonal world, super-Earth, and ancient stagnant world. Each file explicitly
+sets all 44 configuration properties and uses portable deterministic CPU
+settings. See the
+[example seed gallery](https://github.com/Andres77872/magic_geo/blob/master/docs/example_seed_gallery.md) for the
+research basis, intended outcomes, limitations, and seed-selection workflow.
+
+```bash
+magic-geo generate \
+  --geo-only \
+  --config configs/seeds/pelagic_archipelago.yaml \
+  --cells 512 \
+  --output runs/pelagic-preview.json
+```
+
+## Fast world serialization
+
+JSON remains the default and is fully supported. For substantially faster,
+smaller save/load cycles, use the versioned MessagePack-based `.mgeo` format by
+changing the output suffix:
+
+```bash
+magic-geo generate --config configs/earthlike_seed.yaml --output runs/world.mgeo
+magic-geo validate --world runs/world.mgeo
+magic-geo render --world runs/world.mgeo --output runs/world.svg
+```
+
+All commands that consume a generated world accept either format. On a local
+4,096-cell artifact, the trusted generated-world path made `.mgeo` 50.2%
+smaller, 3.92x faster to save, and 2.60x faster to load in a single benchmark.
+See the [serialization review](docs/serialization_review.md) for framing,
+compatibility, safety limits, native transfer APIs, and reproducible
+measurements.
+
 ## CLI
 
 ```bash
-magic-geo init-config --output configs/my_seed.yaml
+magic-geo init-config --profile earthlike --output configs/my_seed.yaml
 magic-geo backend
 magic-geo generate --config configs/my_seed.yaml --output runs/world.json
 magic-geo validate --world runs/world.json
@@ -48,6 +171,7 @@ magic-geo derive-targets --sources configs/calibration_sources.hydrorivers_v10.j
 magic-geo calibrate --world runs/world.json --targets runs/hydrorivers_targets.json --output runs/hydrorivers_calibration.json --require-all-metrics
 magic-geo render --world runs/world.json --output runs/world.svg --projection mollweide --labels --contours --max-cells 4096
 magic-geo render-raster --world runs/world.json --output runs/world.ppm --projection mollweide --max-cells 4096
+magic-geo serve
 ```
 
 ### Geo-only deep validation

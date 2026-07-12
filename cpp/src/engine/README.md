@@ -7,8 +7,8 @@ the C ABI remains in `cpp/src/c_api.cpp`.
 ## Data flow
 
 ```text
-public generate_world_json(params[, compute_options])
-or generate_geo_world_json(params, compute_options)
+public generate_world_json / generate_world_msgpack(params, compute_options)
+or generate_geo_world_json / generate_geo_world_msgpack(params, compute_options)
   -> validate options/params -> scoped thread policy -> per-generation ComputeSession
   -> simulate_world / simulate_geo_world
        mesh -> tectonics -> ocean/climate/hydrology
@@ -17,15 +17,23 @@ or generate_geo_world_json(params, compute_options)
        -> settlements/civilization/history (full-world path only)
   -> serialize_world
        summary + entity serializers + process-ledger serializers
+  -> optional strict JSON-to-MessagePack transport transcoder
 ```
 
 `world.hpp` groups the result into `EarthSystemState`, `NaturalArtifacts`, and
 `SocietyArtifacts`. This is the handoff between computation and output. Domain
 stages must not depend on JSON serializers.
 
+The MessagePack facade intentionally transcodes the canonical JSON document.
+This preserves every established decimal-quantization boundary consumed by the
+Python enrichers. The C ABI exposes binary as pointer plus byte length and frees
+it with `magic_geo_free_buffer`; legacy NUL-terminated JSON symbols are unchanged.
+
 ## Source responsibilities
 
 - `core.cpp`: math, hashing, JSON primitives, parameter checks, and scoped thread policy.
+- `messagepack.cpp`: strict, bounded-depth canonical-JSON to standard
+  MessagePack transport transcoding.
 - `mesh.cpp`: Fibonacci and geodesic mesh construction.
 - `tectonics.cpp`: plates, crust, topography, and plate motion.
 - `plate_boundary_segments.cpp`: exact directed cross-plate control-volume

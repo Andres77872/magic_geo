@@ -392,7 +392,7 @@ export function describeLayer(layer) {
       break;
     }
   }
-  if (layer.kind === 'categorical' && role === 'measurement') {
+  if (layer.kind?.startsWith('categorical') && role === 'measurement') {
     role = 'classification';
     patternDoc = patternDoc
       || 'Categorical classification. Each colour is one discrete class (see legend chips); colours carry no ordering.';
@@ -411,6 +411,7 @@ export function describeLayer(layer) {
     const kindWord = {
       numeric: 'Continuous per-cell field',
       categorical: 'Categorical per-cell classification',
+      categorical_stage: 'Per-stage categorical field (scrub the stage control)',
       numeric_stage: 'Per-stage numeric field (scrub the stage control)',
       numeric_monthly: 'Monthly numeric field (scrub the month control)',
     }[layer.kind] || 'Layer';
@@ -427,7 +428,7 @@ export function describeLayer(layer) {
   const family = SOURCE_DOCS[source];
 
   const notes = [];
-  if (layer.kind === 'numeric_stage') {
+  if (layer.kind?.endsWith('_stage')) {
     notes.push(`Per-stage layer · ${layer.stage_count} stages · colour scale fixed across all stages.`);
   }
   if (layer.kind === 'numeric_monthly') {
@@ -439,7 +440,7 @@ export function describeLayer(layer) {
 
   return {
     title: name,
-    unit: unitInfo ? unitInfo.unit : (layer.kind === 'categorical' ? 'category' : null),
+    unit: unitInfo ? unitInfo.unit : (layer.kind?.startsWith('categorical') ? 'category' : null),
     role,
     roleBadge: ROLE_BADGES[role] || ROLE_BADGES.measurement,
     description: descriptionParts.join(' '),
@@ -453,7 +454,7 @@ export function describeLayer(layer) {
           p98: formatStat(layer.stats.p98),
         }
       : null,
-    categories: layer.kind === 'categorical' ? layer.categories : null,
+    categories: layer.kind?.startsWith('categorical') ? layer.categories : null,
     kind: layer.kind,
     notes,
   };
@@ -481,7 +482,7 @@ export function searchTerms(layer) {
 //   'generated' — pure fallback (kind + "inspect a cell for context")
 export function docStatus(layer) {
   if (CURATED[layer.name]) return 'curated';
-  if (PATTERN_RULES.some((rule) => rule.test(layer.name)) || layer.kind === 'categorical') return 'pattern';
+  if (PATTERN_RULES.some((rule) => rule.test(layer.name)) || layer.kind?.startsWith('categorical')) return 'pattern';
   if (inferUnit(layer.name)) return 'unit';
   return 'generated';
 }

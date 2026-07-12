@@ -3,86 +3,235 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>magic-geo debugger</title>
+<title>magic-geo workbench</title>
 <link rel="stylesheet" href="./style.css">
 <script type="importmap">
 { "imports": { "three": "./vendor/three.module.js" } }
 </script>
 </head>
 <body>
-<div id="app">
-  <aside id="sidebar">
-    <header id="world-info">
-      <h1>magic-geo debugger</h1>
-      <div id="world-meta"></div>
-    </header>
-    <input id="layer-search" type="search" placeholder="Filter layers… ( / )" autocomplete="off">
-    <nav id="layer-list"></nav>
-    <section id="docs-card" class="hidden">
-      <div id="docs-card-head">
-        <span id="docs-card-title">Layer docs</span>
-        <div id="docs-card-actions">
-          <button id="docs-help-open" title="Open full help (?)">?</button>
-          <button id="docs-card-toggle" title="Hide docs (d)">▾</button>
-        </div>
-      </div>
-      <div id="docs-card-body"></div>
-    </section>
-  </aside>
+<header id="workbench-header">
+  <a id="brand" href="#map" aria-label="magic-geo workbench home">
+    <span class="brand-mark" aria-hidden="true">◎</span>
+    <span><strong>magic-geo</strong><small>workbench</small></span>
+  </a>
+  <nav id="view-tabs" role="tablist" aria-label="Workbench views">
+    <button type="button" id="tab-map" role="tab" class="view-tab active" data-view="map" aria-controls="view-map" aria-selected="true">Map</button>
+    <button type="button" id="tab-data" role="tab" class="view-tab" data-view="data" aria-controls="view-data" aria-selected="false">Data</button>
+    <button type="button" id="tab-config" role="tab" class="view-tab" data-view="config" aria-controls="view-config" aria-selected="false">Config</button>
+    <button type="button" id="tab-operations" role="tab" class="view-tab" data-view="operations" aria-controls="view-operations" aria-selected="false">Operations</button>
+    <button type="button" id="tab-api" role="tab" class="view-tab" data-view="api" aria-controls="view-api" aria-selected="false">API</button>
+  </nav>
+  <div id="server-state">
+    <label class="sr-only" for="world-select">Selected debug cache</label>
+    <select id="world-select" aria-label="Selected debug cache" title="Switch between workspace debug caches" disabled>
+      <option value="">Loading caches…</option>
+    </select>
+    <span id="cache-state" class="state-pill pending" role="status" aria-live="polite">Connecting…</span>
+    <span id="workspace-state"></span>
+  </div>
+</header>
 
-  <main id="viewport">
-    <canvas id="globe"></canvas>
-    <div id="topbar">
-      <div class="control-group" id="projection-controls">
-        <button data-proj="globe" class="active" title="Globe (1)">Globe</button>
-        <button data-proj="equirect" title="Equirectangular (2)">Equirect</button>
-        <button data-proj="mollweide" title="Mollweide (3)">Mollweide</button>
-      </div>
-      <div class="control-group" id="overlay-controls">
-        <button id="toggle-wireframe" title="Mesh wireframe (w)">Wire</button>
-        <button id="toggle-plates" title="Plate boundaries (b)">Plates</button>
-        <button id="toggle-graticule" title="Graticule (g)">Grid</button>
-      </div>
-      <div class="control-group" id="help-controls">
-        <button id="toggle-help" title="Help &amp; docs (?)">?</button>
-      </div>
-      <div id="topbar-right">
-        <div id="legend">
-          <div id="legend-head">
-            <div id="legend-title"></div>
-            <button id="legend-info" title="Layer docs (d)">ⓘ</button>
+<main id="workbench">
+  <section id="view-map" class="workbench-view" data-view-panel="map" role="tabpanel" aria-labelledby="tab-map">
+    <div id="app">
+      <aside id="sidebar" aria-label="Map layers">
+        <header id="world-info">
+          <h1>World explorer</h1>
+          <div id="world-meta"></div>
+        </header>
+        <label class="sr-only" for="layer-search">Filter layers</label>
+        <input id="layer-search" type="search" placeholder="Filter layers… ( / )" autocomplete="off">
+        <nav id="layer-list" aria-label="Available layers"></nav>
+        <section id="docs-card" class="hidden" aria-label="Active layer documentation">
+          <div id="docs-card-head">
+            <span id="docs-card-title">Layer docs</span>
+            <div id="docs-card-actions">
+              <button type="button" id="docs-help-open" title="Open full help (?)" aria-label="Open full help">?</button>
+              <button type="button" id="docs-card-toggle" title="Collapse layer documentation" aria-expanded="true">▾</button>
+            </div>
           </div>
-          <canvas id="legend-ramp" width="160" height="10"></canvas>
-          <div id="legend-labels"><span id="legend-min"></span><span id="legend-max"></span></div>
-          <div id="legend-categories"></div>
+          <div id="docs-card-body"></div>
+        </section>
+      </aside>
+
+      <div id="viewport">
+        <canvas id="globe" tabindex="0" aria-label="Interactive world globe. Drag to rotate, scroll to zoom, and select a cell for details."></canvas>
+        <div id="map-empty" class="empty-state hidden" role="status">
+          <div>
+            <span class="empty-icon" aria-hidden="true">◎</span>
+            <h2>No debug cache loaded</h2>
+            <p>Create a configuration and run a generation operation. The map becomes available as soon as a debug cache is produced.</p>
+            <div class="button-row">
+              <button type="button" class="primary" data-go-view="config">Create configuration</button>
+              <button type="button" data-go-view="operations">Open operations</button>
+            </div>
+          </div>
         </div>
+        <div id="topbar">
+          <div class="control-group" id="projection-controls" aria-label="Projection">
+            <button type="button" data-proj="globe" class="active" title="Globe (1)">Globe</button>
+            <button type="button" data-proj="equirect" title="Equirectangular (2)">Equirect</button>
+            <button type="button" data-proj="mollweide" title="Mollweide (3)">Mollweide</button>
+          </div>
+          <div class="control-group" id="overlay-controls" aria-label="Map overlays">
+            <button type="button" id="toggle-wireframe" title="Mesh wireframe (w)" aria-pressed="false">Wire</button>
+            <button type="button" id="toggle-plates" title="Plate boundaries (b)" aria-pressed="false">Plates</button>
+            <button type="button" id="toggle-graticule" title="Graticule (g)" aria-pressed="false">Grid</button>
+          </div>
+          <div class="control-group" id="help-controls">
+            <button type="button" id="toggle-help" title="Help &amp; docs (?)" aria-label="Map help">?</button>
+          </div>
+          <div id="topbar-right">
+            <div id="legend">
+              <div id="legend-head">
+                <div id="legend-title"></div>
+                <button type="button" id="legend-info" title="Layer docs (d)" aria-label="Toggle layer documentation">ⓘ</button>
+              </div>
+              <canvas id="legend-ramp" width="160" height="10" aria-label="Layer color scale"></canvas>
+              <div id="legend-labels"><span id="legend-min"></span><span id="legend-max"></span></div>
+              <div id="legend-categories"></div>
+            </div>
+          </div>
+        </div>
+        <div id="stagebar" class="hidden">
+          <button type="button" id="stage-back" title="Previous stage (,)">◀</button>
+          <label class="sr-only" for="stage-slider">Stage or month</label>
+          <input id="stage-slider" type="range" min="0" max="0" value="0" step="1">
+          <label class="sr-only" for="stage-number">Exact stage or month</label>
+          <input id="stage-number" type="number" min="0" max="0" value="0">
+          <button type="button" id="stage-fwd" title="Next stage (.)">▶</button>
+          <span id="stage-label"></span>
+        </div>
+        <div id="status" role="status" aria-live="polite"></div>
+        <button type="button" id="help-fab" title="Help (?)" aria-label="Open map help">?</button>
       </div>
-    </div>
-    <div id="stagebar" class="hidden">
-      <button id="stage-back" title="Previous stage (,)">◀</button>
-      <input id="stage-slider" type="range" min="0" max="0" value="0" step="1">
-      <input id="stage-number" type="number" min="0" max="0" value="0">
-      <button id="stage-fwd" title="Next stage (.)">▶</button>
-      <span id="stage-label"></span>
-    </div>
-    <div id="status"></div>
-    <button id="help-fab" title="Help (?)">?</button>
-  </main>
 
-  <aside id="inspector" class="hidden">
-    <header>
-      <h2 id="inspector-title">Cell</h2>
-      <button id="inspector-close">×</button>
+      <aside id="inspector" class="hidden" aria-label="Selected cell inspector">
+        <header>
+          <h2 id="inspector-title">Cell</h2>
+          <button type="button" id="inspector-close" aria-label="Close cell inspector">×</button>
+        </header>
+        <div id="inspector-body"></div>
+      </aside>
+    </div>
+  </section>
+
+  <section id="view-data" class="workbench-view page-view" data-view-panel="data" role="tabpanel" aria-labelledby="tab-data" hidden>
+    <header class="page-heading">
+      <div><p class="eyebrow">Generated world</p><h1>Data browser</h1><p>Inspect every exported scalar, layer, stage summary, family, section, and skipped output.</p></div>
+      <button type="button" id="data-refresh">Refresh catalog</button>
     </header>
-    <div id="inspector-body"></div>
-  </aside>
-</div>
+    <div id="data-unavailable" class="notice warning hidden" role="status">A debug cache is required for world data. Config, Operations, and API remain available.</div>
+    <div id="data-workspace" class="split-workspace">
+      <aside class="tool-panel" aria-label="Data selection">
+        <label for="data-kind">Data type</label>
+        <select id="data-kind">
+          <option value="overview">Overview</option>
+          <option value="scalars">Scalars</option>
+          <option value="skipped">Skipped outputs</option>
+          <option value="layers">Layer catalog</option>
+          <option value="cells">Cell schema</option>
+          <option value="stages">Stage summaries</option>
+          <option value="families">Record families</option>
+          <option value="sections">Model sections</option>
+        </select>
+        <div id="data-resource-wrap" class="field-stack hidden">
+          <label for="data-resource">Resource</label>
+          <select id="data-resource"></select>
+        </div>
+        <div id="family-detail-wrap" class="field-stack hidden">
+          <label for="family-detail">Family detail</label>
+          <select id="family-detail"><option value="full">Full nested records</option><option value="scalars">Scalar columns</option></select>
+        </div>
+        <div id="data-page-controls" class="field-stack hidden">
+          <label for="data-limit">Rows per page</label>
+          <select id="data-limit"><option selected>10</option><option>25</option><option>50</option><option>100</option></select>
+          <div class="pager">
+            <button type="button" id="data-prev" aria-label="Previous page">←</button>
+            <span id="data-page-label">0–0</span>
+            <button type="button" id="data-next" aria-label="Next page">→</button>
+          </div>
+        </div>
+      </aside>
+      <article class="content-panel">
+        <div id="data-title-row"><div><p class="eyebrow" id="data-eyebrow">Catalog</p><h2 id="data-title">Overview</h2></div><div class="button-row"><a id="data-raw-link" class="button hidden" target="_blank" rel="noopener">Open raw JSON ↗</a><span id="data-loading" class="state-pill hidden">Loading…</span></div></div>
+        <div id="data-output" class="data-output" tabindex="0"></div>
+      </article>
+    </div>
+  </section>
 
-<div id="help-overlay" class="hidden">
+  <section id="view-config" class="workbench-view page-view" data-view-panel="config" role="tabpanel" aria-labelledby="tab-config" hidden>
+    <header class="page-heading">
+      <div><p class="eyebrow">World definition</p><h1>Configuration</h1><p>Start from a supported profile, edit YAML, validate it, and save or download the result.</p></div>
+      <div class="button-row">
+        <button type="button" id="config-download">Download YAML</button>
+        <button type="button" id="config-save" class="primary">Save configuration</button>
+      </div>
+    </header>
+    <div class="config-grid">
+      <section class="content-panel editor-panel">
+        <div class="form-toolbar">
+          <div><label for="config-profile">Profile</label><select id="config-profile"></select></div>
+          <button type="button" id="config-reset">Reset from profile</button>
+          <div><label for="config-name">Save as</label><input id="config-name" type="text" value="world" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" autocomplete="off"></div>
+          <button type="button" id="config-validate" class="primary">Validate YAML</button>
+        </div>
+        <label class="sr-only" for="config-yaml">World YAML configuration</label>
+        <textarea id="config-yaml" spellcheck="false" aria-describedby="config-result" placeholder="Loading configuration template…"></textarea>
+        <div id="config-result" class="validation-result" role="status" aria-live="polite">Choose a profile or edit the template, then validate.</div>
+      </section>
+      <aside class="content-panel schema-panel">
+        <div class="panel-heading"><div><p class="eyebrow">Reference</p><h2>Schema fields</h2></div><input id="schema-search" type="search" placeholder="Filter fields…" aria-label="Filter schema fields"></div>
+        <div id="schema-docs" class="schema-docs"></div>
+      </aside>
+    </div>
+  </section>
+
+  <section id="view-operations" class="workbench-view page-view" data-view-panel="operations" role="tabpanel" aria-labelledby="tab-operations" hidden>
+    <header class="page-heading">
+      <div><p class="eyebrow">Shared CLI services</p><h1>Operations</h1><p>Run generation, validation, calibration, rendering, and export jobs from the same typed operation catalog.</p></div>
+      <button type="button" id="jobs-refresh">Refresh jobs</button>
+    </header>
+    <div class="operations-grid">
+      <section class="content-panel operation-launcher">
+        <label for="operation-select">Operation</label>
+        <select id="operation-select"></select>
+        <p id="operation-description" class="muted"></p>
+        <form id="operation-form">
+          <div id="operation-fields"></div>
+          <button type="submit" class="primary">Start job</button>
+        </form>
+        <div id="operation-result" role="status" aria-live="polite"></div>
+      </section>
+      <section class="content-panel jobs-panel">
+        <div class="panel-heading"><div><p class="eyebrow">Background work</p><h2>Jobs</h2></div><span id="jobs-poll-state" class="state-pill">Live</span></div>
+        <div id="jobs-list" class="jobs-list"></div>
+      </section>
+      <section class="content-panel job-detail-panel">
+        <div class="panel-heading"><div><p class="eyebrow">Selected job</p><h2 id="job-detail-title">No job selected</h2></div><button type="button" id="job-cancel" class="danger hidden">Cancel job</button></div>
+        <div id="job-detail" class="job-detail"><p class="muted">Select a job to inspect progress, logs, and artifacts.</p></div>
+      </section>
+    </div>
+  </section>
+
+  <section id="view-api" class="workbench-view page-view" data-view-panel="api" role="tabpanel" aria-labelledby="tab-api" hidden>
+    <header class="page-heading">
+      <div><p class="eyebrow">Runtime contract</p><h1>Backend &amp; API</h1><p>Inspect compute capabilities and use the live OpenAPI explorer.</p></div>
+      <div class="button-row"><button type="button" id="backend-refresh">Refresh backend</button><a class="button primary" href="/api/docs" target="_blank" rel="noopener">Open Swagger ↗</a></div>
+    </header>
+    <div class="api-grid">
+      <section class="content-panel backend-panel"><div class="panel-heading"><div><p class="eyebrow">Compute</p><h2>Backend information</h2></div></div><div id="backend-output" class="data-output"></div></section>
+      <section class="content-panel api-panel"><div class="panel-heading"><div><p class="eyebrow">OpenAPI</p><h2>Interactive documentation</h2></div></div><iframe id="api-docs-frame" title="Swagger API documentation" src="/api/docs"></iframe></section>
+    </div>
+  </section>
+</main>
+
+<div id="help-overlay" class="hidden" role="dialog" aria-modal="true" aria-labelledby="help-title">
   <div id="help-panel">
     <header id="help-header">
-      <h2>magic-geo debugger — help</h2>
-      <button id="help-close" title="Close (Esc)">×</button>
+      <h2 id="help-title">magic-geo map — help</h2>
+      <button type="button" id="help-close" title="Close (Esc)" aria-label="Close help">×</button>
     </header>
     <div id="help-body"></div>
   </div>

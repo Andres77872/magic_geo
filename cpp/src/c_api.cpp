@@ -1,9 +1,12 @@
 #include "magic_geo/native.hpp"
 
+#include "engine/messagepack.hpp"
+
 #include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <string>
+#include <string_view>
 
 namespace magic_geo {
 
@@ -79,15 +82,70 @@ char* copy_string(const std::string& value) {
     return out;
 }
 
-std::string error_json(const std::string& message) {
+std::uint8_t* copy_buffer(
+    const std::vector<std::uint8_t>& value,
+    std::size_t* size
+) {
+    if (size == nullptr) {
+        return nullptr;
+    }
+    *size = 0;
+    void* allocation = std::malloc(value.empty() ? 1 : value.size());
+    if (allocation == nullptr) {
+        return nullptr;
+    }
+    if (!value.empty()) {
+        std::memcpy(allocation, value.data(), value.size());
+    }
+    *size = value.size();
+    return static_cast<std::uint8_t*>(allocation);
+}
+
+std::string error_json(std::string_view message) {
     std::string escaped;
-    for (char ch : message) {
-        if (ch == '"' || ch == '\\') {
-            escaped += '\\';
+    constexpr char hex[] = "0123456789abcdef";
+    const std::string sanitized = magic_geo::detail::sanitize_utf8(message);
+    escaped.reserve(sanitized.size() + 8);
+    for (char raw_ch : sanitized) {
+        const auto ch = static_cast<unsigned char>(raw_ch);
+        switch (ch) {
+            case '"': escaped += "\\\""; break;
+            case '\\': escaped += "\\\\"; break;
+            case '\b': escaped += "\\b"; break;
+            case '\f': escaped += "\\f"; break;
+            case '\n': escaped += "\\n"; break;
+            case '\r': escaped += "\\r"; break;
+            case '\t': escaped += "\\t"; break;
+            default:
+                if (ch < 0x20) {
+                    escaped += "\\u00";
+                    escaped += hex[ch >> 4U];
+                    escaped += hex[ch & 0x0fU];
+                } else {
+                    escaped += static_cast<char>(ch);
+                }
+                break;
         }
-        escaped += ch;
     }
     return "{\"error\":\"" + escaped + "\"}";
+}
+
+std::vector<std::uint8_t> error_msgpack(std::string_view message) {
+    return magic_geo::detail::json_to_messagepack(error_json(message));
+}
+
+const std::uint8_t* copy_error_msgpack_noexcept(
+    std::string_view message,
+    std::size_t* size
+) noexcept {
+    try {
+        return copy_buffer(error_msgpack(message), size);
+    } catch (...) {
+        if (size != nullptr) {
+            *size = 0;
+        }
+        return nullptr;
+    }
 }
 
 }  // namespace
@@ -183,6 +241,59 @@ extern "C" const char* magic_geo_generate_geo_json_v3(
     }
 }
 
+extern "C" const std::uint8_t* magic_geo_generate_msgpack_v3(
+    const magic_geo::CConfigV3* cfg,
+    std::size_t* size
+) {
+    if (size == nullptr) {
+        return nullptr;
+    }
+    *size = 0;
+    try {
+        if (cfg == nullptr) {
+            return copy_error_msgpack_noexcept("null config pointer", size);
+        }
+        return copy_buffer(magic_geo::generate_world_msgpack(
+            magic_geo::params_from_c_config(*cfg),
+            magic_geo::compute_options_from_c_config(cfg->base)
+        ), size);
+    } catch (const std::exception& exc) {
+        return copy_error_msgpack_noexcept(exc.what(), size);
+    } catch (...) {
+        return copy_error_msgpack_noexcept("unknown generation failure", size);
+    }
+}
+
+extern "C" const std::uint8_t* magic_geo_generate_geo_msgpack_v3(
+    const magic_geo::CConfigV3* cfg,
+    std::size_t* size
+) {
+    if (size == nullptr) {
+        return nullptr;
+    }
+    *size = 0;
+    try {
+        if (cfg == nullptr) {
+            return copy_error_msgpack_noexcept("null config pointer", size);
+        }
+        return copy_buffer(magic_geo::generate_geo_world_msgpack(
+            magic_geo::params_from_c_config(*cfg),
+            magic_geo::compute_options_from_c_config(cfg->base)
+        ), size);
+    } catch (const std::exception& exc) {
+        return copy_error_msgpack_noexcept(exc.what(), size);
+    } catch (...) {
+        return copy_error_msgpack_noexcept(
+            "unknown geo generation failure",
+            size
+        );
+    }
+}
+
 extern "C" void magic_geo_free_string(const char* ptr) {
     std::free(const_cast<char*>(ptr));
+}
+
+extern "C" void magic_geo_free_buffer(const std::uint8_t* ptr) {
+    std::free(const_cast<std::uint8_t*>(ptr));
 }

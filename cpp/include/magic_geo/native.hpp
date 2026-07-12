@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #if defined(_WIN32)
 #if defined(magic_geo_native_EXPORTS)
@@ -146,6 +148,14 @@ MAGIC_GEO_API std::string generate_geo_world_json(
     const Params& params,
     const ComputeOptions& compute_options
 );
+MAGIC_GEO_API std::vector<std::uint8_t> generate_world_msgpack(
+    const Params& params,
+    const ComputeOptions& compute_options
+);
+MAGIC_GEO_API std::vector<std::uint8_t> generate_geo_world_msgpack(
+    const Params& params,
+    const ComputeOptions& compute_options
+);
 MAGIC_GEO_API Params params_from_c_config(const CConfig& cfg);
 MAGIC_GEO_API Params params_from_c_config(const CConfigV3& cfg);
 MAGIC_GEO_API ComputeOptions compute_options_from_c_config(const CConfigV2& cfg);
@@ -163,7 +173,19 @@ MAGIC_GEO_API const char* magic_geo_generate_geo_json_v2(
 MAGIC_GEO_API const char* magic_geo_generate_geo_json_v3(
     const magic_geo::CConfigV3* cfg
 );
+// Binary results can contain NUL bytes and therefore always use an explicit
+// byte count. The returned allocation belongs to the caller and must be
+// released with magic_geo_free_buffer.
+MAGIC_GEO_API const std::uint8_t* magic_geo_generate_msgpack_v3(
+    const magic_geo::CConfigV3* cfg,
+    std::size_t* size
+);
+MAGIC_GEO_API const std::uint8_t* magic_geo_generate_geo_msgpack_v3(
+    const magic_geo::CConfigV3* cfg,
+    std::size_t* size
+);
 MAGIC_GEO_API void magic_geo_free_string(const char* ptr);
+MAGIC_GEO_API void magic_geo_free_buffer(const std::uint8_t* ptr);
 }
 
 #undef MAGIC_GEO_API

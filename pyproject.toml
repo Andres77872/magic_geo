@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=70.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,6 +9,7 @@ description = "CLI-first causal planet generator with a Python API layer and C++
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "msgpack>=1.1,<2",
   "pydantic>=2.10",
   "PyYAML>=6.0.2",
   "typer>=0.16.0",
@@ -29,7 +30,16 @@ magic-geo = "magic_geo.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-magic_geo = ["seed_config.yaml", "libmagic_geo_native.so"]
+magic_geo = [
+  "seed_config.yaml",
+  "libmagic_geo_native.so",
+  "magic_geo_native.dll",
+  "libmagic_geo_native.dylib",
+  "debug_ui/*.html",
+  "debug_ui/*.css",
+  "debug_ui/*.js",
+  "debug_ui/vendor/*.js",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

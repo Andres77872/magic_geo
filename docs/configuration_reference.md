@@ -1,6 +1,7 @@
 # Configuration Reference — every generation property, deep
 
-Companion to [layers_reference.md](layers_reference.md). This documents every
+Companion to [layers_reference.md](layers_reference.md) and the
+[YAML/helper API guide](configuration_helpers.md). This documents every
 property that shapes a generated world: what it controls, its type, default,
 valid range, which layers/subsystems it moves, and its status/gaps.
 
@@ -8,11 +9,16 @@ The generation config is a single validated schema — `WorldConfig` in
 [config.py](../src/magic_geo/config.py) — loaded from a YAML file
 (`magic-geo generate --config <file>`). Every value below is verified against
 that schema; ranges are the pydantic `Field` bounds, so anything outside them is
-rejected at load time (`extra="forbid"` also rejects unknown keys, and
-`allow_inf_nan=False` rejects `inf`/`nan`). Generate a starter file with
+rejected at load time (`extra="forbid"` also rejects unknown keys,
+`allow_inf_nan=False` rejects `inf`/`nan`, and the YAML loader rejects duplicate
+mapping keys). All sections and fields have defaults, so even `{}` is valid;
+omitted values come from the neutral schema defaults, not from the Earth-like
+file. Generate the curated Earth-like starter with
 `magic-geo init-config`; the shipped seed is
 [seed_config.yaml](../src/magic_geo/seed_config.yaml) and the reference earthlike
-run is [configs/earthlike_seed.yaml](../configs/earthlike_seed.yaml).
+run is [configs/earthlike_seed.yaml](../configs/earthlike_seed.yaml). Nine
+complete exploratory presets and their research/selection guidance are indexed
+in the [example seed gallery](example_seed_gallery.md).
 
 ## How configuration flows through generation
 
@@ -53,7 +59,7 @@ gap; see [Status & gaps](#status--gaps)).
 | Property | Type | Default | Range | What it controls | Affects |
 | --- | --- | --- | --- | --- | --- |
 | `seed` | int | `424242` | `[0, 2⁶⁴−1]` | Master RNG seed. Every stochastic step derives from it, so a fixed seed + fixed thread count is bit-reproducible. | Everything (determinism). |
-| `name` | str | `earthlike_mvp` | any string | World name, echoed into the payload and the debugger's world-info header. | Metadata only. |
+| `name` | str | `earthlike_mvp` | 1–256 Unicode characters; well-formed UTF-8, ≤1024 bytes, no NUL | World name, echoed into the payload and the debugger's world-info header. The encoding constraints preserve it exactly across the native C ABI. | Metadata only. |
 
 ---
 
@@ -430,9 +436,12 @@ rejected at load. Every property is documented above with its first-order effect
   for the coupled alluvium/bedrock distinction and [Paola and Voller
   (2005)](https://doi.org/10.1029/2004JF000274) for the additional terms needed
   for sediment mass and stratigraphic conservation.
-- **`config_to_native` passes the whole dict through.** The native engine reads
-  the sections it knows; there is no per-field "was this consumed?" report, so a
-  property that a given backend ignores fails silently rather than warning.
+- **Native marshaling is explicit, but behavioural consumption is not
+  reported.** `config_to_native` returns the nine validated sections and
+  `native.py` projects every current field into versioned ctypes structs. There
+  is still no per-field runtime evidence report proving which downstream model
+  changed, so a valid knob with no material effect would require tests or output
+  comparison to detect.
 - **No config-driven enable/disable of subsystems.** Every enricher always runs
   (given `include_cells`); you cannot switch off, say, the petroleum or dynasty
   models to shrink the payload. `erosion.iterations: 0` is the one coarse off-switch

@@ -1,0 +1,64 @@
+# Original stormy archipelago world. A large ocean inventory, low continental
+# crust target, many plates, and strong rainfall favor scattered highlands,
+# maritime routes, island ports, reefs, and short river systems.
+run:
+  seed: 12051003
+  name: pelagic_archipelago
+
+planet:
+  radius_km: 6200.0
+  gravity_g: 0.95
+  day_length_hours: 20.0
+  axial_tilt_deg: 17.0
+  orbital_eccentricity: 0.02
+  stellar_luminosity: 1.02
+  atmosphere_pressure_bar: 1.25
+  greenhouse_factor: 1.08
+  ocean_fraction_target: 0.88
+  ocean_water_inventory_km3: 2500000000.0
+  internal_heat: 1.20
+  geological_age_ga: 3.6
+
+mesh:
+  backend: fibonacci_sphere
+  cell_count: 2048
+  neighbor_count: 7
+
+tectonics:
+  plate_count: 24
+  continental_plate_fraction: 0.28
+  continental_crust_fraction_target: 0.18
+  min_angular_speed: 0.08
+  max_angular_speed: 1.15
+  boundary_smoothing_steps: 3
+  plate_motion_scale_deg_per_step: 4.0
+  oceanic_crust_aging_ma_per_step: 6.0
+
+climate:
+  months: 12
+  lapse_rate_c_per_km: 6.0
+  base_temperature_c: 18.0
+  precipitation_scale: 1.40
+  subtropical_drying_strength: 0.45
+
+hydrology:
+  river_percentile: 0.88
+  preserve_geologic_depressions: true
+
+erosion:
+  iterations: 6
+  maturation_timestep_ma: 5.0
+  stream_power_coefficient: 9.0
+  drainage_exponent: 0.5
+  slope_exponent: 1.1
+  hillslope_diffusion: 0.070
+  tectonic_uplift_scale: 1.15
+
+compute:
+  backend: cpu
+  threads: 1
+  opencl_prefer_gpu: true
+
+output:
+  include_cells: true
+  float_precision: 4

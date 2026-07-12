@@ -1,0 +1,66 @@
+# Original small, young, geologically violent world. Internal heat, dense plate
+# boundaries, fast procedural motion, and uplift proxy volcanic/high-relief
+# terrain; the generator does not currently simulate exposed lava.
+run:
+  seed: 12051005
+  name: young_volcanic
+
+planet:
+  radius_km: 4800.0
+  gravity_g: 0.75
+  day_length_hours: 18.0
+  axial_tilt_deg: 9.0
+  orbital_eccentricity: 0.12
+  stellar_luminosity: 1.35
+  atmosphere_pressure_bar: 1.40
+  greenhouse_factor: 1.50
+  ocean_fraction_target: 0.25
+  ocean_water_inventory_km3: 200000000.0
+  internal_heat: 2.50
+  geological_age_ga: 0.80
+
+mesh:
+  backend: fibonacci_sphere
+  cell_count: 2048
+  neighbor_count: 7
+
+tectonics:
+  plate_count: 28
+  continental_plate_fraction: 0.30
+  continental_crust_fraction_target: 0.24
+  min_angular_speed: 0.30
+  max_angular_speed: 1.80
+  boundary_smoothing_steps: 2
+  plate_motion_scale_deg_per_step: 4.50
+  oceanic_crust_aging_ma_per_step: 8.0
+
+climate:
+  months: 12
+  lapse_rate_c_per_km: 7.0
+  base_temperature_c: 32.0
+  precipitation_scale: 0.50
+  subtropical_drying_strength: 0.70
+
+hydrology:
+  river_percentile: 0.93
+  preserve_geologic_depressions: true
+
+erosion:
+  # Six refined steps retain an active surface while staying inside the
+  # engine's finite dry-rock accounting envelope at the declared resolution.
+  iterations: 6
+  maturation_timestep_ma: 2.5
+  stream_power_coefficient: 10.0
+  drainage_exponent: 0.55
+  slope_exponent: 1.2
+  hillslope_diffusion: 0.080
+  tectonic_uplift_scale: 2.0
+
+compute:
+  backend: cpu
+  threads: 1
+  opencl_prefer_gpu: true
+
+output:
+  include_cells: true
+  float_precision: 4

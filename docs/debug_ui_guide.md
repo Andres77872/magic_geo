@@ -1,213 +1,378 @@
-# Debug UI Guide
+# Web workbench UI guide
 
-Deep reference for the GUI debugger frontend (`src/magic_geo/debug_ui/`). For the
-pipeline that produces the data it renders, see [debugger.md](debugger.md); for a
-review of that pipeline, see [layers_pipeline_review.md](layers_pipeline_review.md).
-
-In-app: press `?` (or the `?` button) for the built-in help overlay, and `d`
-(or the legend's ⓘ button) for the docs card describing the active layer. Both are
-driven by [layer_docs.js](../src/magic_geo/debug_ui/layer_docs.js) — see
-[Extending the docs helper](#extending-the-docs-helper).
-
-## Quickstart
+The local workbench combines world creation, operations, complete exported-data
+browsing, the Three.js map debugger, backend telemetry, and live API docs.
+Start it with:
 
 ```bash
 pip install -e '.[debug]'
-magic-geo generate  --config configs/earthlike_seed.yaml --output runs/earthlike/world.json
-magic-geo export-debug --world runs/earthlike/world.json      # → runs/earthlike/debug/
-magic-geo serve -d runs/earthlike/debug                       # → http://127.0.0.1:8642
+magic-geo serve
+# http://127.0.0.1:8642
 ```
 
-## Screen layout
+No `-d` argument is required. With the default `--workspace runs`, `runs/debug`
+is loaded when present; with another workspace, the corresponding
+`<workspace>/debug` is used. Otherwise the workbench starts cacheless and the
+Config, Operations, and API tabs remain fully usable. See
+[debugger.md](debugger.md) for architecture/security and
+[configuration_helpers.md](configuration_helpers.md) for YAML/Python details.
+
+## Global navigation
+
+The header has five semantic tabs. Click one, use Left/Right/Home/End while a tab
+has focus, or use the URL hashes `#map`, `#data`, `#config`, `#operations`, and
+`#api`.
+
+| View | What it covers | Needs a cache? |
+|---|---|---|
+| **Map** | Globe/2-D layer visualization and complete cell inspector | Yes; shows a useful empty state otherwise |
+| **Data** | Every manifest class: scalars, skips, layers, cell schema, stages, full families, sections | Yes |
+| **Config** | Profiles, YAML editor, validation, schema help, save/download | No |
+| **Operations** | Generation, validation, calibration, rendering/export jobs, logs/artifacts/cancel | No |
+| **API** | Native backend diagnostics and embedded/open Swagger | No |
+
+The header cache selector lists every compatible cache discovered in the
+workspace and switches through `/api/worlds/select`; the status badge says
+**Cache ready** or **No cache** and shows workspace and package version. When a
+Generate job finishes with “Prepare browser cache,” the page detects the
+selected cache and initializes the map/data views.
+
+At tablet/mobile widths the workspaces stack vertically; the map sidebars dock
+over the viewport instead of permanently consuming horizontal space.
+
+## Recommended browser-first workflow
+
+1. Open **Config** and choose `smoke` for a fast first run or `earthlike` for
+   the calibrated reference.
+2. Edit YAML. Search the schema reference for a field, then validate.
+3. Save it; the status reports a workspace path such as
+   `runs/configs/world.yaml`.
+4. Open **Operations**, select **Generate world**, set the saved config path and
+   desired world output, and leave **Prepare browser cache** enabled.
+5. Watch the queued/running job, streamed command log, and resulting artifacts.
+6. When it succeeds, open **Map** for layers/cells or **Data** for generic
+   families, sections, stages, and diagnostics.
+7. Run validation/calibration/render/export operations against the saved world.
+
+## Config view
+
+### Profiles and editing
+
+The profile selector comes from `/api/config/profiles`. Selecting a profile is
+non-destructive; **Reset from profile** explicitly requests its complete
+normalized template and replaces current editor changes. Delayed profile
+responses cannot overwrite newer edits. The editor supports Tab indentation
+(two spaces).
+
+Profiles are starting points:
+
+- `default` — exact neutral schema defaults;
+- `earthlike` — calibrated Earth starter;
+- `smoke` — 128-cell deterministic CPU integration run.
+
+The editor remains raw YAML so every current/future field is usable without a
+frontend release. **Validate YAML** sends it through the same duplicate-key-safe
+parser and Pydantic model used by CLI/Python. Errors include source, line/column
+when available, and field paths. Pathological nesting/alias expansion and YAML
+over 1,000,000 UTF-8 bytes are rejected before model construction.
+
+### Schema reference
+
+The right panel resolves `$ref` entries from `/api/config/schema` and flattens
+all nine sections/all 44 properties. Each card shows:
+
+- dotted path;
+- type and required status;
+- authoritative description;
+- default and enum choices when applicable.
+
+The filter matches path, type, and description. Numeric bounds remain available
+in Swagger/JSON Schema even if the compact card does not repeat every keyword.
+
+### Save versus download
+
+**Download YAML** creates a browser download only; it does not touch the server
+filesystem. **Save configuration** validates and atomically writes below
+`<workspace>/configs`. The filename accepts letters, digits, `.`, `_`, and `-`;
+`.yaml` is added when missing. Existing names return a conflict and the UI asks
+for explicit replacement confirmation. Arbitrary host paths and symlink escapes
+are never accepted.
+
+## Operations view
+
+The operation form is generated from `/api/operations`, not hard-coded command
+strings. Fields render as number inputs, choice/boolean selects, paths, or
+one-path-per-line text areas. Types, choices, and bounds mirror the CLI.
+Conventional browser output defaults are instead rebased under the configured
+workspace. In particular, **Prepare browser cache** and **Export
+browser/ParaView cache** default to `<workspace>/debug`; CLI `export-debug`
+without `--output` derives `<world parent>/debug`. Generate and geo-suite forms
+default their base YAML to `<workspace>/configs/world.yaml`, matching the Config
+view's default save name. The geo-suite scenario matrix is deliberately
+required: an installed wheel does not pretend the repository's example
+`configs/geo_validation_matrix.yaml` exists.
+
+### Available workflows
+
+- **Generate world** — config, world JSON/MessagePack path, optional Markdown
+  summary/CSV, cell override, full versus geo-only, optional automatic browser
+  cache and VTU export.
+- **Validate world** — complete structural/replay CLI validation.
+- **Validate natural geography** — generic/Earth-like profile, JSON report,
+  warning policy.
+- **Run geo validation suite** — base config, scenario matrix, JSON/Markdown.
+- **Calibrate world/ensemble** — target bundles, completeness/fit policies,
+  reports.
+- **Derive calibration targets** — local source manifest to JSON/Markdown.
+- **Render SVG/raster** — projections, dimensions, labels/contours or texture,
+  sampling controls.
+- **Export browser/ParaView cache** — full columnar cache with optional VTU,
+  built in staging and published to its workspace destination only on success.
+- **Export Rerun** — available only when `rerun-sdk` is installed.
+
+Configuration creation, backend inspection, and serving are shown as direct
+equivalent views rather than recursive background jobs.
+
+### Job states and logs
+
+Only one heavy job runs at a time; additional work is queued. The UI polls every
+2.5 seconds while visible and shows:
+
+- queued/running/succeeded/failed/cancelled state;
+- job ID and timestamps;
+- normalized typed arguments;
+- exact argument-vector command (no shell);
+- bounded combined stdout/stderr log;
+- exit code and immutable downloadable file snapshots;
+- the cache directory selected by successful generation.
+
+Cancel marks queued work cancelled without starting it. For running work it
+terminates the child process group on POSIX (the child process elsewhere) and
+escalates to a kill after five seconds. Closing the server cancels queued work,
+terminates the active child, and waits for it to reach a terminal state before
+closing cache connections. Cancellation and cache publication/artifact
+finalization share an atomic commit boundary: a request accepted before commit
+produces `cancelled` and discards staging; once commit has begun, a late cancel
+is ignored and the job completes normally rather than reporting a false
+cancelled state after publishing output.
+
+For a successful job, each new or changed declared file output is copied to a
+job-owned immutable snapshot. Download links read that snapshot, so later
+replacement or deletion of the requested output does not change an earlier
+job's download. The reporting operations (`validate-geo`,
+`validate-geo-suite`, `calibrate`, and `calibrate-ensemble`) may write a report
+and then exit nonzero because of a requested policy gate; a report newly written
+or changed by that run remains downloadable from the failed job. An unchanged
+pre-existing target is not claimed as new output. Cancelled jobs do not snapshot
+partial files. If the primary Generate command completed before optional cache
+preparation later failed or was cancelled, its completed world/summary/CSV
+snapshots remain available.
+
+Jobs and their snapshot links are in-memory records for the server lifetime and
+can also be evicted when the bounded history fills. Requested outputs remain on
+disk independently. Browser cache directories are different from downloadable
+files: they are built in a job-private sibling staging directory, published only
+after success, and discarded on failure or cancellation so the prior selected
+cache remains intact. During the rollback-safe old/new directory swap,
+cache-backed reads are paused. Browser reads also send the selected manifest
+revision; a stale request receives `409` and is discarded, so parallel mesh,
+catalog, and layer requests cannot combine two cache revisions.
+
+Input paths must resolve to regular files within the project. That check follows
+the nested source/DBF/PRJ/HydroBASINS-catalog paths used by `derive-targets` and
+the target-bundle/derivation paths used by `validate-geo-suite`; manifests are
+size/complexity bounded before this preflight. Outputs must resolve within the
+workspace (`runs/` by default), cannot replace an input, and cannot overlap
+another declared output. A rejected path is a policy error, not a missing CLI
+feature.
+
+## Data view
+
+The Data tab is the generic escape hatch that makes every exporter/API resource
+usable even when it has no custom map overlay.
+
+The server supports debug manifests with `format: magic-geo-debug-cache` and
+`version: 1`. A missing/different format or version is rejected; it is not
+interpreted as a best-effort older/newer cache.
+
+### Overview and diagnostics
+
+- **Overview** counts layers, stage histories, families, sections, scalars, and
+  skipped outputs, then lists record families/row counts.
+- **Scalars** displays top-level scalar metadata.
+- **Skipped outputs** exposes empty/unhandled top-level sections, non-scalar
+  cell fields, and columns not promoted to visual layers. Skipped does not mean
+  silently lost: new caches retain non-scalar cell values in the full cell
+  sidecar.
+- **Layer catalog** displays all layer manifest entries/stats.
+- **Cell schema** displays scalar fields, skipped-layer reasons, and detail
+  sidecar metadata.
+
+### Stages, families, and sections
+
+- **Stage summaries** uses `/api/stage-summary/{history}` for every history,
+  rendering the full per-stage scalar table plus retained JSON stage extras for
+  non-scalar metadata and mixed per-cell fields.
+- **Record families** includes every exported list-of-records. Choose **Full
+  nested records** for JSONL arrays/objects/provenance or **Scalar columns** for
+  the compact Parquet sidecar. Pagination supports 25/50/100/200 rows.
+- **Model sections** renders every exported dictionary—summary/model contracts,
+  graphs, simulation clock, backend telemetry, validation/calibration content,
+  and other named sections—as formatted JSON.
+
+This closes the old gap where stage summaries, all families, and all sections
+had server routes but no browser view.
+
+## Map view
+
+The map remains optimized for per-cell spatial fields. It does not try to turn
+every record family into bespoke geometry; use Data for generic access.
+
+### Layout
 
 ```text
 ┌────────────┬──────────────────────────────────────┬────────────┐
-│ sidebar    │ topbar: projections · overlays · ?   │ inspector  │
-│  world     │         legend (+ ⓘ)                 │  (opens on │
-│  meta      │                                      │   click)   │
-│  search    │            globe / map               │  fields    │
-│  layer     │                                      │  ledgers   │
-│  list      │      stage/month bar (when the       │  monthly   │
-│  docs card │      layer has a time axis)          │  adjacency │
-│            │ status: layer · cell · value         │            │
+│ layer      │ projection/overlay/help controls     │ selected   │
+│ sidebar    │ legend                               │ cell       │
+│ world meta │                                      │ inspector  │
+│ search     │ globe / equirect / Mollweide         │ fields     │
+│ grouped    │                                      │ ledgers    │
+│ layers     │ stage/month bar                      │ monthly    │
+│ docs card  │ hover status                         │ adjacency  │
 └────────────┴──────────────────────────────────────┴────────────┘
 ```
 
-## Layers
+### Layers and legend
 
-A **layer** is one per-cell column of the exported world, cataloged in
-`manifest.json` and served as a Float32 buffer from `/api/layer/{id}`. The
-sidebar groups layers by record family (source). On the default earthlike run
-there are 446 layers over 4 096 cells, in four kinds:
+A layer is one per-cell column cataloged by the manifest and served as Float32
+(`format=f32`, with Arrow also available to API clients). Four kinds exist:
 
-| kind | badge | time axis | example |
-|---|---|---|---|
-| `numeric` | — | none | `cells/elevation_m` |
-| `categorical` | `cat` | none | `cells/biome` |
-| `numeric_monthly` | `monthly` | 12 months | `monthly/temperature_monthly_c` |
-| `numeric_stage` | `stages` | simulation stages | `hydrologic_water_budget_history/runoff_mm_y` |
+| Kind | Time axis | Example |
+|---|---|---|
+| `numeric` | none | `cells/elevation_m` |
+| `categorical` | none | `cells/biome` |
+| `numeric_monthly` | 12 months | `monthly/temperature_monthly_c` |
+| `numeric_stage` | history-specific stages | `hydrologic_water_budget_history/runoff_mm_y` |
+| `categorical_stage` | history-specific stages | `hydrologic_water_budget_history/phase` |
 
-Selecting a layer swaps a single `Float32Array` into a GPU texture — geometry is
-never rebuilt, so switching is instant once the buffer is fetched. Buffers are
-LRU-cached (48 entries) and stage scrubbing prefetches ±2 stages.
+Switching layers swaps one cached `Float32Array` into a GPU texture; geometry is
+not rebuilt. Neighboring stages are prefetched.
 
-### Reading the legend
+JSON views convert NaN and positive/negative infinity to `null` so browser/API
+serialization remains valid. Binary Float32 and Arrow layer downloads preserve
+their existing non-finite/missing-value representation.
 
-- **Numeric** legends span the **p2–p98** percentile range of the data, not
-  min–max. The extreme 2 % on each side render saturated. This keeps skewed
-  layers (e.g. `flow_accumulation`) readable; hover a cell for the exact value.
-  The docs card (`d`) shows both min/max and the p2/p98 legend bounds.
-- **Monthly and stage** legend ranges span *all* months/stages at once, so a
-  color means the same thing at every slider position — change over time reads
-  as change in color.
-- **Categorical** layers map each category to a golden-angle hue; the legend
-  lists every chip. Color similarity is meaningless.
-- Layers ending in `_id` are numeric labels (basins, plates, regions) rendered
-  on the continuous ramp; treat the colors as labels, not magnitudes.
-- Cells with no value for the current layer/stage/month render as the dark
-  background color.
+Numeric colors use the manifest p2–p98 range across the complete time axis, so
+one color is comparable between stages/months. `≤`/`≥` markers indicate clipped
+true extremes. Hover for the exact finite value. Categorical values use stable
+golden-angle hues and category chips. Numeric `*_id` fields remain labels even
+though the generic renderer uses a continuous scale.
 
-### Field-name conventions
+The docs card (`d` or ⓘ) combines curated text, naming-pattern roles, inferred
+units, source-family descriptions, stats, and categories. `/` searches names,
+families, units, roles, and documentation.
 
-Field names carry their units as suffixes; the docs helper decodes these
-automatically (`_m`, `_km`, `_km2`, `_km3_y`, `_mm_y`, `_m3_s`, `_m_s`, `_m_y`,
-`_w_m2`, `_pa`/`_kpa`/`_hpa`, `_c`, `_ka`/`_ma`/`_years`, `_deg`, `_ph`,
-`_fraction`, `_index`, `_factor`, `_count`, `_id`). Prefixes identify the
-subsystem (`groundwater_*`, `glacial_*`, `wildfire_*`, `petroleum_*`, …); the
-doc card names the subsystem and explains it for every layer, including fields
-added after this guide was written.
+### Stage/month controls
 
-### The two stage histories (earthlike run)
+Stage/month layers reveal a slider, exact-value input, previous/next buttons,
+and contextual metadata. `,` and `.` step backward/forward. Out-of-order fetches
+cannot replace the newest selection; finite neighboring values are cached.
 
-- `hydrologic_water_budget_history` — 16 stages × 16 fields. Snapshots of the
-  coupled water-budget recompute: climate inputs (precipitation, PET,
-  temperature) and hydrologic outputs (infiltration, runoff, residual) at each
-  feedback stage. `residual_mm_y` should be near zero everywhere — hotspots
-  flag conservation bugs.
-- `numeric_depression_fill_history` — 1600 stages × 11 fields. One record per
-  depression fill/breach *event* during hydrologic conditioning, so most cells
-  are empty at any single stage; scrub or use the inspector's ledger sparklines
-  to see a cell's events in context.
+### Complete cell inspector
 
-## Controls
+GPU ID-buffer picking opens `/api/cell/{id}`. For a newly exported cache it
+contains:
 
-### Keyboard
+- every scalar cell column;
+- original vectors and all nested/non-scalar fields from the indexed detail
+  sidecar (boundary ring, neighbors, LOD paths, linked IDs, etc.);
+- every per-stage ledger slice and sparkline;
+- monthly arrays/sparklines;
+- adjacency rows with transition/boundary flags and click-through neighbors.
 
-| key | action |
+Old caches without the sidecar still work and report `complete: false`.
+
+### Projection and overlays
+
+| Key | Action |
 |---|---|
-| `1` / `2` / `3` | Globe / Equirectangular / Mollweide (animated morph) |
-| `w` | Mesh wireframe overlay |
-| `b` | Plate-boundary overlay |
-| `g` | Graticule overlay |
-| `,` / `.` | Step stage or month backward / forward |
-| `/` | Focus the layer search |
-| `d` | Toggle the layer docs card |
-| `?` | Toggle the help overlay |
-| `Esc` | Close help → inspector (in that order) |
+| `1` / `2` / `3` | Globe / Equirectangular / Mollweide |
+| `w` | Mesh wireframe |
+| `b` | Plate-boundary segments |
+| `g` | Graticule |
+| `,` / `.` | Previous/next stage or month |
+| `/` | Layer search |
+| `d` | Layer docs |
+| `?` | Map help |
+| `Esc` | Close help, then inspector |
 
-### Mouse
+Drag rotates/pans, wheel zooms, hover reports cell/value, and click selects.
+Projection morphs happen in the vertex shader; wireframe, boundaries, and grid
+follow the same morph. Antimeridian polygons may extend past a 2-D edge to stay
+contiguous. Visible cell-ring seams are a documented geometry diagnostic.
 
-Drag rotates (or pans in 2D); wheel zooms; hovering shows cell id and value in
-the status bar; clicking a cell opens the inspector. Inside the inspector,
-neighbor links jump to adjacent cells.
+## Backend & API view
 
-### Search
+**Backend information** calls `/api/backend` and displays native CPU/OpenCL/CUDA
+probe and selection data. Probe failures are isolated from the rest of the
+workbench and displayed as a warning.
 
-The layer filter matches the layer name, its family, **and its documentation** —
-units, subsystem, and description text. Searching `upwelling` finds
-`fishery_productivity_index` because its doc mentions upwelling; searching
-`W/m²`-style units or `monsoon` works the same way. Hovering a layer shows its
-one-line doc as a tooltip.
+The right panel embeds Swagger at `/api/docs`; **Open Swagger** opens it in a new
+tab. ReDoc is `/api/redoc` and machine-readable OpenAPI is
+`/api/openapi.json`. Swagger documents config bodies, job requests, cache reads,
+query bounds/enums, status codes, and artifact downloads.
 
-### Stage/month bar
+## Extending the UI
 
-Appears only for layers with a time axis. Slider, exact-value field, and step
-buttons all set the same stage; the label shows stage metadata (engine stage id,
-erosion iteration) when the history provides it. Scrubbing fetches on demand;
-±2 neighboring stages prefetch in the background.
+### New generation field
 
-## Inspector
+Add it—with description/default/bounds—to the Pydantic model. The Config schema
+reference automatically discovers it. Update the profile YAML and
+[configuration reference](configuration_reference.md) when semantics change.
 
-Click any cell:
+### New CLI/web operation field
 
-- **Ledger slices** — per-stage sparklines for every stage-history field at
-  this cell; an orange marker tracks the active stage when the active layer
-  belongs to that history.
-- **Monthly** — 12-point sparklines for monthly fields.
-- **Fields** — all ~400 static fields with a filter box.
-- **Adjacency** — every neighbor edge with distance and flags
-  (`plate_boundary`, `land_water_transition`, `biome_transition`); click a
-  neighbor to jump.
+Add one descriptor to `web_jobs.py`. The same catalog drives the form and
+server-side normalization/path policy. Never add a free-form shell argument.
 
-## Projections and overlays
+### New world output
 
-Projection morphs are vertex-shader blends between the unit sphere and
-precomputed equirectangular/Mollweide plane positions; every overlay (wireframe,
-plates, graticule) follows the same morph via a shared shader chunk. Cells
-straddling the antimeridian keep their polygons contiguous by letting them poke
-past the map edge in 2D — this is intentional, not a bug.
+The generic exporter automatically classifies scalar cells, monthly arrays,
+stage histories, record families, dictionaries, and skipped shapes. The Data
+view sees the manifest entry without frontend changes. Add a map layer or custom
+overlay only when spatial visualization materially helps.
 
-Visible seams between cell polygons are the documented `boundary_ring`
-approximation; `mean_neighbor_boundary_segment_mismatch_km` and
-`cell_polygon_area_error_fraction` are the layers that measure it.
+### Layer documentation
 
-## API quick reference
+`debug_ui/layer_docs.js` resolves a layer in this order: curated field text,
+pattern/role rule, unit rule, source-family text, then generated fallback. After
+changes, regenerate [layers_reference.md](layers_reference.md):
 
-All endpoints are read-only over the exported cache:
-
-| endpoint | returns |
-|---|---|
-| `/api/manifest` | layer catalog, stats, stage index, world metadata |
-| `/api/layer/{id}?stage=&month=&format=f32\|arrow` | one Float32 value per cell |
-| `/api/cell/{id}` | full record + ledger slices + monthly + adjacency |
-| `/api/stage-summary/{history}` | per-stage scalar table (sparkline source) |
-| `/api/family/{name}?limit=&offset=` | paged rows from any record family |
-| `/api/section/{name}` | dict sections (models, graphs, clock) |
-| `/api/plate-boundaries` | plate-boundary segments as lat/lon pairs |
-| `/mesh/*` | binary mesh buffers (positions, cell ids, indices, 2D positions) |
-
-`window.__magicGeo` exposes `{ state, three }` in the console for debugging the
-debugger.
-
-## Extending the docs helper
-
-[layer_docs.js](../src/magic_geo/debug_ui/layer_docs.js) resolves documentation
-for each layer in priority order (`describeLayer`):
-
-1. `CURATED` — curated one-liners keyed by bare field name. Add new entries
-   here when a field needs more than convention can say.
-2. `PATTERN_RULES` — ordered name-pattern predicates that assign a role
-   (identifier, index, diagnostic, …) and a convention blurb. Order matters:
-   specific rules before broad ones.
-3. `UNIT_RULES` — ordered suffix → unit from the conventions above (plus
-   `EXACT_UNITS` for names that carry no suffix).
-4. A generated fallback: kind + inferred unit + value range from manifest stats.
-
-`SOURCE_DOCS` describes record families (shown at the bottom of the docs card),
-`UI_GUIDE` and `KEY_REFERENCE` feed the help overlay, and `docsCoverage()`
-reports in the overlay how many layers resolve through each tier — so it is
-obvious when new engine output has no bespoke docs yet. The layer-list tooltips
-and doc-text search (`layerTooltip`/`searchTerms`) are built on the same
-resolution. Everything degrades gracefully: an unknown field still gets a unit,
-a role, or at minimum its kind explained.
-
-After editing `CURATED` or the rules, regenerate the markdown reference with
-`node scripts/gen_layers_reference.mjs` (see
-[layers_reference.md](layers_reference.md)).
+```bash
+node scripts/gen_layers_reference.mjs
+```
 
 ## Troubleshooting
 
-- **Blank page / fetch errors** — `serve` must point at a directory produced by
-  `export-debug` (it needs `manifest.json`); regenerate the cache after
-  changing the exporter.
-- **Whole layer renders as background** — the layer has no finite values at the
-  current stage/month (common in `numeric_depression_fill_history`, where
-  stages are sparse events).
-- **Colors look flat** — heavy-tailed layer; the p2–p98 clamp is compressing
-  the tail. Hover cells to read actual values.
-- **Stage scrub feels laggy on 1600-stage histories** — each stage is a
-  DuckDB-filtered fetch. Out-of-order responses are dropped (only the newest
-  request may update the display), so fast scrubbing simply waits for the
-  latest fetch; ±2 neighbours prefetch to keep stepping instant.
-- **Seams between polygons** — documented ring mismatch (see above), useful as
-  a mesh-quality signal.
+- **No cache** — normal on first start. Create/save YAML and run Generate with
+  browser-cache preparation.
+- **Config save fails** — use a simple filename, not a path; server saves below
+  workspace `configs/`.
+- **Operation rejected** — check required inputs, project/workspace path policy,
+  numeric range, and enum choice.
+- **Job fails** — select it and read the combined log/exit code. A validation or
+  calibration report produced before a policy failure is still downloadable.
+- **Data family lacks arrays** — switch detail from Scalar to Full nested.
+- **Cell is incomplete** — re-export an old cache to create cell detail/index
+  files.
+- **Whole map layer is background** — current stage/month has no finite values.
+- **Map cannot initialize** — Data/API still work; inspect `/api/status`, cache
+  error, manifest, and mesh assets.
+- **Cache format rejected** — re-export it as `magic-geo-debug-cache` version
+  `1`.
+- **Rerun disabled** — install `rerun-sdk`; its catalog entry intentionally
+  advertises the missing dependency.
+- **Running on another device** — this is a trusted-local, single-user service.
+  It has no login, authorization, per-user isolation, or TLS; anyone who can
+  reach it can inspect data and submit/cancel jobs. Keep loopback binding unless
+  a trusted network boundary and authenticating proxy protect it.

@@ -187,6 +187,29 @@ std::string consume(const char* raw) {
     return value;
 }
 
+std::vector<std::uint8_t> consume_buffer(
+    const std::uint8_t* raw,
+    std::size_t size
+) {
+    const std::vector<std::uint8_t> value = raw == nullptr
+        ? std::vector<std::uint8_t>{}
+        : std::vector<std::uint8_t>(raw, raw + size);
+    magic_geo_free_buffer(raw);
+    return value;
+}
+
+bool contains_ascii(
+    const std::vector<std::uint8_t>& buffer,
+    const std::string& text
+) {
+    return std::search(
+        buffer.begin(),
+        buffer.end(),
+        text.begin(),
+        text.end()
+    ) != buffer.end();
+}
+
 int json_int(const std::string& json, const std::string& key);
 bool json_bool(const std::string& json, const std::string& key);
 
@@ -318,6 +341,61 @@ bool public_api_is_usable() {
         consume(magic_geo_generate_geo_json_v3(nullptr)) ==
         "{\"error\":\"null config pointer\"}"
     );
+
+    magic_geo::ComputeOptions timestep_compute_options =
+        magic_geo::compute_options_from_c_config(timestep_cfg.base);
+    const std::vector<std::uint8_t> direct_msgpack =
+        magic_geo::generate_world_msgpack(
+            magic_geo::params_from_c_config(timestep_cfg),
+            timestep_compute_options
+        );
+    CHECK(!direct_msgpack.empty());
+    CHECK(direct_msgpack.front() == 0xdf);  // top-level MessagePack map32
+    std::size_t msgpack_size = 0;
+    const std::uint8_t* raw_msgpack =
+        magic_geo_generate_msgpack_v3(&timestep_cfg, &msgpack_size);
+    const std::vector<std::uint8_t> c_msgpack = consume_buffer(
+        raw_msgpack,
+        msgpack_size
+    );
+    CHECK(c_msgpack == direct_msgpack);
+    CHECK(contains_ascii(c_msgpack, "schema_version"));
+    CHECK(contains_ascii(c_msgpack, "native_api_test"));
+
+    msgpack_size = 0;
+    const std::uint8_t* raw_msgpack_error =
+        magic_geo_generate_msgpack_v3(nullptr, &msgpack_size);
+    const std::vector<std::uint8_t> msgpack_error = consume_buffer(
+        raw_msgpack_error,
+        msgpack_size
+    );
+    CHECK(contains_ascii(msgpack_error, "error"));
+    CHECK(contains_ascii(msgpack_error, "null config pointer"));
+    CHECK(magic_geo_generate_msgpack_v3(&timestep_cfg, nullptr) == nullptr);
+
+    magic_geo::CConfigV3 invalid_utf8_cfg = timestep_cfg;
+    const char invalid_utf8_name[] = {static_cast<char>(0xff), '\0'};
+    invalid_utf8_cfg.base.base.name = invalid_utf8_name;
+    msgpack_size = 0;
+    const std::uint8_t* raw_utf8_error =
+        magic_geo_generate_msgpack_v3(&invalid_utf8_cfg, &msgpack_size);
+    const std::vector<std::uint8_t> utf8_error = consume_buffer(
+        raw_utf8_error,
+        msgpack_size
+    );
+    CHECK(contains_ascii(utf8_error, "error"));
+    CHECK(contains_ascii(utf8_error, "string is not valid UTF-8"));
+
+    msgpack_size = 0;
+    const std::uint8_t* raw_geo_msgpack =
+        magic_geo_generate_geo_msgpack_v3(&timestep_cfg, &msgpack_size);
+    const std::vector<std::uint8_t> geo_msgpack = consume_buffer(
+        raw_geo_msgpack,
+        msgpack_size
+    );
+    CHECK(!geo_msgpack.empty());
+    CHECK(geo_msgpack.front() == 0xdf);
+    CHECK(contains_ascii(geo_msgpack, "schema_version"));
 
     const std::string c_backend = consume(magic_geo_backend_info_json());
     CHECK(c_backend.starts_with('{'));

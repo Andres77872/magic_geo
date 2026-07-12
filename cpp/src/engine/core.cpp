@@ -140,14 +140,26 @@ double signed_noise(std::uint64_t seed, std::uint64_t a, std::uint64_t b) {
 std::string json_escape(const std::string& value) {
     std::string out;
     out.reserve(value.size() + 8);
-    for (char ch : value) {
+    constexpr char hex[] = "0123456789abcdef";
+    for (char raw_ch : value) {
+        const auto ch = static_cast<unsigned char>(raw_ch);
         switch (ch) {
             case '"': out += "\\\""; break;
             case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b"; break;
+            case '\f': out += "\\f"; break;
             case '\n': out += "\\n"; break;
             case '\r': out += "\\r"; break;
             case '\t': out += "\\t"; break;
-            default: out += ch; break;
+            default:
+                if (ch < 0x20) {
+                    out += "\\u00";
+                    out += hex[ch >> 4U];
+                    out += hex[ch & 0x0fU];
+                } else {
+                    out += static_cast<char>(ch);
+                }
+                break;
         }
     }
     return out;

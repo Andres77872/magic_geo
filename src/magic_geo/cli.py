@@ -29,7 +29,13 @@ from .climate_dynamics import (
 )
 from .civilization_geography_validation import validate_civilization_geography_replay
 from .campaign_operations_validation import validate_campaign_operations_replay
-from .config import load_config, write_seed_config
+from .config import (
+    ConfigError,
+    create_config,
+    load_config,
+    parse_config_overrides,
+    write_config,
+)
 from .control_volume_geometry import (
     CONTROL_VOLUME_AREA_MODELS,
     inspect_control_volume_geometry,
@@ -66,12 +72,30 @@ from .planet_parameters import (
 )
 from .plate_boundary_edge_validation import validate_plate_boundary_edges
 from .phonology_history_validation import validate_phonology_history_replay
-from .io import write_cells_csv, write_json, write_raster_map, write_summary_markdown, write_svg_map
+from .io import (
+    read_world,
+    write_cells_csv,
+    write_json,
+    write_raster_map,
+    write_summary_markdown,
+    write_svg_map,
+    write_world,
+)
 from .scaling import HACK_FIT_MINIMUM_BASIN_AREA_KM2, fit_power_law
 from .sediment_interface_validation import validate_sediment_interfaces
 from .territorial_geography_validation import validate_territorial_geography_replay
 
 app = typer.Typer(no_args_is_help=True, help="Causal planet generator CLI.")
+
+
+def _load_world_for_cli(path: Path) -> dict[str, Any]:
+    try:
+        # CLI paths are user-selected, so retain strict JSON-model validation.
+        # Trusted in-process callers can opt into the faster unchecked API.
+        return read_world(path)
+    except (OSError, UnicodeError, ValueError) as exc:
+        typer.echo(f"Invalid world file: {exc}", err=True)
+        raise typer.Exit(2) from exc
 
 HYDROLOGIC_SURFACE_MODEL = "priority_flood_fill_with_deterministic_flat_gradient_v1"
 HYDROLOGIC_FLAT_GRADIENT_STEP_M = 0.001
@@ -9407,17 +9431,36 @@ def _validate_sediment_inventory(
 
 @app.command("init-config")
 def init_config(
-    output: Annotated[Path, typer.Option("--output", "-o", help="Seed YAML path.")] = Path(
-        "configs/earthlike_seed.yaml"
+    output: Annotated[Path, typer.Option("--output", "-o", help="New YAML config path.")] = Path(
+        "magic-geo.yaml"
     ),
+    profile: Annotated[
+        str,
+        typer.Option(
+            "--profile",
+            "-p",
+            help="Built-in starting profile: default, earthlike, or smoke.",
+        ),
+    ] = "earthlike",
+    overrides: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--set",
+            help="Override section.field=YAML_VALUE; repeat for multiple fields.",
+        ),
+    ] = None,
     force: Annotated[bool, typer.Option("--force", help="Overwrite the target file.")] = False,
 ) -> None:
-    """Write an editable seed YAML config."""
+    """Create a validated, editable YAML configuration."""
     try:
-        write_seed_config(output, force=force)
-    except FileExistsError as exc:
+        config = create_config(
+            profile,
+            parse_config_overrides(overrides or ()),
+        )
+        write_config(output, config, force=force)
+    except (ConfigError, OSError) as exc:
         raise typer.BadParameter(str(exc)) from exc
-    typer.echo(f"Wrote {output}")
+    typer.echo(f"Wrote {output} | profile={profile}")
 
 
 @app.command("backend")
@@ -9429,9 +9472,9 @@ def backend() -> None:
 @app.command("generate")
 def generate(
     config: Annotated[Path, typer.Option("--config", "-c", exists=True, help="YAML config path.")] = Path(
-        "configs/earthlike_seed.yaml"
+        "magic-geo.yaml"
     ),
-    output: Annotated[Path, typer.Option("--output", "-o", help="World JSON output path.")] = Path(
+    output: Annotated[Path, typer.Option("--output", "-o", help="World .json or fast .mgeo output path.")] = Path(
         "runs/world.json"
     ),
     summary: Annotated[Path | None, typer.Option("--summary", help="Optional Markdown summary path.")] = None,
@@ -9446,18 +9489,28 @@ def generate(
             help="Generate only natural geography enrichments; omit civilization, settlement, and history layers.",
         ),
     ] = False,
+    world_format: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            help="World serialization: auto (from suffix), json, or mgeo.",
+        ),
+    ] = "auto",
 ) -> None:
     """Generate a planet from YAML config."""
     try:
         world_config = load_config(config)
-    except (ValidationError, ValueError) as exc:
+        if cells is not None:
+            data = world_config.model_dump(mode="python")
+            data["mesh"]["cell_count"] = cells
+            world_config = type(world_config).model_validate(data)
+    except (OSError, ValidationError, ValueError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(2) from exc
 
-    if cells is not None:
-        data = world_config.model_dump(mode="python")
-        data["mesh"]["cell_count"] = cells
-        world_config = type(world_config).model_validate(data)
+    if world_format not in {"auto", "json", "mgeo"}:
+        typer.echo("--format must be auto, json, or mgeo", err=True)
+        raise typer.Exit(2)
 
     try:
         world = (
@@ -9468,7 +9521,9 @@ def generate(
     except (RuntimeError, ValueError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(2) from exc
-    write_json(output, world)
+    # The generation pipeline owns this object and its JSON-value invariants;
+    # skip the otherwise-public recursive preflight on the hot save path.
+    write_world(output, world, format=world_format, validate_model=False)
     if summary is not None:
         write_summary_markdown(summary, world)
     if cells_csv is not None:
@@ -9486,7 +9541,7 @@ def generate(
 def validate_geo(
     world: Annotated[
         Path,
-        typer.Option("--world", "-w", exists=True, help="Generated world JSON."),
+        typer.Option("--world", "-w", exists=True, help="Generated .json or .mgeo world."),
     ],
     profile: Annotated[
         str,
@@ -9508,11 +9563,7 @@ def validate_geo(
     ] = False,
 ) -> None:
     """Validate only natural geography, conservation, and selected realism gates."""
-    try:
-        payload = json.loads(world.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        typer.echo(f"Invalid world JSON: {exc}", err=True)
-        raise typer.Exit(2) from exc
+    payload = _load_world_for_cli(world)
     if profile not in {"generic", "earthlike"}:
         typer.echo("--profile must be generic or earthlike", err=True)
         raise typer.Exit(2)
@@ -9637,10 +9688,10 @@ def validate_geo_suite(
 
 @app.command("validate")
 def validate(
-    world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated world JSON.")]
+    world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated .json or .mgeo world.")]
 ) -> None:
     """Run basic output validation on a generated world file."""
-    payload = json.loads(world.read_text(encoding="utf-8"))
+    payload = _load_world_for_cli(world)
     summary = payload.get("summary", {})
     failures: list[str] = []
 
@@ -32022,7 +32073,7 @@ def validate(
 
 @app.command("calibrate")
 def calibrate(
-    world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated world JSON.")],
+    world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated .json or .mgeo world.")],
     targets: Annotated[
         Path,
         typer.Option(
@@ -32052,7 +32103,7 @@ def calibrate(
     ] = False,
 ) -> None:
     """Compare a generated world against external dataset-derived calibration ranges."""
-    payload = json.loads(world.read_text(encoding="utf-8"))
+    payload = _load_world_for_cli(world)
     try:
         report = evaluate_calibration_targets(payload, load_calibration_targets(targets))
     except (CalibrationError, json.JSONDecodeError) as exc:
@@ -32226,7 +32277,7 @@ def derive_targets(
 
 @app.command("render")
 def render(
-    world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated world JSON.")],
+    world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated .json or .mgeo world.")],
     output: Annotated[Path, typer.Option("--output", "-o", help="SVG map output path.")] = Path(
         "runs/world.svg"
     ),
@@ -32250,8 +32301,8 @@ def render(
         typer.Option("--contour-interval", min=50.0, help="Contour interval in meters when contours are enabled."),
     ] = 500.0,
 ) -> None:
-    """Render a generated world JSON as a layer-driven SVG map."""
-    payload = json.loads(world.read_text(encoding="utf-8"))
+    """Render a generated world file as a layer-driven SVG map."""
+    payload = _load_world_for_cli(world)
     try:
         write_svg_map(
             output,
@@ -32272,7 +32323,7 @@ def render(
 
 @app.command("render-raster")
 def render_raster(
-    world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated world JSON.")],
+    world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated .json or .mgeo world.")],
     output: Annotated[Path, typer.Option("--output", "-o", help="PPM raster map output path.")] = Path(
         "runs/world.ppm"
     ),
@@ -32291,8 +32342,8 @@ def render_raster(
     ] = None,
     texture: Annotated[bool, typer.Option("--texture/--no-texture", help="Apply deterministic terrain texture.")] = True,
 ) -> None:
-    """Render a generated world JSON as a dependency-free PPM raster map."""
-    payload = json.loads(world.read_text(encoding="utf-8"))
+    """Render a generated world file as a dependency-free PPM raster map."""
+    payload = _load_world_for_cli(world)
     try:
         write_raster_map(
             output,
@@ -32311,7 +32362,7 @@ def render_raster(
 
 @app.command("export-debug")
 def export_debug(
-    world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated world JSON.")],
+    world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated .json or .mgeo world.")],
     output: Annotated[
         Path | None,
         typer.Option("--output", "-o", help="Debug cache directory (default: <world dir>/debug)."),
@@ -32331,11 +32382,7 @@ def export_debug(
     except ImportError as exc:
         typer.echo(f"Debug export requires the optional debug dependencies: pip install 'magic-geo[debug]' ({exc})", err=True)
         raise typer.Exit(2) from exc
-    try:
-        payload = json.loads(world.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        typer.echo(f"Invalid world JSON: {exc}", err=True)
-        raise typer.Exit(2) from exc
+    payload = _load_world_for_cli(world)
     out_dir = output if output is not None else world.parent / "debug"
     try:
         manifest = export_debug_cache(
@@ -32359,7 +32406,7 @@ def export_debug(
 
 @app.command("export-rerun")
 def export_rerun(
-    world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated world JSON.")],
+    world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated .json or .mgeo world.")],
     output: Annotated[
         Path | None,
         typer.Option("--output", "-o", help="Rerun recording path (default: <world dir>/world.rrd)."),
@@ -32371,11 +32418,7 @@ def export_rerun(
     except ImportError as exc:
         typer.echo(f"Rerun export requires the rerun-sdk package: pip install rerun-sdk ({exc})", err=True)
         raise typer.Exit(2) from exc
-    try:
-        payload = json.loads(world.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        typer.echo(f"Invalid world JSON: {exc}", err=True)
-        raise typer.Exit(2) from exc
+    payload = _load_world_for_cli(world)
     target = output if output is not None else world.parent / "world.rrd"
     try:
         stats = export_rerun_recording(payload, target)
@@ -32391,13 +32434,53 @@ def export_rerun(
 @app.command("serve")
 def serve(
     debug_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--debug-dir",
+            "-d",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            help="Optional cache from export-debug; auto-loads <workspace>/debug when present.",
+        ),
+    ] = None,
+    workspace: Annotated[
         Path,
-        typer.Option("--debug-dir", "-d", exists=True, help="Debug cache directory from export-debug."),
-    ],
+        typer.Option(
+            "--workspace",
+            help="Directory for browser-created configs, worlds, reports, and exports.",
+        ),
+    ] = Path("runs"),
     host: Annotated[str, typer.Option("--host", help="Bind address.")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", min=1, max=65535, help="Bind port.")] = 8642,
 ) -> None:
-    """Serve the GUI debugger (FastAPI + DuckDB) over a debug cache directory."""
+    """Serve the browser workbench; an existing debug cache is optional."""
+    project_root = Path.cwd().resolve()
+    resolved_workspace = (
+        workspace.resolve()
+        if workspace.is_absolute()
+        else (project_root / workspace).resolve()
+    )
+    try:
+        resolved_workspace.relative_to(project_root)
+    except ValueError as exc:
+        typer.echo(
+            f"Web workspace must stay inside {project_root}: {workspace}",
+            err=True,
+        )
+        raise typer.Exit(2) from exc
+    default_debug_dir = workspace / "debug"
+    selected_debug_dir = (
+        debug_dir
+        if debug_dir is not None
+        else (default_debug_dir if (default_debug_dir / "manifest.json").is_file() else None)
+    )
+    if debug_dir is not None and not (debug_dir / "manifest.json").is_file():
+        typer.echo(
+            f"No manifest.json in {debug_dir}; choose an export-debug cache or omit -d.",
+            err=True,
+        )
+        raise typer.Exit(2)
     try:
         import uvicorn
 
@@ -32405,11 +32488,38 @@ def serve(
     except ImportError as exc:
         typer.echo(f"Serving requires the optional debug dependencies: pip install 'magic-geo[debug]' ({exc})", err=True)
         raise typer.Exit(2) from exc
-    if not (debug_dir / "manifest.json").exists():
-        typer.echo(f"No manifest.json in {debug_dir}; run export-debug first.", err=True)
-        raise typer.Exit(2)
-    typer.echo(f"Serving debug cache {debug_dir} at http://{host}:{port}")
-    uvicorn.run(create_app(debug_dir), host=host, port=port, log_level="warning")
+    try:
+        web_app = create_app(selected_debug_dir, workspace=workspace)
+    except ValueError as exc:
+        if debug_dir is None and selected_debug_dir is not None:
+            typer.echo(
+                f"Ignoring invalid automatic cache {selected_debug_dir}: {exc}",
+                err=True,
+            )
+            selected_debug_dir = None
+            try:
+                web_app = create_app(None, workspace=workspace)
+            except (OSError, ValueError) as fallback_exc:
+                typer.echo(f"Unable to start web workbench: {fallback_exc}", err=True)
+                raise typer.Exit(2) from fallback_exc
+        else:
+            typer.echo(f"Unable to start web workbench: {exc}", err=True)
+            raise typer.Exit(2) from exc
+    except OSError as exc:
+        typer.echo(f"Unable to start web workbench: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    cache_message = (
+        f"debug cache {selected_debug_dir}"
+        if selected_debug_dir is not None
+        else "with automatic workspace cache discovery (Config and Operations remain available)"
+    )
+    typer.echo(f"Serving web workbench {cache_message} at http://{host}:{port}")
+    uvicorn.run(
+        web_app,
+        host=host,
+        port=port,
+        log_level="warning",
+    )
 
 
 def main() -> None:

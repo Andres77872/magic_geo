@@ -18,9 +18,11 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from array import array
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import quoteattr
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -33,8 +35,33 @@ _CATEGORY_LIMIT = 64
 _VEC3_FIELDS = ("position_3d", "normal_3d")
 
 
+def _storage_stem(logical_name: str) -> str:
+    """Map an arbitrary world key to one collision-resistant local filename."""
+
+    text = str(logical_name)
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("._-")[:72] or "entry"
+    digest = hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
+    return f"{slug}-{digest}"
+
+
 def _is_scalar(value: Any) -> bool:
     return isinstance(value, _SCALAR_TYPES)
+
+
+def _json_safe(value: Any) -> Any:
+    """Convert a world fragment to standards-compliant JSON data."""
+
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _json_dumps(value: Any, **kwargs: Any) -> str:
+    return json.dumps(_json_safe(value), allow_nan=False, **kwargs)
 
 
 def _field_kind(values: list[Any]) -> str | None:
@@ -129,7 +156,12 @@ def _layer_entry(layer_id: str, source: str, name: str, kind: str, values: list[
 # Cells table
 
 
-def _export_cells(cells: list[dict], tables_dir: Path, manifest: dict) -> None:
+def _export_cells(
+    cells: list[dict],
+    tables_dir: Path,
+    events_dir: Path,
+    manifest: dict,
+) -> None:
     ordered_keys: list[str] = []
     seen: set[str] = set()
     for cell in cells:
@@ -142,10 +174,16 @@ def _export_cells(cells: list[dict], tables_dir: Path, manifest: dict) -> None:
     kinds: dict[str, str] = {}
     monthly_columns: dict[str, list[Any]] = {}
     skipped: dict[str, str] = {}
+    # Parquet remains the fast scalar path.  Values that cannot be represented
+    # there are retained in an indexed JSONL sidecar so /api/cell is genuinely
+    # a full-record view rather than silently dropping rings, neighbor arrays,
+    # provenance links, and other nested fields.
+    detail_keys: list[str] = []
 
     for key in ordered_keys:
         values = [cell.get(key) for cell in cells]
         if key in _VEC3_FIELDS:
+            detail_keys.append(key)
             for axis_index, axis in enumerate("xyz"):
                 axis_values = [
                     float(v[axis_index]) if isinstance(v, list) and len(v) == 3 else None for v in values
@@ -156,6 +194,7 @@ def _export_cells(cells: list[dict], tables_dir: Path, manifest: dict) -> None:
         kind = _field_kind(values)
         if kind is None:
             skipped[key] = "all null"
+            detail_keys.append(key)
             continue
         if kind != "mixed":
             columns[key] = values
@@ -163,14 +202,20 @@ def _export_cells(cells: list[dict], tables_dir: Path, manifest: dict) -> None:
             continue
         # List-valued field: keep 12-long numeric arrays as a monthly table.
         sample = next((v for v in values if v is not None), None)
-        if (
-            isinstance(sample, list)
-            and len(sample) == 12
-            and all(isinstance(item, (int, float)) for item in sample)
+        if isinstance(sample, list) and all(
+            value is None
+            or (
+                isinstance(value, list)
+                and len(value) == 12
+                and all(item is None or isinstance(item, (int, float)) for item in value)
+            )
+            for value in values
         ):
             monthly_columns[key] = values
+            detail_keys.append(key)
         else:
-            skipped[key] = "non-scalar field (rings/adjacency live in mesh assets)"
+            skipped[key] = "non-scalar field retained in indexed cell details"
+            detail_keys.append(key)
 
     cells_path = tables_dir / "cells.parquet"
     rows = _write_parquet(cells_path, columns, kinds)
@@ -193,6 +238,34 @@ def _export_cells(cells: list[dict], tables_dir: Path, manifest: dict) -> None:
         "skipped_fields": skipped,
         "skipped_layers": skipped_layers,
     }
+
+    if detail_keys:
+        events_dir.mkdir(parents=True, exist_ok=True)
+        tables_dir.mkdir(parents=True, exist_ok=True)
+        details_path = events_dir / "cell_details.jsonl"
+        offsets: dict[str, int] = {}
+        with details_path.open("wb") as handle:
+            for row_index, cell in enumerate(cells):
+                cell_id = int(cell.get("id", row_index))
+                offsets[str(cell_id)] = handle.tell()
+                record = {key: cell.get(key) for key in detail_keys}
+                handle.write(
+                    (_json_dumps(record, separators=(",", ":"), ensure_ascii=False) + "\n").encode(
+                        "utf-8"
+                    )
+                )
+        index_path = tables_dir / "cell_details_index.json"
+        index_path.write_text(
+            _json_dumps(offsets, separators=(",", ":"), sort_keys=True),
+            encoding="utf-8",
+        )
+        manifest["cells"].update(
+            {
+                "details_jsonl": "events/cell_details.jsonl",
+                "details_index": "tables/cell_details_index.json",
+                "detail_fields": detail_keys,
+            }
+        )
     manifest["layers"].extend(layers)
 
     if monthly_columns:
@@ -208,7 +281,13 @@ def _export_cells(cells: list[dict], tables_dir: Path, manifest: dict) -> None:
                 monthly["month"].append(month)
                 for name, values in monthly_columns.items():
                     value = values[index]
-                    monthly[name].append(float(value[month]) if isinstance(value, list) else None)
+                    monthly[name].append(
+                        float(value[month])
+                        if isinstance(value, list)
+                        and len(value) == 12
+                        and value[month] is not None
+                        else None
+                    )
         rows = _write_parquet(tables_dir / "cells_monthly.parquet", monthly, monthly_kinds)
         monthly_skipped: dict[str, str] = {}
         manifest["monthly"] = {
@@ -218,7 +297,13 @@ def _export_cells(cells: list[dict], tables_dir: Path, manifest: dict) -> None:
             "skipped_layers": monthly_skipped,
         }
         for name, values in monthly_columns.items():
-            flat = [item for value in values if isinstance(value, list) for item in value]
+            flat = [
+                item
+                for value in values
+                if isinstance(value, list) and len(value) == 12
+                for item in value
+                if item is not None
+            ]
             stats = _numeric_stats(flat)
             if stats is None:
                 monthly_skipped[name] = "no finite values (column kept in cells_monthly.parquet)"
@@ -246,18 +331,59 @@ def _is_stage_history(records: list[Any]) -> bool:
     return isinstance(first.get("cell_ids"), list) and any(key.endswith("_by_cell") for key in first)
 
 
-def _export_stage_history(name: str, records: list[dict], tables_dir: Path, manifest: dict) -> None:
+def _export_stage_history(
+    name: str,
+    records: list[dict],
+    tables_dir: Path,
+    events_dir: Path,
+    manifest: dict,
+) -> None:
+    storage_name = _storage_stem(name)
     summary_columns: dict[str, list[Any]] = {"stage_idx": []}
     summary_kinds: dict[str, str] = {"stage_idx": "int"}
-    per_cell_fields = sorted(
+    candidate_per_cell_fields = sorted(
         {key[: -len("_by_cell")] for record in records for key in record if key.endswith("_by_cell")}
     )
+    extra_summary_fields = sorted(
+        {
+            key
+            for record in records
+            for key, value in record.items()
+            if key != "cell_ids"
+            and not key.endswith("_by_cell")
+            and not _is_scalar(value)
+        }
+    )
+
+    flattened_per_cell: dict[str, list[Any]] = {
+        field: [] for field in candidate_per_cell_fields
+    }
+    for record in records:
+        cell_ids = record.get("cell_ids") or []
+        count = len(cell_ids)
+        for field in candidate_per_cell_fields:
+            values = record.get(f"{field}_by_cell")
+            flattened_per_cell[field].extend(
+                values if isinstance(values, list) and len(values) == count else [None] * count
+            )
+
+    per_cell_kinds: dict[str, str] = {}
+    skipped_per_cell_fields: dict[str, str] = {}
+    for field, values in flattened_per_cell.items():
+        kind = _field_kind(values)
+        if kind in ("str", "bool", "int", "float"):
+            per_cell_kinds[field] = kind
+        else:
+            skipped_per_cell_fields[field] = (
+                "empty or mixed non-scalar stage field retained in stage extras"
+            )
+    per_cell_fields = sorted(per_cell_kinds)
 
     stage_columns: dict[str, list[Any]] = {"stage_idx": [], "cell_id": []}
     stage_kinds: dict[str, str] = {"stage_idx": "int", "cell_id": "int"}
     for field in per_cell_fields:
         stage_columns[field] = []
-        stage_kinds[field] = "float"
+        stage_kinds[field] = per_cell_kinds[field]
 
     stage_meta = []
     for stage_idx, record in enumerate(records):
@@ -272,8 +398,7 @@ def _export_stage_history(name: str, records: list[dict], tables_dir: Path, mani
                     summary_columns[key] = [None] * stage_idx
                     summary_kinds[key] = "float"
                 summary_columns[key].append(value)
-                if key in ("id", "stage", "erosion_iteration", "feedback_stage_id"):
-                    meta[key] = value
+                meta[key] = value
         for column in summary_columns.values():
             if len(column) <= stage_idx:
                 column.append(None)
@@ -289,14 +414,30 @@ def _export_stage_history(name: str, records: list[dict], tables_dir: Path, mani
             else:
                 stage_columns[field].extend([None] * count)
 
+    skipped_summary_fields: dict[str, str] = {}
     for key, values in list(summary_columns.items()):
         kind = _field_kind(values)
-        summary_kinds[key] = kind if kind in ("str", "bool", "int", "float") else "float"
+        if kind in ("str", "bool", "int", "float"):
+            summary_kinds[key] = kind
+        else:
+            summary_columns.pop(key)
+            summary_kinds.pop(key, None)
+            skipped_summary_fields[key] = "mixed scalar types retained in manifest stage metadata"
+    for key in extra_summary_fields:
+        skipped_summary_fields[key] = "non-scalar stage metadata retained in stage extras"
 
-    cells_rel = f"tables/{name}_stage_cells.parquet"
-    summary_rel = f"tables/{name}_stages.parquet"
-    cell_rows = _write_parquet(tables_dir / f"{name}_stage_cells.parquet", stage_columns, stage_kinds)
-    _write_parquet(tables_dir / f"{name}_stages.parquet", summary_columns, summary_kinds)
+    cells_rel = f"tables/{storage_name}_stage_cells.parquet"
+    summary_rel = f"tables/{storage_name}_stages.parquet"
+    cell_rows = _write_parquet(
+        tables_dir / f"{storage_name}_stage_cells.parquet",
+        stage_columns,
+        stage_kinds,
+    )
+    _write_parquet(
+        tables_dir / f"{storage_name}_stages.parquet",
+        summary_columns,
+        summary_kinds,
+    )
 
     skipped_layers: dict[str, str] = {}
     manifest["stage_histories"][name] = {
@@ -307,21 +448,60 @@ def _export_stage_history(name: str, records: list[dict], tables_dir: Path, mani
         "row_count": cell_rows,
         "stages": stage_meta,
         "skipped_layers": skipped_layers,
+        "skipped_per_cell_fields": skipped_per_cell_fields,
+        "skipped_summary_fields": skipped_summary_fields,
     }
     for field in per_cell_fields:
-        stats = _numeric_stats(stage_columns[field])
-        if stats is None:
-            skipped_layers[field] = "no finite values (column kept in the stage-cells parquet)"
-            continue
-        manifest["layers"].append(
-            {
-                "id": f"{name}/{field}",
-                "source": name,
-                "name": field,
-                "kind": "numeric_stage",
-                "stage_count": len(records),
-                "stats": stats,
-            }
+        kind = per_cell_kinds[field]
+        if kind in ("int", "float"):
+            stats = _numeric_stats(stage_columns[field])
+            if stats is None:
+                skipped_layers[field] = "no finite values (column kept in the stage-cells parquet)"
+                continue
+            manifest["layers"].append(
+                {
+                    "id": f"{name}/{field}",
+                    "source": name,
+                    "name": field,
+                    "kind": "numeric_stage",
+                    "stage_count": len(records),
+                    "stats": stats,
+                }
+            )
+        else:
+            categories = _categories(stage_columns[field])
+            if categories is None:
+                skipped_layers[field] = (
+                    f"more than {_CATEGORY_LIMIT} categories (column kept in stage parquet)"
+                )
+                continue
+            manifest["layers"].append(
+                {
+                    "id": f"{name}/{field}",
+                    "source": name,
+                    "name": field,
+                    "kind": "categorical_stage",
+                    "stage_count": len(records),
+                    "categories": categories,
+                }
+            )
+
+    if skipped_per_cell_fields or extra_summary_fields:
+        events_dir.mkdir(parents=True, exist_ok=True)
+        extras_path = events_dir / f"{storage_name}_stage_extras.jsonl"
+        with extras_path.open("w", encoding="utf-8") as handle:
+            for stage_idx, record in enumerate(records):
+                extra = {"stage_idx": stage_idx, "cell_ids": record.get("cell_ids")}
+                for field in skipped_per_cell_fields:
+                    extra[f"{field}_by_cell"] = record.get(f"{field}_by_cell")
+                for field in extra_summary_fields:
+                    extra[field] = record.get(field)
+                handle.write(
+                    _json_dumps(extra, separators=(",", ":"), ensure_ascii=False)
+                    + "\n"
+                )
+        manifest["stage_histories"][name]["extras_jsonl"] = (
+            f"events/{storage_name}_stage_extras.jsonl"
         )
 
 
@@ -330,6 +510,7 @@ def _export_stage_history(name: str, records: list[dict], tables_dir: Path, mani
 
 
 def _export_family(name: str, records: list[dict], tables_dir: Path, events_dir: Path, manifest: dict) -> None:
+    storage_name = _storage_stem(name)
     field_values: dict[str, list[Any]] = {}
     flat = True
     for record in records:
@@ -349,38 +530,38 @@ def _export_family(name: str, records: list[dict], tables_dir: Path, events_dir:
 
     if flat:
         rows = _write_parquet(
-            tables_dir / f"{name}.parquet",
+            tables_dir / f"{storage_name}.parquet",
             {key: field_values[key] for key in scalar_fields},
             scalar_fields,
         )
         manifest["families"][name] = {
             "kind": "parquet",
-            "parquet": f"tables/{name}.parquet",
+            "parquet": f"tables/{storage_name}.parquet",
             "row_count": rows,
         }
         return
 
     events_dir.mkdir(parents=True, exist_ok=True)
-    jsonl_path = events_dir / f"{name}.jsonl"
+    jsonl_path = events_dir / f"{storage_name}.jsonl"
     with jsonl_path.open("w", encoding="utf-8") as handle:
         for record in records:
-            handle.write(json.dumps(record, sort_keys=True))
+            handle.write(_json_dumps(record, sort_keys=True))
             handle.write("\n")
     entry: dict[str, Any] = {
         "kind": "jsonl",
-        "jsonl": f"events/{name}.jsonl",
+        "jsonl": f"events/{storage_name}.jsonl",
         "row_count": len(records),
     }
     # Nested families still get a scalar-column Parquet sidecar when there is
     # enough flat structure for sparkline/table queries.
     if len(scalar_fields) >= 3 and len(records) >= 2:
         rows = _write_parquet(
-            tables_dir / f"{name}.scalars.parquet",
+            tables_dir / f"{storage_name}.scalars.parquet",
             {key: field_values[key] for key in scalar_fields},
             scalar_fields,
         )
         entry["kind"] = "jsonl+scalars"
-        entry["scalars_parquet"] = f"tables/{name}.scalars.parquet"
+        entry["scalars_parquet"] = f"tables/{storage_name}.scalars.parquet"
         entry["scalar_row_count"] = rows
     manifest["families"][name] = entry
 
@@ -486,7 +667,7 @@ def _export_mesh(cells: list[dict], mesh_dir: Path, manifest: dict) -> dict[str,
             "pos_mollweide": {"file": "mesh/pos_mollweide.f32", "dtype": "float32", "components": 2},
         },
     }
-    (mesh_dir / "mesh.json").write_text(json.dumps(mesh_info, indent=2), encoding="utf-8")
+    (mesh_dir / "mesh.json").write_text(_json_dumps(mesh_info, indent=2), encoding="utf-8")
     manifest["mesh"] = mesh_info
     return mesh_info
 
@@ -520,7 +701,9 @@ def _write_vtu_stages(
     radius_km = 6371.0
     planet = world.get("planet_parameters")
     if isinstance(planet, dict) and isinstance(planet.get("radius_km"), (int, float)):
-        radius_km = float(planet["radius_km"])
+        candidate_radius = float(planet["radius_km"])
+        if math.isfinite(candidate_radius) and candidate_radius > 0.0:
+            radius_km = candidate_radius
 
     vtu_dir.mkdir(parents=True, exist_ok=True)
     stage_files = []
@@ -531,7 +714,9 @@ def _write_vtu_stages(
         per_cell_arrays = {
             key[: -len("_by_cell")]: value
             for key, value in record.items()
-            if key.endswith("_by_cell") and isinstance(value, list)
+            if key.endswith("_by_cell")
+            and isinstance(value, list)
+            and _field_kind(value) in ("int", "float")
         }
 
         points: list[str] = []
@@ -540,7 +725,16 @@ def _write_vtu_stages(
         offset = 0
         for ring, cell_id in zip(rings, ring_cell_ids):
             row = id_to_row.get(cell_id)
-            elevation = float(elevations[row]) if row is not None and row < len(elevations) else 0.0
+            try:
+                elevation = (
+                    float(elevations[row])
+                    if row is not None and row < len(elevations)
+                    else 0.0
+                )
+            except (TypeError, ValueError, OverflowError):
+                elevation = 0.0
+            if not math.isfinite(elevation):
+                elevation = 0.0
             radial = 1.0 + elevation_exaggeration * elevation / (radius_km * 1000.0)
             start = offset
             for x, y, z in ring:
@@ -555,9 +749,17 @@ def _write_vtu_stages(
             rows = []
             for cell_id in ring_cell_ids:
                 row = id_to_row.get(cell_id)
-                rows.append(f"{float(values[row]):.6f}" if row is not None and row < len(values) else "0")
+                if row is None or row >= len(values) or values[row] is None:
+                    rows.append("0")
+                    continue
+                try:
+                    number = float(values[row])
+                except (TypeError, ValueError, OverflowError):
+                    rows.append("0")
+                else:
+                    rows.append(f"{number:.6f}" if math.isfinite(number) else "nan")
             cell_data_blocks.append(
-                f'    <DataArray type="Float32" Name="{field}" format="ascii">\n'
+                f"    <DataArray type=\"Float32\" Name={quoteattr(field)} format=\"ascii\">\n"
                 + " ".join(rows)
                 + "\n    </DataArray>"
             )
@@ -660,7 +862,7 @@ def export_debug_cache(
             "sha256": hashlib.sha256(data).hexdigest(),
         }
 
-    _export_cells(cells, tables_dir, manifest)
+    _export_cells(cells, tables_dir, events_dir, manifest)
     _export_mesh(cells, mesh_dir, manifest)
 
     sections: dict[str, Any] = {}
@@ -675,7 +877,7 @@ def export_debug_cache(
             if not value:
                 manifest["skipped_sections"][key] = "empty list"
             elif _is_stage_history(value):
-                _export_stage_history(key, value, tables_dir, manifest)
+                _export_stage_history(key, value, tables_dir, events_dir, manifest)
             elif all(isinstance(record, dict) for record in value):
                 _export_family(key, value, tables_dir, events_dir, manifest)
             else:
@@ -684,7 +886,7 @@ def export_debug_cache(
             manifest["skipped_sections"][key] = f"unhandled type {type(value).__name__}"
 
     (out_dir / "sections.json").write_text(
-        json.dumps(sections, indent=2, sort_keys=True), encoding="utf-8"
+        _json_dumps(sections, indent=2, sort_keys=True), encoding="utf-8"
     )
     manifest["sections"] = sorted(sections)
 
@@ -708,5 +910,9 @@ def export_debug_cache(
     if include_vtu:
         _write_vtu_stages(world, out_dir / "vtu", manifest, elevation_exaggeration=elevation_exaggeration)
 
-    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
-    return manifest
+    safe_manifest = _json_safe(manifest)
+    (out_dir / "manifest.json").write_text(
+        json.dumps(safe_manifest, allow_nan=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return safe_manifest
