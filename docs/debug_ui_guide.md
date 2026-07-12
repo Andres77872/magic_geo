@@ -272,6 +272,73 @@ The docs card (`d` or ⓘ) combines curated text, naming-pattern roles, inferred
 units, source-family descriptions, stats, and categories. `/` searches names,
 families, units, roles, and documentation.
 
+### Exporting a GPT Image reference package
+
+The map toolbar can download two matching, client-side artifacts for a GPT
+Image refinement workflow:
+
+- **Export PNG** captures the active layer at the final selected projection,
+  using the current camera framing and every currently visible map overlay. It
+  also reflects the selected stage or month. The browser writes an `image/png`
+  file; the workbench does not send the map anywhere.
+- **Export image prompt** writes a complete, copy/paste-ready GPT Image prompt
+  as `text/markdown`. It names the paired PNG reference and records the world,
+  layer, projection, time selection, and visible overlays. Its color codex lists
+  every category and its cell color for categorical layers, or explains the
+  numeric Viridis scale with representative color/value stops, range, clipping,
+  and missing-data color for numeric layers.
+
+The PNG and Markdown downloads share one sanitized base filename. Attach the
+PNG as the reference image, then paste the Markdown prompt into GPT Image. The
+prompt asks the image model to preserve the reference geography, projection,
+color-coded region placement, semantic meaning, and composition while producing
+the polished map described there. Diagnostic cell seams and overlays remain
+spatial guides rather than required final-map decoration. Exporting creates only
+these local files: it does **not** call OpenAI or any other image-generation API,
+and it does not generate the final image inside the workbench.
+
+The same export functionality is available without starting the web workbench.
+The CLI independently reads the same debug cache and exposes both artifact
+types, every layer and time slice, all three projections, explicit raster
+dimensions, canonical camera center/distance framing, exact Three.js camera
+pose replay, and every diagnostic overlay:
+
+```bash
+magic-geo export-debug-map \
+  --debug-dir runs/debug \
+  --layer cells/biome \
+  --projection mollweide \
+  --output runs/biome-reference
+```
+
+That command writes `runs/biome-reference.png` and
+`runs/biome-reference.gpt-image-prompt.md`. Use `--no-image` or `--no-prompt`
+for either web button's individual behavior; `--stage`, `--month`,
+`--center-lat`, `--center-lon`, `--camera-distance`, `--wireframe`, `--plates`,
+and `--graticule` expose the corresponding map snapshot controls. For an exact
+interactive-camera replay, copy the position, target, up vector, and field of
+view recorded in the web Markdown into `--camera-position`, `--camera-target`,
+`--camera-up`, and `--vertical-fov`. This web/CLI parity is required for
+map-export features; neither path invokes an image model.
+
+One source-data exception is retained rather than guessed: the per-stage
+`lithology` layer is serialized as numeric codes 0–6, but the debug cache does
+not contain an authoritative code-to-name table for those stage values. Its
+Markdown codex therefore preserves the numeric scale and repeats the warning;
+it does not borrow the alphabetical category order from the separate final
+`cells/lithology` layer or invent rock names for the stage codes.
+
+Both exporters fail closed when the cache reports cells without boundary rings
+or no renderable triangles. Otherwise those real cells would appear as
+background holes and the prompt could incorrectly ask the image model to erase
+them.
+
+The generated prompt follows OpenAI's
+[GPT Image prompting guidance](https://developers.openai.com/cookbook/examples/multimodal/image-gen-models-prompting-guide):
+short labeled sections, an explicit goal and composition, concrete visual
+details, and a strict separation between what may change and what must remain
+invariant.
+
 ### Stage/month controls
 
 Stage/month layers reveal a slider, exact-value input, previous/next buttons,

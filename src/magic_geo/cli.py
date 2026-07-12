@@ -32360,6 +32360,157 @@ def render_raster(
     typer.echo(f"Wrote {output}")
 
 
+@app.command("export-debug-map")
+def export_debug_map(
+    debug_dir: Annotated[
+        Path,
+        typer.Option(
+            "--debug-dir",
+            "-d",
+            exists=True,
+            file_okay=False,
+            help="Debug cache directory produced by export-debug.",
+        ),
+    ] = Path("runs/debug"),
+    layer: Annotated[
+        str | None,
+        typer.Option(
+            "--layer",
+            "-l",
+            help="Manifest layer id (default: cells/elevation_m, then the first numeric layer).",
+        ),
+    ] = None,
+    output: Annotated[
+        Path | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Output basename; .png and .gpt-image-prompt.md are appended (default: runs/<generated name>).",
+        ),
+    ] = None,
+    projection: Annotated[
+        str,
+        typer.Option("--projection", help="Map projection: globe, equirect, or mollweide."),
+    ] = "globe",
+    width: Annotated[int, typer.Option("--width", min=320, max=6400, help="PNG width in pixels.")] = 1600,
+    height: Annotated[int, typer.Option("--height", min=160, max=3200, help="PNG height in pixels.")] = 900,
+    stage: Annotated[int, typer.Option("--stage", min=0, help="Zero-based stage for *_stage layers.")] = 0,
+    month: Annotated[int, typer.Option("--month", min=1, max=12, help="Month (1-12) for monthly layers.")] = 1,
+    center_lat: Annotated[
+        float,
+        typer.Option("--center-lat", min=-90.0, max=90.0, help="Latitude at the center of the exported view."),
+    ] = 0.0,
+    center_lon: Annotated[
+        float,
+        typer.Option("--center-lon", min=-360.0, max=360.0, help="Longitude at the center of the exported view."),
+    ] = 0.0,
+    camera_distance: Annotated[
+        float | None,
+        typer.Option(
+            "--camera-distance",
+            min=1.01,
+            max=100.0,
+            help="Perspective camera distance (default: 3.0 globe, 3.4 flat).",
+        ),
+    ] = None,
+    camera_position: Annotated[
+        str | None,
+        typer.Option(
+            "--camera-position",
+            help="Exact Three.js camera position as x,y,z; enables explicit web-camera replay.",
+        ),
+    ] = None,
+    camera_target: Annotated[
+        str | None,
+        typer.Option(
+            "--camera-target",
+            help="Exact OrbitControls target as x,y,z (requires --camera-position; default: 0,0,0).",
+        ),
+    ] = None,
+    camera_up: Annotated[
+        str | None,
+        typer.Option(
+            "--camera-up",
+            help="Exact Three.js camera up vector as x,y,z (requires --camera-position; default: 0,1,0).",
+        ),
+    ] = None,
+    vertical_fov: Annotated[
+        float,
+        typer.Option("--vertical-fov", min=1.0, max=179.0, help="Perspective vertical field of view in degrees."),
+    ] = 50.0,
+    cache_identity: Annotated[
+        str | None,
+        typer.Option(
+            "--cache-identity",
+            help="Browser cache identity override for byte-exact view-fingerprint/name parity.",
+        ),
+    ] = None,
+    wireframe: Annotated[
+        bool,
+        typer.Option("--wireframe/--no-wireframe", help="Include diagnostic cell/triangle edges in the PNG."),
+    ] = False,
+    plates: Annotated[
+        bool,
+        typer.Option("--plates/--no-plates", help="Include diagnostic plate-boundary guides in the PNG."),
+    ] = False,
+    graticule: Annotated[
+        bool,
+        typer.Option("--graticule/--no-graticule", help="Include diagnostic latitude/longitude guides in the PNG."),
+    ] = False,
+    image: Annotated[
+        bool,
+        typer.Option("--image/--no-image", help="Write the diagnostic PNG reference image."),
+    ] = True,
+    prompt: Annotated[
+        bool,
+        typer.Option("--prompt/--no-prompt", help="Write the copy/paste GPT Image Markdown prompt and color codex."),
+    ] = True,
+) -> None:
+    """Export a debug layer PNG and matching GPT Image prompt without a browser."""
+
+    try:
+        from .debug_map_export import export_map_reference
+    except ImportError as exc:
+        typer.echo(
+            "Debug map export requires the optional debug dependencies: "
+            f"pip install 'magic-geo[debug]' ({exc})",
+            err=True,
+        )
+        raise typer.Exit(2) from exc
+    try:
+        result = export_map_reference(
+            debug_dir,
+            layer_id=layer,
+            output=output,
+            projection=projection,
+            width=width,
+            height=height,
+            stage=stage,
+            month=month - 1,
+            center_lat=center_lat,
+            center_lon=center_lon,
+            camera_distance=camera_distance,
+            camera_position=camera_position,
+            camera_target=camera_target,
+            camera_up=camera_up,
+            vertical_fov=vertical_fov,
+            cache_identity=cache_identity,
+            wireframe=wireframe,
+            plates=plates,
+            graticule=graticule,
+            write_image=image,
+            write_prompt=prompt,
+        )
+    except (OSError, ValueError) as exc:
+        typer.echo(f"Unable to export debug map: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    artifacts = [str(path) for path in (result.image_path, result.prompt_path) if path is not None]
+    typer.echo(
+        f"Wrote {', '.join(artifacts)} | layer={result.layer_id} "
+        f"projection={result.projection} stage={result.stage} month={result.month + 1}"
+    )
+
+
 @app.command("export-debug")
 def export_debug(
     world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated .json or .mgeo world.")],

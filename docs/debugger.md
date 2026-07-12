@@ -69,6 +69,7 @@ Every CLI command has a web action or a direct equivalent:
 | `render` | SVG operation with projection, size, labels, contours, and downloadable artifact |
 | `render-raster` | PPM operation with projection, size, sampling, and texture controls |
 | `export-debug` | Browser/ParaView cache operation |
+| `export-debug-map` | Map view **Export PNG** / **Prompt .md**, with matching layer, time, projection, camera, overlay, and color-codex CLI options |
 | `export-rerun` | Rerun operation when the optional package is installed |
 | `serve` | The current workbench process/status |
 

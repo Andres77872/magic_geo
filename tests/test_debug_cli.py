@@ -41,6 +41,59 @@ class DebugCliTests(TestCase):
         self.assertIn("<workspace>/debug", result.output)
         self.assertNotIn("[required]", result.output)
 
+    def test_export_debug_map_help_exposes_all_native_export_controls(self) -> None:
+        result = CliRunner().invoke(app, ["export-debug-map", "--help"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("without a browser", result.output)
+        for option in (
+            "--debug-dir",
+            "--layer",
+            "--output",
+            "--projection",
+            "--width",
+            "--height",
+            "--stage",
+            "--month",
+            "--center-lat",
+            "--center-lon",
+            "--camera-distance",
+            "--camera-position",
+            "--camera-target",
+            "--camera-up",
+            "--vertical-fov",
+            "--cache-identity",
+            "--wireframe",
+            "--no-wireframe",
+            "--plates",
+            "--no-plates",
+            "--graticule",
+            "--no-graticule",
+            "--image",
+            "--no-image",
+            "--prompt",
+            "--no-prompt",
+        ):
+            with self.subTest(option=option):
+                self.assertIn(option, result.output)
+
+    def test_export_debug_map_rejects_disabling_both_outputs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            result = CliRunner().invoke(
+                app,
+                [
+                    "export-debug-map",
+                    "--debug-dir",
+                    temp_dir,
+                    "--no-image",
+                    "--no-prompt",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("at least one of PNG or Markdown output must be enabled", result.output)
+        self.assertNotIn("Traceback", result.output)
+
     def test_serve_uses_runs_debug_when_directory_is_omitted(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temp_dir, chdir(temp_dir):

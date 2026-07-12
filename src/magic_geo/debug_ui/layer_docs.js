@@ -537,6 +537,14 @@ export const UI_GUIDE = [
     ],
   },
   {
+    title: 'Export for GPT Image',
+    items: [
+      ['Export PNG', 'Downloads the current camera view in the final selected projection. Enabled overlays remain visible as spatial guides.'],
+      ['Prompt .md', 'Downloads a copy/paste GPT Image prompt paired to the PNG filename, with layer meaning, snapshot metadata, and an adaptive categorical or numeric colour codex.'],
+      ['No automatic generation', 'The workbench only creates local PNG and Markdown downloads. It never sends the map to an image-generation API.'],
+    ],
+  },
+  {
     title: 'Cell inspector',
     items: [
       ['Open', 'Click any cell to open the inspector on the right with every field for that cell.'],

@@ -259,6 +259,13 @@ _EQUIVALENT_OPERATIONS: list[dict[str, Any]] = [
         "available": True,
     },
     {
+        "id": "export-debug-map",
+        "title": "Export debug map reference",
+        "description": "Provided directly by the Map view's Export PNG and Prompt .md controls.",
+        "equivalent_view": "map",
+        "available": True,
+    },
+    {
         "id": "serve",
         "title": "Serve web workbench",
         "description": "This process is the active serve operation.",

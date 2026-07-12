@@ -430,10 +430,10 @@ class DebugServerTests(TestCase):
                 self.assertFalse(status_payload["cache_available"])
 
                 catalog = endpoint(app, "/api/operations")()
-                self.assertEqual(catalog["coverage"]["cli_command_count"], 14)
+                self.assertEqual(catalog["coverage"]["cli_command_count"], 15)
                 self.assertEqual(
                     {entry["id"] for entry in catalog["equivalents"]},
-                    {"init-config", "backend", "serve"},
+                    {"init-config", "backend", "export-debug-map", "serve"},
                 )
 
                 schema = endpoint(app, "/api/config/schema")()
@@ -913,6 +913,7 @@ class DebugServerTests(TestCase):
                     "render",
                     "render-raster",
                     "export-debug",
+                    "export-debug-map",
                     "export-rerun",
                     "serve",
                 },

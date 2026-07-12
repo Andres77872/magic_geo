@@ -52,6 +52,7 @@ class WebDocumentationTests(TestCase):
             "render",
             "render-raster",
             "export-debug",
+            "export-debug-map",
             "export-rerun",
             "serve",
         ):
@@ -70,4 +71,3 @@ class WebDocumentationTests(TestCase):
 
         self.assertIn("Remaining limitations", review)
         self.assertIn("Verification evidence", review)
-

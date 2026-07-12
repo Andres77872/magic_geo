@@ -171,6 +171,8 @@ magic-geo derive-targets --sources configs/calibration_sources.hydrorivers_v10.j
 magic-geo calibrate --world runs/world.json --targets runs/hydrorivers_targets.json --output runs/hydrorivers_calibration.json --require-all-metrics
 magic-geo render --world runs/world.json --output runs/world.svg --projection mollweide --labels --contours --max-cells 4096
 magic-geo render-raster --world runs/world.json --output runs/world.ppm --projection mollweide --max-cells 4096
+magic-geo export-debug --world runs/world.json --output runs/debug --no-vtu
+magic-geo export-debug-map --debug-dir runs/debug --layer cells/biome --projection mollweide --output runs/biome-reference
 magic-geo serve
 ```
 
