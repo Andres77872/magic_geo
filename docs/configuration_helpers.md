@@ -15,7 +15,7 @@ the loader.
 | Profile | Purpose | Important differences |
 |---|---|---|
 | `default` | Neutral editable schema defaults | Exact `WorldConfig()` values; 4,096 cells, automatic compute, precipitation scale `1.0`, plate-motion scale `2.0`. |
-| `earthlike` | Calibrated checked-in Earth reference | Plate-motion scale `4.0` and precipitation scale `0.8`; otherwise schema defaults. This exactly matches the packaged `seed_config.yaml`. |
+| `earthlike` | Calibrated checked-in Earth reference | Plate-motion scale `4.0` and precipitation scale `0.8`; otherwise schema defaults. This exactly matches `configs/earthlike_seed.yaml`. |
 | `smoke` | Fast integration/debug run | Earth-like forcing (`4.0` plate-motion and `0.8` precipitation scales), 128 cells, 8 plates, one erosion iteration, one CPU thread, deterministic CPU backend. |
 
 An empty YAML document (`{}` or an empty file) means the `default` profile. It
@@ -197,10 +197,9 @@ with atomic same-directory publication (readers see either the old or complete
 new file). It does not promise power-loss durability because it does not fsync
 the file and parent directory.
 
-The legacy `seed_config_text()` and direct-write `write_seed_config()` helpers
-remain for callers that specifically need the packaged Earth-like resource;
-the atomic guarantee above applies to `write_config`, CLI `init-config`, and web
-saves.
+Use `create_config("earthlike")` with `dump_config_yaml()` when an in-memory
+Earth-like template is needed. Use `write_config()` or CLI `init-config` to
+publish it atomically.
 
 ### JSON Schema
 

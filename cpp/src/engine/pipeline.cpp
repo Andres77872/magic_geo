@@ -39,8 +39,6 @@ GeneratedWorld simulate_world_impl(const Params& params, bool include_society) {
     initial_crust_motion.transport_plan = build_identity_crust_transport_plan(
         earth.cells
     );
-    initial_crust_motion.source_cell_ids =
-        initial_crust_motion.transport_plan.dominant_source_cell_ids;
     std::vector<double> initial_isostatic_equilibrium_m;
     std::vector<double> initial_thermal_subsidence_target_m;
     initial_isostatic_equilibrium_m.reserve(earth.cells.size());
@@ -113,7 +111,7 @@ GeneratedWorld simulate_world_impl(const Params& params, bool include_society) {
             0,
             "initial_climate_hydrology",
             -1,
-            earth.numeric_depression_fill_history,
+            earth.numeric_depression_correction_history,
             earth.hydrologic_water_budget_history
         );
     earth.feedback_history.push_back(summarize_feedback_step(
@@ -142,7 +140,7 @@ GeneratedWorld simulate_world_impl(const Params& params, bool include_society) {
         earth.plate_motion_history,
         earth.crust_material_shadow,
         earth.crust_dry_rock_accounting,
-        earth.numeric_depression_fill_history,
+        earth.numeric_depression_correction_history,
         earth.hydrologic_water_budget_history,
         earth.sediment_routing_history,
         earth.hillslope_transport_history
@@ -163,7 +161,7 @@ GeneratedWorld simulate_world_impl(const Params& params, bool include_society) {
             static_cast<int>(earth.feedback_history.size()),
             "cryosphere_coupling",
             -1,
-            earth.numeric_depression_fill_history,
+            earth.numeric_depression_correction_history,
             earth.hydrologic_water_budget_history
         );
     derive_cryosphere_state(params, earth.cells);

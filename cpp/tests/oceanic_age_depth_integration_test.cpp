@@ -187,7 +187,7 @@ bool schema_and_serialized_checkpoints_are_consistent() {
     CHECK(target_difference_gains.size() == 1);
     CHECK(target_difference_gains[0] == 1.0);
     CHECK(model.find(
-        "\"thermal_target_difference_tendency_application\":"
+        "\"thermal_equilibrium_change_application\":"
         "\"full_target_difference_is_applied_outside_the_bounded_dynamic_"
         "relief_clamp_with_zero_unapplied_equilibrium_residual\""
     ) != std::string::npos);
@@ -222,7 +222,7 @@ bool schema_and_serialized_checkpoints_are_consistent() {
             "unapplied_thermal_equilibrium_residual_zero_by_construction",
             "thermal_contribution_outside_bounded_dynamic_relief_clamp_resolved",
             "thermal_contribution_to_tectonic_elevation_change_replayed",
-            "thermal_target_difference_tendency_application_replayed",
+            "thermal_equilibrium_change_application_replayed",
         }) {
         CHECK(model.find("\"" + std::string(true_flag) + "\":true") !=
             std::string::npos);
@@ -292,11 +292,7 @@ bool schema_and_serialized_checkpoints_are_consistent() {
     CHECK(std::is_sorted(ledger_cdf.begin(), ledger_cdf.end()));
 
     const std::string serialized_cells = json_value(world, "cells");
-    const std::vector<double> initial_cell_age_aliases = json_numbers_for_key(
-        serialized_cells,
-        "initial_crust_age_ma"
-    );
-    CHECK(initial_cell_age_aliases.size() == ledger_ages.size());
+    CHECK(serialized_cells.find("\"initial_crust_age_ma\"") == std::string::npos);
 
     const std::string initial_age_history = json_value(
         world,
@@ -307,9 +303,9 @@ bool schema_and_serialized_checkpoints_are_consistent() {
         "remapped_crust_age_ma_by_cell"
     );
     CHECK(remapped_age_arrays.size() == 2);
-    const std::vector<double> initial_history_age_aliases =
+    const std::vector<double> initial_history_ages =
         parse_number_array(remapped_age_arrays.front());
-    CHECK(initial_history_age_aliases == initial_cell_age_aliases);
+    CHECK(initial_history_ages.size() == ledger_ages.size());
     for (std::size_t cell = 0; cell < ledger_ages.size(); ++cell) {
         const int status = static_cast<int>(ledger_statuses[cell]);
         CHECK(ledger_statuses[cell] == static_cast<double>(status));
@@ -321,7 +317,7 @@ bool schema_and_serialized_checkpoints_are_consistent() {
             CHECK(ledger_origins[cell] == -1.0);
             continue;
         }
-        CHECK(initial_cell_age_aliases[cell] == ledger_ages[cell]);
+        CHECK(initial_history_ages[cell] == ledger_ages[cell]);
         if (status == 1) {
             CHECK(ledger_ages[cell] == 0.0);
             CHECK(ledger_unclamped_ages[cell] == 0.0);
@@ -343,6 +339,8 @@ bool schema_and_serialized_checkpoints_are_consistent() {
     }
 
     const std::string history = json_value(world, "plate_motion_history");
+    CHECK(history.find("\"thermal_target_difference_tendency_m\":") ==
+        std::string::npos);
     const std::vector<std::string> previous_isostatic_arrays = json_arrays(
         history,
         "previous_local_isostatic_equilibrium_m"
@@ -362,10 +360,6 @@ bool schema_and_serialized_checkpoints_are_consistent() {
     const std::vector<std::string> post_arrays = json_arrays(
         history,
         "post_process_local_thermal_subsidence_target_m"
-    );
-    const std::vector<std::string> tendency_arrays = json_arrays(
-        history,
-        "thermal_target_difference_tendency_m"
     );
     const std::vector<std::string> thermal_change_arrays = json_arrays(
         history,
@@ -388,7 +382,6 @@ bool schema_and_serialized_checkpoints_are_consistent() {
     CHECK(post_isostatic_arrays.size() == previous_arrays.size());
     CHECK(isostatic_change_arrays.size() == previous_arrays.size());
     CHECK(post_arrays.size() == previous_arrays.size());
-    CHECK(tendency_arrays.size() == previous_arrays.size());
     CHECK(thermal_change_arrays.size() == previous_arrays.size());
     CHECK(unbounded_dynamic_arrays.size() == previous_arrays.size());
     CHECK(bounded_dynamic_arrays.size() == previous_arrays.size());
@@ -408,9 +401,6 @@ bool schema_and_serialized_checkpoints_are_consistent() {
             previous_arrays[step]
         );
         const std::vector<double> post = parse_number_array(post_arrays[step]);
-        const std::vector<double> tendency = parse_number_array(
-            tendency_arrays[step]
-        );
         const std::vector<double> thermal_change = parse_number_array(
             thermal_change_arrays[step]
         );
@@ -428,7 +418,6 @@ bool schema_and_serialized_checkpoints_are_consistent() {
         CHECK(post_isostatic.size() == previous.size());
         CHECK(isostatic_change.size() == previous.size());
         CHECK(post.size() == previous.size());
-        CHECK(tendency.size() == previous.size());
         CHECK(thermal_change.size() == previous.size());
         CHECK(unbounded_dynamic.size() == previous.size());
         CHECK(bounded_dynamic.size() == previous.size());
@@ -437,7 +426,6 @@ bool schema_and_serialized_checkpoints_are_consistent() {
             CHECK(isostatic_change[cell] ==
                 post_isostatic[cell] - previous_isostatic[cell]);
             CHECK(thermal_change[cell] == post[cell] - previous[cell]);
-            CHECK(tendency[cell] == thermal_change[cell]);
             CHECK(bounded_dynamic[cell] == std::clamp(
                 unbounded_dynamic[cell],
                 -180.0,
@@ -453,7 +441,7 @@ bool schema_and_serialized_checkpoints_are_consistent() {
                 CHECK(previous_isostatic[cell] == post_isostatic[cell]);
                 CHECK(isostatic_change[cell] == 0.0);
                 CHECK(previous[cell] == post[cell]);
-                CHECK(tendency[cell] == 0.0);
+                CHECK(thermal_change[cell] == 0.0);
                 CHECK(unbounded_dynamic[cell] == 0.0);
                 CHECK(bounded_dynamic[cell] == 0.0);
                 CHECK(tectonic_change[cell] == 0.0);

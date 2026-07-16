@@ -57,7 +57,11 @@ class PlatformWheel(bdist_wheel):
             for symbol in (
                 "magic_geo_backend_info_json",
                 "magic_geo_generate_json_v3",
+                "magic_geo_generate_geo_json_v3",
+                "magic_geo_generate_msgpack_v3",
+                "magic_geo_generate_geo_msgpack_v3",
                 "magic_geo_free_string",
+                "magic_geo_free_buffer",
             ):
                 getattr(library, symbol)
         except (OSError, AttributeError) as exc:

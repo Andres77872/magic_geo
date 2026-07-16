@@ -81,15 +81,6 @@ void CudaComputeSession::run_smooth_three_fields(
     throw_cuda_not_compiled();
 }
 
-void CudaComputeSession::run_remap_crust_sources(
-    const std::vector<Cell>&,
-    const std::vector<Vec3>&,
-    const std::vector<std::vector<int>>&,
-    std::vector<int>&
-) {
-    throw_cuda_not_compiled();
-}
-
 void CudaComputeSession::run_crust_overlap_continuous_shadow(
     const CrustTransportPlan&,
     const std::vector<Cell>&,

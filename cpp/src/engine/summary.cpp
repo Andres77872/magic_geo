@@ -197,7 +197,7 @@ std::string summary_json(
     const std::vector<Route>& routes,
     const std::vector<EarthSystemFeedbackStep>& feedback_history,
     const std::vector<PlateMotionStep>& plate_motion_history,
-    const std::vector<NumericDepressionFillEvent>& numeric_depression_fill_history,
+    const std::vector<NumericDepressionCorrectionEvent>& numeric_depression_correction_history,
     const std::vector<HillslopeSedimentTransportStage>& hillslope_transport_history,
     const std::vector<GlacialSedimentTransportStage>& glacial_transport_history
 ) {
@@ -216,7 +216,14 @@ std::string summary_json(
     double sediment_inventory_volume_km3 = 0.0;
     double sediment_alluvium_entrainment_volume_km3 = 0.0;
     double sediment_bedrock_erosion_volume_km3 = 0.0;
-    double initial_isostatic_sum = 0.0, initial_thermal_sum = 0.0, initial_ridge_sum = 0.0;
+    double sediment_process_source_witness_volume_km3 = 0.0;
+    double initial_isostatic_sum = 0.0, initial_ridge_sum = 0.0;
+    const double initial_thermal_sum = plate_motion_history.empty() ? 0.0 :
+        std::accumulate(
+            plate_motion_history.front().post_process_local_thermal_subsidence_target_m.begin(),
+            plate_motion_history.front().post_process_local_thermal_subsidence_target_m.end(),
+            0.0
+        );
     double initial_orogenic_sum = 0.0, initial_volcanic_sum = 0.0, initial_trench_sum = 0.0;
     double initial_rift_sum = 0.0, initial_transform_sum = 0.0, initial_roughness_sum = 0.0;
     double initial_elevation_sum = 0.0, volcanic_potential_sum = 0.0, uplift_rate_sum = 0.0;
@@ -258,8 +265,6 @@ std::string summary_json(
     int temporary_numeric_lake_depressions = 0;
     int closed_depressions = 0;
     int depression_component_cell_count = 0;
-    int numeric_depression_filled_unique_cell_count = 0;
-    int numeric_depression_fill_cell_event_count = 0;
     int numeric_depression_breach_cell_event_count = 0;
     int numeric_depression_temporary_lake_cell_event_count = 0;
     int numeric_depression_temporary_lake_unique_cell_count = 0;
@@ -283,8 +288,6 @@ std::string summary_json(
     int snapshot_polygon_region_count = 0;
     int calibration_pass_count = 0;
     double max_depression_depth = 0.0;
-    double cumulative_numeric_depression_fill_sum_m = 0.0;
-    double max_cumulative_numeric_depression_fill_m = 0.0;
     double cumulative_numeric_depression_breach_excavation_sum_m = 0.0;
     double cumulative_numeric_depression_breach_deposition_sum_m = 0.0;
     double max_hydrologic_surface_adjustment_m = 0.0;
@@ -356,17 +359,6 @@ std::string summary_json(
         max_cell_area_km2 = std::max(max_cell_area_km2, area_km2);
         min_elev = std::min(min_elev, cell.elevation_m);
         max_elev = std::max(max_elev, cell.elevation_m);
-        cumulative_numeric_depression_fill_sum_m +=
-            cell.cumulative_numeric_depression_fill_m;
-        max_cumulative_numeric_depression_fill_m = std::max(
-            max_cumulative_numeric_depression_fill_m,
-            cell.cumulative_numeric_depression_fill_m
-        );
-        numeric_depression_fill_cell_event_count +=
-            cell.numeric_depression_fill_event_count;
-        if (cell.numeric_depression_fill_event_count > 0) {
-            numeric_depression_filled_unique_cell_count++;
-        }
         cumulative_numeric_depression_breach_excavation_sum_m +=
             cell.cumulative_numeric_depression_breach_excavation_m;
         cumulative_numeric_depression_breach_deposition_sum_m +=
@@ -415,11 +407,13 @@ std::string summary_json(
             }
         }
         sediment_sum += cell.sediment_thickness_m;
-        sediment_production_sum += cell.sediment_production_m;
+        const double gross_mobilization_m =
+            sediment_gross_mobilization_m(cell);
+        sediment_production_sum += gross_mobilization_m;
         sediment_deposition_sum += cell.sediment_deposition_m;
         sediment_export_sum += cell.sediment_export_m;
         sediment_production_volume_km3 +=
-            cell.sediment_production_m * area_km2 / 1000.0;
+            gross_mobilization_m * area_km2 / 1000.0;
         sediment_deposition_volume_km3 +=
             cell.sediment_deposition_m * area_km2 / 1000.0;
         sediment_export_volume_km3 +=
@@ -430,8 +424,9 @@ std::string summary_json(
             cell.sediment_alluvium_entrainment_m * area_km2 / 1000.0;
         sediment_bedrock_erosion_volume_km3 +=
             cell.sediment_bedrock_erosion_m * area_km2 / 1000.0;
+        sediment_process_source_witness_volume_km3 +=
+            sediment_process_source_witness_m(cell) * area_km2 / 1000.0;
         initial_isostatic_sum += cell.initial_isostatic_elevation_m;
-        initial_thermal_sum += cell.initial_thermal_subsidence_m;
         initial_ridge_sum += cell.initial_ridge_uplift_m;
         initial_orogenic_sum += cell.initial_orogenic_uplift_m;
         initial_volcanic_sum += cell.initial_volcanic_uplift_m;
@@ -789,14 +784,7 @@ std::string summary_json(
             }
         }
     }
-    std::set<std::pair<int, int>> numeric_depression_fill_stage_passes;
-    std::set<int> numeric_depression_fill_unique_cell_ids;
-    int numeric_depression_fill_cell_application_count = 0;
-    int numeric_depression_fill_geologic_source_event_count = 0;
-    double numeric_depression_fill_area_km2 = 0.0;
-    double numeric_depression_fill_volume_km3 = 0.0;
-    double numeric_depression_fill_depth_sum_m = 0.0;
-    double max_numeric_depression_fill_depth_m = 0.0;
+    std::set<std::pair<int, int>> numeric_depression_correction_stage_passes;
     double numeric_depression_fill_candidate_area_km2 = 0.0;
     double numeric_depression_fill_candidate_volume_km3 = 0.0;
     int numeric_depression_fill_candidate_cell_application_count = 0;
@@ -826,7 +814,7 @@ std::string summary_json(
     double max_numeric_depression_breach_path_length_km = 0.0;
     double max_numeric_depression_breach_excavation_depth_m = 0.0;
     double max_lower_volume_breach_excavation_depth_m = 0.0;
-    for (const NumericDepressionFillEvent& event : numeric_depression_fill_history) {
+    for (const NumericDepressionCorrectionEvent& event : numeric_depression_correction_history) {
         if (event.cell_ids.size() !=
                 event.sediment_thickness_before_correction_m_by_cell.size() ||
             event.breach_path_cell_ids.size() !=
@@ -843,7 +831,7 @@ std::string summary_json(
                 event.breach_bedrock_erosion_depth_m_by_cell.size()) {
             throw std::runtime_error("numeric depression breach provenance is inconsistent");
         }
-        numeric_depression_fill_stage_passes.insert(
+        numeric_depression_correction_stage_passes.insert(
             {event.feedback_stage_id, event.stabilization_pass}
         );
         numeric_depression_fill_candidate_area_km2 += event.area_km2;
@@ -923,14 +911,6 @@ std::string summary_json(
         } else {
             throw std::runtime_error("numeric depression correction method is invalid");
         }
-    }
-    if (numeric_depression_fill_cell_application_count !=
-            numeric_depression_fill_cell_event_count ||
-        numeric_depression_fill_unique_cell_ids.size() !=
-            static_cast<std::size_t>(numeric_depression_filled_unique_cell_count) ||
-        std::abs(numeric_depression_fill_depth_sum_m -
-            cumulative_numeric_depression_fill_sum_m) > 1.0e-6) {
-        throw std::runtime_error("numeric depression fill provenance is inconsistent");
     }
     if (numeric_depression_breach_excavation_cell_application_count +
             numeric_depression_breach_deposition_cell_application_count !=
@@ -1108,8 +1088,6 @@ std::string summary_json(
     int total_plate_reassignment_events = 0;
     int plate_reassigned_cell_count = 0;
     int max_plate_assignment_change_count = 0;
-    int total_crust_source_remap_events = 0;
-    int total_crust_source_reuse = 0;
     int total_aged_oceanic_events = 0;
     int total_rejuvenated_oceanic_events = 0;
     int total_subducted_oceanic_events = 0;
@@ -1154,8 +1132,6 @@ std::string summary_json(
         }
         plate_motion_transition_count++;
         total_plate_reassignment_events += step.reassigned_cell_count;
-        total_crust_source_remap_events += step.crust_source_remap_cell_count;
-        total_crust_source_reuse += step.crust_source_reuse_count;
         total_aged_oceanic_events += step.aged_oceanic_cell_count;
         total_rejuvenated_oceanic_events += step.rejuvenated_oceanic_cell_count;
         total_subducted_oceanic_events += step.subducted_oceanic_cell_count;
@@ -1363,8 +1339,8 @@ std::string summary_json(
         "local_excavation_to_nonchannel_depression_deposition_volume_closure_v1");
     add_str(out, first, "numeric_depression_correction_selection_reason",
         "apply_only_lower_volume_depth_bounded_capacity_sufficient_conflict_free_breaches_else_defer_without_material");
-    add_int(out, first, "numeric_depression_fill_max_pass_count",
-        NUMERIC_DEPRESSION_FILL_MAX_PASSES);
+    add_int(out, first, "numeric_depression_correction_max_pass_count",
+        NUMERIC_DEPRESSION_CORRECTION_MAX_PASSES);
     add_double(out, first, "numeric_depression_fill_depth_tolerance_m",
         NUMERIC_DEPRESSION_FILL_DEPTH_TOLERANCE_M, 12);
     add_str(out, first, "hydrologic_surface_model",
@@ -1540,8 +1516,6 @@ std::string summary_json(
     add_int(out, first, "total_plate_reassignment_event_count", total_plate_reassignment_events);
     add_int(out, first, "plate_reassigned_cell_count", plate_reassigned_cell_count);
     add_int(out, first, "max_plate_assignment_change_count", max_plate_assignment_change_count);
-    add_int(out, first, "total_crust_source_remap_event_count", total_crust_source_remap_events);
-    add_int(out, first, "total_crust_source_reuse_count", total_crust_source_reuse);
     add_int(out, first, "total_aged_oceanic_event_count", total_aged_oceanic_events);
     add_int(out, first, "total_rejuvenated_oceanic_event_count", total_rejuvenated_oceanic_events);
     add_int(out, first, "total_subducted_oceanic_event_count", total_subducted_oceanic_events);
@@ -1691,26 +1665,12 @@ std::string summary_json(
     add_int(out, first, "corrected_numeric_depression_count", corrected_numeric_depressions);
     add_int(out, first, "temporary_numeric_lake_depression_count",
         temporary_numeric_lake_depressions);
-    add_int(out, first, "numeric_depression_fill_pass_count",
-        static_cast<int>(numeric_depression_fill_stage_passes.size()));
     add_int(out, first, "numeric_depression_correction_pass_count",
-        static_cast<int>(numeric_depression_fill_stage_passes.size()));
+        static_cast<int>(numeric_depression_correction_stage_passes.size()));
     add_int(out, first, "numeric_depression_correction_event_count",
-        static_cast<int>(numeric_depression_fill_history.size()));
-    add_int(out, first, "numeric_depression_fill_event_count",
-        0);
-    add_int(out, first, "numeric_depression_fill_cell_application_count",
-        numeric_depression_fill_cell_application_count);
-    add_int(out, first, "numeric_depression_filled_unique_cell_count",
-        numeric_depression_filled_unique_cell_count);
-    add_int(out, first, "numeric_depression_fill_geologic_source_event_count",
-        numeric_depression_fill_geologic_source_event_count);
-    add_double(out, first, "numeric_depression_fill_area_km2",
-        numeric_depression_fill_area_km2, std::max(10, params.float_precision));
-    add_double(out, first, "numeric_depression_fill_volume_km3",
-        numeric_depression_fill_volume_km3, std::max(10, params.float_precision));
+        static_cast<int>(numeric_depression_correction_history.size()));
     add_int(out, first, "numeric_depression_fill_candidate_event_count",
-        static_cast<int>(numeric_depression_fill_history.size()));
+        static_cast<int>(numeric_depression_correction_history.size()));
     add_int(out, first, "numeric_depression_fill_candidate_cell_application_count",
         numeric_depression_fill_candidate_cell_application_count);
     add_double(out, first, "numeric_depression_fill_candidate_area_km2",
@@ -1719,18 +1679,6 @@ std::string summary_json(
     add_double(out, first, "numeric_depression_fill_candidate_volume_km3",
         numeric_depression_fill_candidate_volume_km3,
         std::max(10, params.float_precision));
-    add_double(out, first, "mean_numeric_depression_fill_depth_m",
-        numeric_depression_fill_cell_application_count > 0 ?
-            numeric_depression_fill_depth_sum_m /
-                static_cast<double>(numeric_depression_fill_cell_application_count) :
-            0.0,
-        std::max(10, params.float_precision));
-    add_double(out, first, "max_numeric_depression_fill_depth_m",
-        max_numeric_depression_fill_depth_m, std::max(10, params.float_precision));
-    add_double(out, first, "cumulative_numeric_depression_fill_sum_m",
-        cumulative_numeric_depression_fill_sum_m, std::max(10, params.float_precision));
-    add_double(out, first, "max_cumulative_numeric_depression_fill_m",
-        max_cumulative_numeric_depression_fill_m, std::max(10, params.float_precision));
     add_int(out, first, "numeric_depression_temporary_lake_event_count",
         numeric_depression_temporary_lake_event_count);
     add_int(out, first,
@@ -1776,11 +1724,9 @@ std::string summary_json(
         numeric_depression_correction_mass_balance_residual_km3,
         std::max(10, params.float_precision));
     add_int(out, first, "numeric_depression_mass_conserving_event_count",
-        static_cast<int>(numeric_depression_fill_history.size()));
+        static_cast<int>(numeric_depression_correction_history.size()));
     add_int(out, first, "numeric_depression_zero_material_deferral_event_count",
         numeric_depression_temporary_lake_event_count);
-    add_int(out, first, "numeric_depression_unbalanced_fill_event_count",
-        0);
     add_double(out, first, "numeric_depression_avoided_unsourced_fill_volume_km3",
         numeric_depression_fill_candidate_volume_km3,
         std::max(10, params.float_precision));
@@ -1973,7 +1919,7 @@ std::string summary_json(
     add_double(out, first, "sediment_budget_residual_m",
         std::abs(sediment_production_sum - sediment_deposition_sum - sediment_export_sum), params.float_precision);
     add_str(out, first, "sediment_budget_closure_model",
-        "cell_area_weighted_hillslope_glacial_and_routed_deposition_terminal_export_volume_v4");
+        "cell_area_weighted_hillslope_glacial_and_routed_deposition_terminal_export_volume_v5");
     add_double(out, first, "sediment_budget_production_km3",
         sediment_production_volume_km3, std::max(10, params.float_precision));
     add_double(out, first, "sediment_budget_deposition_km3",
@@ -2025,7 +1971,7 @@ std::string summary_json(
         sediment_inventory_volume_km3, sediment_volume_precision);
     add_double(out, first, "sediment_source_partition_residual_km3",
         std::abs(
-            sediment_production_volume_km3 -
+            sediment_process_source_witness_volume_km3 -
                 sediment_alluvium_entrainment_volume_km3 -
                 sediment_bedrock_erosion_volume_km3
         ),

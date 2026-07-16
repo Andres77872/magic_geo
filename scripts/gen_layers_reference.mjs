@@ -6,7 +6,7 @@
 // Usage:
 //   node scripts/gen_layers_reference.mjs [manifest.json] [out.md]
 // Defaults:
-//   manifest = runs/earthlike/debug/manifest.json
+//   manifest = runs/debug/manifest.json
 //   out      = docs/layers_reference.md
 //
 // Re-run after `magic-geo export-debug` produces a new cache, or after editing
@@ -18,13 +18,25 @@ import { dirname, resolve } from 'node:path';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, '..');
-const manifestPath = resolve(process.argv[2] || resolve(REPO, 'runs/earthlike/debug/manifest.json'));
+const manifestPath = resolve(process.argv[2] || resolve(REPO, 'runs/debug/manifest.json'));
 const outPath = resolve(process.argv[3] || resolve(REPO, 'docs/layers_reference.md'));
 
 const { describeLayer, docStatus, docsCoverage } =
   await import(resolve(REPO, 'src/magic_geo/debug_ui/layer_docs.js'));
 
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+const RETIRED_CELL_LAYERS = new Set([
+  'crust_source_remap_event_count',
+  'cumulative_numeric_depression_fill_m',
+  'initial_crust_age_ma',
+  'initial_crust_density',
+  'initial_crust_thickness_km',
+  'initial_thermal_subsidence_m',
+  'last_crust_source_cell_id',
+  'numeric_depression_fill_event_count',
+  'sediment_production_m',
+]);
+const layers = manifest.layers.filter((layer) => !RETIRED_CELL_LAYERS.has(layer.name));
 
 // Thematic domains: ordered rules, first match wins; each carries the "how it
 // works" narrative (subsystem, producing modules, pipeline stage).
@@ -65,7 +77,7 @@ const DOMAINS = [
       || n.startsWith('fluvial_sediment') || n.includes('alluvium') || n.includes('bedrock_erosion')
       || (n.includes('deposition') && !n.startsWith('glacial')) || n === 'sediment_thickness_m' }],
   ['hydrology', 'Surface hydrology & rivers', {
-    what: 'Flow routing over the conditioned surface — flow direction and accumulation, drainage basins, depression fill/breach handling, lakes and closed basins, river channels (width/depth/hydraulics), floodplains, and river-network evolution (avulsion, capture). The depression-fill history (1,600 stages) logs every basin correction.',
+    what: 'Flow routing over the conditioned surface — flow direction and accumulation, drainage basins, depression fill/breach handling, lakes and closed basins, river channels (width/depth/hydraulics), floodplains, and river-network evolution (avulsion, capture). The depression-fill history logs every basin correction as a separate stage.',
     modules: ['`cpp/src/engine/hydrology.cpp`', '`hydrology_dynamics.py`', '`hydrology_realism.py`', '`river_hydraulics.py`', '`river_channel_morphology.py`', '`river_network_evolution.py`', '`watershed_diagnostics.py`'],
     stage: 'Flow routing runs every feedback stage after the surface is conditioned; channel morphology is an enricher on the final network.',
     test: (n) => n.startsWith('flow_') || n === 'flow_to' || n === 'flow_accumulation' || n.startsWith('is_river') || n === 'is_lake'
@@ -163,7 +175,7 @@ function domainFor(name) {
 const STATUS_LABEL = { curated: 'curated', pattern: 'convention', unit: 'unit', generated: 'generated' };
 const esc = (s) => String(s).replace(/\|/g, '\\|').replace(/\n/g, ' ');
 
-const rows = manifest.layers.map((layer) => {
+const rows = layers.map((layer) => {
   const doc = describeLayer(layer);
   return {
     name: layer.name, kind: layer.kind, unit: doc.unit || '', role: doc.role,
@@ -183,7 +195,7 @@ function layerRow(r) {
   return `| \`${esc(r.name)}\` | ${esc(kind)} | ${unit} | ${esc(r.range)} | ${esc(r.role)} | ${STATUS_LABEL[r.status]} | ${esc(desc)} |`;
 }
 
-const cov = docsCoverage(manifest.layers);
+const cov = docsCoverage(layers);
 const byRole = cov.byRole;
 const byDomain = {};
 for (const r of rows) {

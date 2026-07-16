@@ -20,6 +20,25 @@ std::string summary_with_crust_dry_rock_accounting_json(
     const std::vector<CrustDryRockAccountingStep>& history
 );
 
+std::string planet_parameters_json(const Params& params) {
+    std::string out = "{";
+    bool first = true;
+    add_raw(out, first, "radius_km", roundtrip_num(params.radius_km));
+    add_raw(out, first, "gravity_g", roundtrip_num(params.gravity_g));
+    add_raw(out, first, "day_length_hours", roundtrip_num(params.day_length_hours));
+    add_raw(out, first, "axial_tilt_deg", roundtrip_num(params.axial_tilt_deg));
+    add_raw(out, first, "orbital_eccentricity", roundtrip_num(params.orbital_eccentricity));
+    add_raw(out, first, "stellar_luminosity", roundtrip_num(params.stellar_luminosity));
+    add_raw(out, first, "atmosphere_pressure_bar", roundtrip_num(params.atmosphere_pressure_bar));
+    add_raw(out, first, "greenhouse_factor", roundtrip_num(params.greenhouse_factor));
+    add_raw(out, first, "ocean_fraction_target", roundtrip_num(params.ocean_fraction_target));
+    add_raw(out, first, "ocean_water_inventory_km3", roundtrip_num(params.ocean_water_inventory_km3));
+    add_raw(out, first, "internal_heat", roundtrip_num(params.internal_heat));
+    add_raw(out, first, "geological_age_ga", roundtrip_num(params.geological_age_ga));
+    out += "}";
+    return out;
+}
+
 std::string serialize_world(const Params& params, const GeneratedWorld& world) {
     const EarthSystemState& earth = world.earth;
     const NaturalArtifacts& natural = world.natural;
@@ -27,8 +46,9 @@ std::string serialize_world(const Params& params, const GeneratedWorld& world) {
 
     std::string out = "{";
     bool first = true;
-    add_int(out, first, "schema_version", 1);
+    add_int(out, first, "schema_version", 2);
     add_str(out, first, "name", params.name);
+    add_raw(out, first, "planet_parameters", planet_parameters_json(params));
     add_str(out, first, "mesh_backend", mesh_backend_name(params.mesh_backend));
     add_str(out, first, "cell_area_model", cell_area_model_name(params.mesh_backend));
     add_raw(out, first, "summary",
@@ -56,7 +76,7 @@ std::string serialize_world(const Params& params, const GeneratedWorld& world) {
             society.routes,
             earth.feedback_history,
             earth.plate_motion_history,
-            earth.numeric_depression_fill_history,
+            earth.numeric_depression_correction_history,
             earth.hillslope_transport_history,
             earth.glacial_transport_history
             ), earth.crust_material_shadow.history),
@@ -92,16 +112,16 @@ std::string serialize_world(const Params& params, const GeneratedWorld& world) {
         sediment_inventory_model_json(
             earth.cells,
             earth.feedback_history,
-            earth.numeric_depression_fill_history,
+            earth.numeric_depression_correction_history,
             earth.hillslope_transport_history,
             earth.sediment_routing_history,
             earth.glacial_transport_history,
             params.float_precision
         ));
-    add_raw(out, first, "numeric_depression_fill_history",
-        numeric_depression_fill_history_json(
+    add_raw(out, first, "numeric_depression_correction_history",
+        numeric_depression_correction_history_json(
             params,
-            earth.numeric_depression_fill_history,
+            earth.numeric_depression_correction_history,
             params.float_precision
         ));
     add_raw(out, first, "hillslope_sediment_transport_model",

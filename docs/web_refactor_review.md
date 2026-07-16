@@ -184,7 +184,7 @@ The config model now has descriptions on every section/field and explicit
 profiles:
 
 - `default` = `WorldConfig()`;
-- `earthlike` = calibrated reference/package seed;
+- `earthlike` = calibrated checked-in reference profile;
 - `smoke` = 128-cell deterministic CPU run.
 
 Core helpers cover parse/load, stable dump, profile creation, non-mutating

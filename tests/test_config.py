@@ -29,9 +29,7 @@ from magic_geo.config import (
     load_config,
     parse_config_overrides,
     parse_config_yaml,
-    seed_config_text,
     write_config,
-    write_seed_config,
 )
 from magic_geo.native import (
     NativeConfigV1,
@@ -216,34 +214,27 @@ class ConfigTests(TestCase):
                     world["summary"]["cell_count"],
                 )
 
-    def test_legacy_native_library_can_load_without_geo_only_symbol(self) -> None:
+    def test_native_library_requires_the_current_v3_transport_abi(self) -> None:
         class FakeFunction:
             argtypes: list | None = None
             restype: object | None = None
 
-        class LegacyLibrary:
+        class IncompleteLibrary:
             magic_geo_backend_info_json = FakeFunction()
-            magic_geo_generate_json = FakeFunction()
-            magic_geo_generate_json_v2 = FakeFunction()
+            magic_geo_generate_json_v3 = FakeFunction()
             magic_geo_free_string = FakeFunction()
 
-        legacy = LegacyLibrary()
+        incomplete = IncompleteLibrary()
         with (
             patch.object(
-                native_module, "_library_path", return_value=Path("legacy.so")
+                native_module, "_library_path", return_value=Path("incomplete.so")
             ),
-            patch.object(native_module.ctypes, "CDLL", return_value=legacy),
+            patch.object(native_module.ctypes, "CDLL", return_value=incomplete),
         ):
-            loaded = native_module._load_library()
-            self.assertIs(loaded, legacy)
             with self.assertRaisesRegex(
-                RuntimeError, "does not support the nominal maturation clock"
+                RuntimeError, "does not expose the current V3 JSON and MessagePack ABI"
             ):
-                native_module.generate_world({})
-            with self.assertRaisesRegex(
-                RuntimeError, "does not support geo-only generation"
-            ):
-                native_module.generate_geo_world({})
+                native_module._load_library()
 
     def test_seed_config_loads(self) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))
@@ -261,7 +252,7 @@ class ConfigTests(TestCase):
         self.assertEqual(config.climate.precipitation_scale, 0.8)
         self.assertIs(config.output.include_cells, True)
 
-    def test_builtin_profiles_are_explicit_and_packaged_seed_is_earthlike(self) -> None:
+    def test_builtin_profiles_are_explicit_and_reference_seed_is_earthlike(self) -> None:
         self.assertEqual(
             list_config_profiles(),
             ("default", "earthlike", "smoke"),
@@ -275,10 +266,6 @@ class ConfigTests(TestCase):
         self.assertEqual(default.climate.precipitation_scale, 1.0)
         self.assertEqual(earthlike.tectonics.plate_motion_scale_deg_per_step, 4.0)
         self.assertEqual(earthlike.climate.precipitation_scale, 0.8)
-        self.assertEqual(
-            parse_config_yaml(seed_config_text(), source="packaged seed"),
-            earthlike,
-        )
         self.assertEqual(load_config(Path("configs/earthlike_seed.yaml")), earthlike)
 
         self.assertEqual(smoke.run.name, "smoke")
@@ -464,20 +451,12 @@ class ConfigTests(TestCase):
                 create_config(profile["name"]),
             )
 
-    def test_load_and_seed_write_helpers_preserve_io_compatibility(self) -> None:
+    def test_load_preserves_io_error_contract(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             missing = root / "missing.yaml"
             with self.assertRaises(FileNotFoundError):
                 load_config(missing)
-
-            output = root / "nested" / "seed.yaml"
-            write_seed_config(output)
-            self.assertEqual(load_config(output), create_config("earthlike"))
-            with self.assertRaises(FileExistsError):
-                write_seed_config(output)
-            write_seed_config(output, force=True)
-            self.assertEqual(output.read_text(encoding="utf-8"), seed_config_text())
 
     def test_climate_month_count_is_twelve(self) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))

@@ -88,7 +88,7 @@ def _close(first: float, second: float, *, relative: float = 2.0e-9) -> bool:
     )
 
 
-def _legacy_close(first: float, second: float) -> bool:
+def _display_precision_close(first: float, second: float) -> bool:
     return math.isclose(first, second, rel_tol=2.0e-8, abs_tol=2.0e-6)
 
 
@@ -930,7 +930,6 @@ def validate_crust_overlap_transport(world: dict[str, Any]) -> dict[str, Any]:
         or model.get("tectonic_process_inventory_changes_separately_ledgered")
         is not True
         or model.get("crust_transport_execution_backend") != "cpu"
-        or model.get("accelerator_crust_source_remap_kernel_used") is not False
         or model.get("tectonic_process_inventory_ledger_granularity")
         != "transported_post_and_rule_reason_positive_negative_per_step_v2"
         or model.get("tectonic_process_reason_resolved_inventory_ledgered")
@@ -963,12 +962,6 @@ def validate_crust_overlap_transport(world: dict[str, Any]) -> dict[str, Any]:
         != "rule_adds_thickness_and_reduces_age_not_a_crust_removal_flux"
         or model.get("plate_crossing_accretion_proxy_semantics")
         != "extra_continental_convergence_thickening_not_external_reservoir_provenance"
-        or model.get("legacy_crust_source_cell_id_semantics")
-        != "dominant_incoming_crust_volume_contributor_compatibility_alias_v1"
-        or model.get("legacy_crust_source_remap_event_semantics")
-        != "dominant_contributor_id_differs_from_destination_cell_id"
-        or model.get("legacy_crust_source_reuse_count_semantics")
-        != "destination_count_minus_unique_dominant_contributor_count"
         or model.get("canonical_crust_mixture_provenance_location")
         != "plate_motion_history[].crust_overlap_ledger"
     ):
@@ -1020,20 +1013,6 @@ def validate_crust_overlap_transport(world: dict[str, Any]) -> dict[str, Any]:
         is not int
         or backend.get("cpu_conservative_crust_overlap_transition_count")
         != len(history) - 1
-        or backend.get(
-            "accelerator_crust_source_remap_kernel_production_active"
-        )
-        is not False
-        or backend.get("accelerator_crust_source_remap_kernel_role")
-        != "legacy_nearest_donor_test_hook_not_used_by_v3_transport"
-        or backend.get("legacy_nearest_source_remap_world_pipeline_enabled")
-        is not False
-        or backend.get("legacy_crust_source_remap_dispatch_counters_deprecated")
-        is not True
-        or type(backend.get("opencl_crust_source_remap_dispatch_count")) is not int
-        or backend.get("opencl_crust_source_remap_dispatch_count") != 0
-        or type(backend.get("cuda_crust_source_remap_dispatch_count")) is not int
-        or backend.get("cuda_crust_source_remap_dispatch_count") != 0
     ):
         failures.append("conservative crust transport backend telemetry is invalid")
 
@@ -1044,11 +1023,19 @@ def validate_crust_overlap_transport(world: dict[str, Any]) -> dict[str, Any]:
             tuple(float(component) for component in cell["position_3d"])
             for cell in cells
         ]
-        previous_ages = [float(cell["initial_crust_age_ma"]) for cell in cells]
-        previous_thicknesses = [
-            float(cell["initial_crust_thickness_km"]) for cell in cells
+        initial_ledger = history[0]["crust_overlap_ledger"]
+        previous_ages = [
+            float(value)
+            for value in initial_ledger["remapped_crust_age_ma_by_cell"]
         ]
-        previous_densities = [float(cell["initial_crust_density"]) for cell in cells]
+        previous_thicknesses = [
+            float(value)
+            for value in initial_ledger["remapped_crust_thickness_km_by_cell"]
+        ]
+        previous_densities = [
+            float(value)
+            for value in initial_ledger["remapped_crust_density_by_cell"]
+        ]
         radius_km = math.sqrt(math.fsum(areas) / (4.0 * math.pi))
         plate_payload = world["plates"]
         if not isinstance(plate_payload, list) or not plate_payload:
@@ -1297,7 +1284,6 @@ def validate_crust_overlap_transport(world: dict[str, Any]) -> dict[str, Any]:
                 float(value)
                 for value in step["crust_density_process_change_by_cell"]
             ]
-            legacy_dominant_ids = _integer_array(step, "crust_source_cell_ids")
             serialized_transport_distances = [
                 float(value)
                 for value in step["crust_transport_distance_km_by_cell"]
@@ -1361,16 +1347,6 @@ def validate_crust_overlap_transport(world: dict[str, Any]) -> dict[str, Any]:
                     "mean_abs_crust_density_process_change",
                 )
             }
-            step_count_metrics = {
-                field: step[field]
-                for field in (
-                    "crust_source_remap_cell_count",
-                    "unique_crust_source_cell_count",
-                    "crust_source_reuse_count",
-                )
-            }
-            if any(type(value) is not int for value in step_count_metrics.values()):
-                raise TypeError("crust transport scalar counts must be integers")
         except (KeyError, TypeError, ValueError, OverflowError):
             failures.append(f"crust overlap ledger {step_index} has invalid fields")
             break
@@ -1405,7 +1381,6 @@ def validate_crust_overlap_transport(world: dict[str, Any]) -> dict[str, Any]:
             process_age_changes,
             process_thickness_changes,
             process_density_changes,
-            legacy_dominant_ids,
             serialized_transport_distances,
             cell_plate_ids,
         )
@@ -1435,10 +1410,6 @@ def validate_crust_overlap_transport(world: dict[str, Any]) -> dict[str, Any]:
             or any(len(values) != cell_count for values in per_cell_arrays)
             or any(not 0 <= source_id < cell_count for source_id in source_ids)
             or any(not 0 <= source_id < cell_count for source_id in dominant_ids)
-            or any(
-                not 0 <= source_id < cell_count
-                for source_id in legacy_dominant_ids
-            )
             or any(value < 0 for value in contributor_counts)
             or any(value < 0 for value in maximum_multiplicities)
             or any(not 0 <= value < 9 for value in remapped_types + final_types)
@@ -1583,36 +1554,6 @@ def validate_crust_overlap_transport(world: dict[str, Any]) -> dict[str, Any]:
                 )
                 break
 
-        if step_index == 0:
-            # All initial numeric crust fields are round-trip compatibility
-            # aliases for the identity overlap ledger.
-            if (
-                any(
-                    alias != authoritative
-                    for alias, authoritative in zip(
-                        previous_ages, remapped_ages, strict=True
-                    )
-                )
-                or any(
-                    alias != authoritative
-                    for alias, authoritative in zip(
-                        previous_thicknesses,
-                        remapped_thicknesses,
-                        strict=True,
-                    )
-                )
-                or any(
-                    alias != authoritative
-                    for alias, authoritative in zip(
-                        previous_densities, remapped_densities, strict=True
-                    )
-                )
-            ):
-                failures.append("initial crust cell aliases do not match identity ledger")
-                break
-            previous_ages = remapped_ages.copy()
-            previous_thicknesses = remapped_thicknesses.copy()
-            previous_densities = remapped_densities.copy()
         rotated_source_positions: list[tuple[float, float, float]] = []
         for source, plate_id in enumerate(source_plate_ids):
             rotated_source_positions.append(
@@ -1911,7 +1852,6 @@ def validate_crust_overlap_transport(world: dict[str, Any]) -> dict[str, Any]:
             or remapped_types != replayed_types
             or remapped_lithologies != replayed_lithologies
             or dominant_ids != replayed_dominant_ids
-            or legacy_dominant_ids != replayed_dominant_ids
             or any(
                 not _close(actual, expected)
                 for actual, expected in zip(
@@ -1919,7 +1859,7 @@ def validate_crust_overlap_transport(world: dict[str, Any]) -> dict[str, Any]:
                 )
             )
             or any(
-                not _legacy_close(actual, expected)
+                not _display_precision_close(actual, expected)
                 for actual, expected in zip(
                     serialized_transport_distances,
                     replayed_transport_distances,
@@ -1976,22 +1916,11 @@ def validate_crust_overlap_transport(world: dict[str, Any]) -> dict[str, Any]:
                 expected_scalar_metrics[
                     f"mean_abs_crust_{quantity}_{prefix}change{unit}"
                 ] = math.fsum(abs(value) for value in values) / cell_count
-        if (
-            any(
-                not _legacy_close(step_scalar_metrics[field], expected)
-                for field, expected in expected_scalar_metrics.items()
-            )
-            or step_count_metrics["crust_source_remap_cell_count"]
-            != sum(
-                source != destination
-                for destination, source in enumerate(legacy_dominant_ids)
-            )
-            or step_count_metrics["unique_crust_source_cell_count"]
-            != len(set(legacy_dominant_ids))
-            or step_count_metrics["crust_source_reuse_count"]
-            != cell_count - len(set(legacy_dominant_ids))
+        if any(
+            not _display_precision_close(step_scalar_metrics[field], expected)
+            for field, expected in expected_scalar_metrics.items()
         ):
-            failures.append(f"crust transport scalar mirrors failed at step {step_index}")
+            failures.append(f"crust transport scalar metrics failed at step {step_index}")
             break
 
         final_ages = [
@@ -2012,13 +1941,13 @@ def validate_crust_overlap_transport(world: dict[str, Any]) -> dict[str, Any]:
         ]
         if (
             any(
-                not _legacy_close(transport, remapped - previous)
+                not _display_precision_close(transport, remapped - previous)
                 for transport, remapped, previous in zip(
                     transport_age_changes, remapped_ages, previous_ages
                 )
             )
             or any(
-                not _legacy_close(transport, remapped - previous)
+                not _display_precision_close(transport, remapped - previous)
                 for transport, remapped, previous in zip(
                     transport_thickness_changes,
                     remapped_thicknesses,
@@ -2026,7 +1955,7 @@ def validate_crust_overlap_transport(world: dict[str, Any]) -> dict[str, Any]:
                 )
             )
             or any(
-                not _legacy_close(transport, remapped - previous)
+                not _display_precision_close(transport, remapped - previous)
                 for transport, remapped, previous in zip(
                     transport_density_changes,
                     remapped_densities,
@@ -2034,19 +1963,19 @@ def validate_crust_overlap_transport(world: dict[str, Any]) -> dict[str, Any]:
                 )
             )
             or any(
-                not _legacy_close(total, final - previous)
+                not _display_precision_close(total, final - previous)
                 for total, final, previous in zip(
                     total_age_changes, final_ages, previous_ages
                 )
             )
             or any(
-                not _legacy_close(total, final - previous)
+                not _display_precision_close(total, final - previous)
                 for total, final, previous in zip(
                     total_thickness_changes, final_thicknesses, previous_thicknesses
                 )
             )
             or any(
-                not _legacy_close(total, final - previous)
+                not _display_precision_close(total, final - previous)
                 for total, final, previous in zip(
                     total_density_changes, final_densities, previous_densities
                 )

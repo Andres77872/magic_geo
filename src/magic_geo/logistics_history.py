@@ -744,8 +744,8 @@ def _build_strategic_campaign_plans(
 
 
 def enrich_world_with_logistics_history(world: dict[str, Any]) -> dict[str, Any]:
-    _set_logistics_campaign_models(world)
     radius_km = planet_radius_km(world)
+    _set_logistics_campaign_models(world)
     regions = world.get("political_regions", [])
     routes = world.get("routes", [])
     trade_flows = world.get("trade_flows", [])

@@ -56,7 +56,10 @@ int main() {
     const std::string json = raw == nullptr ? std::string{} : std::string(raw);
     magic_geo_free_string(raw);
     const bool valid = !json.empty() && json.find("\"error\"") == std::string::npos &&
+        json.find("\"schema_version\":2") != std::string::npos &&
         json.find("\"name\":\"legacy_v1_client\"") != std::string::npos &&
+        json.find("\"planet_parameters\":{\"radius_km\":6200") !=
+            std::string::npos &&
         json.find("\"requested_backend\":\"cpu\"") != std::string::npos &&
         json.find("\"opencl_probe_performed\":false") != std::string::npos;
     if (!valid) {

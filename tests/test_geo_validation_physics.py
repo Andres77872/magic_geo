@@ -252,7 +252,7 @@ class GeoPhysicsReplayValidationTests(TestCase):
         self.assertFalse(check["passed"])
         self.assertGreaterEqual(check["observed"]["violation_count"], 2)
 
-    def test_process_order_and_reference_erosion_alias_mutations_fail(
+    def test_process_order_and_reference_erosion_mutations_fail(
         self,
     ) -> None:
         altered = deepcopy(self.world)
@@ -260,7 +260,7 @@ class GeoPhysicsReplayValidationTests(TestCase):
         altered["simulation_clock"][
             "erosion_transition_coupling_semantics"
         ] = "tampered"
-        altered["earth_system_feedback_history"][0][
+        altered["earth_system_feedback_history"][-1][
             "mean_stream_power_response_m_per_reference_step"
         ] += 1.0
 

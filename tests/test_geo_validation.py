@@ -164,6 +164,79 @@ class GeoWorldValidationTests(TestCase):
             _check(report, "mesh", "native_cell_area_model_replay")["passed"]
         )
 
+    def test_geo_validation_rejects_prior_world_schema(self) -> None:
+        for schema_version in (1, 2.0, True, None):
+            with self.subTest(schema_version=schema_version):
+                altered = deepcopy(self.world)
+                altered["schema_version"] = schema_version
+
+                report = validate_geo_world(altered, profile="generic")
+
+                self.assertFalse(report["passed"])
+                schema_check = _check(report, "contract", "world_schema_version")
+                self.assertFalse(schema_check["passed"])
+                self.assertEqual(schema_check["expected"], 2)
+
+    def test_geo_validation_requires_current_climate_contract(self) -> None:
+        mutations = {
+            "model_type": "equilibrium_latitude_circulation_climate_v4",
+            "precipitation_model": (
+                "bounded_thermal_moisture_circulation_orography_wind_transport_v2"
+            ),
+            "negative_precipitation_behavior": "retired",
+            "zero_precipitation_scale_behavior": "retired",
+        }
+        for field, retired_value in mutations.items():
+            with self.subTest(field=field):
+                altered = deepcopy(self.world)
+                altered["climate_model"][field] = retired_value
+
+                report = validate_geo_world(altered, profile="generic")
+
+                self.assertFalse(report["passed"])
+                climate_check = _check(
+                    report,
+                    "contract",
+                    "current_climate_model",
+                )
+                self.assertFalse(climate_check["passed"])
+                self.assertEqual(
+                    climate_check["observed"][field],
+                    retired_value,
+                )
+
+    def test_geo_validation_rejects_retired_world_fields(self) -> None:
+        altered = deepcopy(self.world)
+        altered["simulation_clock"][
+            "legacy_mean_erosion_rate_field_semantics"
+        ] = "retired"
+        for step in altered["earth_system_feedback_history"]:
+            step["mean_erosion_rate_m_per_step"] = 0.0
+        altered["plate_kinematic_model"][
+            "accelerator_crust_source_remap_kernel_used"
+        ] = False
+        altered["backend"]["opencl_crust_source_remap_dispatch_count"] = 0
+        altered["climate_model"][
+            "positive_precipitation_pre_thermal_annual_floor_mm"
+        ] = 20.0
+        altered["oceanic_age_depth_model"][
+            "thermal_target_difference_tendency_formula"
+        ] = "retired"
+        for step in altered["plate_motion_history"]:
+            step["thermal_target_difference_tendency_m"] = []
+        altered["numeric_depression_fill_history"] = []
+        altered["summary"]["numeric_depression_fill_event_count"] = 0
+        altered["cells"][0]["cumulative_numeric_depression_fill_m"] = 0.0
+        for step in altered["earth_system_feedback_history"]:
+            step["numeric_depression_fill_pass_count"] = 0
+
+        report = validate_geo_world(altered, profile="generic")
+
+        self.assertFalse(report["passed"])
+        retired_check = _check(report, "contract", "retired_world_schema_fields")
+        self.assertFalse(retired_check["passed"])
+        self.assertGreaterEqual(len(retired_check["observed"]), 11)
+
     def test_geo_factory_rejects_cell_omission(self) -> None:
         data = self.config.model_dump(mode="python")
         data["output"]["include_cells"] = False
@@ -342,7 +415,7 @@ class GeoWorldValidationTests(TestCase):
             SOIL_LINKED_TIME_BASIS,
         )
         self.assertEqual(
-            records["numeric_depression_fill_history"][
+            records["numeric_depression_correction_history"][
                 "state_mutation_evidence"
             ],
             "mixed",
@@ -507,18 +580,26 @@ class GeoWorldValidationTests(TestCase):
             ),
             0,
         )
+        initial_only_ages = initial_only["plate_motion_history"][0][
+            "crust_overlap_ledger"
+        ]["remapped_crust_age_ma_by_cell"]
+        matured_initial_ages = matured["plate_motion_history"][0][
+            "crust_overlap_ledger"
+        ]["remapped_crust_age_ma_by_cell"]
         self.assertFalse(
             any(
-                abs(cell["crust_age_ma"] - cell["initial_crust_age_ma"])
-                > 1.0e-6
-                for cell in initial_only["cells"]
+                abs(cell["crust_age_ma"] - initial_age) > 1.0e-6
+                for cell, initial_age in zip(
+                    initial_only["cells"], initial_only_ages, strict=True
+                )
             )
         )
         self.assertTrue(
             any(
-                abs(cell["crust_age_ma"] - cell["initial_crust_age_ma"])
-                > 1.0e-6
-                for cell in matured["cells"]
+                abs(cell["crust_age_ma"] - initial_age) > 1.0e-6
+                for cell, initial_age in zip(
+                    matured["cells"], matured_initial_ages, strict=True
+                )
             )
         )
         self.assertGreater(
@@ -958,26 +1039,29 @@ class GeoWorldValidationTests(TestCase):
         self.assertFalse(report["passed"])
         self.assertFalse(report["requested_policy"]["policy_passed"])
 
-    def test_geo_generation_does_not_change_legacy_earth_generation(self) -> None:
-        legacy_before = generate_world(self.config)
+    def test_geo_generation_does_not_change_full_world_generation(self) -> None:
+        full_world_before = generate_world(self.config)
 
-        legacy_geo_report = validate_geo_world(legacy_before, profile="generic")
-        self.assertTrue(legacy_geo_report["passed"])
+        full_world_geo_report = validate_geo_world(
+            full_world_before,
+            profile="generic",
+        )
+        self.assertTrue(full_world_geo_report["passed"])
         self.assertNotIn(
             "evolution_provenance",
-            legacy_geo_report["summary"]["domains"],
+            full_world_geo_report["summary"]["domains"],
         )
 
         generate_geo_world(self.config)
-        legacy_after = generate_world(self.config)
+        full_world_after = generate_world(self.config)
 
-        self.assertEqual(legacy_after, legacy_before)
-        self.assertNotIn("generation_scope", legacy_after)
-        self.assertIsInstance(legacy_after["settlements"], list)
-        self.assertIsInstance(legacy_after["political_regions"], list)
-        self.assertIn("trade_route_graph", legacy_after)
-        self.assertIn("political_region_graph", legacy_after)
-        self.assertIn("settlement_score", legacy_after["cells"][0])
+        self.assertEqual(full_world_after, full_world_before)
+        self.assertNotIn("generation_scope", full_world_after)
+        self.assertIsInstance(full_world_after["settlements"], list)
+        self.assertIsInstance(full_world_after["political_regions"], list)
+        self.assertIn("trade_route_graph", full_world_after)
+        self.assertIn("political_region_graph", full_world_after)
+        self.assertIn("settlement_score", full_world_after["cells"][0])
 
 
 class GeoValidationSuiteTests(TestCase):

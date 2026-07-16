@@ -64,14 +64,14 @@ class DebugMapExportDocumentationParityTests(TestCase):
     def test_cli_loads_every_web_curated_description(self) -> None:
         canonical_keys = _curated_keys()
 
-        self.assertGreaterEqual(len(canonical_keys), 170)
+        self.assertGreaterEqual(len(canonical_keys), 164)
         self.assertEqual(canonical_keys - _CURATED_DESCRIPTIONS.keys(), set())
 
     def test_representative_curated_prose_is_exactly_shared(self) -> None:
         for name, kind in (
             ("crust_age_ma", "numeric"),
             ("biome", "categorical"),
-            ("crust_source_remap_event_count", "numeric"),
+            ("cumulative_tectonic_elevation_change_m", "numeric"),
         ):
             with self.subTest(name=name):
                 description = _describe_layer(

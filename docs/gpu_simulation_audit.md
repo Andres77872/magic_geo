@@ -4,20 +4,18 @@
 > determinism analysis. Its backend inventory, automatic-selection policy,
 > thresholds, and latest benchmark results are superseded by the
 > [RTX 5090 CUDA optimization audit](cuda_rtx5090_optimization.md).
-> Its nearest-source crust-remap analysis is also superseded by
+> Its crust-remap analysis is also superseded by
 > `forward_spherical_control_volume_overlap_v1`: production crust transport is
-> conservative and CPU-authoritative. The old accelerator remap kernel is
-> retained only as a low-level tested capability; no current generation path
-> uses it. GPU overlap implementation, parity, telemetry, and benchmarking are
-> pending.
+> conservative and CPU-authoritative. The old accelerator nearest-source kernel
+> documented in the historical baseline below has now been removed. GPU overlap
+> implementation, parity, telemetry, and benchmarking are pending.
 >
 > Generated v3 worlds make the split machine-readable:
 > `backend_scope=accelerated_native_kernels_not_end_to_end_pipeline`,
 > `crust_transport_execution_backend=cpu`,
 > `crust_transport_accelerator_dispatch_count=0`, and
 > `cpu_conservative_crust_overlap_transition_count` records the authoritative
-> overlap transitions. Retained CUDA/OpenCL nearest-source dispatch counters
-> are deprecated and must remain zero during world generation.
+> overlap transitions.
 
 # GPU simulation audit and architecture guide
 
@@ -49,7 +47,7 @@ pipeline. The audited baseline had:
 - fixed-size inline arrays for the four 12-month cell fields;
 - a versioned CPU/auto/OpenCL backend contract and truthful telemetry;
 - FP64 OpenCL kernels for plate assignment, scalar and fused three-field
-  fixed-order CSR smoothing, and the now-superseded segmented same-plate
+  fixed-order CSR smoothing, and the now-removed segmented same-plate
   nearest-source remapping primitive;
 - planet-radius propagation through remaining route/logistics/campaign paths;
 - fail-closed finite/range validation at both Python and native boundaries.
@@ -288,26 +286,26 @@ All kernels use OpenCL C 1.2 FP64 and disable contraction.
    weights 0.58, 0.58, and 0.62. Field-major ping-pong buffers preserve the
    scalar kernel's arithmetic order for each field.
 4. `remap_crust_sources`: one work item per current cell over the ascending
-   candidate segment for its plate. This primitive remains unit-tested, but the
-   production v3 plate path no longer calls it. The authoritative path instead
-   forward-rotates native source polygons, computes exact spherical overlaps,
-   coverage multiplicity, and extensive mixtures on CPU.
+   candidate segment for its plate. This primitive was unit-tested and used by
+   the historical production path; it has since been removed. The authoritative
+   path instead forward-rotates native source polygons, computes exact spherical
+   overlaps, coverage multiplicity, and extensive mixtures on CPU.
 
 In that historical baseline, positions and adjacency were uploaded once per
 generation. The three boundary fields shared one packed upload/read pair and one traversal per smoothing
 step; the independent continental-coherence and relief fields still use scalar
-transfers. The old crust remap uploaded queries, plate IDs, offsets, and candidate IDs
-every erosion iteration. Context creation and source compilation occurred
+transfers. The old crust remap uploaded queries, plate IDs, offsets, and candidate
+IDs every erosion iteration. Context creation and source compilation occurred
 once per world, not once per process. These costs explain the limited gain.
 
 ### Radius propagation and finite validation
 
 Remaining Earth-radius literals in route-corridor, logistics/campaign generation,
-and campaign replay were replaced with `planet_parameters.radius_km`. Legacy
-artifacts without `planet_parameters` intentionally fall back to 6,371 km so
-old payload replay remains stable. Native settlement/sacred-site scale and
-climate traversal use actual generated mesh size, and native distances/areas
-continue to use configured radius.
+and campaign replay were replaced with `planet_parameters.radius_km`. At this
+historical checkpoint, artifacts without `planet_parameters` still fell back to
+6,371 km; current consumers instead require explicit planet parameters. Native
+settlement/sacred-site scale and climate traversal use actual generated mesh
+size, and native distances/areas continue to use configured radius.
 
 All Pydantic configuration models now reject NaN and infinity and enforce
 explicit practical ranges. Native `validate_params` independently checks every
@@ -375,7 +373,7 @@ ordering rules it replaces.
 | --- | --- | --- |
 | Plate-center argmax | GPU now | Dense cell-by-plate loop; fixed ascending plate order. |
 | Fixed-step scalar or fused three-field neighbor smoothing | GPU now | Independent destination cells over immutable ordered CSR; field arithmetic remains ordered. |
-| Forward spherical crust overlap | CPU authoritative; GPU reconciliation pending | Source-polygon rotation, cap-index candidate search, spherical clipping, destination coverage arrangement, and extensive ledgers define v3 semantics. The legacy nearest-source GPU scan is not a valid substitute. |
+| Forward spherical crust overlap | CPU authoritative; GPU reconciliation pending | Source-polygon rotation, cap-index candidate search, spherical clipping, destination coverage arrangement, and extensive ledgers define v3 semantics. The removed nearest-source GPU scan was not a valid substitute. |
 | Independent per-cell algebra with immutable inputs | GPU candidate | Safe only if field order, clamping, and FP policy match and several fields are batched to amortize transfers. |
 | Monthly climate fields | GPU candidate after SoA | Twelve fixed lanes are suitable, but atmospheric/moisture dependencies and downstream parity require a whole-stage design, not isolated expressions. |
 | Sea-level connectivity sweep / union-find | CPU | Ordered connectivity changes and deterministic component choice. |
@@ -420,7 +418,8 @@ are available.
 ### 3. Reconcile the conservative overlap transport with accelerators
 
 The nearest-source scan described by the original profile is no longer the
-production crust algorithm. V3 uses a CPU spherical point index,
+production crust algorithm and has now been removed. V3 uses a CPU spherical
+point index,
 forward-rotated source polygons, exact overlap clipping, canonical
 destination-major CSR, and a destination-local line arrangement for
 union/gap/excess multiplicity. That coverage arrangement fails closed above
@@ -597,7 +596,6 @@ for cells, erosion in (
     opencl = generate_world(opencl_config)
     assert opencl["backend"]["crust_transport_execution_backend"] == "cpu"
     assert opencl["backend"]["crust_transport_accelerator_dispatch_count"] == 0
-    assert opencl["backend"]["opencl_crust_source_remap_dispatch_count"] == 0
     assert (
         opencl["backend"]["cpu_conservative_crust_overlap_transition_count"]
         == erosion
@@ -610,10 +608,9 @@ PY
 ```
 
 These assertions prove the current split: accelerator assignment/smoothing may
-execute, while authoritative v3 crust transport stays on the CPU and the
-retired donor-remap counter stays zero. A future GPU overlap implementation
-needs a new model-specific dispatch counter and complete CSR-ledger parity;
-incrementing the deprecated donor counter would not qualify.
+execute, while authoritative v3 crust transport stays on the CPU. A future GPU
+overlap implementation needs a new model-specific dispatch counter and complete
+CSR-ledger parity.
 
 ### Sanitizers
 

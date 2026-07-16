@@ -52,8 +52,6 @@ struct Cell {
     int initial_plate_id = 0;
     int plate_assignment_change_count = 0;
     int last_plate_assignment_change_iteration = -1;
-    int last_crust_source_cell_id = -1;
-    int crust_source_remap_event_count = 0;
     int oceanic_crust_aging_event_count = 0;
     int oceanic_crust_rejuvenation_event_count = 0;
     int oceanic_crust_subduction_event_count = 0;
@@ -73,15 +71,11 @@ struct Cell {
     double crust_age_ma = 0.0;
     double crust_thickness_km = 0.0;
     double crust_density = 0.0;
-    double initial_crust_age_ma = 0.0;
-    double initial_crust_thickness_km = 0.0;
-    double initial_crust_density = 0.0;
     double cumulative_tectonic_elevation_change_m = 0.0;
     double boundary_convergent = 0.0;
     double boundary_divergent = 0.0;
     double boundary_transform = 0.0;
     double initial_isostatic_elevation_m = 0.0;
-    double initial_thermal_subsidence_m = 0.0;
     // Instantaneous relative oceanic-basement equilibrium target from the
     // age-depth curve, not a realized terrain-component state. This is zero
     // for states that do not satisfy the oceanic-like predicate.
@@ -163,8 +157,6 @@ struct Cell {
     double lake_fill_fraction = 0.0;
     bool is_closed_basin = false;
     bool lake_overflows = false;
-    double cumulative_numeric_depression_fill_m = 0.0;
-    int numeric_depression_fill_event_count = 0;
     double cumulative_numeric_depression_breach_excavation_m = 0.0;
     double cumulative_numeric_depression_breach_deposition_m = 0.0;
     int numeric_depression_breach_event_count = 0;
@@ -172,7 +164,6 @@ struct Cell {
     int numeric_depression_temporary_lake_event_count = 0;
     double erosion_rate = 0.0;
     double sediment_thickness_m = 0.0;
-    double sediment_production_m = 0.0;
     double sediment_deposition_m = 0.0;
     double sediment_export_m = 0.0;
     double sediment_net_budget_m = 0.0;
@@ -211,5 +202,20 @@ struct Cell {
     double fertility = 0.0;
     double settlement_score = 0.0;
 };
+
+// Canonical cumulative gross mobilization is the material partition sum.
+inline double sediment_gross_mobilization_m(const Cell& cell) noexcept {
+    return cell.sediment_alluvium_entrainment_m +
+        cell.sediment_bedrock_erosion_m;
+}
+
+// Independent process-side witness for partition closure. Keep this derived
+// from process provenance rather than from the material partitions above.
+inline double sediment_process_source_witness_m(const Cell& cell) noexcept {
+    return cell.hillslope_sediment_production_m +
+        cell.fluvial_sediment_local_source_m +
+        cell.glacial_sediment_production_m +
+        cell.cumulative_numeric_depression_breach_excavation_m;
+}
 
 }  // namespace magic_geo::detail

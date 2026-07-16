@@ -55,6 +55,20 @@ class DebugUiContractTests(TestCase):
         self.assertIn('@media (max-width:', style)
         self.assertIn('.cacheless', style)
 
+    def test_status_refresh_requires_the_workbench_status_api(self) -> None:
+        script = Path("src/magic_geo/debug_ui/app.js").read_text(encoding="utf-8")
+        status_loader = script[
+            script.index("async function loadServerStatus") : script.index(
+                "async function initializeMap"
+            )
+        ]
+
+        self.assertIn("await fetchJson('/api/status')", status_loader)
+        self.assertIn("showStatusRefreshFailure(error);", status_loader)
+        self.assertNotIn("optionalJson('/api/manifest')", status_loader)
+        self.assertNotIn("legacyManifest", status_loader)
+        self.assertNotIn("legacy debug cache", status_loader)
+
     def test_map_exports_png_and_copy_paste_image_prompt(self) -> None:
         html = Path("src/magic_geo/debug_ui/index.html").read_text(encoding="utf-8")
         script = Path("src/magic_geo/debug_ui/app.js").read_text(encoding="utf-8")

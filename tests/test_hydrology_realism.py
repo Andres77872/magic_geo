@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from unittest import TestCase
 
-from magic_geo.hydrology_realism import enrich_world_with_hydrology_realism
+from magic_geo.hydrology_realism import (
+    VALID_WATERSHED_OUTLET_TYPES,
+    enrich_world_with_hydrology_realism,
+)
 
 
 def _realism_check(world: dict, name: str) -> dict:
@@ -120,6 +123,55 @@ def _marine_and_lacustrine_delta_world() -> dict:
 
 
 class HydrologyRealismRegressionTests(TestCase):
+    def test_watershed_outlet_vocabulary_is_canonical(self) -> None:
+        expected_outlet_types = {
+            "ocean",
+            "lake",
+            "saline_basin",
+            "inland_sea",
+            "closed_land",
+        }
+        self.assertEqual(VALID_WATERSHED_OUTLET_TYPES, expected_outlet_types)
+
+        for outlet_type in sorted(expected_outlet_types):
+            with self.subTest(outlet_type=outlet_type):
+                world = _closed_land_river_world(
+                    {
+                        "outlet_type": outlet_type,
+                        "is_endorheic": outlet_type != "ocean",
+                    }
+                )
+
+                enrich_world_with_hydrology_realism(world)
+
+                check = _realism_check(world, "river_terminal_sink_validity")
+                self.assertEqual(check["value"], 1.0)
+                self.assertTrue(check["passed"])
+                self.assertEqual(
+                    check["evidence"]["valid_sink_reason_counts"],
+                    {f"watershed_outlet:{outlet_type}": 1},
+                )
+
+    def test_legacy_watershed_outlet_aliases_are_rejected(self) -> None:
+        for outlet_type in ("fresh_lake", "endorheic"):
+            with self.subTest(outlet_type=outlet_type):
+                world = _closed_land_river_world(
+                    {
+                        "outlet_type": outlet_type,
+                        "is_endorheic": False,
+                    }
+                )
+
+                enrich_world_with_hydrology_realism(world)
+
+                check = _realism_check(world, "river_terminal_sink_validity")
+                self.assertEqual(check["value"], 0.0)
+                self.assertFalse(check["passed"])
+                self.assertEqual(
+                    check["evidence"]["valid_sink_reason_counts"],
+                    {},
+                )
+
     def test_closed_land_and_endorheic_watershed_terminals_are_valid(self) -> None:
         cases = (
             (
@@ -208,4 +260,3 @@ class HydrologyRealismRegressionTests(TestCase):
         self.assertEqual(check["value"], 0.5)
         self.assertFalse(check["passed"])
         self.assertEqual(check["evidence"]["unrecognized_terminal_delta_count"], 1)
-

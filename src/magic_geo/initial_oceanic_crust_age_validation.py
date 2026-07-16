@@ -33,16 +33,12 @@ MODEL_LITERAL_VALUES: dict[str, Any] = {
     "authoritative_age_field_location": (
         "initial_oceanic_crust_age_ledger.age_ma_by_cell"
     ),
-    "compatibility_cell_alias_location": (
-        "cells[].initial_crust_age_ma_where_status_id_is_not_zero"
-    ),
-    "compatibility_history_alias_location": (
+    "initial_state_checkpoint_location": (
         "plate_motion_history[0].crust_overlap_ledger.remapped_crust_age_ma_"
         "by_cell_where_status_id_is_not_zero"
     ),
-    "compatibility_alias_scope": (
-        "oceanic_like_ledger_cells_only_non_oceanic_cell_age_aliases_are_"
-        "initialized_by_the_separate_continental_crust_rule"
+    "initial_state_checkpoint_scope": (
+        "history_identity_overlap_oceanic_like_ledger_cells_only"
     ),
     "cell_geometry_source": "cells[].position_3d_area_km2_and_neighbors",
     "boundary_source": "plate_motion_history[0].boundary_segments",
@@ -410,7 +406,6 @@ def validate_initial_oceanic_crust_age(world: Any) -> dict[str, Any]:
         "clamped_ages_and_status_replayed": False,
         "summary_statistics_replayed": False,
         "cdf_replayed": False,
-        "oceanic_cell_aliases_replayed": False,
         "oceanic_history_aliases_replayed": False,
         "procedural_authority": False,
         "physical_seafloor_creation_resolved": False,
@@ -956,17 +951,10 @@ def validate_initial_oceanic_crust_age(world: Any) -> dict[str, Any]:
         for cell_id, status in enumerate(statuses):
             if status == STATUS_NOT_OCEANIC_LIKE:
                 continue
-            _assert_close(
-                cells[cell_id].get("initial_crust_age_ma"),
-                clamped[cell_id],
-                f"cells[{cell_id}].initial_crust_age_ma",
-                operations=cell_count,
-            )
             _require(
                 _close(history_ages[cell_id], clamped[cell_id], operations=cell_count),
                 "plate_motion_history[0] oceanic initial age alias does not replay",
             )
-        metrics["oceanic_cell_aliases_replayed"] = True
         metrics["oceanic_history_aliases_replayed"] = True
 
         for field in (

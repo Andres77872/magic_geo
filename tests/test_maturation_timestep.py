@@ -204,7 +204,8 @@ class MaturationTimestepTests(TestCase):
         convergent_fields = (
             "elevation_m",
             "sediment_thickness_m",
-            "sediment_production_m",
+            "sediment_alluvium_entrainment_m",
+            "sediment_bedrock_erosion_m",
             "crust_thickness_km",
         )
         for field in convergent_fields:

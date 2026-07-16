@@ -137,6 +137,8 @@ class OceanicAgeDepthGeneratedValidationTests(TestCase):
         result = validate_oceanic_age_depth(self.world)
         self.assertTrue(result["passed"], result["failures"])
         self.assertEqual(self.world["oceanic_age_depth_model"], MODEL_LITERAL_VALUES)
+        for step in self.world["plate_motion_history"]:
+            self.assertNotIn("thermal_target_difference_tendency_m", step)
         metrics = result["metrics"]
         cell_count = len(self.world["cells"])
         history_count = len(self.world["plate_motion_history"])
@@ -170,7 +172,7 @@ class OceanicAgeDepthGeneratedValidationTests(TestCase):
                 )
             )
         )
-        self.assertTrue(metrics["initial_thermal_aliases_replayed"])
+        self.assertTrue(metrics["initial_thermal_checkpoint_replayed"])
         self.assertTrue(metrics["initial_isostatic_targets_replayed"])
         self.assertTrue(metrics["final_thermal_target_replayed"])
         self.assertTrue(metrics["kinematic_equilibrium_metadata_replayed"])
@@ -201,7 +203,7 @@ class OceanicAgeDepthGeneratedValidationTests(TestCase):
             "unapplied_thermal_equilibrium_residual_zero_by_construction",
             "thermal_contribution_outside_bounded_dynamic_relief_clamp_resolved",
             "thermal_contribution_to_tectonic_elevation_change_replayed",
-            "thermal_target_difference_tendency_application_replayed",
+            "thermal_equilibrium_change_application_replayed",
         ):
             self.assertTrue(metrics[field], field)
 
@@ -347,7 +349,7 @@ class OceanicAgeDepthGeneratedValidationTests(TestCase):
                 altered["plate_kinematic_model"][field] += 1.0e-6
                 self.assert_rejected(altered)
 
-    def test_round_trip_thermal_arrays_and_final_alias_tampering_is_rejected(
+    def test_round_trip_thermal_arrays_and_final_target_tampering_is_rejected(
         self,
     ) -> None:
         mutations = (
@@ -361,10 +363,6 @@ class OceanicAgeDepthGeneratedValidationTests(TestCase):
                 "thermal_subsidence_target_m",
                 world["cells"][0]["thermal_subsidence_target_m"] + 1.0e-6,
             ),
-            lambda world: world["cells"][0].__setitem__(
-                "initial_thermal_subsidence_m",
-                world["cells"][0]["initial_thermal_subsidence_m"] + 1.0e-6,
-            ),
         )
         for mutate in mutations:
             with self.subTest(mutation=mutate):
@@ -372,11 +370,13 @@ class OceanicAgeDepthGeneratedValidationTests(TestCase):
                 mutate(altered)
                 self.assert_rejected(altered)
 
-    def test_target_difference_tendency_tampering_is_rejected(self) -> None:
+    def test_canonical_thermal_equilibrium_change_tampering_is_rejected(
+        self,
+    ) -> None:
         altered = deepcopy(self.world)
-        altered["plate_motion_history"][1][
-            "thermal_target_difference_tendency_m"
-        ][0] += 1.0e-8
+        altered["plate_motion_history"][1]["thermal_equilibrium_change_m"][
+            0
+        ] += 1.0e-8
         self.assert_rejected(altered)
 
     def test_every_equilibrium_application_array_tampering_is_rejected(
@@ -392,7 +392,6 @@ class OceanicAgeDepthGeneratedValidationTests(TestCase):
             "previous_local_thermal_subsidence_target_m",
             "post_process_local_thermal_subsidence_target_m",
             "thermal_equilibrium_change_m",
-            "thermal_target_difference_tendency_m",
             "unbounded_dynamic_relief_change_m",
             "bounded_dynamic_relief_change_m",
             "tectonic_elevation_change_m_by_cell",
@@ -403,7 +402,9 @@ class OceanicAgeDepthGeneratedValidationTests(TestCase):
                 altered["plate_motion_history"][1][field][0] += 1.0e-6
                 self.assert_rejected(altered)
 
-    def test_colluding_thermal_target_and_tendency_cannot_spoof_formula(self) -> None:
+    def test_colluding_thermal_target_change_and_total_cannot_spoof_formula(
+        self,
+    ) -> None:
         altered = deepcopy(self.world)
         step = altered["plate_motion_history"][-1]
         cell_id = next(
@@ -418,7 +419,6 @@ class OceanicAgeDepthGeneratedValidationTests(TestCase):
         new_change = 0.0 - previous
         step["post_process_local_thermal_subsidence_target_m"][cell_id] = 0.0
         step["thermal_equilibrium_change_m"][cell_id] = new_change
-        step["thermal_target_difference_tendency_m"][cell_id] = new_change
         step["tectonic_elevation_change_m_by_cell"][cell_id] += (
             new_change - old_change
         )
@@ -475,7 +475,7 @@ class OceanicAgeDepthGeneratedValidationTests(TestCase):
 
         altered = deepcopy(self.world)
         altered["plate_motion_history"][0][
-            "thermal_target_difference_tendency_m"
+            "post_process_local_thermal_subsidence_target_m"
         ].pop()
         self.assert_rejected(altered)
 

@@ -52,10 +52,10 @@ from .ocean_circulation import enrich_world_with_ocean_circulation
 from .ore_genesis import enrich_world_with_ore_genesis
 from .permafrost_diagnostics import enrich_world_with_permafrost_diagnostics
 from .phonology_history import enrich_world_with_phonology_history
-from .planet_parameters import planet_parameter_snapshot
 from .planet_realism import enrich_world_with_planet_realism
 from .political_geography import enrich_world_with_political_geography_models
 from .port_sites import enrich_world_with_port_sites
+from .planet_parameters import planet_parameter_snapshot
 from .petroleum_migration import enrich_world_with_petroleum_migration
 from .reef_diagnostics import enrich_world_with_reef_diagnostics
 from .river_network_evolution import enrich_world_with_river_network_evolution
@@ -182,13 +182,21 @@ def backend_info() -> dict[str, Any]:
     return native_backend_info()
 
 
+def _require_configured_planet_snapshot(
+    world: dict[str, Any],
+    config: WorldConfig,
+) -> None:
+    if world.get("planet_parameters") != planet_parameter_snapshot(config.planet):
+        raise RuntimeError(
+            "native planet_parameters do not match the configured planet snapshot"
+        )
+
+
 def generate_world(config: WorldConfig) -> dict[str, Any]:
     from .native import generate_world as native_generate_world
 
     world = native_generate_world(config_to_native(config))
-    # Python enrichers consume this snapshot, so expose it before the first one
-    # runs rather than waiting for the later planet-realism diagnostics.
-    world["planet_parameters"] = planet_parameter_snapshot(config.planet)
+    _require_configured_planet_snapshot(world, config)
     enrich_world_with_mesh_lod(world)
     enrich_world_with_spherical_index(world)
     enrich_world_with_cell_geometry(world)
@@ -292,9 +300,9 @@ def generate_geo_world(config: WorldConfig) -> dict[str, Any]:
         )
 
     world = native_generate_geo_world(config_to_native(config))
+    _require_configured_planet_snapshot(world, config)
     _strip_native_civilization_outputs(world)
     world["generation_scope"] = "geo_only"
-    world["planet_parameters"] = planet_parameter_snapshot(config.planet)
 
     # Geometry and physical topology.
     enrich_world_with_mesh_lod(world)

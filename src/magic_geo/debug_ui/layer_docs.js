@@ -19,7 +19,6 @@
 // Ordered longest-first so `_mm_y` wins over `_m`, `_m3_s` over `_s`, etc.
 const EXACT_UNITS = {
   crust_density: ['g/cm³', 'Bulk density (grams per cubic centimetre).'],
-  initial_crust_density: ['g/cm³', 'Bulk density (grams per cubic centimetre).'],
 };
 
 const UNIT_RULES = [
@@ -142,7 +141,6 @@ const CURATED = {
   plate_id: 'Tectonic plate the cell belongs to. Identifier — colour groups plates, magnitude is meaningless.',
   crust_type: 'Crust classification (continental, oceanic, craton, orogen, …).',
   crust_age_ma: 'Current procedural crust-state age in Ma after remap and maturation rules. This replay root is serialized with binary64 round-trip precision. It is not a reconstructed geological creation age or proof of a ridge-to-subduction flowline.',
-  initial_crust_age_ma: 'Initial procedural crust-state age in Ma, serialized with binary64 round-trip precision. On oceanic-like cells this aliases the replayable ridge-seeded graph-travel-time ledger: distance over one global nominal half-spreading rate, with explicit ceiling/clamp/unreachable statuses. It is not a physical seafloor-creation reconstruction.',
   lithology: 'Dominant rock type (basalt, granite, limestone, …). NOTE: the per-stage history serializes lithology as numeric codes 0–6, while this cell layer uses names; the code order is alphabetical here and may not match the engine enum (see layers_review.md F3).',
   soil_type: 'Soil classification from climate, parent material, and drainage.',
   resource: 'Dominant natural-resource association for the cell (craton_iron_gold, sedimentary_fuels, …).',
@@ -169,9 +167,6 @@ const CURATED = {
   mean_seasonal_wind_speed: 'Mean wind speed over the seasonal cycle (magnitude of the monthly wind vectors).',
   earthquake_recurrence_interval_y: 'Mean interval between large earthquakes, in years. Low values mark seismically active belts.',
   crust_density: 'Bulk crust density in g/cm³, serialized with binary64 round-trip precision; oceanic crust is denser than continental.',
-  initial_crust_density: 'Initial bulk crust density in g/cm³ before the geodynamic feedback loop, serialized with binary64 round-trip precision.',
-  crust_source_remap_event_count: 'V3 compatibility counter incremented when a stage\'s dominant incoming-volume contributor ID differs from the destination cell ID. It does not count all overlap contributors or prove a unique donor/remap. Use `plate_motion_history[*].crust_overlap_ledger` for canonical mixture provenance.',
-  last_crust_source_cell_id: 'V3 compatibility alias for the source contributing the largest incoming crust volume in the latest stage, with source ID as the tie-break. It is not a unique donor; the canonical destination-major mixture is in `plate_motion_history[*].crust_overlap_ledger`.',
   erosion_rate: 'Local stream-power response in depth per 5 Ma reference step; applied incision is timestep-scaled.',
   flow_velocity_m_s: 'Channel flow velocity in m/s from the river-hydraulics solve.',
   froude_number: 'Froude number of channel flow (dimensionless): <1 subcritical, >1 supercritical. Mostly ~0 off the channel network.',
@@ -199,7 +194,6 @@ const CURATED = {
   boundary_transform: 'Strength of transform-boundary influence on this cell.',
   cumulative_tectonic_elevation_change_m: 'Net elevation change contributed by tectonics over the whole run. Each step is the full gain-1 isostatic change plus full gain-1 thermal-target change plus only the bounded dynamic-relief term.',
   initial_isostatic_elevation_m: 'Initial local crustal isostatic-equilibrium elevation contribution. Later changes are applied in full outside the dynamic-relief clamp.',
-  initial_thermal_subsidence_m: 'Initial relative oceanic age–depth subsidence target; zero for non-oceanic-like cells. This is a target component, not absolute basement depth.',
   thermal_subsidence_target_m: 'Current relative oceanic age–depth equilibrium target. Its full step-to-step change is applied outside the bounded dynamic-relief clamp; the field is not a separately evolved thermal-relief state.',
   continental_shelf_id: 'Identifier for a coarse marine shelf diagnostic component. At Earth reference resolution a cell is roughly 400 km across, so this does not resolve fractional shelf area or a shelf–slope–rise profile.',
   tectonic_uplift_rate_m_per_step: 'Current tectonic uplift (positive) or subsidence (negative) rate.',
@@ -263,7 +257,6 @@ const CURATED = {
   active_layer_depth_m: 'Seasonal thaw depth above permafrost.',
   deglaciation_age_ka: 'Model time since the cell became ice-free.',
   // Sediment
-  sediment_production_m: 'Sediment generated in the cell (hillslope + channel erosion).',
   sediment_deposition_m: 'Sediment deposited in the cell.',
   sediment_export_m: 'Sediment leaving the cell downstream.',
   sediment_net_budget_m: 'Deposition minus erosion — positive is net aggradation.',
@@ -308,9 +301,9 @@ const CURATED = {
   residual_mm_y: 'Unclosed remainder of the stage water budget — should be near 0; hotspots flag conservation bugs.',
   local_relief_m: 'Relief within the cell\'s neighborhood at that stage.',
   // Stage-history fields (numeric depression fill)
-  fill_depth_m: 'Depth added by this fill event to remove a numeric depression.',
-  elevation_before_fill_m: 'Surface elevation at the event cell before the fill event.',
-  elevation_after_fill_m: 'Surface elevation at the event cell after the fill event.',
+  fill_depth_m: 'Counterfactual Priority-Flood depth for the event cell; retained for correction selection and not applied as material.',
+  elevation_before_fill_m: 'Surface elevation before correction and fill-candidate evaluation.',
+  elevation_after_fill_m: 'Counterfactual surface elevation under the full-fill candidate; not the applied post-correction terrain.',
   breach_excavation_depth_m: 'Depth excavated through the sill when the policy breached instead of filled.',
   breach_deposition_depth_m: 'Excavated material redeposited downstream of the breach.',
 };
@@ -330,9 +323,9 @@ const SOURCE_DOCS = {
     title: 'Water-budget stage history',
     doc: 'Per-stage snapshots of the coupled climate–hydrology solve as the geodynamic feedback loop iterates. Scrub the stage control to watch elevation, precipitation, runoff, and the balance residual co-evolve. The colour scale spans all stages so you can see change, not re-normalisation.',
   },
-  numeric_depression_fill_history: {
-    title: 'Depression-fill stage history',
-    doc: 'Fine-grained log of the depression fill/breach algorithm — one stage per fill or breach operation (1,600 on the earthlike run). Each stage records what a single closed-basin correction did. Scrubbing all stages is many requests; step with `,`/`.` to inspect specific operations.',
+  numeric_depression_correction_history: {
+    title: 'Depression-correction history',
+    doc: 'Fine-grained correction ledger — one stage per bounded breach or explicit temporary-lake deferral. The stage count depends on the generated world. Each stage also retains the non-mutating Priority-Flood fill candidate used for comparison. Scrubbing a long history is many requests; step with `,`/`.` to inspect specific operations.',
   },
 };
 

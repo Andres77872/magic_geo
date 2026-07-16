@@ -15,7 +15,7 @@ struct FeedbackReference {
     std::vector<double> runoff_mm_y;
 };
 
-struct NumericDepressionFillEvent {
+struct NumericDepressionCorrectionEvent {
     int id = 0;
     int feedback_stage_id = 0;
     std::string stage;
@@ -58,7 +58,6 @@ struct NumericDepressionFillEvent {
     double breach_deposition_capacity_km3 = 0.0;
     std::vector<int> breach_deposition_cell_ids;
     std::vector<double> breach_deposition_depth_m_by_cell;
-    double applied_fill_volume_km3 = 0.0;
     double applied_breach_excavation_volume_km3 = 0.0;
     double applied_breach_deposition_volume_km3 = 0.0;
     double applied_alluvium_entrainment_volume_km3 = 0.0;
@@ -71,10 +70,7 @@ struct HydrologyStabilizationResult {
     int climate_recompute_count = 0;
     int hydrologic_water_budget_recompute_count = 0;
     int hydrology_recompute_count = 0;
-    int numeric_depression_fill_pass_count = 0;
-    int numeric_depression_fill_event_count = 0;
-    int numeric_depression_fill_cell_application_count = 0;
-    int numeric_depression_filled_unique_cell_count = 0;
+    int numeric_depression_correction_pass_count = 0;
     int numeric_depression_correction_event_count = 0;
     int numeric_depression_breach_selected_event_count = 0;
     int numeric_depression_breach_excavation_cell_application_count = 0;
@@ -83,9 +79,6 @@ struct HydrologyStabilizationResult {
     int numeric_depression_temporary_lake_cell_application_count = 0;
     int numeric_depression_temporary_lake_unique_cell_count = 0;
     double sea_level_adjustment_m = 0.0;
-    double numeric_depression_fill_area_km2 = 0.0;
-    double numeric_depression_fill_volume_km3 = 0.0;
-    double max_numeric_depression_fill_depth_m = 0.0;
     double numeric_depression_breach_excavation_volume_km3 = 0.0;
     double numeric_depression_breach_deposition_volume_km3 = 0.0;
     double numeric_depression_alluvium_entrainment_volume_km3 = 0.0;
@@ -361,10 +354,7 @@ struct EarthSystemFeedbackStep {
     int climate_recompute_count = 0;
     int hydrologic_water_budget_recompute_count = 0;
     int hydrology_recompute_count = 0;
-    int numeric_depression_fill_pass_count = 0;
-    int numeric_depression_fill_event_count = 0;
-    int numeric_depression_fill_cell_application_count = 0;
-    int numeric_depression_filled_unique_cell_count = 0;
+    int numeric_depression_correction_pass_count = 0;
     int numeric_depression_correction_event_count = 0;
     int numeric_depression_breach_selected_event_count = 0;
     int numeric_depression_breach_excavation_cell_application_count = 0;
@@ -393,9 +383,6 @@ struct EarthSystemFeedbackStep {
     int water_cell_count = 0;
     int river_cell_count = 0;
     double sea_level_adjustment_m = 0.0;
-    double numeric_depression_fill_area_km2 = 0.0;
-    double numeric_depression_fill_volume_km3 = 0.0;
-    double max_numeric_depression_fill_depth_m = 0.0;
     double numeric_depression_breach_excavation_volume_km3 = 0.0;
     double numeric_depression_breach_deposition_volume_km3 = 0.0;
     double numeric_depression_correction_mass_balance_residual_km3 = 0.0;
@@ -539,7 +526,8 @@ enum InitialOceanicCrustAgeStatus : int {
 };
 
 // Complete authoritative witness for the procedural initial oceanic-crust age
-// field. Per-cell scalar state is retained as a compatibility alias.
+// field. The plate-motion identity-overlap checkpoint carries the complete
+// initial crust state for every cell.
 struct InitialOceanicCrustAgeDiagnostics {
     std::vector<double> age_ma_by_cell;
     std::vector<double> unclamped_graph_age_ma_by_cell;
@@ -759,7 +747,6 @@ struct CrustMaterialShadowState {
 
 struct CrustMotionDiagnostics {
     CrustTransportPlan transport_plan;
-    std::vector<int> source_cell_ids;
     std::vector<double> transport_distance_km_by_cell;
     std::vector<double> age_transport_change_ma_by_cell;
     std::vector<double> thickness_transport_change_km_by_cell;
@@ -787,9 +774,6 @@ struct PlateMotionStep {
     int boundary_segment_count = 0;
     int control_volume_boundary_incident_cell_count = 0;
     int accreted_terrane_cell_count = 0;
-    int crust_source_remap_cell_count = 0;
-    int unique_crust_source_cell_count = 0;
-    int crust_source_reuse_count = 0;
     int aged_oceanic_cell_count = 0;
     int rejuvenated_oceanic_cell_count = 0;
     int subducted_oceanic_cell_count = 0;
@@ -820,7 +804,6 @@ struct PlateMotionStep {
     std::vector<double> boundary_convergent_by_cell;
     std::vector<double> boundary_divergent_by_cell;
     std::vector<double> boundary_transform_by_cell;
-    std::vector<int> crust_source_cell_ids;
     std::vector<int> crust_type_by_cell;
     std::vector<int> lithology_by_cell;
     std::vector<double> crust_transport_distance_km_by_cell;
@@ -840,8 +823,6 @@ struct PlateMotionStep {
     std::vector<double> previous_local_thermal_subsidence_target_m;
     std::vector<double> post_process_local_thermal_subsidence_target_m;
     std::vector<double> thermal_equilibrium_change_m;
-    // Deprecated compatibility alias for thermal_equilibrium_change_m.
-    std::vector<double> thermal_target_difference_tendency_m;
     std::vector<double> unbounded_dynamic_relief_change_m;
     std::vector<double> bounded_dynamic_relief_change_m;
     std::vector<int> aged_oceanic_cell_ids;

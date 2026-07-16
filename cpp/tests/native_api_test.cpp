@@ -211,6 +211,7 @@ bool contains_ascii(
 }
 
 int json_int(const std::string& json, const std::string& key);
+double json_double(const std::string& json, const std::string& key);
 bool json_bool(const std::string& json, const std::string& key);
 
 bool public_api_is_usable() {
@@ -223,12 +224,21 @@ bool public_api_is_usable() {
         magic_geo::params_from_c_config(cfg)
     );
     CHECK(generated.starts_with('{'));
-    CHECK(generated.find("\"schema_version\":1") != std::string::npos);
+    CHECK(generated.find("\"schema_version\":2") != std::string::npos);
     CHECK(generated.find("\"name\":\"native_api_test\"") != std::string::npos);
+    CHECK(generated.find("\"planet_parameters\":{") != std::string::npos);
+    CHECK(json_double(generated, "radius_km") == cfg.radius_km);
+    CHECK(json_double(generated, "gravity_g") == cfg.gravity_g);
     CHECK(generated.find("\"cells\":[]") != std::string::npos);
     CHECK(generated.find("\"requested_backend\":\"cpu\"") != std::string::npos);
     CHECK(generated.find("\"clock_type\":\"coupled_geodynamic_stage_clock_v12\"") !=
           std::string::npos);
+    CHECK(generated.find(
+        "\"model_type\":\"equilibrium_latitude_circulation_climate_v5\""
+    ) != std::string::npos);
+    CHECK(generated.find(
+        "\"precipitation_model\":\"bounded_thermal_moisture_circulation_orography_wind_transport_v3\""
+    ) != std::string::npos);
     CHECK(generated.find("\"nominal_timestep_ma\":5") != std::string::npos);
     CHECK(generated.find("\"erosion_transition_coupling_semantics\":") !=
           std::string::npos);
@@ -236,6 +246,23 @@ bool public_api_is_usable() {
     CHECK(generated.find(
         "\"mean_stream_power_response_m_per_reference_step\":"
     ) != std::string::npos);
+    CHECK(generated.find("mean_erosion_rate_m_per_step") == std::string::npos);
+    CHECK(generated.find("legacy_mean_erosion_rate_field_semantics") ==
+          std::string::npos);
+    CHECK(generated.find("accelerator_crust_source_remap_kernel_used") ==
+          std::string::npos);
+    CHECK(generated.find("\"numeric_depression_correction_history\":") !=
+          std::string::npos);
+    CHECK(generated.find("\"numeric_depression_fill_history\":") ==
+          std::string::npos);
+    CHECK(generated.find("\"numeric_depression_correction_pass_count\":") !=
+          std::string::npos);
+    CHECK(generated.find("\"numeric_depression_fill_pass_count\":") ==
+          std::string::npos);
+    CHECK(generated.find("\"numeric_depression_fill_candidate_event_count\":") !=
+          std::string::npos);
+    CHECK(generated.find("\"numeric_depression_fill_event_count\":") ==
+          std::string::npos);
     CHECK(generated.find("\"opencl_probe_performed\":false") != std::string::npos);
     CHECK(generated.find("\"cuda_probe_performed\":false") != std::string::npos);
     CHECK(generated.find(
@@ -743,12 +770,6 @@ bool backend_selection_fallback_and_opencl_parity() {
         ) != std::string::npos
     );
     CHECK(
-        !json_bool(
-            cpu_world,
-            "accelerator_crust_source_remap_kernel_production_active"
-        )
-    );
-    CHECK(
         cpu_world.find(
             "\"crust_overlap_continuous_shadow_model\":"
             "\"cpu_authoritative_overlap_csr_continuous_moment_shadow_v1\""
@@ -898,9 +919,6 @@ bool backend_selection_fallback_and_opencl_parity() {
     CHECK(remap_opencl_world.find("\"error\"") == std::string::npos);
     CHECK(json_int(remap_opencl_world, "total_crust_mixed_destination_count") > 0);
     CHECK(
-        json_int(remap_opencl_world, "opencl_crust_source_remap_dispatch_count") == 0
-    );
-    CHECK(
         json_int(
             remap_opencl_world,
             "cpu_conservative_crust_overlap_transition_count"
@@ -1021,9 +1039,6 @@ bool cuda_backend_failure_and_parity() {
     );
     CHECK(remap_cuda_world.find("\"error\"") == std::string::npos);
     CHECK(json_int(remap_cuda_world, "total_crust_mixed_destination_count") > 0);
-    CHECK(
-        json_int(remap_cuda_world, "cuda_crust_source_remap_dispatch_count") == 0
-    );
     CHECK(
         json_int(
             remap_cuda_world,

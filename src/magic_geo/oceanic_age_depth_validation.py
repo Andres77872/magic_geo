@@ -113,25 +113,21 @@ MODEL_LITERAL_VALUES: dict[str, Any] = {
         "equilibrium_change_is_zero"
     ),
     "thermal_target_difference_gain": THERMAL_TARGET_DIFFERENCE_GAIN,
-    "thermal_target_difference_tendency_formula": (
+    "thermal_equilibrium_change_formula": (
         "1.0*(post_process_local_thermal_subsidence_target_m-previous_local_"
         "thermal_subsidence_target_m)"
     ),
-    "thermal_target_difference_tendency_application": (
+    "thermal_equilibrium_change_application": (
         "full_target_difference_is_applied_outside_the_bounded_dynamic_relief_"
         "clamp_with_zero_unapplied_equilibrium_residual"
     ),
-    "thermal_target_difference_tendency_compatibility_alias": (
-        "plate_motion_history[].thermal_target_difference_tendency_m_equals_"
-        "thermal_equilibrium_change_m"
-    ),
-    "thermal_target_difference_tendency_application_replayed": True,
+    "thermal_equilibrium_change_application_replayed": True,
     "array_serialization_model": (
         "general_format_max_digits10_binary64_round_trip_v1"
     ),
     "array_cardinality": (
-        "each_thermal_target_or_tendency_array_length_equals_plate_motion_step_"
-        "cell_count"
+        "each_thermal_target_or_equilibrium_change_array_length_equals_plate_"
+        "motion_step_cell_count"
     ),
     "finite_nonnegative_age_required": True,
     "continuity_at_transition_resolved": True,
@@ -733,7 +729,6 @@ def _preflight(world: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dic
         "previous_local_thermal_subsidence_target_m",
         "post_process_local_thermal_subsidence_target_m",
         "thermal_equilibrium_change_m",
-        "thermal_target_difference_tendency_m",
         "unbounded_dynamic_relief_change_m",
         "bounded_dynamic_relief_change_m",
         "tectonic_elevation_change_m_by_cell",
@@ -1220,7 +1215,7 @@ def validate_oceanic_age_depth(world: Any) -> dict[str, Any]:
         "equilibrium_change_exceeds_dynamic_clamp_cell_step_count": 0,
         "tectonic_change_exceeds_dynamic_clamp_cell_step_count": 0,
         "initial_isostatic_targets_replayed": False,
-        "initial_thermal_aliases_replayed": False,
+        "initial_thermal_checkpoint_replayed": False,
         "final_thermal_target_replayed": False,
         "isostatic_target_application_replayed": False,
         "dynamic_relief_clamp_replayed": False,
@@ -1233,7 +1228,7 @@ def validate_oceanic_age_depth(world: Any) -> dict[str, Any]:
         "unapplied_thermal_equilibrium_residual_zero_by_construction": False,
         "thermal_contribution_outside_bounded_dynamic_relief_clamp_resolved": False,
         "thermal_contribution_to_tectonic_elevation_change_replayed": False,
-        "thermal_target_difference_tendency_application_replayed": False,
+        "thermal_equilibrium_change_application_replayed": False,
         "absolute_basement_depth_calibrated": False,
         "physical_crust_creation_age_provenance": False,
         "ridge_age_distance_consistency": False,
@@ -1333,9 +1328,6 @@ def validate_oceanic_age_depth(world: Any) -> dict[str, Any]:
             thermal_change = _numeric_array(
                 step, "thermal_equilibrium_change_m", cell_count, label
             )
-            tendencies = _numeric_array(
-                step, "thermal_target_difference_tendency_m", cell_count, label
-            )
             unbounded_dynamic = _numeric_array(
                 step, "unbounded_dynamic_relief_change_m", cell_count, label
             )
@@ -1355,7 +1347,6 @@ def validate_oceanic_age_depth(world: Any) -> dict[str, Any]:
                         for column in (
                             isostatic_change,
                             thermal_change,
-                            tendencies,
                             unbounded_dynamic,
                             bounded_dynamic,
                             tectonic_change,
@@ -1495,11 +1486,6 @@ def validate_oceanic_age_depth(world: Any) -> dict[str, Any]:
                 _require(
                     thermal_change_residual <= thermal_change_bound,
                     f"{label}.thermal_equilibrium_change_m[{cell_id}] does not replay",
-                )
-                _require(
-                    tendencies[cell_id] == thermal_change[cell_id],
-                    f"{label}.thermal_target_difference_tendency_m[{cell_id}] "
-                    "does not equal its compatibility target",
                 )
                 metrics["maximum_absolute_tendency_residual_m"] = max(
                     metrics["maximum_absolute_tendency_residual_m"],
@@ -1663,15 +1649,6 @@ def validate_oceanic_age_depth(world: Any) -> dict[str, Any]:
                 _integer(cell.get("id"), f"cells[{cell_id}].id") == cell_id,
                 f"cells[{cell_id}].id is not canonical",
             )
-            initial_alias = _finite(
-                cell.get("initial_thermal_subsidence_m"),
-                f"cells[{cell_id}].initial_thermal_subsidence_m",
-            )
-            _require(
-                initial_alias == initial_post_thermal[cell_id],
-                f"cells[{cell_id}].initial_thermal_subsidence_m does not "
-                "match the initial round-trip checkpoint",
-            )
             final_alias = _finite(
                 cell.get("thermal_subsidence_target_m"),
                 f"cells[{cell_id}].thermal_subsidence_target_m",
@@ -1745,7 +1722,7 @@ def validate_oceanic_age_depth(world: Any) -> dict[str, Any]:
             )
 
         metrics["initial_isostatic_targets_replayed"] = True
-        metrics["initial_thermal_aliases_replayed"] = True
+        metrics["initial_thermal_checkpoint_replayed"] = True
         metrics["final_thermal_target_replayed"] = True
         metrics["isostatic_target_application_replayed"] = True
         metrics["dynamic_relief_clamp_replayed"] = True
@@ -1775,7 +1752,7 @@ def validate_oceanic_age_depth(world: Any) -> dict[str, Any]:
             "unapplied_thermal_equilibrium_residual_zero_by_construction",
             "thermal_contribution_outside_bounded_dynamic_relief_clamp_resolved",
             "thermal_contribution_to_tectonic_elevation_change_replayed",
-            "thermal_target_difference_tendency_application_replayed",
+            "thermal_equilibrium_change_application_replayed",
             "absolute_basement_depth_calibrated",
             "physical_crust_creation_age_provenance",
             "ridge_age_distance_consistency",

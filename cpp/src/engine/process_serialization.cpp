@@ -377,10 +377,10 @@ std::string climate_model_json(const Params& params) {
         climate_thermal_moisture_capacity_factor(params);
     std::string out = "{";
     bool first = true;
-    add_str(out, first, "model_type", "equilibrium_latitude_circulation_climate_v4");
+    add_str(out, first, "model_type", "equilibrium_latitude_circulation_climate_v5");
     add_str(out, first, "temperature_model", "area_mean_normalized_latitude_centered_local_adjustments_v3");
     add_str(out, first, "precipitation_model",
-        "bounded_thermal_moisture_circulation_orography_wind_transport_v2");
+        "bounded_thermal_moisture_circulation_orography_wind_transport_v3");
     add_str(out, first, "base_temperature_interpretation", "post_centered_local_adjustment_global_area_mean_c");
     add_double(out, first, "base_temperature_c", params.base_temperature_c, precision);
     add_double(out, first, "latitude_temperature_gradient_c",
@@ -393,12 +393,8 @@ std::string climate_model_json(const Params& params) {
     add_double(out, first, "marine_annual_temperature_offset_c",
         CLIMATE_MARINE_ANNUAL_TEMPERATURE_OFFSET_C, precision);
     add_double(out, first, "precipitation_scale", params.precipitation_scale, precision);
-    add_double(out, first, "positive_precipitation_pre_thermal_annual_floor_mm",
-        20.0, precision);
-    add_double(out, first, "positive_precipitation_effective_annual_floor_mm",
-        20.0 * thermal_moisture_capacity_factor, precision);
-    add_str(out, first, "positive_precipitation_floor_application",
-        "annual_equivalent_floor_before_thermal_moisture_multiplier");
+    add_str(out, first, "negative_precipitation_behavior",
+        "clamped_to_zero_before_thermal_moisture_multiplier");
     add_str(out, first, "zero_precipitation_scale_behavior",
         "exact_zero_monthly_and_annual_precipitation");
     add_double(out, first, "subtropical_drying_strength",
@@ -651,15 +647,15 @@ std::string hydrologic_water_budget_history_json(
     return out;
 }
 
-std::string numeric_depression_fill_history_json(
+std::string numeric_depression_correction_history_json(
     const Params& params,
-    const std::vector<NumericDepressionFillEvent>& history,
+    const std::vector<NumericDepressionCorrectionEvent>& history,
     int precision
 ) {
     const int surface_precision = std::max(12, precision);
     std::string out = "[";
     bool first_event = true;
-    for (const NumericDepressionFillEvent& event : history) {
+    for (const NumericDepressionCorrectionEvent& event : history) {
         comma(out, first_event);
         out += "{";
         bool first = true;
@@ -779,8 +775,6 @@ std::string numeric_depression_fill_history_json(
                 event.breach_deposition_depth_m_by_cell,
                 surface_precision
             ));
-        add_double(out, first, "applied_fill_volume_km3",
-            event.applied_fill_volume_km3, surface_precision);
         add_double(out, first, "applied_breach_excavation_volume_km3",
             event.applied_breach_excavation_volume_km3, surface_precision);
         add_double(out, first, "applied_breach_deposition_volume_km3",
@@ -1880,7 +1874,7 @@ std::string sediment_interface_model_json(
 std::string sediment_inventory_model_json(
     const std::vector<Cell>& cells,
     const std::vector<EarthSystemFeedbackStep>& feedback_history,
-    const std::vector<NumericDepressionFillEvent>& numeric_history,
+    const std::vector<NumericDepressionCorrectionEvent>& numeric_history,
     const std::vector<HillslopeSedimentTransportStage>& hillslope_history,
     const std::vector<FluvialSedimentRoutingStage>& fluvial_history,
     const std::vector<GlacialSedimentTransportStage>& glacial_history,
@@ -1930,7 +1924,7 @@ std::string sediment_inventory_model_json(
     double numeric_deposition_volume_km3 = 0.0;
     double numeric_alluvium_volume_km3 = 0.0;
     double numeric_bedrock_volume_km3 = 0.0;
-    for (const NumericDepressionFillEvent& event : numeric_history) {
+    for (const NumericDepressionCorrectionEvent& event : numeric_history) {
         numeric_gross_volume_km3 +=
             event.applied_breach_excavation_volume_km3;
         numeric_deposition_volume_km3 +=
@@ -2104,8 +2098,6 @@ std::string simulation_clock_json(
         "stream_power_response_per_reference_step_not_applied_transition_depth");
     add_str(out, first, "stream_incision_update",
         "cell_erosion_rate_times_maturation_timestep_scale");
-    add_str(out, first, "legacy_mean_erosion_rate_field_semantics",
-        "mean_erosion_rate_m_per_step_is_a_reference_step_response_alias_not_applied_transition_depth");
     add_str(out, first, "erosion_transition_coupling_semantics",
         "hillslope_and_stream_use_prior_stabilized_surface_and_hydrology_with_updated_crust_state;tectonic_hillslope_stream_tendencies_are_combined_before_terrain_commit;fluvial_routing_uses_prior_flow_graph_and_provisional_terrain_accommodation");
     add_double(out, first, "nominal_timestep_ma",
@@ -2188,14 +2180,8 @@ std::string earth_system_feedback_history_json(
         add_int(out, first, "hydrologic_water_budget_recompute_count",
             step.hydrologic_water_budget_recompute_count);
         add_int(out, first, "hydrology_recompute_count", step.hydrology_recompute_count);
-        add_int(out, first, "numeric_depression_fill_pass_count",
-            step.numeric_depression_fill_pass_count);
-        add_int(out, first, "numeric_depression_fill_event_count",
-            step.numeric_depression_fill_event_count);
-        add_int(out, first, "numeric_depression_fill_cell_application_count",
-            step.numeric_depression_fill_cell_application_count);
-        add_int(out, first, "numeric_depression_filled_unique_cell_count",
-            step.numeric_depression_filled_unique_cell_count);
+        add_int(out, first, "numeric_depression_correction_pass_count",
+            step.numeric_depression_correction_pass_count);
         add_int(out, first, "numeric_depression_correction_event_count",
             step.numeric_depression_correction_event_count);
         add_int(out, first, "numeric_depression_breach_selected_event_count",
@@ -2251,12 +2237,6 @@ std::string earth_system_feedback_history_json(
         add_int(out, first, "river_cell_count", step.river_cell_count);
         add_double(out, first, "sea_level_adjustment_m",
             step.sea_level_adjustment_m, std::max(10, precision));
-        add_double(out, first, "numeric_depression_fill_area_km2",
-            step.numeric_depression_fill_area_km2, precision);
-        add_double(out, first, "numeric_depression_fill_volume_km3",
-            step.numeric_depression_fill_volume_km3, precision);
-        add_double(out, first, "max_numeric_depression_fill_depth_m",
-            step.max_numeric_depression_fill_depth_m, precision);
         add_double(out, first,
             "numeric_depression_breach_excavation_volume_km3",
             step.numeric_depression_breach_excavation_volume_km3, precision);
@@ -2397,11 +2377,6 @@ std::string earth_system_feedback_history_json(
             "max_abs_hydrologic_water_budget_cell_residual_mm_y",
             step.max_abs_hydrologic_water_budget_cell_residual_mm_y,
             std::max(12, precision));
-        // Retain the legacy JSON key for schema compatibility, but expose an
-        // unambiguous name and clock-level semantics. Both values are the
-        // reference-step stream-power response, not applied transition depth.
-        add_double(out, first, "mean_erosion_rate_m_per_step",
-            step.mean_stream_power_response_m_per_reference_step, precision);
         add_double(out, first,
             "mean_stream_power_response_m_per_reference_step",
             step.mean_stream_power_response_m_per_reference_step, precision);
@@ -2445,12 +2420,10 @@ std::string initial_oceanic_crust_age_model_json(
         "initial_oceanic_crust_age_ledger");
     add_str(out, first, "authoritative_age_field_location",
         "initial_oceanic_crust_age_ledger.age_ma_by_cell");
-    add_str(out, first, "compatibility_cell_alias_location",
-        "cells[].initial_crust_age_ma_where_status_id_is_not_zero");
-    add_str(out, first, "compatibility_history_alias_location",
+    add_str(out, first, "initial_state_checkpoint_location",
         "plate_motion_history[0].crust_overlap_ledger.remapped_crust_age_ma_by_cell_where_status_id_is_not_zero");
-    add_str(out, first, "compatibility_alias_scope",
-        "oceanic_like_ledger_cells_only_non_oceanic_cell_age_aliases_are_initialized_by_the_separate_continental_crust_rule");
+    add_str(out, first, "initial_state_checkpoint_scope",
+        "history_identity_overlap_oceanic_like_ledger_cells_only");
     add_str(out, first, "cell_geometry_source",
         "cells[].position_3d_area_km2_and_neighbors");
     add_str(out, first, "boundary_source",
@@ -2853,14 +2826,6 @@ std::string plate_kinematic_model_json(
     add_int(out, first, "crust_transport_coverage_arrangement_fragment_limit",
         16384);
     add_str(out, first, "crust_transport_execution_backend", "cpu");
-    add_bool(out, first,
-        "accelerator_crust_source_remap_kernel_used", false);
-    add_str(out, first, "legacy_crust_source_cell_id_semantics",
-        "dominant_incoming_crust_volume_contributor_compatibility_alias_v1");
-    add_str(out, first, "legacy_crust_source_remap_event_semantics",
-        "dominant_contributor_id_differs_from_destination_cell_id");
-    add_str(out, first, "legacy_crust_source_reuse_count_semantics",
-        "destination_count_minus_unique_dominant_contributor_count");
     add_str(out, first, "canonical_crust_mixture_provenance_location",
         "plate_motion_history[].crust_overlap_ledger");
     add_str(out, first, "crust_density_unit", "g_cm3");
@@ -3339,18 +3304,16 @@ std::string oceanic_age_depth_model_json() {
         roundtrip_num(
             OCEANIC_AGE_DEPTH_TARGET_DIFFERENCE_GAIN
         ));
-    add_str(out, first, "thermal_target_difference_tendency_formula",
+    add_str(out, first, "thermal_equilibrium_change_formula",
         "1.0*(post_process_local_thermal_subsidence_target_m-previous_local_thermal_subsidence_target_m)");
-    add_str(out, first, "thermal_target_difference_tendency_application",
+    add_str(out, first, "thermal_equilibrium_change_application",
         "full_target_difference_is_applied_outside_the_bounded_dynamic_relief_clamp_with_zero_unapplied_equilibrium_residual");
-    add_str(out, first, "thermal_target_difference_tendency_compatibility_alias",
-        "plate_motion_history[].thermal_target_difference_tendency_m_equals_thermal_equilibrium_change_m");
     add_bool(out, first,
-        "thermal_target_difference_tendency_application_replayed", true);
+        "thermal_equilibrium_change_application_replayed", true);
     add_str(out, first, "array_serialization_model",
         "general_format_max_digits10_binary64_round_trip_v1");
     add_str(out, first, "array_cardinality",
-        "each_thermal_target_or_tendency_array_length_equals_plate_motion_step_cell_count");
+        "each_thermal_target_or_equilibrium_change_array_length_equals_plate_motion_step_cell_count");
     add_bool(out, first, "finite_nonnegative_age_required", true);
     add_bool(out, first, "continuity_at_transition_resolved", true);
     add_bool(out, first, "derivative_continuity_at_transition_resolved", false);
@@ -3536,9 +3499,6 @@ std::string plate_motion_history_json(
         add_int(out, first, "control_volume_boundary_incident_cell_count",
             step.control_volume_boundary_incident_cell_count);
         add_int(out, first, "accreted_terrane_cell_count", step.accreted_terrane_cell_count);
-        add_int(out, first, "crust_source_remap_cell_count", step.crust_source_remap_cell_count);
-        add_int(out, first, "unique_crust_source_cell_count", step.unique_crust_source_cell_count);
-        add_int(out, first, "crust_source_reuse_count", step.crust_source_reuse_count);
         add_int(out, first, "aged_oceanic_cell_count", step.aged_oceanic_cell_count);
         add_int(out, first, "rejuvenated_oceanic_cell_count", step.rejuvenated_oceanic_cell_count);
         add_int(out, first, "subducted_oceanic_cell_count", step.subducted_oceanic_cell_count);
@@ -3565,7 +3525,6 @@ std::string plate_motion_history_json(
             step.max_abs_tectonic_elevation_change_m,
             std::numeric_limits<double>::max_digits10);
         add_raw(out, first, "cell_plate_ids", int_array_json(step.cell_plate_ids));
-        add_raw(out, first, "crust_source_cell_ids", int_array_json(step.crust_source_cell_ids));
         const CrustTransportPlan& transport = step.transport_plan;
         const int transport_precision = std::numeric_limits<double>::max_digits10;
         std::string overlap_ledger = "{";
@@ -4413,10 +4372,6 @@ std::string plate_motion_history_json(
         add_raw(out, first, "thermal_equilibrium_change_m",
             roundtrip_double_array_json(
                 step.thermal_equilibrium_change_m
-            ));
-        add_raw(out, first, "thermal_target_difference_tendency_m",
-            roundtrip_double_array_json(
-                step.thermal_target_difference_tendency_m
             ));
         add_raw(out, first, "unbounded_dynamic_relief_change_m",
             roundtrip_double_array_json(

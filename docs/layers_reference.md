@@ -50,15 +50,15 @@ The **Doc** column records how each description is sourced, most to least specif
 
 World: **earthlike_mvp** · 4,096 cells · mesh `fibonacci_sphere` · scope `full`.
 
-**448 layers** total — 370 numeric, 47 categorical, 27 per-stage, 4 monthly.
+**439 layers** total — 361 numeric, 47 categorical, 27 per-stage, 4 monthly.
 
 Documentation coverage:
 
 | Tier | Count | Share |
 | --- | --: | --: |
-| curated | 180 | 40.2% |
-| convention | 184 | 41.1% |
-| unit | 72 | 16.1% |
+| curated | 174 | 39.6% |
+| convention | 181 | 41.2% |
+| unit | 72 | 16.4% |
 | generated | 12 | 2.7% |
 
 Layers by domain (documentation gaps = generated tier):
@@ -66,10 +66,10 @@ Layers by domain (documentation gaps = generated tier):
 | Domain | Layers | Curated | Generated (gaps) |
 | --- | --: | --: | --: |
 | [Mesh & geometry](#geometry) | 40 | 14 | 7 |
-| [Tectonics & solid earth](#tectonics) | 43 | 25 | 1 |
+| [Tectonics & solid earth](#tectonics) | 37 | 20 | 1 |
 | [Elevation & landforms](#geomorphology) | 13 | 10 | 0 |
-| [Sediment & stratigraphy](#sediment) | 36 | 9 | 0 |
-| [Surface hydrology & rivers](#hydrology) | 80 | 34 | 2 |
+| [Sediment & stratigraphy](#sediment) | 35 | 8 | 0 |
+| [Surface hydrology & rivers](#hydrology) | 78 | 34 | 2 |
 | [Water budget & atmospheric moisture](#water-budget) | 27 | 14 | 0 |
 | [Groundwater, aquifers & karst](#groundwater) | 30 | 8 | 0 |
 | [Climate & atmosphere](#climate) | 38 | 19 | 0 |
@@ -145,7 +145,7 @@ Layers by domain (documentation gaps = generated tier):
 
 <a id="tectonics"></a>
 
-**43 layers** · doc coverage: 25 curated · 16 convention · 1 unit · **1 generated (gaps)**.
+**37 layers** · doc coverage: 20 curated · 15 convention · 1 unit · **1 generated (gaps)**.
 
 **How it works.** Plate assignment and kinematics, crust type/age/thickness/density, boundary classification (convergent/divergent/transform), fault systems, seismic hazard, and the initial tectonic elevation contributions (ridge, rift, trench, orogenic, volcanic, thermal, isostatic). This is the deepest layer of the model — the feedback loop re-derives elevation from these each stage.
 
@@ -162,16 +162,11 @@ Layers by domain (documentation gaps = generated tier):
 | `continental_shelf_id` | numeric | — | -1 … 44 | identifier | curated | Identifier for a coarse marine shelf diagnostic component. At Earth reference resolution a cell is roughly 400 km across, so this does not resolve fractional shelf area or a shelf–slope–rise profile. Identifier / graph reference — the integer labels a region, system, or points at another cell. Rendered as a numeric gradient, so neighbouring ids get neighbouring colours: read it as "same colour ≈ same group", not as a magnitude. Percentile stats on ids are not meaningful. |
 | `crust_age_ma` | numeric | `Ma` | 0 … 4102 | measurement | curated | Current procedural crust-state age in Ma after remap and maturation rules. This replay root is serialized with binary64 round-trip precision. It is not a reconstructed geological creation age or proof of a ridge-to-subduction flowline. |
 | `crust_density` | numeric | `g/cm³` | 2.708 … 3 | measurement | curated | Bulk crust density in g/cm³, serialized with binary64 round-trip precision; oceanic crust is denser than continental. |
-| `crust_source_remap_event_count` | numeric | `count` | 0 … 6 | diagnostic | curated | V3 compatibility counter incremented when a stage's dominant incoming-volume contributor ID differs from the destination cell ID. It does not count all overlap contributors or prove a unique donor/remap. Use `plate_motion_history[*].crust_overlap_ledger` for canonical mixture provenance. |
 | `crust_thickness_km` | numeric | `km` | 4.5 … 76 | measurement | curated | Crustal thickness; thick under orogens, thin under ridges. |
 | `crust_type` | categorical | `category` | 9 classes | classification | curated | Crust classification (continental, oceanic, craton, orogen, …). **Classes:** accreted_terrane, continental, craton, oceanic, orogen, rift_basin, sedimentary_basin, transitional, volcanic_arc. |
 | `earthquake_recurrence_interval_y` | numeric | — | 0 … 922.8 | measurement | curated | Mean interval between large earthquakes, in years. Low values mark seismically active belts. |
-| `initial_crust_age_ma` | numeric | `Ma` | 0 … 4200 | provenance | curated | Initial procedural crust-state age in Ma, serialized with binary64 round-trip precision. On oceanic-like cells this aliases the replayable ridge-seeded graph-travel-time ledger: distance over one global nominal half-spreading rate, with explicit ceiling/clamp/unreachable statuses. It is not a physical seafloor-creation reconstruction. Initial-condition snapshot captured before the geodynamic feedback loop ran. Compare against the same field without the `initial_` prefix to see net change over the simulation. |
-| `initial_crust_density` | numeric | `g/cm³` | 2.7 … 3 | provenance | curated | Initial bulk crust density in g/cm³ before the geodynamic feedback loop, serialized with binary64 round-trip precision. Initial-condition snapshot captured before the geodynamic feedback loop ran. Compare against the same field without the `initial_` prefix to see net change over the simulation. |
 | `initial_isostatic_elevation_m` | numeric | `m` | -2500 … 669 | provenance | curated | Initial local crustal isostatic-equilibrium elevation contribution. Later changes are applied in full outside the dynamic-relief clamp. Initial-condition snapshot captured before the geodynamic feedback loop ran. Compare against the same field without the `initial_` prefix to see net change over the simulation. |
 | `initial_plate_id` | numeric | — | 0 … 13 | identifier | curated | Plate assignment at initialization, before any plate reorganization events. Identifier / graph reference — the integer labels a region, system, or points at another cell. Rendered as a numeric gradient, so neighbouring ids get neighbouring colours: read it as "same colour ≈ same group", not as a magnitude. Percentile stats on ids are not meaningful. |
-| `initial_thermal_subsidence_m` | numeric | `m` | -3846 … 0 | provenance | curated | Initial relative oceanic age–depth subsidence target; zero for non-oceanic-like cells. This is a target component, not absolute basement depth. Initial-condition snapshot captured before the geodynamic feedback loop ran. Compare against the same field without the `initial_` prefix to see net change over the simulation. |
-| `last_crust_source_cell_id` | numeric | — | 0 … 4095 | identifier | curated | V3 compatibility alias for the source contributing the largest incoming crust volume in the latest stage, with source ID as the tie-break. It is not a unique donor; the canonical destination-major mixture is in `plate_motion_history[*].crust_overlap_ledger`. Identifier / graph reference — the integer labels a region, system, or points at another cell. Rendered as a numeric gradient, so neighbouring ids get neighbouring colours: read it as "same colour ≈ same group", not as a magnitude. Percentile stats on ids are not meaningful. |
 | `lithology` | categorical | `category` | 7 classes | classification | curated | Dominant rock type (basalt, granite, limestone, …). NOTE: the per-stage history serializes lithology as numeric codes 0–6, while this cell layer uses names; the code order is alphabetical here and may not match the engine enum (see layers_review.md F3). **Classes:** basalt, granite, limestone, metamorphic, sandstone, shale, volcanic. |
 | `lithology` | stage×16 | — | 0 … 6 | measurement | curated | Dominant rock type (basalt, granite, limestone, …). NOTE: the per-stage history serializes lithology as numeric codes 0–6, while this cell layer uses names; the code order is alphabetical here and may not match the engine enum (see layers_review.md F3). |
 | `plate_id` | numeric | — | 0 … 13 | identifier | curated | Tectonic plate the cell belongs to. Identifier — colour groups plates, magnitude is meaningless. Identifier / graph reference — the integer labels a region, system, or points at another cell. Rendered as a numeric gradient, so neighbouring ids get neighbouring colours: read it as "same colour ≈ same group", not as a magnitude. Percentile stats on ids are not meaningful. |
@@ -185,7 +180,6 @@ Layers by domain (documentation gaps = generated tier):
 | `dominant_tectonic_zone_type` | categorical | `category` | 4 classes | classification | convention | Categorical classification. Each colour is one discrete class (see the legend chips); there is no ordering implied between colours. **Classes:** collision, none, rift, subduction. |
 | `fault_slip_rate_index` | numeric | `index` | 3.40e-5 … 0.6443 | index | convention | Derived index — typically normalised 0–1 where higher means "more" of the named property, but convergence/divergence-style indices are signed around 0 (check the value range below). Built by a Python enricher from the physical fields; good for ranking cells, not an absolute measurement. |
 | `fault_system_id` | numeric | — | -1 … 10 | identifier | convention | Identifier / graph reference — the integer labels a region, system, or points at another cell. Rendered as a numeric gradient, so neighbouring ids get neighbouring colours: read it as "same colour ≈ same group", not as a magnitude. Percentile stats on ids are not meaningful. |
-| `initial_crust_thickness_km` | numeric | `km` | 5 … 43.31 | provenance | convention | Initial-condition snapshot captured before the geodynamic feedback loop ran. Compare against the same field without the `initial_` prefix to see net change over the simulation. |
 | `initial_orogenic_uplift_m` | numeric | `m` | 0 … 7733 | provenance | convention | Initial-condition snapshot captured before the geodynamic feedback loop ran. Compare against the same field without the `initial_` prefix to see net change over the simulation. |
 | `initial_ridge_uplift_m` | numeric | `m` | 0 … 532.1 | provenance | convention | Initial-condition snapshot captured before the geodynamic feedback loop ran. Compare against the same field without the `initial_` prefix to see net change over the simulation. |
 | `initial_rift_subsidence_m` | numeric | `m` | -495.8 … 0 | provenance | convention | Initial-condition snapshot captured before the geodynamic feedback loop ran. Compare against the same field without the `initial_` prefix to see net change over the simulation. |
@@ -237,7 +231,7 @@ Layers by domain (documentation gaps = generated tier):
 
 <a id="sediment"></a>
 
-**36 layers** · doc coverage: 9 curated · 6 convention · 21 unit · **0 generated (gaps)**.
+**35 layers** · doc coverage: 8 curated · 6 convention · 21 unit · **0 generated (gaps)**.
 
 **How it works.** Erosion, transport, and deposition budgets — hillslope diffusion, fluvial routing (production, deposition, terminal export/capture), sediment thickness, and sequence-stratigraphy inventory. These close the mass balance between the eroding uplands and the depositional basins.
 
@@ -253,7 +247,6 @@ Layers by domain (documentation gaps = generated tier):
 | `sediment_deposition_m` | numeric | `m` | 0 … 2248 | measurement | curated | Sediment deposited in the cell. |
 | `sediment_export_m` | numeric | `m` | 0 … 422.4 | measurement | curated | Sediment leaving the cell downstream. |
 | `sediment_net_budget_m` | numeric | `m` | -2673 … 2248 | measurement | curated | Deposition minus erosion — positive is net aggradation. |
-| `sediment_production_m` | numeric | `m` | 0 … 2682 | measurement | curated | Sediment generated in the cell (hillslope + channel erosion). |
 | `sediment_thickness_m` | numeric | `m` | 0 … 2248 | measurement | curated | Accumulated sediment column thickness in metres. |
 | `sediment_thickness_m` | stage×16 | `m` | 0 … 2248 | measurement | curated | Accumulated sediment column thickness in metres. |
 | `breach_alluvium_entrainment_depth_m` | stage×423 | `m` | 0 … 0 | measurement | unit | Per-stage numeric field (scrub the stage control). Length/elevation/depth (metres). |
@@ -290,9 +283,9 @@ Layers by domain (documentation gaps = generated tier):
 
 <a id="hydrology"></a>
 
-**80 layers** · doc coverage: 34 curated · 34 convention · 10 unit · **2 generated (gaps)**.
+**78 layers** · doc coverage: 34 curated · 32 convention · 10 unit · **2 generated (gaps)**.
 
-**How it works.** Flow routing over the conditioned surface — flow direction and accumulation, drainage basins, depression fill/breach handling, lakes and closed basins, river channels (width/depth/hydraulics), floodplains, and river-network evolution (avulsion, capture). The depression-fill history (1,600 stages) logs every basin correction.
+**How it works.** Flow routing over the conditioned surface — flow direction and accumulation, drainage basins, depression correction, lakes and closed basins, river channels (width/depth/hydraulics), floodplains, and river-network evolution (avulsion, capture). The depression-correction history logs every bounded breach or explicit temporary-lake deferral as a separate stage and retains its counterfactual fill candidate.
 
 **Produced by:** `cpp/src/engine/hydrology.cpp`, `hydrology_dynamics.py`, `hydrology_realism.py`, `river_hydraulics.py`, `river_channel_morphology.py`, `river_network_evolution.py`, `watershed_diagnostics.py`.
 
@@ -307,9 +300,9 @@ Layers by domain (documentation gaps = generated tier):
 | `breach_excavation_depth_m` | stage×423 | `m` | 0 … 6794 | measurement | curated | Depth excavated through the sill when the policy breached instead of filled. |
 | `depression_depth_m` | numeric | `m` | 0 … 4594 | measurement | curated | Depth of the enclosing depression below its spill elevation. |
 | `depression_policy` | categorical | `category` | 5 classes | classification | curated | How the depression containing this cell was resolved (preserved, filled, breached, …). **Classes:** dry_closed, none, overflow_spill, preserved_geologic, temporary_numeric_lake. |
-| `elevation_after_fill_m` | stage×423 | `m` | 7.209 … 1758 | measurement | curated | Surface elevation at the event cell after the fill event. |
-| `elevation_before_fill_m` | stage×423 | `m` | -5933 … 1703 | measurement | curated | Surface elevation at the event cell before the fill event. |
-| `fill_depth_m` | stage×423 | `m` | 0.3587 … 7517 | measurement | curated | Depth added by this fill event to remove a numeric depression. |
+| `elevation_after_fill_m` | stage×423 | `m` | 7.209 … 1758 | measurement | curated | Counterfactual surface elevation under the full-fill candidate; not the applied post-correction terrain. |
+| `elevation_before_fill_m` | stage×423 | `m` | -5933 … 1703 | measurement | curated | Surface elevation before correction and fill-candidate evaluation. |
+| `fill_depth_m` | stage×423 | `m` | 0.3587 … 7517 | measurement | curated | Counterfactual Priority-Flood depth for the event cell; retained for correction selection and not applied as material. |
 | `flow_accumulation` | numeric | — | 0 … 1.89e+10 | measurement | curated | Upstream drainage area (in cell-count units) draining through each cell — the classic river-network signal. Extremely heavy-tailed: a handful of trunk cells dwarf everything, so the p2–p98 default colour scale saturates the main stems (see legend clip markers). |
 | `flow_to` | numeric | — | -1 … 4036 | identifier | curated | Downstream neighbour each cell drains into (a cell id, or -1 at outlets/oceans). Together with `flow_accumulation` this defines the drainage network. Identifier / graph reference — the integer labels a region, system, or points at another cell. Rendered as a numeric gradient, so neighbouring ids get neighbouring colours: read it as "same colour ≈ same group", not as a magnitude. Percentile stats on ids are not meaningful. |
 | `flow_velocity_m_s` | numeric | `m/s` | 0 … 2.348 | measurement | curated | Channel flow velocity in m/s from the river-hydraulics solve. |
@@ -340,7 +333,6 @@ Layers by domain (documentation gaps = generated tier):
 | `channel_morphology_class` | categorical | `category` | 5 classes | classification | convention | Categorical classification. Each colour is one discrete class (see the legend chips); there is no ordering implied between colours. **Classes:** braided_sediment_rich_channel, glacial_outwash_channel, navigable_lowland_channel, non_channel, small_headwater. |
 | `channel_slope_index` | numeric | `index` | 0 … 0.05504 | index | convention | Derived index — typically normalised 0–1 where higher means "more" of the named property, but convergence/divergence-style indices are signed around 0 (check the value range below). Built by a Python enricher from the physical fields; good for ranking cells, not an absolute measurement. |
 | `cumulative_numeric_depression_breach_excavation_m` | numeric | `m` | 0 … 49.24 | accumulator | convention | Running total accumulated across all simulation stages (monotonic per cell). The per-stage delta lives in the corresponding stage-history ledger. |
-| `cumulative_numeric_depression_fill_m` | numeric | `m` | 0 … 0 | accumulator | convention | Running total accumulated across all simulation stages (monotonic per cell). The per-stage delta lives in the corresponding stage-history ledger. |
 | `depression_component_id` | numeric | — | -1 … 66 | identifier | convention | Identifier / graph reference — the integer labels a region, system, or points at another cell. Rendered as a numeric gradient, so neighbouring ids get neighbouring colours: read it as "same colour ≈ same group", not as a magnitude. Percentile stats on ids are not meaningful. |
 | `depression_sink_cell_id` | numeric | — | -1 … 3900 | identifier | convention | Identifier / graph reference — the integer labels a region, system, or points at another cell. Rendered as a numeric gradient, so neighbouring ids get neighbouring colours: read it as "same colour ≈ same group", not as a magnitude. Percentile stats on ids are not meaningful. |
 | `equal_filled_raw_downhill_rerouted` | categorical | `category` | 2 classes | classification | convention | Categorical classification. Each colour is one discrete class (see legend chips); colours carry no ordering. **Classes:** False, True. |
@@ -359,7 +351,6 @@ Layers by domain (documentation gaps = generated tier):
 | `lake_overflows` | categorical | `category` | 2 classes | classification | convention | Categorical classification. Each colour is one discrete class (see legend chips); colours carry no ordering. **Classes:** False, True. |
 | `navigable_waterway_id` | numeric | — | -1 … 70 | identifier | convention | Identifier / graph reference — the integer labels a region, system, or points at another cell. Rendered as a numeric gradient, so neighbouring ids get neighbouring colours: read it as "same colour ≈ same group", not as a magnitude. Percentile stats on ids are not meaningful. |
 | `numeric_depression_breach_event_count` | numeric | `count` | 0 … 1 | diagnostic | convention | Bookkeeping counter — how many times an event/transfer/path touched this cell during the simulation. Useful for spotting hot spots and verifying conservation, not a physical quantity. |
-| `numeric_depression_fill_event_count` | numeric | `count` | 0 … 0 | diagnostic | convention | Bookkeeping counter — how many times an event/transfer/path touched this cell during the simulation. Useful for spotting hot spots and verifying conservation, not a physical quantity. |
 | `numeric_depression_temporary_lake_event_count` | numeric | `count` | 0 … 8 | diagnostic | convention | Bookkeeping counter — how many times an event/transfer/path touched this cell during the simulation. Useful for spotting hot spots and verifying conservation, not a physical quantity. |
 | `overflow_channel_active` | categorical | `category` | 2 classes | classification | convention | Categorical classification. Each colour is one discrete class (see legend chips); colours carry no ordering. **Classes:** False, True. |
 | `overflow_channel_avulsion_risk` | numeric | — | 0 … 0.4033 | measurement | generated | Continuous per-cell field. No documented unit for this field — inspect a cell for context. |
@@ -779,7 +770,7 @@ Layers by domain (documentation gaps = generated tier):
 
 ## Status & gaps summary
 
-**Documentation gaps.** 12 of 448 layers (2.7%) fall to the generated tier — coordinate components, a few dimensionless physics quantities, and stage-ledger coordinates. Listed per domain above; each is a one-line addition to `CURATED`.
+**Documentation gaps.** 12 of 439 layers (2.7%) fall to the generated tier — coordinate components, a few dimensionless physics quantities, and stage-ledger coordinates. Listed per domain above; each is a one-line addition to `CURATED`.
 
 **Data-model gaps** (from the pipeline review — see [layers_review.md](layers_review.md) for detail):
 

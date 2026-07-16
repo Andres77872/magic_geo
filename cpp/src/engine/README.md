@@ -84,13 +84,11 @@ it with `magic_geo_free_buffer`; legacy NUL-terminated JSON symbols are unchange
 - `opencl_compute.cpp`: generation-scoped CPU/OpenCL/CUDA orchestration,
   dynamic OpenCL discovery/resources, automatic fallback, and unified
   telemetry. `cuda_compute.cu` owns native NVIDIA discovery, persistent
-  CUDA buffers/stream/events, FP64 kernels, and a legacy warp-cooperative
-  nearest-donor crust-remap test hook. `crust_overlap_shadow.cpp` validates a
-  separately named discarded-output FP64 continuous-moment reduction over the
-  exact CPU overlap CSR. Production v3 crust transport uses the
-  CPU-authoritative exact spherical forward-overlap implementation in
-  `crust_transport.cpp`; the legacy OpenCL/CUDA donor kernel is not dispatched
-  by generation. `cuda_compute_stub.cpp` preserves builds without a CUDA
+  CUDA buffers/stream/events and FP64 kernels. `crust_overlap_shadow.cpp`
+  validates a separately named discarded-output FP64 continuous-moment
+  reduction over the exact CPU overlap CSR. Production v3 crust transport uses
+  the CPU-authoritative exact spherical forward-overlap implementation in
+  `crust_transport.cpp`. `cuda_compute_stub.cpp` preserves builds without a CUDA
   toolchain. CPU execution remains the reference path; explicit
   OpenCL/CUDA failures are fatal and only `auto` may fall back.
 - `summary.cpp`, `entity_serialization.cpp`, `process_serialization.cpp`, and
@@ -119,11 +117,13 @@ rate over the oceanic-like neighbor graph. The round-trip
 predecessor, origin seed, eligible segment, seed cell, rate operand, area-weighted
 summary, and inclusive 20–200 Ma CDF. A reachable age above the procedural cap is
 clamped with a distinct status; a component without an active-ridge path gets
-the cap with an unresolved status. `cells[].initial_crust_age_ma` is only a
-compatibility alias for oceanic-like ledger cells. This is a procedural graph
-field using one global nominal rate, not reconstructed seafloor creation: local
-rates, flowlines, convergence/subduction history, and physical creation and
-destruction provenance remain unresolved.
+the cap with an unresolved status. The identity-overlap initial checkpoint at
+`plate_motion_history[0].crust_overlap_ledger.remapped_crust_age_ma_by_cell`
+carries all-cell initial crust age and matches the oceanic-age ledger where its
+status is nonzero. This is a procedural graph field using one global nominal
+rate, not reconstructed seafloor creation: local rates, flowlines,
+convergence/subduction history, and physical creation and destruction
+provenance remain unresolved.
 
 Replay-critical numerical state is not truncated to the configured display
 precision. Initial/final cell crust age, thickness, and density; remapped crust
@@ -145,8 +145,7 @@ differences, unbounded and bounded dynamic relief, and the total tectonic
 elevation change at binary64 round-trip precision. Full isostatic and thermal
 target differences are applied outside the empirical dynamic clamp; only
 `unbounded_dynamic_relief_change_m` is clamped to `[-180, 220]` m.
-`thermal_target_difference_tendency_m` remains a deprecated exact alias of
-`thermal_equilibrium_change_m`, and
+`thermal_equilibrium_change_m` is the sole serialized thermal-change array, and
 `tectonic_elevation_change_m_by_cell = isostatic_equilibrium_change_m +
 thermal_equilibrium_change_m + bounded_dynamic_relief_change_m`. Independent
 replay verifies the operands, gain-1 changes, dynamic formula/clamp, application,

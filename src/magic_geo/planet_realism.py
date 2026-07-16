@@ -77,12 +77,16 @@ def _range_score(value: float, lower: float, upper: float, outer_lower: float, o
 
 
 def enrich_world_with_planet_realism(world: dict[str, Any], planet: Any | None = None) -> dict[str, Any]:
+    parameters = world.get("planet_parameters")
+    expected_parameters = planet_parameter_snapshot(planet)
+    if parameters != expected_parameters:
+        raise ValueError(
+            "world planet_parameters must match the configured planet snapshot"
+        )
     cells = world.get("cells", [])
     if not isinstance(cells, list) or not cells:
         return world
 
-    parameters = planet_parameter_snapshot(planet)
-    world["planet_parameters"] = parameters
     summary = world.setdefault("summary", {})
 
     temperatures = [float(cell.get("temperature_c", 0.0)) for cell in cells]

@@ -135,7 +135,7 @@ _FAMILY_DESCRIPTIONS = {
     "cells": "The wide cells table — one value per cell for the final simulation state. The bulk of the layers live here: tectonics, climate, hydrology, ecology, resources, and human geography, all keyed by cell id.",
     "cells_monthly": "12-value-per-cell climate series (precipitation, temperature, winds). Scrub the month control to animate the seasonal cycle. The color scale is fixed across all 12 months so magnitudes stay comparable while scrubbing.",
     "hydrologic_water_budget_history": "Per-stage snapshots of the coupled climate–hydrology solve as the geodynamic feedback loop iterates. The color scale spans all stages so change remains comparable.",
-    "numeric_depression_fill_history": "Fine-grained log of the depression fill/breach algorithm, with one stage per fill or breach operation.",
+    "numeric_depression_correction_history": "Fine-grained correction ledger with one stage per bounded breach or explicit temporary-lake deferral.",
 }
 
 
@@ -290,7 +290,7 @@ def map_view_fingerprint(
 
 
 def _infer_unit(name: str, categorical: bool) -> str | None:
-    if name in {"crust_density", "initial_crust_density"}:
+    if name == "crust_density":
         return "g/cm³"
     for suffix, unit in _UNIT_RULES:
         if name.endswith(suffix):

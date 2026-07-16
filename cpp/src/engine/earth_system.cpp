@@ -53,14 +53,8 @@ EarthSystemFeedbackStep summarize_feedback_step(
     step.hydrologic_water_budget_recompute_count =
         stabilization.hydrologic_water_budget_recompute_count;
     step.hydrology_recompute_count = stabilization.hydrology_recompute_count;
-    step.numeric_depression_fill_pass_count =
-        stabilization.numeric_depression_fill_pass_count;
-    step.numeric_depression_fill_event_count =
-        stabilization.numeric_depression_fill_event_count;
-    step.numeric_depression_fill_cell_application_count =
-        stabilization.numeric_depression_fill_cell_application_count;
-    step.numeric_depression_filled_unique_cell_count =
-        stabilization.numeric_depression_filled_unique_cell_count;
+    step.numeric_depression_correction_pass_count =
+        stabilization.numeric_depression_correction_pass_count;
     step.numeric_depression_correction_event_count =
         stabilization.numeric_depression_correction_event_count;
     step.numeric_depression_breach_selected_event_count =
@@ -77,12 +71,6 @@ EarthSystemFeedbackStep summarize_feedback_step(
         stabilization.numeric_depression_temporary_lake_unique_cell_count;
     step.plate_motion_history_id = plate_motion_history_id;
     step.sea_level_adjustment_m = stabilization.sea_level_adjustment_m;
-    step.numeric_depression_fill_area_km2 =
-        stabilization.numeric_depression_fill_area_km2;
-    step.numeric_depression_fill_volume_km3 =
-        stabilization.numeric_depression_fill_volume_km3;
-    step.max_numeric_depression_fill_depth_m =
-        stabilization.max_numeric_depression_fill_depth_m;
     step.numeric_depression_breach_excavation_volume_km3 =
         stabilization.numeric_depression_breach_excavation_volume_km3;
     step.numeric_depression_breach_deposition_volume_km3 =
@@ -199,6 +187,7 @@ EarthSystemFeedbackStep summarize_feedback_step(
     double land_elevation_sum = 0.0;
     double cumulative_alluvium_entrainment_volume_km3 = 0.0;
     double cumulative_bedrock_erosion_volume_km3 = 0.0;
+    double cumulative_process_source_witness_volume_km3 = 0.0;
     for (std::size_t index = 0; index < cells.size(); ++index) {
         const Cell& cell = cells[index];
         const double area_km2 = std::max(0.0, cell.area_km2);
@@ -218,11 +207,13 @@ EarthSystemFeedbackStep summarize_feedback_step(
         step.mean_stream_power_response_m_per_reference_step +=
             cell.erosion_rate;
         step.mean_sediment_thickness_m += cell.sediment_thickness_m;
-        step.mean_cumulative_sediment_production_m += cell.sediment_production_m;
+        const double gross_mobilization_m =
+            sediment_gross_mobilization_m(cell);
+        step.mean_cumulative_sediment_production_m += gross_mobilization_m;
         step.mean_cumulative_sediment_deposition_m += cell.sediment_deposition_m;
         step.mean_cumulative_sediment_export_m += cell.sediment_export_m;
         step.cumulative_sediment_production_volume_km3 +=
-            cell.sediment_production_m * area_km2 / 1000.0;
+            gross_mobilization_m * area_km2 / 1000.0;
         step.cumulative_sediment_deposition_volume_km3 +=
             cell.sediment_deposition_m * area_km2 / 1000.0;
         step.cumulative_sediment_export_volume_km3 +=
@@ -233,6 +224,8 @@ EarthSystemFeedbackStep summarize_feedback_step(
             cell.sediment_alluvium_entrainment_m * area_km2 / 1000.0;
         cumulative_bedrock_erosion_volume_km3 +=
             cell.sediment_bedrock_erosion_m * area_km2 / 1000.0;
+        cumulative_process_source_witness_volume_km3 +=
+            sediment_process_source_witness_m(cell) * area_km2 / 1000.0;
         if (!cell.is_water) {
             land_elevation_sum += cell.elevation_m;
             step.hydrologic_land_precipitation_volume_km3_y +=
@@ -277,7 +270,7 @@ EarthSystemFeedbackStep summarize_feedback_step(
     step.mean_cumulative_sediment_deposition_m /= divisor;
     step.mean_cumulative_sediment_export_m /= divisor;
     step.sediment_source_partition_residual_km3 = std::abs(
-        step.cumulative_sediment_production_volume_km3 -
+        cumulative_process_source_witness_volume_km3 -
         cumulative_alluvium_entrainment_volume_km3 -
         cumulative_bedrock_erosion_volume_km3
     );
@@ -926,7 +919,7 @@ void erode(
     std::vector<PlateMotionStep>& plate_motion_history,
     CrustMaterialShadowState& crust_material_shadow,
     CrustDryRockAccountingState& crust_dry_rock_accounting,
-    std::vector<NumericDepressionFillEvent>& numeric_depression_fill_history,
+    std::vector<NumericDepressionCorrectionEvent>& numeric_depression_correction_history,
     std::vector<HydrologicWaterBudgetStage>& hydrologic_water_budget_history,
     std::vector<FluvialSedimentRoutingStage>& sediment_routing_history,
     std::vector<HillslopeSedimentTransportStage>& hillslope_transport_history
@@ -1068,8 +1061,6 @@ void erode(
             cells[i].sediment_bedrock_erosion_m +=
                 hillslope_bedrock_erosion_depth_m +
                 fluvial_bedrock_erosion_depth_m;
-            cells[i].sediment_production_m +=
-                fluvial_source_depth_m + hillslope_source_depth_m;
             cells[i].sediment_deposition_m +=
                 sediment_delta[static_cast<std::size_t>(i)] +
                 hillslope_deposition_depth_m[static_cast<std::size_t>(i)];
@@ -1100,7 +1091,9 @@ void erode(
                     "hillslope/fluvial sediment-interface update changed the compatibility surface"
                 );
             }
-            cells[i].sediment_net_budget_m = cells[i].sediment_deposition_m - cells[i].sediment_production_m;
+            cells[i].sediment_net_budget_m =
+                cells[i].sediment_deposition_m -
+                sediment_gross_mobilization_m(cells[i]);
         }
         maximum_sediment_interface_closure_residual_m(
             cells,
@@ -1132,7 +1125,7 @@ void erode(
             static_cast<int>(feedback_history.size()),
             "erosion_iteration",
             iter + 1,
-            numeric_depression_fill_history,
+            numeric_depression_correction_history,
             hydrologic_water_budget_history
         );
         feedback_history.push_back(summarize_feedback_step(

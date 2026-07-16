@@ -14,9 +14,8 @@ rejected at load time (`extra="forbid"` also rejects unknown keys,
 mapping keys). All sections and fields have defaults, so even `{}` is valid;
 omitted values come from the neutral schema defaults, not from the Earth-like
 file. Generate the curated Earth-like starter with
-`magic-geo init-config`; the shipped seed is
-[seed_config.yaml](../src/magic_geo/seed_config.yaml) and the reference earthlike
-run is [configs/earthlike_seed.yaml](../configs/earthlike_seed.yaml). Nine
+`magic-geo init-config --profile earthlike`; the checked-in reference is
+[configs/earthlike_seed.yaml](../configs/earthlike_seed.yaml). Nine
 complete exploratory presets and their research/selection guidance are indexed
 in the [example seed gallery](example_seed_gallery.md).
 
@@ -143,11 +142,12 @@ without an active-ridge path receives that ceiling with an explicit unresolved
 status. The round-trip `initial_oceanic_crust_age_ledger` contains exact and
 unclamped ages, status, predecessor, origin seed, eligible segments, ridge seeds,
 rate operands, area-weighted summaries, and inclusive CDF values at 20 Ma
-increments through 200 Ma. `cells[].initial_crust_age_ma` is a compatibility
-alias on oceanic-like ledger cells. Replay requires `output.include_cells: true`.
-One global nominal rate, graph adjacency in place of flowlines, and missing
-convergence/subduction and crust-creation/destruction history mean this is not a
-physical seafloor-age reconstruction.
+increments through 200 Ma. The identity-overlap initial checkpoint at
+`plate_motion_history[0].crust_overlap_ledger.remapped_crust_age_ma_by_cell`
+carries all-cell initial crust age and matches this ledger on oceanic-like
+cells. One global nominal rate, graph adjacency in place of flowlines, and
+missing convergence/subduction and crust-creation/destruction history mean this
+is not a physical seafloor-age reconstruction.
 
 The always-emitted `oceanic_age_depth_model` is also fixed. For oceanic-like
 states its relative subsidence target is `-350 sqrt(age_ma)` m through 70 Ma,
@@ -159,8 +159,8 @@ snapshot records old/new local isostatic equilibria, old/new thermal targets,
 their full gain-1 differences, unbounded and bounded dynamic relief, and total
 tectonic elevation change. Isostatic and thermal equilibrium changes are applied
 outside the clamp; only the dynamic-relief term is clamped to `[-180, 220]` m.
-The deprecated `thermal_target_difference_tendency_m` array exactly aliases
-`thermal_equilibrium_change_m`, and the total is exactly
+`thermal_equilibrium_change_m` is the sole serialized thermal-change array, and
+the total is exactly
 `isostatic_equilibrium_change_m + thermal_equilibrium_change_m +
 bounded_dynamic_relief_change_m`. Independent replay verifies every operand,
 the dynamic formula/clamp, application, total composition, and zero unapplied
@@ -226,7 +226,7 @@ blanket absolute or relative tolerance.
 | `months` | enum | `12` | `12` | Months in the seasonal cycle. Fixed at 12 (the monthly layers are 12-long). | climate, water_budget |
 | `lapse_rate_c_per_km` | float | `6.5` | `[0, 15]` | Temperature drop per km of elevation. Sets mountain cooling → `temperature_c`, snowlines, biomes. | climate, cryosphere, ecology |
 | `base_temperature_c` | float | `15.0` | `[−100, 100]` | Global mean sea-level temperature anchor. Shifts the whole climate. | climate (all) |
-| `precipitation_scale` | float | `1.0` | `[0, 10]` | Global precipitation multiplier. `0` is an exact dry boundary; positive values retain a 20 mm/y annual-equivalent floor before the thermal-moisture multiplier and monthly partitioning. Scales precipitation → runoff, rivers, and biomes. | water_budget, hydrology, ecology |
+| `precipitation_scale` | float | `1.0` | `[0, 10]` | Global precipitation multiplier. `0` is an exact dry boundary and near-zero positive values remain proportional; negative empirical precipitation combinations clamp to zero before the thermal-moisture multiplier and monthly partitioning. Scales precipitation → runoff, rivers, and biomes. | water_budget, hydrology, ecology |
 | `subtropical_drying_strength` | float | `0.65` | `[0, 0.9]` | Strength of subtropical (desert-belt) drying. Sets aridity of the horse latitudes. | climate, water_budget, ecology |
 
 > Note the shipped earthlike config sets `precipitation_scale: 0.8` (drier than
@@ -239,7 +239,7 @@ blanket absolute or relative tolerance.
 | Property | Type | Default | Range | What it controls | Affects |
 | --- | --- | --- | --- | --- | --- |
 | `river_percentile` | float | `0.92` | `[0.50, 0.995]` | Flow-accumulation percentile above which a cell is a river. Sets `is_river` density and network extent. | hydrology |
-| `preserve_geologic_depressions` | bool | `true` | — | Whether real closed basins are preserved (endorheic) vs filled. Sets `depression_policy`, `is_closed_basin`, and the depression-fill history behaviour. | hydrology |
+| `preserve_geologic_depressions` | bool | `true` | — | Whether geologic closed basins remain preserved and endorheic rather than entering numerical-depression correction. Sets `depression_policy`, `is_closed_basin`, and correction-ledger behavior. | hydrology |
 
 ---
 

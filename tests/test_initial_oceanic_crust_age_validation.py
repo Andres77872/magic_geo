@@ -73,7 +73,7 @@ class InitialOceanicCrustAgeValidationTests(TestCase):
         self.assertFalse(result["passed"])
         self.assertTrue(result["failures"])
 
-    def test_generated_world_replays_every_age_path_and_alias(self) -> None:
+    def test_generated_world_replays_every_age_path_and_history_alias(self) -> None:
         result = validate_initial_oceanic_crust_age(self.world)
 
         self.assertTrue(result["passed"], result["failures"])
@@ -92,7 +92,6 @@ class InitialOceanicCrustAgeValidationTests(TestCase):
             "clamped_ages_and_status_replayed",
             "summary_statistics_replayed",
             "cdf_replayed",
-            "oceanic_cell_aliases_replayed",
             "oceanic_history_aliases_replayed",
             "procedural_authority",
         ):
@@ -240,9 +239,6 @@ class InitialOceanicCrustAgeValidationTests(TestCase):
                 "remapped_crust_age_ma_by_cell"
             ][oceanic_id] += 0.01
 
-        def mutate_cell_alias(world: dict) -> None:
-            world["cells"][oceanic_id]["initial_crust_age_ma"] += 0.01
-
         def segment(world: dict) -> dict:
             return world["plate_motion_history"][0]["boundary_segments"][
                 eligible_segment_id
@@ -259,7 +255,6 @@ class InitialOceanicCrustAgeValidationTests(TestCase):
             "provisional_thickness": mutate_provisional_thickness,
             "provisional_density": mutate_provisional_density,
             "history_age_alias": mutate_history_alias,
-            "cell_age_alias": mutate_cell_alias,
             "segment_class": lambda world: segment(world).__setitem__(
                 "direct_boundary_class", "transform"
             ),

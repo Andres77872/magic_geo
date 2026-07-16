@@ -240,8 +240,6 @@ GlacialSedimentTransportStage transport_glacial_sediment(
             cell.elevation_m +
             deposition_depth_m[static_cast<std::size_t>(i)] -
             source_depth_m;
-        cell.sediment_production_m +=
-            source_depth_m;
         cell.sediment_deposition_m +=
             deposition_depth_m[static_cast<std::size_t>(i)];
         apply_sediment_interface_material_change(
@@ -267,7 +265,8 @@ GlacialSedimentTransportStage transport_glacial_sediment(
             cell.glacial_sediment_deposition_m -
             cell.glacial_sediment_production_m;
         cell.sediment_net_budget_m =
-            cell.sediment_deposition_m - cell.sediment_production_m;
+            cell.sediment_deposition_m -
+            sediment_gross_mobilization_m(cell);
         stage.max_target_deposition_depth_m = std::max(
             stage.max_target_deposition_depth_m,
             deposition_depth_m[static_cast<std::size_t>(i)]

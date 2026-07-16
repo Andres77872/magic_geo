@@ -25,7 +25,12 @@ class YoungPlanetCrustAgeTests(TestCase):
         planet_age_ma = young_planet.planet.geological_age_ga * 1000.0
         cells = world["cells"]
 
-        initial_ages = [float(cell["initial_crust_age_ma"]) for cell in cells]
+        initial_ages = [
+            float(age)
+            for age in world["plate_motion_history"][0]["crust_overlap_ledger"][
+                "remapped_crust_age_ma_by_cell"
+            ]
+        ]
         final_ages = [float(cell["crust_age_ma"]) for cell in cells]
         self.assertTrue(all(0.0 <= age <= planet_age_ma for age in initial_ages))
         self.assertTrue(all(0.0 <= age <= planet_age_ma for age in final_ages))
@@ -60,8 +65,11 @@ class YoungPlanetCrustAgeTests(TestCase):
             valid_result = CliRunner().invoke(app, ["validate", "--world", str(world_path)])
             self.assertEqual(valid_result.exit_code, 0, valid_result.output)
 
-            original_initial_age = cells[0]["initial_crust_age_ma"]
-            cells[0]["initial_crust_age_ma"] = planet_age_ma + 1.0
+            initial_age_ledger = world["plate_motion_history"][0][
+                "crust_overlap_ledger"
+            ]["remapped_crust_age_ma_by_cell"]
+            original_initial_age = initial_age_ledger[0]
+            initial_age_ledger[0] = planet_age_ma + 1.0
             world_path.write_text(json.dumps(world), encoding="utf-8")
             invalid_result = CliRunner().invoke(app, ["validate", "--world", str(world_path)])
             self.assertNotEqual(invalid_result.exit_code, 0)
@@ -70,7 +78,7 @@ class YoungPlanetCrustAgeTests(TestCase):
                 invalid_result.output,
             )
 
-            cells[0]["initial_crust_age_ma"] = original_initial_age
+            initial_age_ledger[0] = original_initial_age
             first_transition = world["plate_motion_history"][1]
             first_transition["crust_age_change_ma_by_cell"][0] = planet_age_ma + 1.0
             world_path.write_text(json.dumps(world), encoding="utf-8")

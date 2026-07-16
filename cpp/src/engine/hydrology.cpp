@@ -727,7 +727,7 @@ void derive_numeric_depression_breach_alternative(
     const std::vector<Cell>& cells,
     const std::vector<double>& elevation_before_correction_m,
     const std::vector<int>& source_component_cell_ids,
-    NumericDepressionFillEvent& event
+    NumericDepressionCorrectionEvent& event
 ) {
     if (event.sink_cell_id < 0 ||
         event.sink_cell_id >= static_cast<int>(cells.size()) ||
@@ -895,7 +895,7 @@ void derive_numeric_depression_breach_alternative(
 
 void apply_numeric_depression_correction(
     std::vector<Cell>& cells,
-    NumericDepressionFillEvent& event,
+    NumericDepressionCorrectionEvent& event,
     std::set<int>& mutated_cell_ids_this_pass
 ) {
     std::set<int> excavated_path_cell_ids;
@@ -978,7 +978,6 @@ void apply_numeric_depression_correction(
             cell.numeric_depression_temporary_lake_deferred = true;
             cell.numeric_depression_temporary_lake_event_count++;
         }
-        event.applied_fill_volume_km3 = 0.0;
         event.correction_mass_balance_residual_km3 = 0.0;
         return;
     }
@@ -1030,12 +1029,12 @@ void apply_numeric_depression_correction(
                 "numeric depression breach sediment-interface target mismatch"
             );
         }
-        cell.sediment_production_m += excavation_depth_m;
         cell.sediment_alluvium_entrainment_m +=
             alluvium_entrainment_depth_m;
         cell.sediment_bedrock_erosion_m += bedrock_erosion_depth_m;
         cell.sediment_net_budget_m =
-            cell.sediment_deposition_m - cell.sediment_production_m;
+            cell.sediment_deposition_m -
+            sediment_gross_mobilization_m(cell);
         cell.cumulative_numeric_depression_breach_excavation_m +=
             excavation_depth_m;
         cell.numeric_depression_breach_event_count++;
@@ -1091,7 +1090,8 @@ void apply_numeric_depression_correction(
         );
         cell.sediment_deposition_m += deposition_depth_m;
         cell.sediment_net_budget_m =
-            cell.sediment_deposition_m - cell.sediment_production_m;
+            cell.sediment_deposition_m -
+            sediment_gross_mobilization_m(cell);
         cell.cumulative_numeric_depression_breach_deposition_m +=
             deposition_depth_m;
         cell.numeric_depression_breach_event_count++;
@@ -1125,18 +1125,17 @@ HydrologyStabilizationResult stabilize_numeric_depressions(
     int feedback_stage_id,
     const std::string& stage,
     int erosion_iteration,
-    std::vector<NumericDepressionFillEvent>& fill_history,
+    std::vector<NumericDepressionCorrectionEvent>& correction_history,
     std::vector<HydrologicWaterBudgetStage>& water_budget_history
 ) {
     HydrologyStabilizationResult result;
-    std::set<int> filled_unique_cell_ids;
     std::set<int> temporary_lake_unique_cell_ids;
     for (Cell& cell : cells) {
         cell.numeric_depression_temporary_lake_deferred = false;
     }
 
     for (int recomputation_index = 0;
-         recomputation_index <= NUMERIC_DEPRESSION_FILL_MAX_PASSES;
+         recomputation_index <= NUMERIC_DEPRESSION_CORRECTION_MAX_PASSES;
          ++recomputation_index) {
         result.sea_level_adjustment_m += apply_sea_level(params, cells);
         result.sea_level_recompute_count++;
@@ -1167,8 +1166,6 @@ HydrologyStabilizationResult stabilize_numeric_depressions(
             }
         }
         if (cells_by_component.empty()) {
-            result.numeric_depression_filled_unique_cell_count =
-                static_cast<int>(filled_unique_cell_ids.size());
             result.numeric_depression_temporary_lake_unique_cell_count =
                 static_cast<int>(temporary_lake_unique_cell_ids.size());
             maximum_sediment_interface_closure_residual_m(
@@ -1177,12 +1174,12 @@ HydrologyStabilizationResult stabilize_numeric_depressions(
             );
             return result;
         }
-        if (recomputation_index == NUMERIC_DEPRESSION_FILL_MAX_PASSES) {
-            throw std::runtime_error("numeric depression fill did not converge within the bounded pass count");
+        if (recomputation_index == NUMERIC_DEPRESSION_CORRECTION_MAX_PASSES) {
+            throw std::runtime_error("numeric depression correction did not converge within the bounded pass count");
         }
 
-        result.numeric_depression_fill_pass_count++;
-        const int stabilization_pass = result.numeric_depression_fill_pass_count;
+        result.numeric_depression_correction_pass_count++;
+        const int stabilization_pass = result.numeric_depression_correction_pass_count;
         std::vector<double> elevation_before_correction_m;
         elevation_before_correction_m.reserve(cells.size());
         for (const Cell& cell : cells) {
@@ -1200,8 +1197,8 @@ HydrologyStabilizationResult stabilize_numeric_depressions(
             }
             const Cell& sink = cells[static_cast<std::size_t>(sink_cell_id)];
 
-            NumericDepressionFillEvent event;
-            event.id = static_cast<int>(fill_history.size());
+            NumericDepressionCorrectionEvent event;
+            event.id = static_cast<int>(correction_history.size());
             event.feedback_stage_id = feedback_stage_id;
             event.stage = stage;
             event.erosion_iteration = erosion_iteration;
@@ -1301,7 +1298,7 @@ HydrologyStabilizationResult stabilize_numeric_depressions(
                     temporary_lake_unique_cell_ids.insert(cell_id);
                 }
             }
-            fill_history.push_back(std::move(event));
+            correction_history.push_back(std::move(event));
         }
     }
 

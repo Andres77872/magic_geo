@@ -123,36 +123,6 @@ std::vector<double> reference_smooth(
     return current;
 }
 
-std::vector<int> reference_remap(
-    const std::vector<Cell>& cells,
-    const std::vector<Vec3>& queries,
-    const std::vector<std::vector<int>>& candidates_by_plate
-) {
-    std::vector<int> output(cells.size(), -1);
-    for (std::size_t cell_id = 0; cell_id < cells.size(); ++cell_id) {
-        const auto& candidates =
-            candidates_by_plate[static_cast<std::size_t>(cells[cell_id].plate_id)];
-        if (candidates.empty()) {
-            output[cell_id] = static_cast<int>(cell_id);
-            continue;
-        }
-        double best = -2.0;
-        int best_source = candidates.front();
-        for (int candidate : candidates) {
-            const Vec3& position = cells[static_cast<std::size_t>(candidate)].p;
-            double score = queries[cell_id].x * position.x;
-            score = score + queries[cell_id].y * position.y;
-            score = score + queries[cell_id].z * position.z;
-            if (score > best) {
-                best = score;
-                best_source = candidate;
-            }
-        }
-        output[cell_id] = best_source;
-    }
-    return output;
-}
-
 void check_bitwise_equal(
     const std::vector<double>& actual,
     const std::vector<double>& expected,
@@ -255,9 +225,9 @@ int main() {
             "fused smoothing field C"
         );
 
-        // This is a shadow replay of the many-contributor conservative v3 CSR,
-        // not the legacy nearest-donor primitive tested below. Device results
-        // are validated and discarded by the production reconciliation path.
+        // This is a shadow replay of the many-contributor conservative v3 CSR.
+        // Device results are validated and discarded by the production
+        // reconciliation path.
         std::vector<Cell> shadow_cells = make_cells(33);
         std::vector<double> shadow_thickness(shadow_cells.size());
         std::vector<double> shadow_density(shadow_cells.size());
@@ -366,38 +336,6 @@ int main() {
         check(session.telemetry().crust_overlap_continuous_shadow_dispatch_count == 1,
               "rejected CUDA shadow input incremented its dispatch count");
 
-        // Retained low-level compatibility coverage for the legacy nearest-source
-        // primitive. Production v3 crust transport uses CPU spherical overlaps and
-        // never dispatches this kernel from the world pipeline.
-        std::vector<std::vector<int>> candidates_by_plate(4);
-        for (std::size_t index = 0; index < cells.size(); ++index) {
-            const int plate_id = cells[index].plate_id;
-            if (plate_id != 2) {
-                candidates_by_plate[static_cast<std::size_t>(plate_id)].push_back(
-                    static_cast<int>(index)
-                );
-            }
-        }
-        std::vector<Vec3> queries(cells.size());
-        for (std::size_t index = 0; index < cells.size(); ++index) {
-            queries[index] = cells[(index * 37U + 11U) % cells.size()].p;
-        }
-        std::vector<int> source_ids;
-        session.run_remap_crust_sources(
-            cells, queries, candidates_by_plate, source_ids
-        );
-        check(source_ids == reference_remap(cells, queries, candidates_by_plate),
-              "warp remap differs from ordered/tie-stable CPU reference");
-
-        std::vector<Cell> empty_cells;
-        std::vector<Vec3> empty_queries;
-        std::vector<std::vector<int>> empty_candidates(1);
-        source_ids = {123};
-        session.run_remap_crust_sources(
-            empty_cells, empty_queries, empty_candidates, source_ids
-        );
-        check(source_ids.empty(), "empty remap did not clear its output");
-
         bool invalid_rejected = false;
         try {
             session.run_smooth_field(cells, std::vector<double>(1), 1, 0.5, output);
@@ -418,8 +356,6 @@ int main() {
               "unexpected scalar-smoothing dispatch count");
         check(telemetry.batched_smoothing_kernel_dispatch_count == 5,
               "unexpected fused-smoothing dispatch count");
-        check(telemetry.crust_source_remap_dispatch_count == 1,
-              "unexpected remap dispatch count");
         check(telemetry.crust_overlap_continuous_shadow_dispatch_count == 1,
               "unexpected conservative-overlap shadow dispatch count");
         check(telemetry.last_threads_per_block == 256,

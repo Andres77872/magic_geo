@@ -14,7 +14,13 @@ from magic_geo.cell_geometry import enrich_world_with_cell_geometry
 from magic_geo.cli import _validate_route_corridors, app
 from magic_geo.config import WorldConfig, load_config
 from magic_geo.logistics_history import enrich_world_with_logistics_history
-from magic_geo.planet_parameters import EARTH_RADIUS_KM, EARTH_STANDARD_GRAVITY_M_S2
+from magic_geo.planet_parameters import (
+    EARTH_STANDARD_GRAVITY_M_S2,
+    planet_gravity_g,
+    planet_parameter_snapshot,
+    planet_radius_km,
+)
+from magic_geo.planet_realism import enrich_world_with_planet_realism
 from magic_geo.river_hydraulics import enrich_world_with_river_hydraulics
 from magic_geo.route_corridors import enrich_world_with_route_corridors
 
@@ -36,7 +42,11 @@ class PlanetScalingTests(TestCase):
         with (
             patch(
                 "magic_geo.native.generate_world",
-                return_value={"cells": [], "summary": {}},
+                return_value={
+                    "cells": [],
+                    "summary": {},
+                    "planet_parameters": planet_parameter_snapshot(config.planet),
+                },
             ),
             patch(
                 "magic_geo.api.enrich_world_with_mesh_lod",
@@ -46,7 +56,91 @@ class PlanetScalingTests(TestCase):
         ):
             generate_world(config)
 
-    def test_cell_geometry_scales_with_configured_radius_and_legacy_defaults_to_earth(
+    def test_planet_realism_rejects_native_config_snapshot_mismatch(self) -> None:
+        config = WorldConfig.model_validate(
+            {"planet": {"radius_km": 4200.123456789, "gravity_g": 0.55}}
+        )
+        world = {
+            "cells": [],
+            "planet_parameters": planet_parameter_snapshot(config.planet),
+        }
+        self.assertIs(enrich_world_with_planet_realism(world, config.planet), world)
+
+        world["planet_parameters"]["radius_km"] += 1.0
+        with self.assertRaisesRegex(ValueError, "must match the configured planet"):
+            enrich_world_with_planet_realism(world, config.planet)
+
+    def test_api_rejects_native_planet_snapshot_mismatch_before_enrichment(
+        self,
+    ) -> None:
+        config = WorldConfig.model_validate(
+            {"planet": {"radius_km": 4200.0, "gravity_g": 0.55}}
+        )
+        native_parameters = planet_parameter_snapshot(config.planet)
+        native_parameters["radius_km"] = 4201.0
+
+        with (
+            patch(
+                "magic_geo.native.generate_world",
+                return_value={
+                    "cells": [],
+                    "summary": {},
+                    "planet_parameters": native_parameters,
+                },
+            ),
+            patch("magic_geo.api.enrich_world_with_mesh_lod") as first_enricher,
+            self.assertRaisesRegex(RuntimeError, "do not match the configured planet"),
+        ):
+            generate_world(config)
+        first_enricher.assert_not_called()
+
+    def test_planet_scale_accessors_reject_invalid_world_parameters(self) -> None:
+        for accessor, key in (
+            (planet_radius_km, "radius_km"),
+            (planet_gravity_g, "gravity_g"),
+        ):
+            invalid_cases = (
+                ({}, "world must provide planet_parameters"),
+                ({"planet_parameters": []}, "planet_parameters must be an object"),
+                (
+                    {"planet_parameters": {}},
+                    rf"planet_parameters\.{key} is required",
+                ),
+                (
+                    {"planet_parameters": {key: "1.0"}},
+                    rf"planet_parameters\.{key} must be numeric",
+                ),
+                (
+                    {"planet_parameters": {key: None}},
+                    rf"planet_parameters\.{key} must be numeric",
+                ),
+                (
+                    {"planet_parameters": {key: True}},
+                    rf"planet_parameters\.{key} must be numeric",
+                ),
+                (
+                    {"planet_parameters": {key: math.nan}},
+                    rf"planet_parameters\.{key} must be finite and positive",
+                ),
+                (
+                    {"planet_parameters": {key: math.inf}},
+                    rf"planet_parameters\.{key} must be finite and positive",
+                ),
+                (
+                    {"planet_parameters": {key: 0.0}},
+                    rf"planet_parameters\.{key} must be finite and positive",
+                ),
+                (
+                    {"planet_parameters": {key: -1.0}},
+                    rf"planet_parameters\.{key} must be finite and positive",
+                ),
+            )
+            for world, message in invalid_cases:
+                with self.subTest(parameter=key, world=world):
+                    with self.assertRaisesRegex(ValueError, message):
+                        accessor(world)
+
+    def test_cell_geometry_scales_with_configured_radius_and_rejects_missing_parameters(
         self,
     ) -> None:
         cells = [
@@ -56,23 +150,20 @@ class PlanetScalingTests(TestCase):
             {"id": 3, "lat_deg": -35.26439, "lon_deg": -45.0, "neighbors": [0, 1, 2]},
         ]
 
-        def world_for_radius(radius_km: float, *, expose_parameters: bool = True) -> dict:
+        def world_for_radius(radius_km: float) -> dict:
             world = {
                 "cells": copy.deepcopy(cells),
                 "summary": {},
+                "planet_parameters": {"radius_km": radius_km},
             }
             area_km2 = 4.0 * math.pi * radius_km**2 / len(cells)
             for cell in world["cells"]:
                 cell["area_km2"] = area_km2
-            if expose_parameters:
-                world["planet_parameters"] = {"radius_km": radius_km}
             return world
 
         small = world_for_radius(3000.0)
         large = world_for_radius(6000.0)
-        legacy = world_for_radius(EARTH_RADIUS_KM, expose_parameters=False)
-        explicit_earth = world_for_radius(EARTH_RADIUS_KM)
-        for world in (small, large, legacy, explicit_earth):
+        for world in (small, large):
             enrich_world_with_cell_geometry(world)
 
         self.assertAlmostEqual(
@@ -87,17 +178,14 @@ class PlanetScalingTests(TestCase):
             4.0,
             places=5,
         )
-        self.assertEqual(legacy["cell_adjacency_edges"], explicit_earth["cell_adjacency_edges"])
-        self.assertEqual(
-            legacy["summary"]["cell_geometry_total_area_km2"],
-            explicit_earth["summary"]["cell_geometry_total_area_km2"],
-        )
+        missing_parameters = world_for_radius(6371.0)
+        missing_parameters.pop("planet_parameters")
+        with self.assertRaisesRegex(ValueError, "world must provide planet_parameters"):
+            enrich_world_with_cell_geometry(missing_parameters)
 
     def test_route_corridors_scale_from_small_to_super_earth_and_replay(self) -> None:
         def world_for_radius(
             radius_km: float,
-            *,
-            expose_parameters: bool = True,
         ) -> dict:
             angular_distance = math.radians(12.0)
             world = {
@@ -133,16 +221,13 @@ class PlanetScalingTests(TestCase):
                     }
                 ],
                 "summary": {},
+                "planet_parameters": {"radius_km": radius_km},
             }
-            if expose_parameters:
-                world["planet_parameters"] = {"radius_km": radius_km}
             return world
 
         small = world_for_radius(3000.0)
         super_earth = world_for_radius(9000.0)
-        legacy = world_for_radius(EARTH_RADIUS_KM, expose_parameters=False)
-        explicit_earth = world_for_radius(EARTH_RADIUS_KM)
-        for world in (small, super_earth, legacy, explicit_earth):
+        for world in (small, super_earth):
             enrich_world_with_route_corridors(world)
             cells_by_id = {cell["id"]: cell for cell in world["cells"]}
             self.assertEqual(
@@ -161,19 +246,16 @@ class PlanetScalingTests(TestCase):
             3.0,
             places=5,
         )
-        self.assertEqual(legacy["route_corridors"], explicit_earth["route_corridors"])
-        self.assertEqual(
-            legacy["route_corridor_model"],
-            explicit_earth["route_corridor_model"],
-        )
+        missing_parameters = world_for_radius(6371.0)
+        missing_parameters.pop("planet_parameters")
+        with self.assertRaisesRegex(ValueError, "world must provide planet_parameters"):
+            enrich_world_with_route_corridors(missing_parameters)
 
     def test_campaign_distances_scale_from_small_to_super_earth_and_replay(
         self,
     ) -> None:
         def world_for_radius(
             radius_km: float,
-            *,
-            expose_parameters: bool = True,
         ) -> dict:
             angular_distance = math.radians(12.0)
             distance_km = radius_km * angular_distance
@@ -254,16 +336,13 @@ class PlanetScalingTests(TestCase):
                 ],
                 "economy_histories": [],
                 "summary": {},
+                "planet_parameters": {"radius_km": radius_km},
             }
-            if expose_parameters:
-                world["planet_parameters"] = {"radius_km": radius_km}
             return world
 
         small = world_for_radius(3000.0)
         super_earth = world_for_radius(9000.0)
-        legacy = world_for_radius(EARTH_RADIUS_KM, expose_parameters=False)
-        explicit_earth = world_for_radius(EARTH_RADIUS_KM)
-        for world in (small, super_earth, legacy, explicit_earth):
+        for world in (small, super_earth):
             enrich_world_with_logistics_history(world)
             self.assertEqual(validate_campaign_operations_replay(world), [])
 
@@ -279,16 +358,19 @@ class PlanetScalingTests(TestCase):
             3.0,
             places=5,
         )
+        missing_parameters = copy.deepcopy(small)
+        missing_parameters.pop("planet_parameters")
         self.assertEqual(
-            legacy["campaign_movements"],
-            explicit_earth["campaign_movements"],
+            validate_campaign_operations_replay(missing_parameters),
+            [
+                "campaign operations replay rejected: world must provide "
+                "planet_parameters"
+            ],
         )
-        self.assertEqual(
-            legacy["campaign_path_segments"],
-            explicit_earth["campaign_path_segments"],
-        )
+        with self.assertRaisesRegex(ValueError, "world must provide planet_parameters"):
+            enrich_world_with_logistics_history(missing_parameters)
 
-    def test_river_hydraulics_uses_configured_gravity_and_legacy_defaults_to_earth(
+    def test_river_hydraulics_uses_configured_gravity_and_rejects_missing_parameters(
         self,
     ) -> None:
         base_world = {
@@ -308,20 +390,13 @@ class PlanetScalingTests(TestCase):
             "river_channel_systems": [],
             "summary": {},
         }
-        legacy = copy.deepcopy(base_world)
         earth = copy.deepcopy(base_world)
         earth["planet_parameters"] = {"gravity_g": 1.0}
         low_gravity = copy.deepcopy(base_world)
         low_gravity["planet_parameters"] = {"gravity_g": 0.25}
-        for world in (legacy, earth, low_gravity):
+        for world in (earth, low_gravity):
             enrich_world_with_river_hydraulics(world)
 
-        self.assertEqual(legacy["cells"], earth["cells"])
-        self.assertEqual(
-            legacy["river_hydraulics_model"],
-            earth["river_hydraulics_model"],
-        )
-        self.assertEqual(legacy["summary"], earth["summary"])
         self.assertAlmostEqual(
             low_gravity["river_hydraulics_model"]["gravity_m_s2"],
             EARTH_STANDARD_GRAVITY_M_S2 * 0.25,
@@ -338,6 +413,8 @@ class PlanetScalingTests(TestCase):
             0.25,
             places=5,
         )
+        with self.assertRaisesRegex(ValueError, "world must provide planet_parameters"):
+            enrich_world_with_river_hydraulics(copy.deepcopy(base_world))
 
     def test_non_earth_generation_passes_strict_natural_model_replays(self) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))

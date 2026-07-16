@@ -86,11 +86,13 @@ def _different_id(value: int, cell_count: int) -> int:
 class ConservativeCrustTransportValidationTests(TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        config = _moving_geodesic_config()
         cls.world = generate_geo_world(
-            config_to_native(_moving_geodesic_config())
+            config_to_native(config)
         )
+        zero_precision_config = _moving_geodesic_config(output_precision=0)
         cls.zero_precision_world = generate_geo_world(
-            config_to_native(_moving_geodesic_config(output_precision=0))
+            config_to_native(zero_precision_config)
         )
 
     def test_initial_overlap_plan_is_exact_identity(self) -> None:
@@ -105,7 +107,6 @@ class ConservativeCrustTransportValidationTests(TestCase):
         self.assertEqual(ledger["remap_residual_distance_km"], [0.0] * cell_count)
         self.assertEqual(ledger["source_kinematic_distance_km"], [0.0] * cell_count)
         self.assertEqual(ledger["dominant_source_cell_ids"], list(range(cell_count)))
-        self.assertEqual(initial["crust_source_cell_ids"], list(range(cell_count)))
         self.assertEqual(ledger["contributor_count_by_cell"], [1] * cell_count)
         self.assertEqual(
             ledger["dominant_source_volume_fraction_by_cell"],
@@ -331,10 +332,6 @@ class ConservativeCrustTransportValidationTests(TestCase):
             )
             self.assertEqual(
                 ledger["dominant_source_cell_ids"][destination],
-                dominant_source,
-            )
-            self.assertEqual(
-                moving["crust_source_cell_ids"][destination],
                 dominant_source,
             )
             self.assertAlmostEqual(
@@ -1522,15 +1519,6 @@ class ConservativeCrustTransportValidationTests(TestCase):
                 ledger["dominant_source_cell_ids"][0]
             )
 
-        def mutate_initial_crust_age_alias(world: dict) -> None:
-            world["cells"][0]["initial_crust_age_ma"] += 10.0
-
-        def mutate_initial_crust_thickness_alias(world: dict) -> None:
-            world["cells"][0]["initial_crust_thickness_km"] += 1.0
-
-        def mutate_initial_crust_density_alias(world: dict) -> None:
-            world["cells"][0]["initial_crust_density"] += 0.1
-
         def mutate_out_of_range_initial_type(world: dict) -> None:
             world["plate_motion_history"][0]["crust_type_by_cell"][0] = 99
 
@@ -1572,12 +1560,6 @@ class ConservativeCrustTransportValidationTests(TestCase):
             ledger = world["plate_motion_history"][1]["crust_overlap_ledger"]
             ledger["global_coverage_area_km2_by_multiplicity"][0] += 1.0
 
-        def mutate_legacy_dominant_alias(world: dict) -> None:
-            step = world["plate_motion_history"][1]
-            step["crust_source_cell_ids"][0] = _different_id(
-                step["crust_source_cell_ids"][0], cell_count
-            )
-
         def mutate_canonical_dominant_alias(world: dict) -> None:
             ledger = world["plate_motion_history"][1]["crust_overlap_ledger"]
             ledger["dominant_source_cell_ids"][0] = _different_id(
@@ -1617,9 +1599,6 @@ class ConservativeCrustTransportValidationTests(TestCase):
             world["backend"][
                 "cpu_conservative_crust_overlap_transition_count"
             ] += 1
-
-        def mutate_legacy_accelerator_dispatch_count(world: dict) -> None:
-            world["backend"]["opencl_crust_source_remap_dispatch_count"] += 1
 
         def mutate_arrangement_fragment_count(world: dict) -> None:
             ledger = world["plate_motion_history"][1]["crust_overlap_ledger"]
@@ -1770,9 +1749,6 @@ class ConservativeCrustTransportValidationTests(TestCase):
             "fractional_csr_offset": mutate_fractional_csr_offset,
             "fractional_source_id": mutate_fractional_source_id,
             "string_dominant_id": mutate_string_dominant_id,
-            "initial_crust_age_alias": mutate_initial_crust_age_alias,
-            "initial_crust_thickness_alias": mutate_initial_crust_thickness_alias,
-            "initial_crust_density_alias": mutate_initial_crust_density_alias,
             "out_of_range_initial_type": mutate_out_of_range_initial_type,
             "missing_global_gap_scalar": delete_global_gap_scalar,
             "trailing_zero_histogram_bin": append_zero_histogram_bin,
@@ -1783,7 +1759,6 @@ class ConservativeCrustTransportValidationTests(TestCase):
             "destination_closure": mutate_destination_closure,
             "global_gap_overlap_balance": mutate_global_balance,
             "coverage_histogram": mutate_coverage_histogram,
-            "legacy_dominant_alias": mutate_legacy_dominant_alias,
             "canonical_dominant_alias": mutate_canonical_dominant_alias,
             "remapped_category": mutate_remapped_category,
             "process_inventory_delta": mutate_process_inventory_delta,
@@ -1793,9 +1768,6 @@ class ConservativeCrustTransportValidationTests(TestCase):
             "transport_backend_metadata": mutate_transport_backend_metadata,
             "backend_execution_metadata": mutate_backend_execution_metadata,
             "backend_cpu_transition_count": mutate_backend_cpu_transition_count,
-            "legacy_accelerator_dispatch_count": (
-                mutate_legacy_accelerator_dispatch_count
-            ),
             "arrangement_fragment_count": mutate_arrangement_fragment_count,
             "arrangement_maximum": mutate_arrangement_maximum,
             "arrangement_nonmaximum_count": (

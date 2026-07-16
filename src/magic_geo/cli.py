@@ -83,6 +83,7 @@ from .io import (
 )
 from .scaling import HACK_FIT_MINIMUM_BASIN_AREA_KM2, fit_power_law
 from .sediment_interface_validation import validate_sediment_interfaces
+from .serialization import CURRENT_WORLD_SCHEMA_VERSION, retired_world_schema_fields
 from .territorial_geography_validation import validate_territorial_geography_replay
 
 app = typer.Typer(no_args_is_help=True, help="Causal planet generator CLI.")
@@ -111,7 +112,7 @@ NUMERIC_DEPRESSION_TEMPORARY_LAKE_METHOD = (
 NUMERIC_DEPRESSION_BREACH_METHOD = (
     "bounded_mass_conserving_breach_with_local_deposition_v1"
 )
-NUMERIC_DEPRESSION_FILL_MAX_PASSES = 16
+NUMERIC_DEPRESSION_CORRECTION_MAX_PASSES = 16
 NUMERIC_DEPRESSION_FILL_DEPTH_TOLERANCE_M = 1.0e-9
 NUMERIC_DEPRESSION_CORRECTION_SELECTION_MODEL = (
     "lower_volume_full_cell_breach_with_50m_depth_bound_else_temporary_lake_v3"
@@ -181,10 +182,6 @@ EROSION_TRANSITION_COUPLING_SEMANTICS = (
     "updated_crust_state;tectonic_hillslope_stream_tendencies_are_combined_"
     "before_terrain_commit;fluvial_routing_uses_prior_flow_graph_and_"
     "provisional_terrain_accommodation"
-)
-LEGACY_MEAN_EROSION_RATE_FIELD_SEMANTICS = (
-    "mean_erosion_rate_m_per_step_is_a_reference_step_response_alias_not_"
-    "applied_transition_depth"
 )
 NOMINAL_TIME_RECORD_FIELDS = {
     "nominal_time_model",
@@ -5395,8 +5392,6 @@ def _validate_route_corridors(
     corridors = payload.get("route_corridors", [])
     routes = payload.get("routes", [])
     settlements = payload.get("settlements", [])
-    # Worlds created before planet_parameters were recorded used Earth radius;
-    # configured_planet_radius_km retains that replay-compatible fallback.
     radius_km = configured_planet_radius_km(payload)
     try:
         metadata_invalid = (
@@ -8659,7 +8654,7 @@ def _validate_sediment_inventory(
 
     model = payload.get("sediment_inventory_model", {})
     feedback_history = payload.get("earth_system_feedback_history", [])
-    numeric_history = payload.get("numeric_depression_fill_history", [])
+    numeric_history = payload.get("numeric_depression_correction_history", [])
     hillslope_history = payload.get("hillslope_sediment_transport_history", [])
     fluvial_history = payload.get("fluvial_sediment_routing_history", [])
     glacial_history = payload.get("glacial_sediment_transport_history", [])
@@ -9695,6 +9690,30 @@ def validate(
     summary = payload.get("summary", {})
     failures: list[str] = []
 
+    schema_version = payload.get("schema_version")
+    if (
+        type(schema_version) is not int
+        or schema_version != CURRENT_WORLD_SCHEMA_VERSION
+    ):
+        failures.append(
+            "world schema_version must be "
+            f"{CURRENT_WORLD_SCHEMA_VERSION}, got {schema_version!r}"
+        )
+    retired_fields = retired_world_schema_fields(payload)
+    if retired_fields:
+        failures.append(
+            "world schema contains retired fields: " + ", ".join(retired_fields)
+        )
+    try:
+        configured_planet_radius_km(payload)
+        surface_gravity_m_s2(payload)
+    except ValueError as exc:
+        failures.append(f"planet parameters invalid: {exc}")
+    if failures:
+        for failure in failures:
+            typer.echo(f"FAIL {failure}")
+        raise typer.Exit(1)
+
     mesh_backend = payload.get("mesh_backend")
     allowed_mesh_backends = {"fibonacci_sphere", "geodesic_icosahedron"}
     if mesh_backend not in allowed_mesh_backends:
@@ -9726,11 +9745,23 @@ def validate(
     crust_age_invalid = (
         not math.isfinite(maximum_crust_age_ma) or maximum_crust_age_ma <= 0.0
     )
-    for cell in cells_payload:
+    try:
+        initial_crust_ages = [
+            float(value)
+            for value in payload["plate_motion_history"][0]["crust_overlap_ledger"][
+                "remapped_crust_age_ma_by_cell"
+            ]
+        ]
+    except (KeyError, IndexError, TypeError, ValueError):
+        initial_crust_ages = []
+        crust_age_invalid = True
+    if len(initial_crust_ages) != len(cells_payload):
+        crust_age_invalid = True
+    for cell_id, cell in enumerate(cells_payload):
         try:
-            initial_crust_age = float(cell["initial_crust_age_ma"])
+            initial_crust_age = initial_crust_ages[cell_id]
             final_crust_age = float(cell["crust_age_ma"])
-        except (KeyError, TypeError, ValueError):
+        except (IndexError, KeyError, TypeError, ValueError):
             crust_age_invalid = True
             break
         if (
@@ -11128,7 +11159,7 @@ def validate(
     ):
         failures.append("hydrology depression components or lake basin aggregation invalid")
 
-    numeric_fill_summary_keys = {
+    numeric_correction_summary_keys = {
         "numeric_depression_correction_model",
         "numeric_depression_correction_selection_model",
         "numeric_depression_breach_diagnostic_model",
@@ -11136,25 +11167,14 @@ def validate(
         "numeric_depression_selected_breach_max_depth_m",
         "numeric_depression_breach_mass_transfer_model",
         "numeric_depression_correction_selection_reason",
-        "numeric_depression_fill_max_pass_count",
+        "numeric_depression_correction_max_pass_count",
         "numeric_depression_fill_depth_tolerance_m",
-        "numeric_depression_fill_pass_count",
         "numeric_depression_correction_pass_count",
         "numeric_depression_correction_event_count",
-        "numeric_depression_fill_event_count",
-        "numeric_depression_fill_cell_application_count",
-        "numeric_depression_filled_unique_cell_count",
-        "numeric_depression_fill_geologic_source_event_count",
-        "numeric_depression_fill_area_km2",
-        "numeric_depression_fill_volume_km3",
         "numeric_depression_fill_candidate_event_count",
         "numeric_depression_fill_candidate_cell_application_count",
         "numeric_depression_fill_candidate_area_km2",
         "numeric_depression_fill_candidate_volume_km3",
-        "mean_numeric_depression_fill_depth_m",
-        "max_numeric_depression_fill_depth_m",
-        "cumulative_numeric_depression_fill_sum_m",
-        "max_cumulative_numeric_depression_fill_m",
         "numeric_depression_temporary_lake_event_count",
         "numeric_depression_temporary_lake_cell_application_count",
         "numeric_depression_temporary_lake_unique_cell_count",
@@ -11173,7 +11193,6 @@ def validate(
         "numeric_depression_correction_mass_balance_residual_km3",
         "numeric_depression_mass_conserving_event_count",
         "numeric_depression_zero_material_deferral_event_count",
-        "numeric_depression_unbalanced_fill_event_count",
         "numeric_depression_avoided_unsourced_fill_volume_km3",
         "numeric_depression_feasible_breach_excavation_volume_km3",
         "numeric_depression_lower_volume_hybrid_adjustment_volume_km3",
@@ -11184,7 +11203,7 @@ def validate(
         "max_numeric_depression_breach_excavation_depth_m",
         "max_lower_volume_breach_excavation_depth_m",
     }
-    numeric_fill_event_keys = {
+    numeric_correction_event_keys = {
         "id",
         "feedback_stage_id",
         "stage",
@@ -11234,7 +11253,6 @@ def validate(
         "breach_deposition_cell_count",
         "breach_deposition_cell_ids",
         "breach_deposition_depth_m_by_cell",
-        "applied_fill_volume_km3",
         "applied_breach_excavation_volume_km3",
         "applied_breach_deposition_volume_km3",
         "applied_alluvium_entrainment_volume_km3",
@@ -11243,8 +11261,8 @@ def validate(
         "lower_adjustment_volume_method",
         "selected_correction_method",
     }
-    numeric_fill_history = payload.get("numeric_depression_fill_history", [])
-    numeric_fill_feedback_by_stage: dict[int, dict[str, Any]] = {}
+    numeric_correction_history = payload.get("numeric_depression_correction_history", [])
+    numeric_correction_feedback_by_stage: dict[int, dict[str, Any]] = {}
     try:
         numeric_fill_configured_erosion_iterations = int(
             payload.get("simulation_clock", {}).get(
@@ -11257,9 +11275,9 @@ def validate(
     except (TypeError, ValueError, OverflowError):
         numeric_fill_configured_erosion_iterations = -1
         numeric_fill_nominal_timestep_ma = math.nan
-    numeric_fill_invalid = (
-        not numeric_fill_summary_keys.issubset(summary)
-        or not isinstance(numeric_fill_history, list)
+    numeric_correction_invalid = (
+        not numeric_correction_summary_keys.issubset(summary)
+        or not isinstance(numeric_correction_history, list)
         or summary.get("numeric_depression_correction_model")
         != NUMERIC_DEPRESSION_CORRECTION_MODEL
         or summary.get("numeric_depression_correction_selection_model")
@@ -11276,10 +11294,8 @@ def validate(
         < numeric_fill_nominal_timestep_ma
         <= MATURATION_REFERENCE_TIMESTEP_MA
     )
-    if not isinstance(numeric_fill_history, list):
-        numeric_fill_history = []
-    expected_numeric_fill_depth_by_cell = {cell_id: 0.0 for cell_id in cell_ids}
-    expected_numeric_fill_event_count_by_cell = {cell_id: 0 for cell_id in cell_ids}
+    if not isinstance(numeric_correction_history, list):
+        numeric_correction_history = []
     expected_numeric_breach_excavation_depth_by_cell = {
         cell_id: 0.0 for cell_id in cell_ids
     }
@@ -11292,16 +11308,9 @@ def validate(
     expected_numeric_temporary_lake_event_count_by_cell = {
         cell_id: 0 for cell_id in cell_ids
     }
-    numeric_fill_seen_components: set[tuple[int, int, int]] = set()
+    numeric_correction_seen_components: set[tuple[int, int, int]] = set()
     numeric_mutated_cells_by_stage_pass: dict[tuple[int, int], set[int]] = {}
-    numeric_fill_stage_passes: set[tuple[int, int]] = set()
-    numeric_fill_unique_cell_ids: set[int] = set()
-    numeric_fill_cell_application_count = 0
-    numeric_fill_geologic_source_event_count = 0
-    numeric_fill_area_km2 = 0.0
-    numeric_fill_volume_km3 = 0.0
-    numeric_fill_depth_sum_m = 0.0
-    max_numeric_fill_depth_m = 0.0
+    numeric_correction_stage_passes: set[tuple[int, int]] = set()
     numeric_fill_candidate_area_km2 = 0.0
     numeric_fill_candidate_volume_km3 = 0.0
     numeric_fill_candidate_cell_application_count = 0
@@ -11328,8 +11337,8 @@ def validate(
     max_numeric_breach_excavation_depth_m = 0.0
     max_lower_volume_breach_excavation_depth_m = 0.0
     try:
-        reported_numeric_fill_max_passes = int(
-            summary.get("numeric_depression_fill_max_pass_count", -1)
+        reported_numeric_correction_max_passes = int(
+            summary.get("numeric_depression_correction_max_pass_count", -1)
         )
         reported_numeric_fill_tolerance_m = float(
             summary.get("numeric_depression_fill_depth_tolerance_m", math.nan)
@@ -11341,13 +11350,13 @@ def validate(
             summary.get("numeric_depression_selected_breach_max_depth_m", math.nan)
         )
     except (TypeError, ValueError):
-        numeric_fill_invalid = True
-        reported_numeric_fill_max_passes = -1
+        numeric_correction_invalid = True
+        reported_numeric_correction_max_passes = -1
         reported_numeric_fill_tolerance_m = math.nan
         reported_numeric_breach_gradient_step_m = math.nan
         reported_numeric_selected_breach_max_depth_m = math.nan
     if (
-        reported_numeric_fill_max_passes != NUMERIC_DEPRESSION_FILL_MAX_PASSES
+        reported_numeric_correction_max_passes != NUMERIC_DEPRESSION_CORRECTION_MAX_PASSES
         or not math.isfinite(reported_numeric_fill_tolerance_m)
         or abs(
             reported_numeric_fill_tolerance_m
@@ -11368,16 +11377,16 @@ def validate(
         > 1.0e-12
         or corrected_depression_count != 0
     ):
-        numeric_fill_invalid = True
+        numeric_correction_invalid = True
 
     geologic_quantization_margin = (
         0.5001 * 10.0 ** (-output_float_precision)
         if 0 <= output_float_precision <= 8
         else 0.000051
     )
-    for event_index, event in enumerate(numeric_fill_history):
-        if not isinstance(event, dict) or not numeric_fill_event_keys.issubset(event):
-            numeric_fill_invalid = True
+    for event_index, event in enumerate(numeric_correction_history):
+        if not isinstance(event, dict) or not numeric_correction_event_keys.issubset(event):
+            numeric_correction_invalid = True
             break
         try:
             event_id = int(event["id"])
@@ -11448,9 +11457,6 @@ def validate(
                 float(value)
                 for value in event["breach_deposition_depth_m_by_cell"]
             ]
-            reported_applied_fill_volume_km3 = float(
-                event["applied_fill_volume_km3"]
-            )
             reported_applied_breach_excavation_volume_km3 = float(
                 event["applied_breach_excavation_volume_km3"]
             )
@@ -11481,7 +11487,7 @@ def validate(
                 float(value) for value in event["elevation_after_fill_m_by_cell"]
             ]
         except (TypeError, ValueError):
-            numeric_fill_invalid = True
+            numeric_correction_invalid = True
             break
         if feedback_stage_id == 0:
             expected_stage = "initial_climate_hydrology"
@@ -11545,7 +11551,7 @@ def validate(
                 * numeric_fill_nominal_timestep_ma,
                 expected_role="stage_end_stabilization_event",
             )
-            or not 1 <= stabilization_pass <= NUMERIC_DEPRESSION_FILL_MAX_PASSES
+            or not 1 <= stabilization_pass <= NUMERIC_DEPRESSION_CORRECTION_MAX_PASSES
             or source_component_id < 0
             or sink_cell_id not in cell_ids
             or event.get("correction_method")
@@ -11607,7 +11613,7 @@ def validate(
                 not breach_feasible
                 and (breach_path_cell_ids or breach_outlet_cell_id != -1)
             )
-            or component_key in numeric_fill_seen_components
+            or component_key in numeric_correction_seen_components
             or not all(
                 math.isfinite(value)
                 for value in (
@@ -11623,7 +11629,6 @@ def validate(
                     reported_breach_max_depth_m,
                     reported_breach_to_fill_ratio,
                     reported_breach_deposition_capacity_km3,
-                    reported_applied_fill_volume_km3,
                     reported_applied_breach_excavation_volume_km3,
                     reported_applied_breach_deposition_volume_km3,
                     reported_applied_alluvium_entrainment_volume_km3,
@@ -11651,7 +11656,6 @@ def validate(
                     reported_breach_max_depth_m,
                     reported_breach_to_fill_ratio,
                     reported_breach_deposition_capacity_km3,
-                    reported_applied_fill_volume_km3,
                     reported_applied_breach_excavation_volume_km3,
                     reported_applied_breach_deposition_volume_km3,
                     reported_applied_alluvium_entrainment_volume_km3,
@@ -11667,7 +11671,7 @@ def validate(
             or (sink_is_geologic and not sink_geologic_possible)
             or (not sink_is_geologic and sink_geologic_definite)
         ):
-            numeric_fill_invalid = True
+            numeric_correction_invalid = True
             break
 
         reconstructed_event_area_km2 = 0.0
@@ -11683,7 +11687,7 @@ def validate(
                 )
                 > 0.000000005
             ):
-                numeric_fill_invalid = True
+                numeric_correction_invalid = True
                 break
             cell_area_km2 = float(cells_by_id[cell_id].get("area_km2", 0.0))
             reconstructed_event_area_km2 += cell_area_km2
@@ -11691,7 +11695,7 @@ def validate(
             reconstructed_event_max_depth_m = max(
                 reconstructed_event_max_depth_m, depth_m
             )
-        if numeric_fill_invalid:
+        if numeric_correction_invalid:
             break
         if (
             abs(reported_event_area_km2 - reconstructed_event_area_km2)
@@ -11701,7 +11705,7 @@ def validate(
             or abs(reported_event_max_depth_m - reconstructed_event_max_depth_m)
             > 0.000000005
         ):
-            numeric_fill_invalid = True
+            numeric_correction_invalid = True
             break
 
         reconstructed_breach_path_length_km = 0.0
@@ -11718,7 +11722,7 @@ def validate(
                 or abs(depth_m - max(0.0, before_m - target_m))
                 > 0.000000005
             ):
-                numeric_fill_invalid = True
+                numeric_correction_invalid = True
                 break
             if path_index == 0:
                 if (
@@ -11726,7 +11730,7 @@ def validate(
                     or abs(target_m - before_m) > 0.000000005
                     or depth_m > 0.000000005
                 ):
-                    numeric_fill_invalid = True
+                    numeric_correction_invalid = True
                     break
             else:
                 previous_cell_id = breach_path_cell_ids[path_index - 1]
@@ -11734,7 +11738,7 @@ def validate(
                     int(value)
                     for value in cells_by_id[previous_cell_id].get("neighbors", [])
                 }:
-                    numeric_fill_invalid = True
+                    numeric_correction_invalid = True
                     break
                 reconstructed_breach_path_length_km += flow_distance_m(
                     cells_by_id[previous_cell_id], cells_by_id[cell_id]
@@ -11756,7 +11760,7 @@ def validate(
                     - NUMERIC_DEPRESSION_BREACH_GRADIENT_STEP_M
                     + 0.000000005
                 ):
-                    numeric_fill_invalid = True
+                    numeric_correction_invalid = True
                     break
             if depth_m > NUMERIC_DEPRESSION_FILL_DEPTH_TOLERANCE_M:
                 cell_area_km2 = float(cells_by_id[cell_id].get("area_km2", 0.0))
@@ -11768,7 +11772,7 @@ def validate(
                     reconstructed_breach_max_depth_m, depth_m
                 )
             previous_breach_target_m = target_m
-        if numeric_fill_invalid:
+        if numeric_correction_invalid:
             break
         expected_breach_to_fill_ratio = (
             reconstructed_breach_volume_km3 / reconstructed_event_volume_km3
@@ -11801,7 +11805,7 @@ def validate(
             > max(0.000000005, expected_breach_to_fill_ratio * 0.0000000001)
             or breach_has_lower_volume != expected_breach_has_lower_volume
         ):
-            numeric_fill_invalid = True
+            numeric_correction_invalid = True
             break
 
         excavated_path_cell_ids = {
@@ -11915,13 +11919,12 @@ def validate(
                 )
                 or remaining_deposition_volume_km3 > 0.0000001
             ):
-                numeric_fill_invalid = True
+                numeric_correction_invalid = True
                 break
         elif breach_deposition_cell_ids or breach_deposition_depth_m:
-            numeric_fill_invalid = True
+            numeric_correction_invalid = True
             break
 
-        expected_applied_fill_volume_km3 = 0.0
         expected_applied_breach_excavation_volume_km3 = (
             reconstructed_breach_volume_km3 if expected_breach_selected else 0.0
         )
@@ -11955,11 +11958,6 @@ def validate(
                 reconstructed_breach_deposition_capacity_km3 * 0.0000000001,
             )
             or abs(
-                reported_applied_fill_volume_km3
-                - expected_applied_fill_volume_km3
-            )
-            > max(0.00001, expected_applied_fill_volume_km3 * 0.0000000001)
-            or abs(
                 reported_applied_breach_excavation_volume_km3
                 - expected_applied_breach_excavation_volume_km3
             )
@@ -11984,7 +11982,7 @@ def validate(
                 expected_correction_mass_balance_residual_km3 * 0.0000000001,
             )
         ):
-            numeric_fill_invalid = True
+            numeric_correction_invalid = True
             break
 
         if expected_breach_selected:
@@ -12008,8 +12006,8 @@ def validate(
             for cell_id in event_cell_ids:
                 expected_numeric_temporary_lake_event_count_by_cell[cell_id] += 1
 
-        numeric_fill_seen_components.add(component_key)
-        numeric_fill_stage_passes.add((feedback_stage_id, stabilization_pass))
+        numeric_correction_seen_components.add(component_key)
+        numeric_correction_stage_passes.add((feedback_stage_id, stabilization_pass))
         numeric_fill_candidate_cell_application_count += event_cell_count
         numeric_fill_candidate_area_km2 += reconstructed_event_area_km2
         numeric_fill_candidate_volume_km3 += reconstructed_event_volume_km3
@@ -12075,17 +12073,11 @@ def validate(
                 max_lower_volume_breach_excavation_depth_m,
                 reconstructed_breach_max_depth_m,
             )
-        stage_metrics = numeric_fill_feedback_by_stage.setdefault(
+        stage_metrics = numeric_correction_feedback_by_stage.setdefault(
             feedback_stage_id,
             {
                 "passes": set(),
                 "correction_event_count": 0,
-                "fill_event_count": 0,
-                "fill_cell_application_count": 0,
-                "fill_unique_cell_ids": set(),
-                "fill_area_km2": 0.0,
-                "fill_volume_km3": 0.0,
-                "fill_max_depth_m": 0.0,
                 "breach_selected_event_count": 0,
                 "breach_excavation_cell_application_count": 0,
                 "breach_deposition_cell_application_count": 0,
@@ -12134,22 +12126,16 @@ def validate(
                 reconstructed_event_max_depth_m,
             )
 
-    if not numeric_fill_invalid:
-        for stage_metrics in numeric_fill_feedback_by_stage.values():
+    if not numeric_correction_invalid:
+        for stage_metrics in numeric_correction_feedback_by_stage.values():
             passes = stage_metrics["passes"]
             if passes != set(range(1, max(passes, default=0) + 1)):
-                numeric_fill_invalid = True
+                numeric_correction_invalid = True
                 break
 
-    if not numeric_fill_invalid:
+    if not numeric_correction_invalid:
         for cell_id, cell in cells_by_id.items():
             try:
-                emitted_fill_depth_m = float(
-                    cell.get("cumulative_numeric_depression_fill_m", math.nan)
-                )
-                emitted_fill_event_count = int(
-                    cell.get("numeric_depression_fill_event_count", -1)
-                )
                 emitted_breach_excavation_depth_m = float(
                     cell.get(
                         "cumulative_numeric_depression_breach_excavation_m",
@@ -12169,9 +12155,8 @@ def validate(
                     cell.get("numeric_depression_temporary_lake_event_count", -1)
                 )
             except (TypeError, ValueError):
-                numeric_fill_invalid = True
+                numeric_correction_invalid = True
                 break
-            expected_fill_depth_m = expected_numeric_fill_depth_by_cell[cell_id]
             expected_breach_excavation_depth_m = (
                 expected_numeric_breach_excavation_depth_by_cell[cell_id]
             )
@@ -12179,13 +12164,7 @@ def validate(
                 expected_numeric_breach_deposition_depth_by_cell[cell_id]
             )
             if (
-                not math.isfinite(emitted_fill_depth_m)
-                or emitted_fill_depth_m < 0.0
-                or abs(emitted_fill_depth_m - expected_fill_depth_m)
-                > max(0.0000001, expected_fill_depth_m * 0.0000000001)
-                or emitted_fill_event_count
-                != expected_numeric_fill_event_count_by_cell[cell_id]
-                or not math.isfinite(emitted_breach_excavation_depth_m)
+                not math.isfinite(emitted_breach_excavation_depth_m)
                 or emitted_breach_excavation_depth_m < 0.0
                 or abs(
                     emitted_breach_excavation_depth_m
@@ -12210,19 +12189,12 @@ def validate(
                 or emitted_temporary_lake_event_count
                 != expected_numeric_temporary_lake_event_count_by_cell[cell_id]
             ):
-                numeric_fill_invalid = True
+                numeric_correction_invalid = True
                 break
 
-    expected_numeric_fill_summary = {
-        "numeric_depression_fill_pass_count": len(numeric_fill_stage_passes),
-        "numeric_depression_correction_pass_count": len(numeric_fill_stage_passes),
-        "numeric_depression_correction_event_count": len(numeric_fill_history),
-        "numeric_depression_fill_event_count": 0,
-        "numeric_depression_fill_cell_application_count": numeric_fill_cell_application_count,
-        "numeric_depression_filled_unique_cell_count": len(numeric_fill_unique_cell_ids),
-        "numeric_depression_fill_geologic_source_event_count": (
-            numeric_fill_geologic_source_event_count
-        ),
+    expected_numeric_correction_summary = {
+        "numeric_depression_correction_pass_count": len(numeric_correction_stage_passes),
+        "numeric_depression_correction_event_count": len(numeric_correction_history),
         "numeric_depression_breach_feasible_event_count": (
             numeric_breach_feasible_event_count
         ),
@@ -12244,12 +12216,12 @@ def validate(
         "numeric_depression_breach_deposition_cell_application_count": (
             numeric_breach_deposition_cell_application_count
         ),
-        "numeric_depression_fill_candidate_event_count": len(numeric_fill_history),
+        "numeric_depression_fill_candidate_event_count": len(numeric_correction_history),
         "numeric_depression_fill_candidate_cell_application_count": (
             numeric_fill_candidate_cell_application_count
         ),
         "numeric_depression_mass_conserving_event_count": (
-            len(numeric_fill_history)
+            len(numeric_correction_history)
         ),
         "numeric_depression_temporary_lake_event_count": (
             numeric_temporary_lake_event_count
@@ -12263,31 +12235,18 @@ def validate(
         "numeric_depression_zero_material_deferral_event_count": (
             numeric_temporary_lake_event_count
         ),
-        "numeric_depression_unbalanced_fill_event_count": 0,
     }
-    if not numeric_fill_invalid:
-        for key, expected in expected_numeric_fill_summary.items():
+    if not numeric_correction_invalid:
+        for key, expected in expected_numeric_correction_summary.items():
             if int(summary.get(key, -1)) != expected:
-                numeric_fill_invalid = True
+                numeric_correction_invalid = True
                 break
-    expected_numeric_fill_summary_values = {
-        "numeric_depression_fill_area_km2": numeric_fill_area_km2,
-        "numeric_depression_fill_volume_km3": numeric_fill_volume_km3,
+    expected_numeric_correction_summary_values = {
         "numeric_depression_fill_candidate_area_km2": (
             numeric_fill_candidate_area_km2
         ),
         "numeric_depression_fill_candidate_volume_km3": (
             numeric_fill_candidate_volume_km3
-        ),
-        "mean_numeric_depression_fill_depth_m": (
-            numeric_fill_depth_sum_m / numeric_fill_cell_application_count
-            if numeric_fill_cell_application_count > 0
-            else 0.0
-        ),
-        "max_numeric_depression_fill_depth_m": max_numeric_fill_depth_m,
-        "cumulative_numeric_depression_fill_sum_m": numeric_fill_depth_sum_m,
-        "max_cumulative_numeric_depression_fill_m": max(
-            expected_numeric_fill_depth_by_cell.values(), default=0.0
         ),
         "numeric_depression_temporary_lake_candidate_area_km2": (
             numeric_temporary_lake_candidate_area_km2
@@ -12346,20 +12305,20 @@ def validate(
             max_lower_volume_breach_excavation_depth_m
         ),
     }
-    if not numeric_fill_invalid:
-        for key, expected in expected_numeric_fill_summary_values.items():
+    if not numeric_correction_invalid:
+        for key, expected in expected_numeric_correction_summary_values.items():
             try:
                 actual = float(summary.get(key, math.nan))
             except (TypeError, ValueError):
-                numeric_fill_invalid = True
+                numeric_correction_invalid = True
                 break
             if (
                 not math.isfinite(actual)
                 or abs(actual - expected) > max(0.000001, abs(expected) * 0.0000000001)
             ):
-                numeric_fill_invalid = True
+                numeric_correction_invalid = True
                 break
-    if numeric_fill_invalid:
+    if numeric_correction_invalid:
         failures.append("numeric depression correction provenance invalid")
 
     climate_model = payload.get("climate_model", {})
@@ -12375,6 +12334,8 @@ def validate(
         "lapse_rate_c_per_km",
         "marine_annual_temperature_offset_c",
         "precipitation_scale",
+        "negative_precipitation_behavior",
+        "zero_precipitation_scale_behavior",
         "subtropical_drying_strength",
         "subtropical_drying_min_factor",
         "seasonal_monsoon_precipitation_strength",
@@ -12492,11 +12453,15 @@ def validate(
             expected_area_mean_offset = latitude_gradient / (latitude_exponent + 1.0)
             climate_model_invalid = (
                 climate_model.get("model_type")
-                != "equilibrium_latitude_circulation_climate_v4"
+                != "equilibrium_latitude_circulation_climate_v5"
                 or climate_model.get("temperature_model")
                 != "area_mean_normalized_latitude_centered_local_adjustments_v3"
                 or climate_model.get("precipitation_model")
-                != "bounded_thermal_moisture_circulation_orography_wind_transport_v2"
+                != "bounded_thermal_moisture_circulation_orography_wind_transport_v3"
+                or climate_model.get("negative_precipitation_behavior")
+                != "clamped_to_zero_before_thermal_moisture_multiplier"
+                or climate_model.get("zero_precipitation_scale_behavior")
+                != "exact_zero_monthly_and_annual_precipitation"
                 or climate_model.get("base_temperature_interpretation")
                 != "post_centered_local_adjustment_global_area_mean_c"
                 or climate_model.get("latitude_temperature_area_normalized") is not True
@@ -12686,7 +12651,6 @@ def validate(
         "nominal_time_direction",
         "cell_erosion_rate_semantics",
         "stream_incision_update",
-        "legacy_mean_erosion_rate_field_semantics",
         "erosion_transition_coupling_semantics",
         "nominal_timestep_ma",
         "reference_timestep_ma",
@@ -12726,10 +12690,7 @@ def validate(
         "climate_recompute_count",
         "hydrologic_water_budget_recompute_count",
         "hydrology_recompute_count",
-        "numeric_depression_fill_pass_count",
-        "numeric_depression_fill_event_count",
-        "numeric_depression_fill_cell_application_count",
-        "numeric_depression_filled_unique_cell_count",
+        "numeric_depression_correction_pass_count",
         "numeric_depression_correction_event_count",
         "numeric_depression_breach_selected_event_count",
         "numeric_depression_breach_excavation_cell_application_count",
@@ -12758,9 +12719,6 @@ def validate(
         "water_cell_count",
         "river_cell_count",
         "sea_level_adjustment_m",
-        "numeric_depression_fill_area_km2",
-        "numeric_depression_fill_volume_km3",
-        "max_numeric_depression_fill_depth_m",
         "numeric_depression_breach_excavation_volume_km3",
         "numeric_depression_breach_deposition_volume_km3",
         "numeric_depression_correction_mass_balance_residual_km3",
@@ -12810,7 +12768,6 @@ def validate(
         "hydrologic_runoff_volume_km3_y",
         "hydrologic_water_budget_residual_km3_y",
         "max_abs_hydrologic_water_budget_cell_residual_mm_y",
-        "mean_erosion_rate_m_per_step",
         "mean_stream_power_response_m_per_reference_step",
         "mean_sediment_thickness_m",
         "mean_cumulative_sediment_production_m",
@@ -12839,7 +12796,7 @@ def validate(
     feedback_invalid = False
     if any(
         stage_id < 0 or stage_id >= len(feedback_history)
-        for stage_id in numeric_fill_feedback_by_stage
+        for stage_id in numeric_correction_feedback_by_stage
     ):
         feedback_invalid = True
     configured_erosion_iterations = -1
@@ -12914,10 +12871,6 @@ def validate(
                 != "stream_power_response_per_reference_step_not_applied_transition_depth"
                 or simulation_clock.get("stream_incision_update")
                 != "cell_erosion_rate_times_maturation_timestep_scale"
-                or simulation_clock.get(
-                    "legacy_mean_erosion_rate_field_semantics"
-                )
-                != LEGACY_MEAN_EROSION_RATE_FIELD_SEMANTICS
                 or simulation_clock.get("erosion_transition_coupling_semantics")
                 != EROSION_TRANSITION_COUPLING_SEMANTICS
                 or simulation_clock.get("cryosphere_advances_nominal_time")
@@ -12995,10 +12948,7 @@ def validate(
         "climate_recompute_count",
         "hydrologic_water_budget_recompute_count",
         "hydrology_recompute_count",
-        "numeric_depression_fill_pass_count",
-        "numeric_depression_fill_event_count",
-        "numeric_depression_fill_cell_application_count",
-        "numeric_depression_filled_unique_cell_count",
+        "numeric_depression_correction_pass_count",
         "numeric_depression_correction_event_count",
         "numeric_depression_breach_selected_event_count",
         "numeric_depression_breach_excavation_cell_application_count",
@@ -13072,17 +13022,8 @@ def validate(
             hydrology_recompute_count = int(
                 step.get("hydrology_recompute_count", -1)
             )
-            numeric_fill_pass_count = int(
-                step.get("numeric_depression_fill_pass_count", -1)
-            )
-            numeric_fill_event_count = int(
-                step.get("numeric_depression_fill_event_count", -1)
-            )
-            numeric_fill_cell_count = int(
-                step.get("numeric_depression_fill_cell_application_count", -1)
-            )
-            numeric_filled_unique_cell_count = int(
-                step.get("numeric_depression_filled_unique_cell_count", -1)
+            numeric_correction_pass_count = int(
+                step.get("numeric_depression_correction_pass_count", -1)
             )
             numeric_correction_event_count = int(
                 step.get("numeric_depression_correction_event_count", -1)
@@ -13187,27 +13128,9 @@ def validate(
         expected_plate_motion_history_id = (
             configured_erosion_iterations if is_cryosphere_step else index
         )
-        expected_numeric_fill = numeric_fill_feedback_by_stage.get(index, {})
-        expected_numeric_fill_pass_count = len(
+        expected_numeric_fill = numeric_correction_feedback_by_stage.get(index, {})
+        expected_numeric_correction_pass_count = len(
             expected_numeric_fill.get("passes", set())
-        )
-        expected_numeric_fill_event_count = int(
-            expected_numeric_fill.get("fill_event_count", 0)
-        )
-        expected_numeric_fill_cell_count = int(
-            expected_numeric_fill.get("fill_cell_application_count", 0)
-        )
-        expected_numeric_fill_unique_cell_count = len(
-            expected_numeric_fill.get("fill_unique_cell_ids", set())
-        )
-        expected_numeric_fill_area_km2 = float(
-            expected_numeric_fill.get("fill_area_km2", 0.0)
-        )
-        expected_numeric_fill_volume_km3 = float(
-            expected_numeric_fill.get("fill_volume_km3", 0.0)
-        )
-        expected_numeric_fill_max_depth_m = float(
-            expected_numeric_fill.get("fill_max_depth_m", 0.0)
         )
         expected_numeric_correction_event_count = int(
             expected_numeric_fill.get("correction_event_count", 0)
@@ -13263,12 +13186,6 @@ def validate(
                 expected_role=expected_nominal_role,
             )
             or not all(math.isfinite(value) for value in numeric_values.values())
-            or not feedback_close(
-                numeric_values[
-                    "mean_stream_power_response_m_per_reference_step"
-                ],
-                numeric_values["mean_erosion_rate_m_per_step"],
-            )
             or cell_count != len(cells_payload)
             or land_count < 0
             or water_count < 0
@@ -13302,9 +13219,6 @@ def validate(
             or any(
                 numeric_values[key] < 0.0
                 for key in (
-                    "numeric_depression_fill_area_km2",
-                    "numeric_depression_fill_volume_km3",
-                    "max_numeric_depression_fill_depth_m",
                     "numeric_depression_breach_excavation_volume_km3",
                     "numeric_depression_breach_deposition_volume_km3",
                     "numeric_depression_correction_mass_balance_residual_km3",
@@ -13344,7 +13258,6 @@ def validate(
                     "hydrologic_infiltration_volume_km3_y",
                     "hydrologic_runoff_volume_km3_y",
                     "max_abs_hydrologic_water_budget_cell_residual_mm_y",
-                    "mean_erosion_rate_m_per_step",
                     "mean_sediment_thickness_m",
                     "mean_cumulative_sediment_production_m",
                     "mean_cumulative_sediment_deposition_m",
@@ -13418,7 +13331,7 @@ def validate(
             or hydrologic_water_budget_recompute_count
             != sea_level_recompute_count
             or hydrology_recompute_count != sea_level_recompute_count
-            or hydrology_recompute_count != numeric_fill_pass_count + 1
+            or hydrology_recompute_count != numeric_correction_pass_count + 1
             or bool(step.get("hydrology_recomputed", False))
             != (hydrology_recompute_count > 0)
             or bool(step.get("hydrologic_water_budget_recomputed", False))
@@ -13427,11 +13340,7 @@ def validate(
             != (climate_recompute_count > 0)
             or bool(step.get("sea_level_recomputed", False))
             != (sea_level_recompute_count > 0)
-            or numeric_fill_pass_count != expected_numeric_fill_pass_count
-            or numeric_fill_event_count != expected_numeric_fill_event_count
-            or numeric_fill_cell_count != expected_numeric_fill_cell_count
-            or numeric_filled_unique_cell_count
-            != expected_numeric_fill_unique_cell_count
+            or numeric_correction_pass_count != expected_numeric_correction_pass_count
             or numeric_correction_event_count
             != expected_numeric_correction_event_count
             or numeric_breach_selected_event_count
@@ -13446,18 +13355,6 @@ def validate(
             != expected_numeric_temporary_lake_cell_count
             or numeric_temporary_lake_unique_cell_count
             != expected_numeric_temporary_lake_unique_cell_count
-            or not feedback_close(
-                numeric_values["numeric_depression_fill_area_km2"],
-                expected_numeric_fill_area_km2,
-            )
-            or not feedback_close(
-                numeric_values["numeric_depression_fill_volume_km3"],
-                expected_numeric_fill_volume_km3,
-            )
-            or not feedback_close(
-                numeric_values["max_numeric_depression_fill_depth_m"],
-                expected_numeric_fill_max_depth_m,
-            )
             or not feedback_close(
                 numeric_values[
                     "numeric_depression_breach_excavation_volume_km3"
@@ -13598,6 +13495,11 @@ def validate(
             if bool(cell.get("is_water", False))
         )
         final_land_cells = [cell for cell in cells_payload if not bool(cell.get("is_water", False))]
+        final_sediment_gross_depths_m = [
+            float(cell.get("sediment_alluvium_entrainment_m", 0.0))
+            + float(cell.get("sediment_bedrock_erosion_m", 0.0))
+            for cell in cells_payload
+        ]
         final_metrics = {
             "cell_count": len(cells_payload),
             "land_cell_count": len(final_land_cells),
@@ -13616,14 +13518,13 @@ def validate(
             "mean_temperature_c": sum(float(cell.get("temperature_c", 0.0)) for cell in cells_payload) / cell_divisor,
             "mean_precipitation_mm_y": sum(float(cell.get("precipitation_mm_y", 0.0)) for cell in cells_payload) / cell_divisor,
             "mean_runoff_mm_y": sum(float(cell.get("runoff_mm_y", 0.0)) for cell in cells_payload) / cell_divisor,
-            "mean_erosion_rate_m_per_step": sum(float(cell.get("erosion_rate", 0.0)) for cell in cells_payload) / cell_divisor,
             "mean_stream_power_response_m_per_reference_step": sum(
                 float(cell.get("erosion_rate", 0.0))
                 for cell in cells_payload
             )
             / cell_divisor,
             "mean_cumulative_sediment_production_m": sum(
-                float(cell.get("sediment_production_m", 0.0)) for cell in cells_payload
+                final_sediment_gross_depths_m
             )
             / cell_divisor,
             "mean_cumulative_sediment_deposition_m": sum(
@@ -13633,10 +13534,10 @@ def validate(
             "mean_cumulative_sediment_export_m": sum(float(cell.get("sediment_export_m", 0.0)) for cell in cells_payload)
             / cell_divisor,
             "cumulative_sediment_production_volume_km3": sum(
-                float(cell.get("sediment_production_m", 0.0))
+                final_sediment_gross_depths_m[index]
                 * float(cell.get("area_km2", 0.0))
                 / 1000.0
-                for cell in cells_payload
+                for index, cell in enumerate(cells_payload)
             ),
             "cumulative_sediment_deposition_volume_km3": sum(
                 float(cell.get("sediment_deposition_m", 0.0))
@@ -14143,7 +14044,6 @@ def validate(
         "destination_overlap_areas_normalized",
         "tectonic_process_inventory_changes_separately_ledgered",
         "crust_transport_execution_backend",
-        "accelerator_crust_source_remap_kernel_used",
         "tectonic_process_inventory_ledger_granularity",
         "tectonic_process_reason_resolved_inventory_ledgered",
         "tectonic_process_inventory_ledger_scope",
@@ -14182,9 +14082,6 @@ def validate(
         "tectonic_process_changed_cell_count_semantics",
         "oceanic_convergence_subduction_proxy_semantics",
         "plate_crossing_accretion_proxy_semantics",
-        "legacy_crust_source_cell_id_semantics",
-        "legacy_crust_source_remap_event_semantics",
-        "legacy_crust_source_reuse_count_semantics",
         "canonical_crust_mixture_provenance_location",
         "crust_transport_limitation",
         "model_limitation",
@@ -14200,9 +14097,6 @@ def validate(
         "plate_boundary_cell_count",
         "plate_boundary_edge_count",
         "accreted_terrane_cell_count",
-        "crust_source_remap_cell_count",
-        "unique_crust_source_cell_count",
-        "crust_source_reuse_count",
         "aged_oceanic_cell_count",
         "rejuvenated_oceanic_cell_count",
         "subducted_oceanic_cell_count",
@@ -14226,7 +14120,6 @@ def validate(
         "boundary_convergent_by_cell",
         "boundary_divergent_by_cell",
         "boundary_transform_by_cell",
-        "crust_source_cell_ids",
         "crust_overlap_ledger",
         "crust_type_by_cell",
         "lithology_by_cell",
@@ -14247,7 +14140,6 @@ def validate(
         "previous_local_thermal_subsidence_target_m",
         "post_process_local_thermal_subsidence_target_m",
         "thermal_equilibrium_change_m",
-        "thermal_target_difference_tendency_m",
         "unbounded_dynamic_relief_change_m",
         "bounded_dynamic_relief_change_m",
         "aged_oceanic_cell_ids",
@@ -14269,15 +14161,10 @@ def validate(
         "plate_id",
         "plate_assignment_change_count",
         "last_plate_assignment_change_iteration",
-        "last_crust_source_cell_id",
-        "crust_source_remap_event_count",
         "oceanic_crust_aging_event_count",
         "oceanic_crust_rejuvenation_event_count",
         "oceanic_crust_subduction_event_count",
         "cumulative_crust_transport_distance_km",
-        "initial_crust_age_ma",
-        "initial_crust_thickness_km",
-        "initial_crust_density",
         "crust_age_ma",
         "crust_thickness_km",
         "crust_density",
@@ -14289,8 +14176,6 @@ def validate(
         "total_plate_reassignment_event_count",
         "plate_reassigned_cell_count",
         "max_plate_assignment_change_count",
-        "total_crust_source_remap_event_count",
-        "total_crust_source_reuse_count",
         "total_crust_overlap_sparse_edge_count",
         "total_crust_mixed_destination_count",
         "maximum_crust_coverage_multiplicity",
@@ -14648,8 +14533,6 @@ def validate(
                 or kinematic_model.get("tectonic_process_inventory_changes_separately_ledgered") is not True
                 or kinematic_model.get("crust_transport_execution_backend")
                 != "cpu"
-                or kinematic_model.get("accelerator_crust_source_remap_kernel_used")
-                is not False
                 or kinematic_model.get(
                     "tectonic_process_inventory_ledger_granularity"
                 )
@@ -14738,16 +14621,6 @@ def validate(
                     "plate_crossing_accretion_proxy_semantics"
                 )
                 != "extra_continental_convergence_thickening_not_external_reservoir_provenance"
-                or kinematic_model.get("legacy_crust_source_cell_id_semantics")
-                != "dominant_incoming_crust_volume_contributor_compatibility_alias_v1"
-                or kinematic_model.get(
-                    "legacy_crust_source_remap_event_semantics"
-                )
-                != "dominant_contributor_id_differs_from_destination_cell_id"
-                or kinematic_model.get(
-                    "legacy_crust_source_reuse_count_semantics"
-                )
-                != "destination_count_minus_unique_dominant_contributor_count"
                 or kinematic_model.get(
                     "canonical_crust_mixture_provenance_location"
                 )
@@ -14899,7 +14772,6 @@ def validate(
     thickness_change_sums = [0.0] * cell_count
     density_change_sums = [0.0] * cell_count
     elevation_change_sums = [0.0] * cell_count
-    crust_source_remap_counts = [0] * cell_count
     oceanic_aging_counts = [0] * cell_count
     oceanic_rejuvenation_counts = [0] * cell_count
     oceanic_subduction_counts = [0] * cell_count
@@ -14909,7 +14781,6 @@ def validate(
     history_crust_densities: list[list[float]] = []
     history_crust_types: list[list[int]] = []
     history_lithologies: list[list[int]] = []
-    history_crust_sources: list[list[int]] = []
     previous_snapshots: dict[int, dict[str, Any]] | None = None
     for history_index, motion_step in enumerate(plate_motion_history):
         if not isinstance(motion_step, dict) or not motion_step_keys.issubset(motion_step):
@@ -14924,9 +14795,6 @@ def validate(
             boundary_cell_count = int(motion_step["plate_boundary_cell_count"])
             boundary_edge_count = int(motion_step["plate_boundary_edge_count"])
             accreted_count = int(motion_step["accreted_terrane_cell_count"])
-            source_remap_count = int(motion_step["crust_source_remap_cell_count"])
-            unique_source_count = int(motion_step["unique_crust_source_cell_count"])
-            source_reuse_count = int(motion_step["crust_source_reuse_count"])
             aged_count = int(motion_step["aged_oceanic_cell_count"])
             rejuvenated_count = int(motion_step["rejuvenated_oceanic_cell_count"])
             subducted_count = int(motion_step["subducted_oceanic_cell_count"])
@@ -14943,7 +14811,6 @@ def validate(
                 float(value)
                 for value in motion_step["boundary_transform_by_cell"]
             ]
-            crust_sources = [int(value) for value in motion_step["crust_source_cell_ids"]]
             crust_types = [int(value) for value in motion_step["crust_type_by_cell"]]
             lithologies = [int(value) for value in motion_step["lithology_by_cell"]]
             transport_distances = [float(value) for value in motion_step["crust_transport_distance_km_by_cell"]]
@@ -15001,12 +14868,6 @@ def validate(
                 float(value)
                 for value in motion_step["thermal_equilibrium_change_m"]
             ]
-            thermal_tendency_alias = [
-                float(value)
-                for value in motion_step[
-                    "thermal_target_difference_tendency_m"
-                ]
-            ]
             unbounded_dynamic_relief_changes = [
                 float(value)
                 for value in motion_step["unbounded_dynamic_relief_change_m"]
@@ -15054,7 +14915,6 @@ def validate(
             previous_thermal_equilibrium,
             post_thermal_equilibrium,
             thermal_equilibrium_changes,
-            thermal_tendency_alias,
             unbounded_dynamic_relief_changes,
             bounded_dynamic_relief_changes,
         )
@@ -15071,7 +14931,6 @@ def validate(
             elevation_changes,
             isostatic_equilibrium_changes,
             thermal_equilibrium_changes,
-            thermal_tendency_alias,
             unbounded_dynamic_relief_changes,
             bounded_dynamic_relief_changes,
         )
@@ -15096,8 +14955,6 @@ def validate(
                 not math.isfinite(value) or not 0.0 <= value <= 1.0
                 for value in boundary_convergent + boundary_divergent + boundary_transform
             )
-            or len(crust_sources) != cell_count
-            or any(not 0 <= source_id < cell_count for source_id in crust_sources)
             or len(crust_types) != cell_count
             or any(not 0 <= crust_type < len(crust_names) for crust_type in crust_types)
             or len(lithologies) != cell_count
@@ -15124,7 +14981,6 @@ def validate(
                 not -180.000002 <= value <= 220.000002
                 for value in bounded_dynamic_relief_changes
             )
-            or thermal_equilibrium_changes != thermal_tendency_alias
             or any(
                 bounded != min(220.0, max(-180.0, unbounded))
                 for unbounded, bounded in zip(
@@ -15241,7 +15097,7 @@ def validate(
             ):
                 motion_invalid = True
                 break
-            for cell_index, source_id in enumerate(crust_sources):
+            for cell_index in range(cell_count):
                 expected_transport = (
                     remapped_ages[cell_index] - previous_ages[cell_index],
                     remapped_thicknesses[cell_index] - previous_thicknesses[cell_index],
@@ -15340,9 +15196,6 @@ def validate(
             any(not 0.0 <= value <= 4200.0001 for value in current_ages)
             or any(not 4.5 <= value <= 76.0001 for value in current_thicknesses)
             or any(not 2.58 <= value <= 3.0801 for value in current_densities)
-            or source_remap_count != sum(source_id != index for index, source_id in enumerate(crust_sources))
-            or unique_source_count != len(set(crust_sources))
-            or source_reuse_count != cell_count - unique_source_count
         ):
             motion_invalid = True
             break
@@ -15415,13 +15268,9 @@ def validate(
         if history_index == 0 and (
             reassigned_count != 0
             or accreted_count != 0
-            or source_remap_count != 0
-            or unique_source_count != cell_count
-            or source_reuse_count != 0
             or aged_count != 0
             or rejuvenated_count != 0
             or subducted_count != 0
-            or crust_sources != list(range(cell_count))
             or any(
                 abs(value) > 0.0000001
                 for column in initial_zero_delta_columns
@@ -15560,10 +15409,7 @@ def validate(
             if best_score - assigned_score > 0.0005:
                 motion_invalid = True
                 break
-            source_id = crust_sources[cell_index]
             if history_index > 0:
-                if source_id != cell_index:
-                    crust_source_remap_counts[cell_index] += 1
                 crust_transport_distance_sums[cell_index] += transport_distances[cell_index]
                 oceanic_aging_counts[cell_index] += cell_index in aged_id_set
                 oceanic_rejuvenation_counts[cell_index] += cell_index in rejuvenated_id_set
@@ -15580,7 +15426,6 @@ def validate(
         history_crust_densities.append(current_densities)
         history_crust_types.append(crust_types)
         history_lithologies.append(lithologies)
-        history_crust_sources.append(crust_sources)
         previous_snapshots = snapshots
 
     if history_assignments and not motion_invalid:
@@ -15597,20 +15442,18 @@ def validate(
                 final_plate_id = int(cell["plate_id"])
                 assignment_change_count = int(cell["plate_assignment_change_count"])
                 last_change_iteration = int(cell["last_plate_assignment_change_iteration"])
-                last_crust_source_cell_id = int(cell["last_crust_source_cell_id"])
-                crust_source_remap_event_count = int(cell["crust_source_remap_event_count"])
                 oceanic_aging_event_count = int(cell["oceanic_crust_aging_event_count"])
                 oceanic_rejuvenation_event_count = int(cell["oceanic_crust_rejuvenation_event_count"])
                 oceanic_subduction_event_count = int(cell["oceanic_crust_subduction_event_count"])
                 cumulative_transport_distance = float(cell["cumulative_crust_transport_distance_km"])
-                initial_age = float(cell["initial_crust_age_ma"])
+                initial_age = history_crust_ages[0][cell_index]
                 final_age = float(cell["crust_age_ma"])
-                initial_thickness = float(cell["initial_crust_thickness_km"])
+                initial_thickness = history_crust_thicknesses[0][cell_index]
                 final_thickness = float(cell["crust_thickness_km"])
-                initial_density = float(cell["initial_crust_density"])
+                initial_density = history_crust_densities[0][cell_index]
                 final_density = float(cell["crust_density"])
                 cumulative_elevation = float(cell["cumulative_tectonic_elevation_change_m"])
-            except (TypeError, ValueError):
+            except (IndexError, TypeError, ValueError):
                 motion_invalid = True
                 break
             change_iterations = [
@@ -15625,8 +15468,6 @@ def validate(
                 or final_plate_id != history_assignments[-1][cell_index]
                 or assignment_change_count != len(change_iterations)
                 or last_change_iteration != expected_last_change
-                or last_crust_source_cell_id != history_crust_sources[-1][cell_index]
-                or crust_source_remap_event_count != crust_source_remap_counts[cell_index]
                 or oceanic_aging_event_count != oceanic_aging_counts[cell_index]
                 or oceanic_rejuvenation_event_count != oceanic_rejuvenation_counts[cell_index]
                 or oceanic_subduction_event_count != oceanic_subduction_counts[cell_index]
@@ -15688,9 +15529,6 @@ def validate(
         final_snapshots_payload = plate_motion_history[-1]["plates"]
         final_cumulative_rotations = [abs(float(snapshot["cumulative_rotation_deg"])) for snapshot in final_snapshots_payload]
         final_crust_event_counts = {
-            "total_crust_source_remap_event_count": sum(
-                int(cell["crust_source_remap_event_count"]) for cell in cells_payload
-            ),
             "total_aged_oceanic_event_count": sum(
                 int(cell["oceanic_crust_aging_event_count"]) for cell in cells_payload
             ),
@@ -15710,12 +15548,6 @@ def validate(
             ),
             "max_plate_assignment_change_count": max(
                 (int(cell["plate_assignment_change_count"]) for cell in cells_payload), default=0
-            ),
-            "total_crust_source_remap_event_count": sum(
-                int(step["crust_source_remap_cell_count"]) for step in transitions
-            ),
-            "total_crust_source_reuse_count": sum(
-                int(step["crust_source_reuse_count"]) for step in transitions
             ),
             "total_aged_oceanic_event_count": sum(
                 int(step["aged_oceanic_cell_count"]) for step in transitions
@@ -15834,7 +15666,6 @@ def validate(
 
     initial_relief_keys = {
         "initial_isostatic_elevation_m",
-        "initial_thermal_subsidence_m",
         "initial_ridge_uplift_m",
         "initial_orogenic_uplift_m",
         "initial_volcanic_uplift_m",
@@ -15847,15 +15678,28 @@ def validate(
         "volcanic_potential_index",
     }
     initial_relief_sums = {key: 0.0 for key in initial_relief_keys}
+    initial_relief_sums["initial_checkpoint_thermal_subsidence_m"] = 0.0
     high_volcanic_potential_count = 0
     initial_relief_invalid = False
-    for cell in cells_payload:
+    try:
+        initial_thermal_targets = [
+            float(value)
+            for value in plate_motion_history[0][
+                "post_process_local_thermal_subsidence_target_m"
+            ]
+        ]
+    except (IndexError, KeyError, TypeError, ValueError):
+        initial_thermal_targets = []
+        initial_relief_invalid = True
+    if len(initial_thermal_targets) != len(cells_payload):
+        initial_relief_invalid = True
+    for cell_id, cell in enumerate(cells_payload):
         if not initial_relief_keys.issubset(cell):
             initial_relief_invalid = True
             break
         try:
             isostatic = float(cell["initial_isostatic_elevation_m"])
-            thermal = float(cell["initial_thermal_subsidence_m"])
+            thermal = initial_thermal_targets[cell_id]
             ridge = float(cell["initial_ridge_uplift_m"])
             orogenic = float(cell["initial_orogenic_uplift_m"])
             volcanic = float(cell["initial_volcanic_uplift_m"])
@@ -15866,7 +15710,7 @@ def validate(
             initial_elevation = float(cell["initial_elevation_m"])
             uplift_rate = float(cell["tectonic_uplift_rate_m_per_step"])
             volcanic_potential = float(cell["volcanic_potential_index"])
-        except (TypeError, ValueError):
+        except (IndexError, TypeError, ValueError):
             initial_relief_invalid = True
             break
         component_sum = isostatic + thermal + ridge + orogenic + volcanic + trench + rift + transform + roughness
@@ -15886,6 +15730,7 @@ def validate(
             break
         for key in initial_relief_keys:
             initial_relief_sums[key] += float(cell[key])
+        initial_relief_sums["initial_checkpoint_thermal_subsidence_m"] += thermal
         if volcanic_potential >= 0.65:
             high_volcanic_potential_count += 1
     if initial_relief_invalid:
@@ -15894,7 +15739,7 @@ def validate(
         relief_divisor = float(len(cells_payload))
         relief_summary_map = {
             "mean_initial_isostatic_elevation_m": "initial_isostatic_elevation_m",
-            "mean_initial_thermal_subsidence_m": "initial_thermal_subsidence_m",
+            "mean_initial_thermal_subsidence_m": "initial_checkpoint_thermal_subsidence_m",
             "mean_initial_ridge_uplift_m": "initial_ridge_uplift_m",
             "mean_initial_orogenic_uplift_m": "initial_orogenic_uplift_m",
             "mean_initial_volcanic_uplift_m": "initial_volcanic_uplift_m",
@@ -18896,7 +18741,7 @@ def validate(
             failures.append("sediment budget values must be non-negative")
         if (
             summary.get("sediment_budget_closure_model")
-            != "cell_area_weighted_hillslope_glacial_and_routed_deposition_terminal_export_volume_v4"
+            != "cell_area_weighted_hillslope_glacial_and_routed_deposition_terminal_export_volume_v5"
             or sediment_production_km3 < 0.0
             or sediment_deposition_km3 < 0.0
             or sediment_export_km3 < 0.0
@@ -18915,7 +18760,10 @@ def validate(
             failures.append("sediment budget does not close")
         reconstructed_sediment_volumes = {
             "sediment_budget_production_km3": sum(
-                max(0.0, float(cell.get("sediment_production_m", 0.0)))
+                (
+                    float(cell.get("sediment_alluvium_entrainment_m", 0.0))
+                    + float(cell.get("sediment_bedrock_erosion_m", 0.0))
+                )
                 * max(0.0, float(cell.get("area_km2", 0.0)))
                 / 1000.0
                 for cell in cells_payload
@@ -18948,31 +18796,37 @@ def validate(
             ):
                 failures.append(f"{key} does not match cell volumes")
                 break
-    if cells_payload and (
-        "sediment_production_m" not in cells_payload[0]
-        or "sediment_deposition_m" not in cells_payload[0]
-        or "sediment_export_m" not in cells_payload[0]
-        or "sediment_net_budget_m" not in cells_payload[0]
-        or "glacial_sediment_deposition_m" not in cells_payload[0]
-        or "glacial_sediment_production_m" not in cells_payload[0]
-        or "glacial_sediment_net_m" not in cells_payload[0]
-        or "glacial_sediment_outgoing_transfer_count" not in cells_payload[0]
-        or "glacial_sediment_incoming_transfer_count" not in cells_payload[0]
-        or "fluvial_sediment_local_source_m" not in cells_payload[0]
-        or "fluvial_sediment_routed_incoming_m" not in cells_payload[0]
-        or "fluvial_sediment_routed_outgoing_m" not in cells_payload[0]
-        or "fluvial_sediment_local_deposition_m" not in cells_payload[0]
-        or "fluvial_sediment_terminal_land_deposition_m" not in cells_payload[0]
-        or "fluvial_sediment_marine_deposition_m" not in cells_payload[0]
-        or "fluvial_sediment_depression_fill_m" not in cells_payload[0]
-        or "fluvial_sediment_terminal_export_m" not in cells_payload[0]
-        or "fluvial_sediment_terminal_capture_volume_km3" not in cells_payload[0]
-        or "fluvial_sediment_routing_event_count" not in cells_payload[0]
-        or "hillslope_sediment_production_m" not in cells_payload[0]
-        or "hillslope_sediment_deposition_m" not in cells_payload[0]
-        or "hillslope_sediment_net_m" not in cells_payload[0]
-        or "hillslope_sediment_outgoing_edge_count" not in cells_payload[0]
-        or "hillslope_sediment_incoming_edge_count" not in cells_payload[0]
+    required_sediment_cell_fields = {
+        "sediment_alluvium_entrainment_m",
+        "sediment_bedrock_erosion_m",
+        "sediment_deposition_m",
+        "sediment_export_m",
+        "sediment_net_budget_m",
+        "glacial_sediment_deposition_m",
+        "glacial_sediment_production_m",
+        "glacial_sediment_net_m",
+        "glacial_sediment_outgoing_transfer_count",
+        "glacial_sediment_incoming_transfer_count",
+        "fluvial_sediment_local_source_m",
+        "fluvial_sediment_routed_incoming_m",
+        "fluvial_sediment_routed_outgoing_m",
+        "fluvial_sediment_local_deposition_m",
+        "fluvial_sediment_terminal_land_deposition_m",
+        "fluvial_sediment_marine_deposition_m",
+        "fluvial_sediment_depression_fill_m",
+        "fluvial_sediment_terminal_export_m",
+        "fluvial_sediment_terminal_capture_volume_km3",
+        "fluvial_sediment_routing_event_count",
+        "hillslope_sediment_production_m",
+        "hillslope_sediment_deposition_m",
+        "hillslope_sediment_net_m",
+        "hillslope_sediment_outgoing_edge_count",
+        "hillslope_sediment_incoming_edge_count",
+    }
+    if cells_payload and any(
+        not isinstance(cell, dict)
+        or not required_sediment_cell_fields.issubset(cell)
+        for cell in cells_payload
     ):
         failures.append("sediment budget cell fields missing")
     elif (
@@ -19039,8 +18893,9 @@ def validate(
                 + glacial_deposition_depth_m
                 + expected_numeric_breach_deposition_depth_by_cell[cell_id]
             )
-            actual_production_depth_m = float(
-                cell.get("sediment_production_m", math.nan)
+            partition_gross_depth_m = (
+                float(cell.get("sediment_alluvium_entrainment_m", math.nan))
+                + float(cell.get("sediment_bedrock_erosion_m", math.nan))
             )
             actual_deposition_depth_m = float(
                 cell.get("sediment_deposition_m", math.nan)
@@ -19052,7 +18907,7 @@ def validate(
                 cell.get("sediment_net_budget_m", math.nan)
             )
             depth_comparisons = (
-                (actual_production_depth_m, expected_production_depth_m),
+                (partition_gross_depth_m, expected_production_depth_m),
                 (actual_deposition_depth_m, expected_deposition_depth_m),
                 (actual_export_depth_m, fluvial_export_depth_m),
                 (

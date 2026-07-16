@@ -53,10 +53,6 @@ EROSION_TRANSITION_COUPLING_SEMANTICS = (
     "before_terrain_commit;fluvial_routing_uses_prior_flow_graph_and_"
     "provisional_terrain_accommodation"
 )
-LEGACY_MEAN_EROSION_RATE_FIELD_SEMANTICS = (
-    "mean_erosion_rate_m_per_step_is_a_reference_step_response_alias_not_"
-    "applied_transition_depth"
-)
 NOMINAL_TIME_RECORD_FIELDS = frozenset(
     {
         "nominal_time_model",
@@ -432,7 +428,7 @@ def _validate_nominal_process_histories(
     )
     numeric_history = _validate_stage_end_snapshot_history(
         world,
-        key="numeric_depression_fill_history",
+        key="numeric_depression_correction_history",
         role="stage_end_stabilization_event",
         erosion_iterations=erosion_iterations,
         nominal_timestep_ma=nominal_timestep_ma,
@@ -520,10 +516,6 @@ def _validate_nominal_process_histories(
         "volcanic_arc_oceanic_state_rule",
         "crust_transport_coverage_arrangement_fragment_limit",
         "crust_transport_execution_backend",
-        "accelerator_crust_source_remap_kernel_used",
-        "legacy_crust_source_cell_id_semantics",
-        "legacy_crust_source_remap_event_semantics",
-        "legacy_crust_source_reuse_count_semantics",
         "canonical_crust_mixture_provenance_location",
         "crust_density_unit",
         "density_weighted_crust_volume_unit",
@@ -601,13 +593,6 @@ def _validate_nominal_process_histories(
         )
         != 16384
         or model.get("crust_transport_execution_backend") != "cpu"
-        or model.get("accelerator_crust_source_remap_kernel_used") is not False
-        or model.get("legacy_crust_source_cell_id_semantics")
-        != "dominant_incoming_crust_volume_contributor_compatibility_alias_v1"
-        or model.get("legacy_crust_source_remap_event_semantics")
-        != "dominant_contributor_id_differs_from_destination_cell_id"
-        or model.get("legacy_crust_source_reuse_count_semantics")
-        != "destination_count_minus_unique_dominant_contributor_count"
         or model.get("canonical_crust_mixture_provenance_location")
         != "plate_motion_history[].crust_overlap_ledger"
         or model.get("crust_density_unit") != "g_cm3"
@@ -759,7 +744,7 @@ def _validate_nominal_process_histories(
 
     return {
         "hydrologic_water_budget_history": len(hydrologic_history),
-        "numeric_depression_fill_history": len(numeric_history),
+        "numeric_depression_correction_history": len(numeric_history),
         "hillslope_sediment_transport_history": len(hillslope_history),
         "fluvial_sediment_routing_history": len(fluvial_history),
         "glacial_sediment_transport_history": len(glacial_history),
@@ -1664,10 +1649,7 @@ FEEDBACK_COUNT_FIELDS = frozenset(
         "climate_recompute_count",
         "hydrologic_water_budget_recompute_count",
         "hydrology_recompute_count",
-        "numeric_depression_fill_pass_count",
-        "numeric_depression_fill_event_count",
-        "numeric_depression_fill_cell_application_count",
-        "numeric_depression_filled_unique_cell_count",
+        "numeric_depression_correction_pass_count",
         "numeric_depression_correction_event_count",
         "numeric_depression_breach_selected_event_count",
         "numeric_depression_breach_excavation_cell_application_count",
@@ -1700,9 +1682,6 @@ FEEDBACK_COUNT_FIELDS = frozenset(
 FEEDBACK_VALUE_FIELDS = frozenset(
     {
         "sea_level_adjustment_m",
-        "numeric_depression_fill_area_km2",
-        "numeric_depression_fill_volume_km3",
-        "max_numeric_depression_fill_depth_m",
         "numeric_depression_breach_excavation_volume_km3",
         "numeric_depression_breach_deposition_volume_km3",
         "numeric_depression_correction_mass_balance_residual_km3",
@@ -1752,7 +1731,6 @@ FEEDBACK_VALUE_FIELDS = frozenset(
         "hydrologic_runoff_volume_km3_y",
         "hydrologic_water_budget_residual_km3_y",
         "max_abs_hydrologic_water_budget_cell_residual_mm_y",
-        "mean_erosion_rate_m_per_step",
         "mean_stream_power_response_m_per_reference_step",
         "mean_sediment_thickness_m",
         "mean_cumulative_sediment_production_m",
@@ -1802,7 +1780,6 @@ def _validate_feedback_structure(
         "nominal_time_direction",
         "cell_erosion_rate_semantics",
         "stream_incision_update",
-        "legacy_mean_erosion_rate_field_semantics",
         "erosion_transition_coupling_semantics",
         "nominal_timestep_ma",
         "reference_timestep_ma",
@@ -1882,8 +1859,6 @@ def _validate_feedback_structure(
         != "stream_power_response_per_reference_step_not_applied_transition_depth"
         or clock.get("stream_incision_update")
         != "cell_erosion_rate_times_maturation_timestep_scale"
-        or clock.get("legacy_mean_erosion_rate_field_semantics")
-        != LEGACY_MEAN_EROSION_RATE_FIELD_SEMANTICS
         or clock.get("erosion_transition_coupling_semantics")
         != EROSION_TRANSITION_COUPLING_SEMANTICS
         or clock.get("cryosphere_advances_nominal_time") is not False
@@ -2070,15 +2045,6 @@ def _validate_feedback_structure(
             _record_violation(
                 violations, f"feedback step[{index}] has non-finite numeric fields"
             )
-        if not _feedback_close(
-            step.get("mean_stream_power_response_m_per_reference_step"),
-            _number(step.get("mean_erosion_rate_m_per_step")) or 0.0,
-        ):
-            _record_violation(
-                violations,
-                f"feedback step[{index}] has inconsistent reference erosion aliases",
-            )
-
         expected_stage = (
             "initial_climate_hydrology"
             if is_initial
@@ -2138,16 +2104,18 @@ def _validate_feedback_structure(
                     violations,
                     f"feedback step[{index}] {boolean_field} does not mirror its count",
                 )
-        fill_passes = _integer(step.get("numeric_depression_fill_pass_count"))
+        correction_passes = _integer(
+            step.get("numeric_depression_correction_pass_count")
+        )
         hydrology_recomputes = _integer(step.get("hydrology_recompute_count"))
         if (
-            fill_passes is not None
+            correction_passes is not None
             and hydrology_recomputes is not None
-            and hydrology_recomputes != fill_passes + 1
+            and hydrology_recomputes != correction_passes + 1
         ):
             _record_violation(
                 violations,
-                f"feedback step[{index}] hydrology/fill pass counts are inconsistent",
+                f"feedback step[{index}] hydrology/correction pass counts are inconsistent",
             )
         cell_count = _integer(step.get("cell_count"))
         land_count = _integer(step.get("land_cell_count"))
@@ -2233,6 +2201,11 @@ def _validate_feedback_structure(
                 if bool(cell.get("is_water", False))
             )
             divisor = max(1, cell_count)
+            cumulative_sediment_gross_depths_m = [
+                float(cell["sediment_alluvium_entrainment_m"])
+                + float(cell["sediment_bedrock_erosion_m"])
+                for cell in cells
+            ]
             expected_final: dict[str, float | int] = {
                 "cell_count": cell_count,
                 "land_cell_count": len(land),
@@ -2272,10 +2245,6 @@ def _validate_feedback_structure(
                     float(cell.get("runoff_mm_y", 0.0)) for cell in cells
                 )
                 / divisor,
-                "mean_erosion_rate_m_per_step": sum(
-                    float(cell.get("erosion_rate", 0.0)) for cell in cells
-                )
-                / divisor,
                 "mean_stream_power_response_m_per_reference_step": sum(
                     float(cell.get("erosion_rate", 0.0)) for cell in cells
                 )
@@ -2285,7 +2254,7 @@ def _validate_feedback_structure(
                 )
                 / divisor,
                 "mean_cumulative_sediment_production_m": sum(
-                    float(cell.get("sediment_production_m", 0.0)) for cell in cells
+                    cumulative_sediment_gross_depths_m
                 )
                 / divisor,
                 "mean_cumulative_sediment_deposition_m": sum(
@@ -2297,10 +2266,10 @@ def _validate_feedback_structure(
                 )
                 / divisor,
                 "cumulative_sediment_production_volume_km3": sum(
-                    float(cell.get("sediment_production_m", 0.0))
+                    cumulative_sediment_gross_depths_m[index]
                     * float(cell.get("area_km2", 0.0))
                     / 1000.0
-                    for cell in cells
+                    for index, cell in enumerate(cells)
                 ),
                 "cumulative_sediment_deposition_volume_km3": sum(
                     float(cell.get("sediment_deposition_m", 0.0))
@@ -2575,7 +2544,7 @@ def validate_physics_replays(world: dict[str, Any]) -> list[dict[str, Any]]:
             "the provisional oceanic-like mask, eligible nominal ridge "
             "segments, global representative spreading rate, multi-source "
             "Dijkstra path witness, ceiling policy, area-weighted summaries, "
-            "CDF, and oceanic compatibility aliases must replay independently; "
+            "CDF, and identity-overlap history checkpoint must replay independently; "
             "this procedural initialization is not a physical seafloor "
             "creation, flowline, local spreading-rate, or subduction-history model"
         ),
@@ -2661,7 +2630,7 @@ def validate_physics_replays(world: dict[str, Any]) -> list[dict[str, Any]]:
             "unapplied_thermal_equilibrium_residual_zero_by_construction": True,
             "thermal_contribution_outside_bounded_dynamic_relief_clamp_resolved": True,
             "thermal_contribution_to_tectonic_elevation_change_replayed": True,
-            "thermal_target_difference_tendency_application_replayed": True,
+            "thermal_equilibrium_change_application_replayed": True,
             "absolute_basement_depth_calibrated": False,
             "physical_crust_creation_age_provenance": False,
             "ridge_age_distance_consistency": False,

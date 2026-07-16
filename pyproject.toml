@@ -31,7 +31,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 magic_geo = [
-  "seed_config.yaml",
   "libmagic_geo_native.so",
   "magic_geo_native.dll",
   "libmagic_geo_native.dylib",

@@ -61,13 +61,6 @@ bool try_accelerated_smooth_three_fields(
     std::vector<double>& output_c
 );
 
-bool try_accelerated_remap_crust_sources(
-    const std::vector<Cell>& cells,
-    const std::vector<Vec3>& backtraced_positions,
-    const std::vector<std::vector<int>>& previous_cells_by_plate,
-    std::vector<int>& source_cell_ids
-);
-
 // Run a diagnostic-only device replay of the continuous extensive-state
 // reduction over a CPU-authoritative spherical-overlap CSR. Device output is
 // validated against the CPU plan and discarded; this function never mutates

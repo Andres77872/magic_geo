@@ -46,14 +46,9 @@ class GenerationSmokeTests(TestCase):
                     "plate_assignment_change_count": 1,
                     "last_plate_assignment_change_iteration": 2,
                     "crust_age_ma": 40.0,
-                    "initial_crust_age_ma": 55.0,
                     "crust_thickness_km": 7.0,
-                    "initial_crust_thickness_km": 7.5,
                     "crust_density": 3.0,
-                    "initial_crust_density": 2.98,
                     "cumulative_tectonic_elevation_change_m": 18.5,
-                    "last_crust_source_cell_id": 4,
-                    "crust_source_remap_event_count": 2,
                     "oceanic_crust_aging_event_count": 1,
                     "oceanic_crust_rejuvenation_event_count": 2,
                     "oceanic_crust_subduction_event_count": 1,
@@ -62,8 +57,6 @@ class GenerationSmokeTests(TestCase):
                     "hydrologic_flow_drop_m": 0.001,
                     "hydrologic_flow_slope": 0.0000000025,
                     "hydrologic_surface_conditioned": True,
-                    "cumulative_numeric_depression_fill_m": 128.75,
-                    "numeric_depression_fill_event_count": 2,
                     "cumulative_numeric_depression_breach_excavation_m": 12.5,
                     "cumulative_numeric_depression_breach_deposition_m": 4.25,
                     "numeric_depression_breach_event_count": 3,
@@ -96,7 +89,6 @@ class GenerationSmokeTests(TestCase):
                 "plate_motion_history_step_count": 3,
                 "plate_motion_transition_count": 2,
                 "total_plate_reassignment_event_count": 1,
-                "total_crust_source_remap_event_count": 2,
                 "mean_plate_cumulative_rotation_deg": 3.25,
                 "numeric_depression_correction_model": (
                     "bounded_mass_conserving_breach_or_zero_material_temporary_lake_with_coupled_recomputation_v3"
@@ -104,7 +96,7 @@ class GenerationSmokeTests(TestCase):
                 "numeric_depression_correction_selection_model": (
                     "lower_volume_full_cell_breach_with_50m_depth_bound_else_temporary_lake_v3"
                 ),
-                "numeric_depression_fill_event_count": 2,
+                "numeric_depression_correction_event_count": 2,
                 "numeric_depression_breach_lower_volume_event_count": 1,
                 "simulation_clock_cryosphere_coupling_stage_count": 1,
                 "glacial_sediment_transport_stage_count": 1,
@@ -123,17 +115,20 @@ class GenerationSmokeTests(TestCase):
                 fieldnames = reader.fieldnames or []
             self.assertEqual(row["initial_plate_id"], "1")
             self.assertEqual(row["plate_assignment_change_count"], "1")
-            self.assertEqual(row["initial_crust_age_ma"], "55.0")
             self.assertEqual(row["cumulative_tectonic_elevation_change_m"], "18.5")
-            self.assertEqual(row["last_crust_source_cell_id"], "4")
-            self.assertEqual(row["crust_source_remap_event_count"], "2")
+            self.assertNotIn("initial_crust_age_ma", fieldnames)
+            self.assertNotIn("initial_crust_thickness_km", fieldnames)
+            self.assertNotIn("initial_crust_density", fieldnames)
+            self.assertNotIn("initial_thermal_subsidence_m", fieldnames)
+            self.assertNotIn("last_crust_source_cell_id", fieldnames)
+            self.assertNotIn("crust_source_remap_event_count", fieldnames)
             self.assertEqual(row["cumulative_crust_transport_distance_km"], "314.5")
             self.assertEqual(row["hydrologic_surface_elevation_m"], "412.125")
             self.assertEqual(row["hydrologic_flow_drop_m"], "0.001")
             self.assertEqual(row["hydrologic_flow_slope"], "2.5e-09")
             self.assertEqual(row["hydrologic_surface_conditioned"], "True")
-            self.assertEqual(row["cumulative_numeric_depression_fill_m"], "128.75")
-            self.assertEqual(row["numeric_depression_fill_event_count"], "2")
+            self.assertNotIn("cumulative_numeric_depression_fill_m", fieldnames)
+            self.assertNotIn("numeric_depression_fill_event_count", fieldnames)
             self.assertEqual(
                 row["cumulative_numeric_depression_breach_excavation_m"],
                 "12.5",
@@ -172,88 +167,90 @@ class GenerationSmokeTests(TestCase):
                 "0.2",
             )
             self.assertEqual(row["groundwater_retained_storage_km3_y"], "0.3")
-            self.assertEqual(fieldnames.index("glacial_sediment_deposition_m"), 371)
-            self.assertEqual(fieldnames.index("fluvial_sediment_local_source_m"), 373)
-            self.assertEqual(fieldnames.index("fluvial_sediment_routing_event_count"), 382)
-            self.assertEqual(fieldnames.index("hillslope_sediment_production_m"), 383)
-            self.assertEqual(fieldnames.index("hillslope_sediment_deposition_m"), 384)
-            self.assertEqual(fieldnames.index("hillslope_sediment_net_m"), 385)
+            self.assertNotIn("sediment_production_m", fieldnames)
+            self.assertEqual(fieldnames.index("glacial_sediment_deposition_m"), 362)
+            self.assertEqual(fieldnames.index("fluvial_sediment_local_source_m"), 364)
+            self.assertEqual(fieldnames.index("fluvial_sediment_routing_event_count"), 373)
+            self.assertEqual(fieldnames.index("hillslope_sediment_production_m"), 374)
+            self.assertEqual(fieldnames.index("hillslope_sediment_deposition_m"), 375)
+            self.assertEqual(fieldnames.index("hillslope_sediment_net_m"), 376)
             self.assertEqual(
-                fieldnames.index("hillslope_sediment_outgoing_edge_count"), 386
+                fieldnames.index("hillslope_sediment_outgoing_edge_count"), 377
             )
             self.assertEqual(
-                fieldnames.index("hillslope_sediment_incoming_edge_count"), 387
+                fieldnames.index("hillslope_sediment_incoming_edge_count"), 378
             )
-            self.assertEqual(fieldnames.index("glacial_sediment_production_m"), 388)
-            self.assertEqual(fieldnames.index("glacial_sediment_net_m"), 389)
+            self.assertEqual(fieldnames.index("glacial_sediment_production_m"), 379)
+            self.assertEqual(fieldnames.index("glacial_sediment_net_m"), 380)
             self.assertEqual(
                 fieldnames.index("glacial_sediment_outgoing_transfer_count"),
-                390,
+                381,
             )
             self.assertEqual(
                 fieldnames.index("glacial_sediment_incoming_transfer_count"),
-                391,
+                382,
             )
             self.assertEqual(
-                fieldnames.index("sediment_alluvium_entrainment_m"), 392
+                fieldnames.index("sediment_alluvium_entrainment_m"), 383
             )
-            self.assertEqual(fieldnames.index("sediment_bedrock_erosion_m"), 393)
+            self.assertEqual(fieldnames.index("sediment_bedrock_erosion_m"), 384)
             self.assertEqual(
                 fieldnames.index(
                     "hydrologic_potential_evapotranspiration_mm_y"
                 ),
-                394,
+                385,
             )
             self.assertEqual(
                 fieldnames.index(
                     "groundwater_recharge_source_infiltration_mm_y"
                 ),
-                395,
+                386,
             )
             self.assertEqual(
-                fieldnames.index("groundwater_recharge_fraction"), 396
+                fieldnames.index("groundwater_recharge_fraction"), 387
             )
             self.assertEqual(
-                fieldnames.index("vadose_zone_retention_mm_y"), 397
+                fieldnames.index("vadose_zone_retention_mm_y"), 388
             )
             self.assertEqual(
-                fieldnames.index("vadose_zone_retention_km3_y"), 398
+                fieldnames.index("vadose_zone_retention_km3_y"), 389
             )
             self.assertEqual(
                 fieldnames.index(
                     "groundwater_recharge_mass_balance_residual_mm_y"
                 ),
-                399,
+                390,
             )
             self.assertEqual(
                 fieldnames.index("groundwater_lateral_inflow_km3_y"),
-                400,
+                391,
             )
             self.assertEqual(
                 fieldnames.index("groundwater_available_volume_km3_y"),
-                401,
+                392,
             )
             self.assertEqual(
                 fieldnames.index(
                     "groundwater_internal_lateral_outflow_km3_y"
                 ),
-                402,
+                393,
             )
             self.assertEqual(
                 fieldnames.index("groundwater_retained_storage_km3_y"),
-                403,
+                394,
             )
             self.assertEqual(
                 fieldnames.index(
                     "groundwater_flow_mass_balance_residual_km3_y"
                 ),
-                404,
+                395,
             )
             summary_text = summary_path.read_text(encoding="utf-8")
             self.assertIn("`plate_motion_history_step_count`: 3", summary_text)
-            self.assertIn("`total_crust_source_remap_event_count`: 2", summary_text)
             self.assertIn("`mean_plate_cumulative_rotation_deg`: 3.25", summary_text)
-            self.assertIn("`numeric_depression_fill_event_count`: 2", summary_text)
+            self.assertIn(
+                "`numeric_depression_correction_event_count`: 2", summary_text
+            )
             self.assertIn(
                 "`numeric_depression_breach_lower_volume_event_count`: 1",
                 summary_text,
@@ -307,7 +304,10 @@ class GenerationSmokeTests(TestCase):
             motion_history[0]["cell_plate_ids"],
             [cell["plate_id"] for cell in world["cells"]],
         )
-        self.assertEqual(motion_history[0]["crust_source_cell_ids"], list(range(len(world["cells"]))))
+        self.assertEqual(
+            motion_history[0]["crust_overlap_ledger"]["dominant_source_cell_ids"],
+            list(range(len(world["cells"]))),
+        )
         self.assertTrue(all(value == 0.0 for value in motion_history[0]["crust_transport_distance_km_by_cell"]))
         self.assertTrue(
             all(
@@ -336,7 +336,7 @@ class GenerationSmokeTests(TestCase):
             result = CliRunner().invoke(app, ["validate", "--world", str(world_path)])
             self.assertEqual(result.exit_code, 0, result.output)
 
-    def test_zero_plate_motion_keeps_identity_crust_sources(self) -> None:
+    def test_zero_plate_motion_keeps_identity_overlap_transport(self) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))
         data = config.model_dump(mode="python")
         data["mesh"]["cell_count"] = 128
@@ -348,13 +348,13 @@ class GenerationSmokeTests(TestCase):
         world = generate_world(stationary)
         expected_sources = list(range(len(world["cells"])))
         for step in world["plate_motion_history"]:
-            self.assertEqual(step["crust_source_cell_ids"], expected_sources)
-            self.assertEqual(step["crust_source_remap_cell_count"], 0)
-            self.assertEqual(step["crust_source_reuse_count"], 0)
+            self.assertEqual(
+                step["crust_overlap_ledger"]["dominant_source_cell_ids"],
+                expected_sources,
+            )
             self.assertTrue(all(distance == 0.0 for distance in step["crust_transport_distance_km_by_cell"]))
             self.assertTrue(all(delta == 0.0 for delta in step["crust_age_transport_change_ma_by_cell"]))
         self.assertTrue(all(plate["initial_center"] == plate["center"] for plate in world["plates"]))
-        self.assertEqual(world["summary"]["total_crust_source_remap_event_count"], 0)
         self.assertEqual(world["summary"]["max_crust_transport_distance_km"], 0.0)
 
         with TemporaryDirectory() as temp_dir:
@@ -681,6 +681,15 @@ class GenerationSmokeTests(TestCase):
                 "thermal_moisture_capacity_factor"
             ] = original_thermal_moisture_factor
 
+            world["climate_model"]["negative_precipitation_behavior"] = "tampered"
+            world_path.write_text(json.dumps(world), encoding="utf-8")
+            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
+            self.assertNotEqual(invalid_result.exit_code, 0)
+            self.assertIn("climate model metadata invalid", invalid_result.output)
+            world["climate_model"]["negative_precipitation_behavior"] = (
+                "clamped_to_zero_before_thermal_moisture_multiplier"
+            )
+
             original_fitted_hack_exponent = world["summary"]["watershed_hack_fitted_exponent"]
             world["summary"]["watershed_hack_fitted_exponent"] += 0.1
             world_path.write_text(json.dumps(world), encoding="utf-8")
@@ -765,15 +774,18 @@ class GenerationSmokeTests(TestCase):
             self.assertIn("crust material shadow:", invalid_result.output)
             shadow_masses[0] = original_shadow_mass
 
-            original_source = world["plate_motion_history"][1]["crust_source_cell_ids"][0]
-            world["plate_motion_history"][1]["crust_source_cell_ids"][0] = (
+            dominant_sources = world["plate_motion_history"][1][
+                "crust_overlap_ledger"
+            ]["dominant_source_cell_ids"]
+            original_source = dominant_sources[0]
+            dominant_sources[0] = (
                 original_source + 1
             ) % len(world["cells"])
             world_path.write_text(json.dumps(world), encoding="utf-8")
             invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
             self.assertNotEqual(invalid_result.exit_code, 0)
             self.assertIn("plate kinematic model or motion history invalid", invalid_result.output)
-            world["plate_motion_history"][1]["crust_source_cell_ids"][0] = original_source
+            dominant_sources[0] = original_source
 
             original_distance = world["plate_motion_history"][1][
                 "crust_transport_distance_km_by_cell"
@@ -786,14 +798,6 @@ class GenerationSmokeTests(TestCase):
             world["plate_motion_history"][1]["crust_transport_distance_km_by_cell"][
                 0
             ] = original_distance
-
-            original_remap_count = world["cells"][0]["crust_source_remap_event_count"]
-            world["cells"][0]["crust_source_remap_event_count"] += 1
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("plate kinematic model or motion history invalid", invalid_result.output)
-            world["cells"][0]["crust_source_remap_event_count"] = original_remap_count
 
             original_center = world["plate_motion_history"][1]["plates"][0]["center"][0]
             world["plate_motion_history"][1]["plates"][0]["center"][0] += 0.05
@@ -3456,6 +3460,50 @@ class GenerationSmokeTests(TestCase):
             ),
             delta=0.1,
         )
+        partition_gross_volume_km3 = sum(
+            (
+                cell["sediment_alluvium_entrainment_m"]
+                + cell["sediment_bedrock_erosion_m"]
+            )
+            * cell["area_km2"]
+            / 1000.0
+            for cell in cells
+        )
+        self.assertAlmostEqual(
+            summary["sediment_gross_mobilization_volume_km3"],
+            partition_gross_volume_km3,
+            delta=0.1,
+        )
+        self.assertAlmostEqual(
+            summary["sediment_budget_production_km3"],
+            partition_gross_volume_km3,
+            delta=0.1,
+        )
+        cell_depth_output_tolerance_m = (
+            1.0001 * 10.0 ** (-int(summary["output_float_precision"]))
+        )
+        for cell in cells:
+            self.assertNotIn("sediment_production_m", cell)
+            partition_gross_depth_m = (
+                cell["sediment_alluvium_entrainment_m"]
+                + cell["sediment_bedrock_erosion_m"]
+            )
+            independent_process_gross_depth_m = (
+                cell["hillslope_sediment_production_m"]
+                + cell["fluvial_sediment_local_source_m"]
+                + cell["glacial_sediment_production_m"]
+                + cell["cumulative_numeric_depression_breach_excavation_m"]
+            )
+            self.assertAlmostEqual(
+                partition_gross_depth_m,
+                independent_process_gross_depth_m,
+                delta=1.0e-7,
+            )
+            self.assertAlmostEqual(
+                cell["sediment_net_budget_m"],
+                cell["sediment_deposition_m"] - partition_gross_depth_m,
+                delta=cell_depth_output_tolerance_m,
+            )
         process_partition = model["process_source_partition"]
         self.assertEqual(
             set(process_partition),
@@ -3492,7 +3540,7 @@ class GenerationSmokeTests(TestCase):
             )
             selected_breach = next(
                 event
-                for event in world["numeric_depression_fill_history"]
+                for event in world["numeric_depression_correction_history"]
                 if event["selected_correction_method"]
                 == "mass_conserving_breach"
             )
@@ -3574,7 +3622,7 @@ class GenerationSmokeTests(TestCase):
 
             numeric_event = next(
                 event
-                for event in world["numeric_depression_fill_history"]
+                for event in world["numeric_depression_correction_history"]
                 if event["breach_path_cell_ids"]
             )
             numeric_event[
@@ -3630,7 +3678,7 @@ class GenerationSmokeTests(TestCase):
         routed_config = type(config).model_validate(data)
 
         world = generate_world(routed_config)
-        fill_history = world["numeric_depression_fill_history"]
+        fill_history = world["numeric_depression_correction_history"]
         self.assertTrue(fill_history)
         self.assertTrue(world["lake_basins"])
         self.assertEqual(world["summary"]["preserved_geologic_depression_count"], 0)
@@ -3716,7 +3764,7 @@ class GenerationSmokeTests(TestCase):
                 "temporary_numeric_lake_selected"
             ]
 
-            world["numeric_depression_fill_history"] = None
+            world["numeric_depression_correction_history"] = None
             world_path.write_text(json.dumps(world), encoding="utf-8")
             invalid_result = runner.invoke(
                 app, ["validate", "--world", str(world_path)]
@@ -3726,20 +3774,18 @@ class GenerationSmokeTests(TestCase):
                 "numeric depression correction provenance invalid",
                 invalid_result.output,
             )
-            world["numeric_depression_fill_history"] = fill_history
+            world["numeric_depression_correction_history"] = fill_history
 
             filled_cell = world["cells"][first_event["cell_ids"][0]]
-            filled_cell["cumulative_numeric_depression_fill_m"] += 1.0
+            self.assertNotIn("cumulative_numeric_depression_fill_m", filled_cell)
+            filled_cell["cumulative_numeric_depression_fill_m"] = 0.0
             world_path.write_text(json.dumps(world), encoding="utf-8")
             invalid_result = runner.invoke(
                 app, ["validate", "--world", str(world_path)]
             )
             self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "numeric depression correction provenance invalid",
-                invalid_result.output,
-            )
-            filled_cell["cumulative_numeric_depression_fill_m"] -= 1.0
+            self.assertIn("world schema contains retired fields", invalid_result.output)
+            del filled_cell["cumulative_numeric_depression_fill_m"]
 
             deferred_event = next(
                 event
@@ -3816,12 +3862,17 @@ class GenerationSmokeTests(TestCase):
         small = type(config).model_validate(data)
 
         world = generate_world(small)
+        self.assertEqual(world["schema_version"], 2)
         summary = world["summary"]
 
         climate_model = world["climate_model"]
         self.assertEqual(
             climate_model["model_type"],
-            "equilibrium_latitude_circulation_climate_v4",
+            "equilibrium_latitude_circulation_climate_v5",
+        )
+        self.assertEqual(
+            climate_model["precipitation_model"],
+            "bounded_thermal_moisture_circulation_orography_wind_transport_v3",
         )
         self.assertEqual(climate_model["marine_annual_temperature_offset_c"], 0.0)
         self.assertTrue(climate_model["latitude_temperature_area_normalized"])
@@ -3922,10 +3973,6 @@ class GenerationSmokeTests(TestCase):
             clock["erosion_transition_coupling_semantics"],
             "hillslope_and_stream_use_prior_stabilized_surface_and_hydrology_with_updated_crust_state;tectonic_hillslope_stream_tendencies_are_combined_before_terrain_commit;fluvial_routing_uses_prior_flow_graph_and_provisional_terrain_accommodation",
         )
-        self.assertEqual(
-            clock["legacy_mean_erosion_rate_field_semantics"],
-            "mean_erosion_rate_m_per_step_is_a_reference_step_response_alias_not_applied_transition_depth",
-        )
         self.assertEqual(clock["configured_erosion_iteration_count"], 2)
         self.assertEqual(clock["configured_cryosphere_coupling_stage_count"], 1)
         self.assertEqual(clock["cryosphere_coupling_stage_count"], 1)
@@ -3946,11 +3993,11 @@ class GenerationSmokeTests(TestCase):
         self.assertEqual([step["id"] for step in feedback_history], list(range(4)))
         self.assertTrue(
             all(
-                step["mean_erosion_rate_m_per_step"]
-                == step["mean_stream_power_response_m_per_reference_step"]
+                "mean_erosion_rate_m_per_step" not in step
                 for step in feedback_history
             )
         )
+        self.assertNotIn("legacy_mean_erosion_rate_field_semantics", clock)
         self.assertEqual(
             [step["erosion_iteration"] for step in feedback_history],
             [-1, 1, 2, -1],
@@ -3967,7 +4014,7 @@ class GenerationSmokeTests(TestCase):
                 == step["climate_recompute_count"]
                 == step["hydrologic_water_budget_recompute_count"]
                 == step["hydrology_recompute_count"]
-                == step["numeric_depression_fill_pass_count"] + 1
+                == step["numeric_depression_correction_pass_count"] + 1
                 for step in feedback_history
             )
         )
@@ -4093,10 +4140,6 @@ class GenerationSmokeTests(TestCase):
                 step["max_crust_transport_distance_km"],
                 max_rotation_arc_km + 0.01,
             )
-        self.assertEqual(
-            sum(step["crust_source_remap_cell_count"] for step in motion_history[1:]),
-            summary["total_crust_source_remap_event_count"],
-        )
         for step in motion_history[1:]:
             for total, transported, processed in zip(
                 step["crust_age_change_ma_by_cell"],
@@ -4176,7 +4219,6 @@ class GenerationSmokeTests(TestCase):
         self.assertGreater(first_cell["crust_density"], 0.0)
         relief_component_keys = [
             "initial_isostatic_elevation_m",
-            "initial_thermal_subsidence_m",
             "initial_ridge_uplift_m",
             "initial_orogenic_uplift_m",
             "initial_volcanic_uplift_m",
@@ -4187,7 +4229,13 @@ class GenerationSmokeTests(TestCase):
         ]
         for key in relief_component_keys:
             self.assertIn(key, first_cell)
-        relief_component_sum = sum(first_cell[key] for key in relief_component_keys)
+        initial_thermal_subsidence_m = world["plate_motion_history"][0][
+            "post_process_local_thermal_subsidence_target_m"
+        ][int(first_cell["id"])]
+        relief_component_sum = (
+            sum(first_cell[key] for key in relief_component_keys)
+            + initial_thermal_subsidence_m
+        )
         self.assertAlmostEqual(first_cell["initial_elevation_m"], relief_component_sum, delta=0.05)
         self.assertGreaterEqual(first_cell["tectonic_uplift_rate_m_per_step"], 0.0)
         self.assertGreaterEqual(first_cell["volcanic_potential_index"], 0.0)
@@ -4622,11 +4670,11 @@ class GenerationSmokeTests(TestCase):
             "weighted_graph_excavation_proxy_monotone_lower_outlet_v1",
         )
         self.assertEqual(summary["numeric_depression_selected_breach_max_depth_m"], 50.0)
-        self.assertEqual(summary["numeric_depression_fill_max_pass_count"], 16)
+        self.assertEqual(summary["numeric_depression_correction_max_pass_count"], 16)
         self.assertAlmostEqual(
             summary["numeric_depression_fill_depth_tolerance_m"], 1.0e-9
         )
-        fill_history = world["numeric_depression_fill_history"]
+        fill_history = world["numeric_depression_correction_history"]
         self.assertTrue(fill_history)
         selected_breaches = [
             event
@@ -4669,14 +4717,11 @@ class GenerationSmokeTests(TestCase):
             delta=max(0.000001, expected_hybrid_adjustment_volume_km3 * 1.0e-10),
         )
         self.assertEqual(
-            summary["numeric_depression_fill_event_count"], 0
-        )
-        self.assertEqual(
             summary["numeric_depression_temporary_lake_event_count"],
             len(temporary_lake_deferrals),
         )
         self.assertEqual(
-            summary["numeric_depression_fill_pass_count"],
+            summary["numeric_depression_correction_pass_count"],
             len(
                 {
                     (event["feedback_stage_id"], event["stabilization_pass"])
@@ -4684,19 +4729,11 @@ class GenerationSmokeTests(TestCase):
                 }
             ),
         )
-        self.assertEqual(
-            summary["numeric_depression_fill_cell_application_count"],
-            0,
-        )
         temporary_lake_cell_ids = {
             cell_id
             for event in temporary_lake_deferrals
             for cell_id in event["cell_ids"]
         }
-        self.assertEqual(
-            summary["numeric_depression_filled_unique_cell_count"],
-            0,
-        )
         self.assertEqual(
             summary["numeric_depression_temporary_lake_cell_application_count"],
             sum(event["cell_count"] for event in temporary_lake_deferrals),
@@ -4705,8 +4742,6 @@ class GenerationSmokeTests(TestCase):
             summary["numeric_depression_temporary_lake_unique_cell_count"],
             len(temporary_lake_cell_ids),
         )
-        expected_fill_depth_by_cell = Counter()
-        expected_fill_event_count_by_cell = Counter()
         expected_breach_excavation_by_cell = Counter()
         expected_breach_deposition_by_cell = Counter()
         expected_breach_event_count_by_cell = Counter()
@@ -4728,7 +4763,7 @@ class GenerationSmokeTests(TestCase):
                 if event["selected_correction_method"] == "temporary_numeric_lake":
                     expected_temporary_lake_event_count_by_cell[cell_id] += 1
             self.assertFalse(event["fill_candidate_applied"])
-            self.assertAlmostEqual(event["applied_fill_volume_km3"], 0.0)
+            self.assertNotIn("applied_fill_volume_km3", event)
             if event["selected_correction_method"] == "mass_conserving_breach":
                 self.assertLessEqual(event["max_breach_excavation_depth_m"], 50.0)
                 self.assertAlmostEqual(
@@ -4762,15 +4797,8 @@ class GenerationSmokeTests(TestCase):
                     event["correction_mass_balance_residual_km3"], 0.0
                 )
         for cell in world["cells"]:
-            self.assertAlmostEqual(
-                cell["cumulative_numeric_depression_fill_m"],
-                expected_fill_depth_by_cell[cell["id"]],
-                delta=0.0000001,
-            )
-            self.assertEqual(
-                cell["numeric_depression_fill_event_count"],
-                expected_fill_event_count_by_cell[cell["id"]],
-            )
+            self.assertNotIn("cumulative_numeric_depression_fill_m", cell)
+            self.assertNotIn("numeric_depression_fill_event_count", cell)
             self.assertAlmostEqual(
                 cell["cumulative_numeric_depression_breach_excavation_m"],
                 expected_breach_excavation_by_cell[cell["id"]],
@@ -4789,13 +4817,9 @@ class GenerationSmokeTests(TestCase):
                 cell["numeric_depression_temporary_lake_event_count"],
                 expected_temporary_lake_event_count_by_cell[cell["id"]],
             )
-        self.assertEqual(summary["numeric_depression_fill_volume_km3"], 0.0)
         self.assertEqual(
             summary["numeric_depression_correction_mass_balance_residual_km3"],
             0.0,
-        )
-        self.assertEqual(
-            summary["numeric_depression_unbalanced_fill_event_count"], 0
         )
         self.assertEqual(
             summary["numeric_depression_mass_conserving_event_count"],
@@ -5220,7 +5244,7 @@ class GenerationSmokeTests(TestCase):
         self.assertIn("sediment_budget_residual_m", summary)
         self.assertEqual(
             summary["sediment_budget_closure_model"],
-            "cell_area_weighted_hillslope_glacial_and_routed_deposition_terminal_export_volume_v4",
+            "cell_area_weighted_hillslope_glacial_and_routed_deposition_terminal_export_volume_v5",
         )
         self.assertIn("sediment_budget_production_km3", summary)
         self.assertIn("sediment_budget_deposition_km3", summary)
@@ -8109,10 +8133,12 @@ class GenerationSmokeTests(TestCase):
             max(first_cell["river_capture_risk"], first_cell["river_avulsion_risk"]),
         )
         self.assertIn("sediment_thickness_m", first_cell)
-        self.assertIn("sediment_production_m", first_cell)
+        self.assertNotIn("sediment_production_m", first_cell)
         self.assertIn("sediment_deposition_m", first_cell)
         self.assertIn("sediment_export_m", first_cell)
         self.assertIn("sediment_net_budget_m", first_cell)
+        self.assertIn("sediment_alluvium_entrainment_m", first_cell)
+        self.assertIn("sediment_bedrock_erosion_m", first_cell)
         self.assertIn("fluvial_sediment_local_source_m", first_cell)
         self.assertIn("fluvial_sediment_routed_incoming_m", first_cell)
         self.assertIn("fluvial_sediment_routed_outgoing_m", first_cell)
@@ -11837,17 +11863,8 @@ class GenerationSmokeTests(TestCase):
             "exact_zero_monthly_and_annual_precipitation",
         )
         self.assertEqual(
-            world["climate_model"][
-                "positive_precipitation_pre_thermal_annual_floor_mm"
-            ],
-            20.0,
-        )
-        self.assertAlmostEqual(
-            world["climate_model"][
-                "positive_precipitation_effective_annual_floor_mm"
-            ],
-            20.0
-            * world["climate_model"]["thermal_moisture_capacity_factor"],
+            world["climate_model"]["negative_precipitation_behavior"],
+            "clamped_to_zero_before_thermal_moisture_multiplier",
         )
         self.assertTrue(
             all(cell["precipitation_mm_y"] == 0.0 for cell in world["cells"])
@@ -11864,6 +11881,23 @@ class GenerationSmokeTests(TestCase):
             all(cell["actual_evapotranspiration_mm_y"] == 0.0 for cell in land)
         )
         self.assertTrue(all(cell["infiltration_mm_y"] == 0.0 for cell in land))
+
+    def test_near_zero_precipitation_scale_has_no_legacy_floor(self) -> None:
+        config = load_config(Path("configs/earthlike_seed.yaml"))
+        data = config.model_dump(mode="python")
+        data["mesh"]["cell_count"] = 128
+        data["tectonics"]["plate_count"] = 8
+        data["erosion"]["iterations"] = 0
+        data["climate"]["precipitation_scale"] = 1.0e-6
+
+        world = generate_world(type(config).model_validate(data))
+        precipitation = [
+            float(cell["precipitation_mm_y"]) for cell in world["cells"]
+        ]
+
+        self.assertTrue(any(value > 0.0 for value in precipitation))
+        self.assertLess(max(precipitation), 0.02)
+        self.assertTrue(any(0.0 < value < 0.001 for value in precipitation))
 
     def test_subtropical_drying_strength_reduces_horse_latitude_rainfall(self) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))
@@ -12006,7 +12040,7 @@ class GenerationSmokeTests(TestCase):
         self.assertAlmostEqual(surface_elevation_span, 17443.550462964195)
         self.assertAlmostEqual(mean_land_temperature, 6.834819370070568)
         self.assertAlmostEqual(mean_land_temperature_range, 16.894286363636365)
-        self.assertAlmostEqual(mean_land_precipitation, 808.9630832503113)
+        self.assertAlmostEqual(mean_land_precipitation, 808.9624364881694)
         self.assertAlmostEqual(endorheic_count_fraction, 0.09872611464968153)
         self.assertAlmostEqual(endorheic_area_fraction, 0.27494236382566906)
         self.assertEqual(
@@ -12042,27 +12076,16 @@ class GenerationSmokeTests(TestCase):
         self.assertEqual(world["summary"]["preserved_geologic_depression_count"], 24)
         self.assertEqual(world["summary"]["corrected_numeric_depression_count"], 0)
         self.assertEqual(world["summary"]["temporary_numeric_lake_depression_count"], 43)
-        self.assertEqual(world["summary"]["numeric_depression_fill_pass_count"], 8)
+        self.assertEqual(world["summary"]["numeric_depression_correction_pass_count"], 8)
         self.assertEqual(world["summary"]["numeric_depression_correction_event_count"], 423)
-        self.assertEqual(world["summary"]["numeric_depression_fill_event_count"], 0)
-        self.assertEqual(
-            world["summary"]["numeric_depression_fill_cell_application_count"],
-            0,
-        )
-        self.assertEqual(
-            world["summary"]["numeric_depression_filled_unique_cell_count"],
-            0,
-        )
-        self.assertAlmostEqual(
-            world["summary"]["numeric_depression_fill_volume_km3"],
-            0.0,
-            places=6,
-        )
-        self.assertAlmostEqual(
-            world["summary"]["max_numeric_depression_fill_depth_m"],
-            0.0,
-            places=6,
-        )
+        for retired_field in (
+            "numeric_depression_fill_event_count",
+            "numeric_depression_fill_cell_application_count",
+            "numeric_depression_filled_unique_cell_count",
+            "numeric_depression_fill_volume_km3",
+            "max_numeric_depression_fill_depth_m",
+        ):
+            self.assertNotIn(retired_field, world["summary"])
         self.assertEqual(
             world["summary"]["numeric_depression_temporary_lake_event_count"],
             414,
@@ -12308,7 +12331,7 @@ class GenerationSmokeTests(TestCase):
         )
         selected_breaches = [
             event
-            for event in world["numeric_depression_fill_history"]
+            for event in world["numeric_depression_correction_history"]
             if event["selected_correction_method"] == "mass_conserving_breach"
         ]
         self.assertEqual(len(selected_breaches), 9)

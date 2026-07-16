@@ -234,7 +234,7 @@ class SedimentInterfaceGeneratedTests(TestCase):
         # a later numeric depression correction.  That keeps the adversarial
         # offset present through every later opening snapshot and final state.
         numeric_cells_by_feedback: dict[int, set[int]] = {}
-        for event in self.world["numeric_depression_fill_history"]:
+        for event in self.world["numeric_depression_correction_history"]:
             event_cells = numeric_cells_by_feedback.setdefault(
                 event["feedback_stage_id"], set()
             )

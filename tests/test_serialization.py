@@ -47,6 +47,121 @@ def sample_world() -> dict[str, object]:
 
 
 class WorldSerializationTests(TestCase):
+    def test_retired_world_schema_field_inventory_is_complete(self) -> None:
+        payload = {
+            "simulation_clock": {
+                "legacy_mean_erosion_rate_field_semantics": "retired",
+            },
+            "earth_system_feedback_history": [
+                {
+                    "mean_erosion_rate_m_per_step": 0.0,
+                    "numeric_depression_fill_pass_count": 0,
+                    "numeric_depression_fill_event_count": 0,
+                    "numeric_depression_fill_cell_application_count": 0,
+                    "numeric_depression_filled_unique_cell_count": 0,
+                    "numeric_depression_fill_area_km2": 0.0,
+                    "numeric_depression_fill_volume_km3": 0.0,
+                    "max_numeric_depression_fill_depth_m": 0.0,
+                },
+            ],
+            "numeric_depression_fill_history": [],
+            "numeric_depression_correction_history": [
+                {"applied_fill_volume_km3": 0.0},
+            ],
+            "cells": [
+                {
+                    "last_crust_source_cell_id": 0,
+                    "crust_source_remap_event_count": 0,
+                    "initial_crust_age_ma": 0.0,
+                    "initial_crust_thickness_km": 0.0,
+                    "initial_crust_density": 0.0,
+                    "initial_thermal_subsidence_m": 0.0,
+                    "sediment_production_m": 0.0,
+                    "cumulative_numeric_depression_fill_m": 0.0,
+                    "numeric_depression_fill_event_count": 0,
+                },
+            ],
+            "summary": {
+                key: 0
+                for key in (
+                    "total_crust_source_remap_event_count",
+                    "total_crust_source_reuse_count",
+                    "numeric_depression_fill_max_pass_count",
+                    "numeric_depression_fill_pass_count",
+                    "numeric_depression_fill_event_count",
+                    "numeric_depression_fill_cell_application_count",
+                    "numeric_depression_filled_unique_cell_count",
+                    "numeric_depression_fill_geologic_source_event_count",
+                    "numeric_depression_fill_area_km2",
+                    "numeric_depression_fill_volume_km3",
+                    "mean_numeric_depression_fill_depth_m",
+                    "max_numeric_depression_fill_depth_m",
+                    "cumulative_numeric_depression_fill_sum_m",
+                    "max_cumulative_numeric_depression_fill_m",
+                    "numeric_depression_unbalanced_fill_event_count",
+                )
+            },
+            "plate_kinematic_model": {
+                "accelerator_crust_source_remap_kernel_used": False,
+                "legacy_crust_source_cell_id_semantics": "retired",
+                "legacy_crust_source_remap_event_semantics": "retired",
+                "legacy_crust_source_reuse_count_semantics": "retired",
+            },
+            "initial_oceanic_crust_age_model": {
+                "compatibility_cell_alias_location": "retired",
+                "compatibility_history_alias_location": "retired",
+                "compatibility_alias_scope": "retired",
+            },
+            "backend": {
+                key: 0
+                for key in (
+                    "accelerator_crust_source_remap_kernel_production_active",
+                    "accelerator_crust_source_remap_kernel_role",
+                    "legacy_nearest_source_remap_world_pipeline_enabled",
+                    "legacy_crust_source_remap_dispatch_counters_deprecated",
+                    "opencl_crust_source_remap_dispatch_count",
+                    "cuda_crust_source_remap_dispatch_count",
+                )
+            },
+            "climate_model": {
+                key: 0
+                for key in (
+                    "positive_precipitation_pre_thermal_annual_floor_mm",
+                    "positive_precipitation_effective_annual_floor_mm",
+                    "positive_precipitation_floor_application",
+                )
+            },
+            "oceanic_age_depth_model": {
+                key: 0
+                for key in (
+                    "thermal_target_difference_tendency_formula",
+                    "thermal_target_difference_tendency_application",
+                    "thermal_target_difference_tendency_compatibility_alias",
+                    "thermal_target_difference_tendency_application_replayed",
+                )
+            },
+            "plate_motion_history": [
+                {
+                    "crust_source_remap_cell_count": 0,
+                    "unique_crust_source_cell_count": 0,
+                    "crust_source_reuse_count": 0,
+                    "crust_source_cell_ids": [],
+                    "thermal_target_difference_tendency_m": [],
+                },
+            ],
+        }
+
+        retired = serialization_module.retired_world_schema_fields(payload)
+
+        self.assertEqual(len(retired), 60)
+        self.assertEqual(len(set(retired)), len(retired))
+        self.assertTrue(
+            all(
+                path.split(".", 1)[0].split("[", 1)[0] in payload
+                for path in retired
+            )
+        )
+
     def test_binary_round_trip_preserves_json_value_semantics(self) -> None:
         world = sample_world()
         encoded = dumps_world(world)
@@ -288,8 +403,12 @@ class WorldSerializationTests(TestCase):
 
     def test_cli_world_consumer_accepts_mgeo(self) -> None:
         world = {
-            "schema_version": 1,
+            "schema_version": 2,
             "mesh_backend": "fibonacci_sphere",
+            "planet_parameters": {
+                "radius_km": 6371.0,
+                "gravity_g": 1.0,
+            },
             "summary": {
                 "cell_count": 0,
                 "ocean_fraction": 0.5,
@@ -307,3 +426,40 @@ class WorldSerializationTests(TestCase):
         self.assertEqual(result.exit_code, 1)
         self.assertIn("FAIL sea level model", result.output)
         self.assertNotIn("Invalid world file", result.output)
+
+    def test_cli_world_consumer_rejects_prior_world_schema(self) -> None:
+        world = {
+            "schema_version": 1,
+            "planet_parameters": {
+                "radius_km": 6371.0,
+                "gravity_g": 1.0,
+            },
+        }
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "world.mgeo"
+            write_world(path, world)
+            result = CliRunner().invoke(app, ["validate", "--world", str(path)])
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("FAIL world schema_version must be 2, got 1", result.output)
+        self.assertNotIn("Invalid world file", result.output)
+
+    def test_cli_world_consumer_rejects_retired_world_fields(self) -> None:
+        world = {
+            "schema_version": 2,
+            "planet_parameters": {
+                "radius_km": 6371.0,
+                "gravity_g": 1.0,
+            },
+            "plate_kinematic_model": {
+                "accelerator_crust_source_remap_kernel_used": False,
+            },
+        }
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "world.mgeo"
+            write_world(path, world)
+            result = CliRunner().invoke(app, ["validate", "--world", str(path)])
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("FAIL world schema contains retired fields", result.output)
+        self.assertIn("accelerator_crust_source_remap_kernel_used", result.output)

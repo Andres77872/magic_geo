@@ -20,9 +20,6 @@ VALID_WATERSHED_OUTLET_TYPES = {
     "saline_basin",
     "inland_sea",
     "closed_land",
-    # Backward-compatible aliases used by older world snapshots.
-    "fresh_lake",
-    "endorheic",
 }
 
 

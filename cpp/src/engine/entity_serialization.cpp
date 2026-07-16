@@ -137,8 +137,6 @@ std::string cells_json(const std::vector<Cell>& cells, int precision) {
         add_int(out, first, "initial_plate_id", cell.initial_plate_id);
         add_int(out, first, "plate_assignment_change_count", cell.plate_assignment_change_count);
         add_int(out, first, "last_plate_assignment_change_iteration", cell.last_plate_assignment_change_iteration);
-        add_int(out, first, "last_crust_source_cell_id", cell.last_crust_source_cell_id);
-        add_int(out, first, "crust_source_remap_event_count", cell.crust_source_remap_event_count);
         add_int(out, first, "oceanic_crust_aging_event_count", cell.oceanic_crust_aging_event_count);
         add_int(out, first, "oceanic_crust_rejuvenation_event_count", cell.oceanic_crust_rejuvenation_event_count);
         add_int(out, first, "oceanic_crust_subduction_event_count", cell.oceanic_crust_subduction_event_count);
@@ -155,18 +153,10 @@ std::string cells_json(const std::vector<Cell>& cells, int precision) {
             roundtrip_num(cell.crust_thickness_km));
         add_raw(out, first, "crust_density",
             roundtrip_num(cell.crust_density));
-        add_raw(out, first, "initial_crust_age_ma",
-            roundtrip_num(cell.initial_crust_age_ma));
-        add_raw(out, first, "initial_crust_thickness_km",
-            roundtrip_num(cell.initial_crust_thickness_km));
-        add_raw(out, first, "initial_crust_density",
-            roundtrip_num(cell.initial_crust_density));
         add_double(out, first, "cumulative_tectonic_elevation_change_m",
             cell.cumulative_tectonic_elevation_change_m, surface_precision);
         add_double(out, first, "initial_isostatic_elevation_m",
             cell.initial_isostatic_elevation_m, surface_precision);
-        add_raw(out, first, "initial_thermal_subsidence_m",
-            roundtrip_num(cell.initial_thermal_subsidence_m));
         add_raw(out, first, "thermal_subsidence_target_m",
             roundtrip_num(cell.thermal_subsidence_target_m));
         add_double(out, first, "initial_ridge_uplift_m",
@@ -271,10 +261,6 @@ std::string cells_json(const std::vector<Cell>& cells, int precision) {
         add_bool(out, first, "is_lake", cell.is_lake);
         add_bool(out, first, "is_closed_basin", cell.is_closed_basin);
         add_bool(out, first, "lake_overflows", cell.lake_overflows);
-        add_double(out, first, "cumulative_numeric_depression_fill_m",
-            cell.cumulative_numeric_depression_fill_m, surface_precision);
-        add_int(out, first, "numeric_depression_fill_event_count",
-            cell.numeric_depression_fill_event_count);
         add_double(out, first,
             "cumulative_numeric_depression_breach_excavation_m",
             cell.cumulative_numeric_depression_breach_excavation_m,
@@ -290,7 +276,6 @@ std::string cells_json(const std::vector<Cell>& cells, int precision) {
         add_double(out, first, "erosion_rate", cell.erosion_rate, precision);
         add_double(out, first, "sediment_thickness_m",
             cell.sediment_thickness_m, surface_precision);
-        add_double(out, first, "sediment_production_m", cell.sediment_production_m, precision);
         add_double(out, first, "sediment_deposition_m", cell.sediment_deposition_m, precision);
         add_double(out, first, "sediment_export_m", cell.sediment_export_m, precision);
         add_double(out, first, "sediment_net_budget_m", cell.sediment_net_budget_m, precision);

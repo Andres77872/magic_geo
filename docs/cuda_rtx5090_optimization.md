@@ -7,10 +7,10 @@ host-specific engineering evidence, not universal NVIDIA performance claims.
 > **Current crust-transport boundary:** the calibration below predates
 > `forward_spherical_control_volume_overlap_v1`. Production v3 crust transport
 > now runs authoritatively on CPU for `cpu`, `opencl`, and `cuda` backends. The
-> CUDA nearest-source kernel remains a raw tested primitive but is not called by
-> world generation. None of the remap dispatch counts or speedups below measures
-> the new overlap path; GPU implementation, complete-ledger parity, telemetry,
-> fallback behavior, and new crossover calibration remain pending.
+> CUDA nearest-source kernel measured below has since been removed; no current
+> generation or low-level API exposes it. None of the historical remap speedups
+> below measures the overlap path; GPU implementation, complete-ledger parity,
+> telemetry, fallback behavior, and new crossover calibration remain pending.
 
 ## Audited target
 
@@ -131,7 +131,7 @@ stage/reason.
 
 ## Kernel design and compiled-resource evidence
 
-The first CUDA tranche accelerates the same four deterministic operation
+The measured first CUDA tranche accelerated four deterministic operation
 families as the established OpenCL path while retaining ordered host inputs
 and complete host results:
 
@@ -142,11 +142,10 @@ and complete host results:
    fields.
 3. Three-field smoothing fuses the three fields so each thread reads the CSR
    row once while preserving each field's original summation order.
-4. The legacy crust-source primitive assigns one warp to each nearest-source
-   query. Warp lanes scan ascending candidate positions cooperatively and reduce
-   `(score, position)` pairs so an exact tie selects the earliest candidate.
-   This kernel remains directly tested but no longer implements production
-   crust transport.
+4. The former crust-source primitive assigned one warp to each nearest-source
+   query. Warp lanes scanned ascending candidate positions cooperatively and
+   reduced `(score, position)` pairs so an exact tie selected the earliest
+   candidate. This historical kernel has since been removed.
 
 The session owns a nonblocking stream, reusable CUDA events and capacity
 buffers, structure-of-arrays mesh coordinates, and CSR adjacency. Mesh uploads
@@ -172,7 +171,7 @@ support the launch-limit, transfer-minimization, and coalescing choices.
 | Plate assignment | 37 | 0 | 0 | 0 |
 | Scalar smoothing | 40 | 0 | 0 | 0 |
 | Fused three-field smoothing | 40 | 0 | 0 | 0 |
-| Legacy crust-source primitive | 40 | 0 | 0 | 0 |
+| Historical crust-source primitive | 40 | 0 | 0 | 0 |
 
 `cuobjdump --list-elf` identifies `cuda_compute.sm_120.cubin`, and
 `--list-ptx` identifies `cuda_compute.sm_120.ptx`. This is direct artifact
@@ -309,8 +308,9 @@ loaded successfully in the driverless, GPU-masked sandbox without a dynamic
 
 ## Profile-driven CPU optimization and remaining limits
 
-Historical sampling showed that, after nearest-source crust remapping, repeated climate humidity paths
-were the next native bottleneck. The CPU reference replaces a heap-allocated
+Historical sampling showed that, after nearest-source crust remapping, repeated
+climate humidity paths were the next native bottleneck. The CPU reference
+replaces a heap-allocated
 `std::set` per cell with a fixed 35-ID visited array and precomputes the strict
 upwind neighbor/alignment for the six prevailing-wind regimes once per climate
 recomputation. Complete physical payload hashes remain identical. Warm native

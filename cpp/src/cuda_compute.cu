@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <iomanip>
@@ -176,69 +175,6 @@ void reduce_crust_overlap_continuous_shadow_kernel(
     output[5U * stride + index] = volume > 0.0
         ? age_moment / volume
         : 0.0;
-}
-
-__global__ __launch_bounds__(CUDA_BLOCK_THREADS) void remap_crust_sources_kernel(
-    const double* __restrict__ mesh_x,
-    const double* __restrict__ mesh_y,
-    const double* __restrict__ mesh_z,
-    const double* __restrict__ query_x,
-    const double* __restrict__ query_y,
-    const double* __restrict__ query_z,
-    const int* __restrict__ current_plate_ids,
-    const int* __restrict__ candidate_offsets,
-    const int* __restrict__ candidate_ids,
-    int cell_count,
-    int* __restrict__ source_cell_ids
-) {
-    const int lane = static_cast<int>(threadIdx.x) & (CUDA_WARP_THREADS - 1);
-    const int warp_in_block = static_cast<int>(threadIdx.x) / CUDA_WARP_THREADS;
-    const int cell_id =
-        static_cast<int>(blockIdx.x) * CUDA_WARPS_PER_BLOCK + warp_in_block;
-    if (cell_id >= cell_count) {
-        return;
-    }
-    constexpr unsigned FULL_WARP = 0xffffffffU;
-    double qx = lane == 0 ? read_only(query_x + cell_id) : 0.0;
-    double qy = lane == 0 ? read_only(query_y + cell_id) : 0.0;
-    double qz = lane == 0 ? read_only(query_z + cell_id) : 0.0;
-    qx = __shfl_sync(FULL_WARP, qx, 0);
-    qy = __shfl_sync(FULL_WARP, qy, 0);
-    qz = __shfl_sync(FULL_WARP, qz, 0);
-    const int plate_id = read_only(current_plate_ids + cell_id);
-    const int begin = read_only(candidate_offsets + plate_id);
-    const int end = read_only(candidate_offsets + plate_id + 1);
-
-    double best_score = -2.0;
-    int best_position = INT_MAX;
-    int best_source = cell_id;
-    for (std::int64_t position = static_cast<std::int64_t>(begin) + lane;
-         position < static_cast<std::int64_t>(end);
-         position += CUDA_WARP_THREADS) {
-        const int candidate = read_only(candidate_ids + position);
-        double score = qx * read_only(mesh_x + candidate);
-        score = score + qy * read_only(mesh_y + candidate);
-        score = score + qz * read_only(mesh_z + candidate);
-        if (score > best_score) {
-            best_score = score;
-            best_position = static_cast<int>(position);
-            best_source = candidate;
-        }
-    }
-    for (int offset = CUDA_WARP_THREADS / 2; offset > 0; offset /= 2) {
-        const double other_score = __shfl_down_sync(FULL_WARP, best_score, offset);
-        const int other_position = __shfl_down_sync(FULL_WARP, best_position, offset);
-        const int other_source = __shfl_down_sync(FULL_WARP, best_source, offset);
-        if (other_score > best_score ||
-            (other_score == best_score && other_position < best_position)) {
-            best_score = other_score;
-            best_position = other_position;
-            best_source = other_source;
-        }
-    }
-    if (lane == 0) {
-        source_cell_ids[cell_id] = best_source;
-    }
 }
 
 // Host-side session implementation follows below. It intentionally lives in
@@ -1386,177 +1322,6 @@ struct CudaComputeSession::Impl {
         finish_operation(started);
     }
 
-    void run_remap_crust_sources(
-        const std::vector<Cell>& cells,
-        const std::vector<Vec3>& backtraced_positions,
-        const std::vector<std::vector<int>>& previous_cells_by_plate,
-        std::vector<int>& source_cell_ids
-    ) {
-        ensure_available();
-        state.error.clear();
-        const ScopedCudaDevice device_guard(selected_device);
-        if (cells.size() != backtraced_positions.size() ||
-            previous_cells_by_plate.empty()) {
-            throw std::runtime_error("CUDA crust-source remap input shape is invalid");
-        }
-        const int cell_count = checked_int_count(
-            cells.size(), "CUDA crust-source remap cell count"
-        );
-        checked_int_count(
-            previous_cells_by_plate.size(), "CUDA crust-source remap plate count"
-        );
-        if (cells.empty()) {
-            source_cell_ids.clear();
-            return;
-        }
-        const auto started = begin_operation();
-
-        std::vector<double> query_x(cells.size());
-        std::vector<double> query_y(cells.size());
-        std::vector<double> query_z(cells.size());
-        std::vector<int> current_plate_ids(cells.size());
-        for (std::size_t index = 0; index < cells.size(); ++index) {
-            query_x[index] = backtraced_positions[index].x;
-            query_y[index] = backtraced_positions[index].y;
-            query_z[index] = backtraced_positions[index].z;
-            const int plate_id = cells[index].plate_id;
-            if (plate_id < 0 ||
-                plate_id >= static_cast<int>(previous_cells_by_plate.size())) {
-                throw std::runtime_error(
-                    "CUDA crust-source remap has an invalid plate id"
-                );
-            }
-            current_plate_ids[index] = plate_id;
-        }
-
-        std::vector<int> candidate_offsets(
-            previous_cells_by_plate.size() + 1U, 0
-        );
-        std::vector<int> candidate_ids;
-        candidate_ids.reserve(cells.size());
-        for (std::size_t plate_id = 0;
-             plate_id < previous_cells_by_plate.size();
-             ++plate_id) {
-            int previous_id = -1;
-            for (int candidate : previous_cells_by_plate[plate_id]) {
-                if (candidate < 0 || candidate >= cell_count ||
-                    candidate <= previous_id) {
-                    throw std::runtime_error(
-                        "CUDA crust-source candidates must be valid ascending cell ids"
-                    );
-                }
-                if (candidate_ids.size() ==
-                    static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-                    throw std::runtime_error(
-                        "CUDA crust-source candidate list exceeds 32-bit kernel indices"
-                    );
-                }
-                candidate_ids.push_back(candidate);
-                previous_id = candidate;
-            }
-            candidate_offsets[plate_id + 1U] =
-                static_cast<int>(candidate_ids.size());
-        }
-        if (candidate_ids.empty()) {
-            throw std::runtime_error("CUDA crust-source remap has no candidates");
-        }
-        ensure_positions(cells);
-        ensure_capacity(remap_query_x, cells.size(), "cudaMalloc(remap query x)");
-        ensure_capacity(remap_query_y, cells.size(), "cudaMalloc(remap query y)");
-        ensure_capacity(remap_query_z, cells.size(), "cudaMalloc(remap query z)");
-        ensure_capacity(remap_plate_ids, cells.size(), "cudaMalloc(remap plate ids)");
-        ensure_capacity(remap_source_ids, cells.size(), "cudaMalloc(remap source ids)");
-        ensure_capacity(
-            remap_candidate_offsets,
-            candidate_offsets.size(),
-            "cudaMalloc(remap candidate offsets)"
-        );
-        ensure_capacity(
-            remap_candidate_ids,
-            candidate_ids.size(),
-            "cudaMalloc(remap candidate ids)"
-        );
-        const std::size_t coordinate_bytes = checked_bytes(
-            cells.size(), sizeof(double), "CUDA remap coordinate upload"
-        );
-        const std::size_t cell_id_bytes = checked_bytes(
-            cells.size(), sizeof(int), "CUDA remap cell-id upload"
-        );
-        const HostToDeviceCopy remap_copies[] = {
-            {remap_query_x.data, query_x.data(), coordinate_bytes},
-            {remap_query_y.data, query_y.data(), coordinate_bytes},
-            {remap_query_z.data, query_z.data(), coordinate_bytes},
-            {remap_plate_ids.data, current_plate_ids.data(), cell_id_bytes},
-            {
-                remap_candidate_offsets.data,
-                candidate_offsets.data(),
-                checked_bytes(
-                    candidate_offsets.size(),
-                    sizeof(int),
-                    "remap candidate-offset upload"
-                )
-            },
-            {
-                remap_candidate_ids.data,
-                candidate_ids.data(),
-                checked_bytes(
-                    candidate_ids.size(), sizeof(int), "remap candidate-id upload"
-                )
-            },
-        };
-        copy_host_to_device_batch(remap_copies, 6);
-
-        const std::uint64_t blocks = static_cast<std::uint64_t>(
-            (cells.size() + CUDA_WARPS_PER_BLOCK - 1U) / CUDA_WARPS_PER_BLOCK
-        );
-        if (blocks > static_cast<std::uint64_t>(state.max_grid_dimensions[0])) {
-            throw std::runtime_error("CUDA crust-source remap grid exceeds device limits");
-        }
-        launch_timed([&] {
-            remap_crust_sources_kernel<<<
-                static_cast<unsigned int>(blocks), CUDA_BLOCK_THREADS, 0, stream
-            >>>(
-                mesh_x.data,
-                mesh_y.data,
-                mesh_z.data,
-                remap_query_x.data,
-                remap_query_y.data,
-                remap_query_z.data,
-                remap_plate_ids.data,
-                remap_candidate_offsets.data,
-                remap_candidate_ids.data,
-                cell_count,
-                remap_source_ids.data
-            );
-            require_cuda(
-                cudaPeekAtLastError(), "remap_crust_sources_kernel launch"
-            );
-        });
-        state.kernel_dispatch_count++;
-        state.crust_source_remap_dispatch_count++;
-        set_last_launch(cells.size(), blocks, CUDA_WARPS_PER_BLOCK);
-        std::vector<int> gpu_source_ids(cells.size());
-        copy_device_to_host(
-            gpu_source_ids.data(), remap_source_ids.data, cell_id_bytes
-        );
-        for (std::size_t index = 0; index < gpu_source_ids.size(); ++index) {
-            const int source_id = gpu_source_ids[index];
-            const int plate_id = current_plate_ids[index];
-            const std::vector<int>& candidates =
-                previous_cells_by_plate[static_cast<std::size_t>(plate_id)];
-            const bool valid = candidates.empty()
-                ? source_id == static_cast<int>(index)
-                : std::binary_search(candidates.begin(), candidates.end(), source_id);
-            if (!valid) {
-                throw std::runtime_error(
-                    "CUDA crust-source remap returned a source outside its plate segment"
-                );
-            }
-        }
-        source_cell_ids = std::move(gpu_source_ids);
-        finish_operation(started);
-    }
-
     void release_all_noexcept() noexcept {
         int device_to_restore = previous_device;
         if (state.available) {
@@ -1583,13 +1348,6 @@ struct CudaComputeSession::Impl {
         release_buffer_noexcept(smooth_b);
         release_buffer_noexcept(smooth_three_a);
         release_buffer_noexcept(smooth_three_b);
-        release_buffer_noexcept(remap_query_x);
-        release_buffer_noexcept(remap_query_y);
-        release_buffer_noexcept(remap_query_z);
-        release_buffer_noexcept(remap_plate_ids);
-        release_buffer_noexcept(remap_candidate_offsets);
-        release_buffer_noexcept(remap_candidate_ids);
-        release_buffer_noexcept(remap_source_ids);
         release_buffer_noexcept(overlap_shadow_destination_offsets);
         release_buffer_noexcept(overlap_shadow_source_cell_ids);
         release_buffer_noexcept(overlap_shadow_area_km2);
@@ -1645,13 +1403,6 @@ struct CudaComputeSession::Impl {
     DeviceBuffer<double> smooth_b;
     DeviceBuffer<double> smooth_three_a;
     DeviceBuffer<double> smooth_three_b;
-    DeviceBuffer<double> remap_query_x;
-    DeviceBuffer<double> remap_query_y;
-    DeviceBuffer<double> remap_query_z;
-    DeviceBuffer<int> remap_plate_ids;
-    DeviceBuffer<int> remap_candidate_offsets;
-    DeviceBuffer<int> remap_candidate_ids;
-    DeviceBuffer<int> remap_source_ids;
     DeviceBuffer<int> overlap_shadow_destination_offsets;
     DeviceBuffer<int> overlap_shadow_source_cell_ids;
     DeviceBuffer<double> overlap_shadow_area_km2;
@@ -1737,25 +1488,6 @@ void CudaComputeSession::run_smooth_three_fields(
             output_a,
             output_b,
             output_c
-        );
-    } catch (const std::exception& error) {
-        impl_->state.error = error.what();
-        throw;
-    }
-}
-
-void CudaComputeSession::run_remap_crust_sources(
-    const std::vector<Cell>& cells,
-    const std::vector<Vec3>& backtraced_positions,
-    const std::vector<std::vector<int>>& previous_cells_by_plate,
-    std::vector<int>& source_cell_ids
-) {
-    try {
-        impl_->run_remap_crust_sources(
-            cells,
-            backtraced_positions,
-            previous_cells_by_plate,
-            source_cell_ids
         );
     } catch (const std::exception& error) {
         impl_->state.error = error.what();

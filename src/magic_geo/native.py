@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import ctypes
 import json
+import math
 import os
 import sys
 from pathlib import Path
 from typing import Any
 
 import msgpack
+
+from .planet_parameters import PLANET_PARAMETER_DEFAULTS
+from .serialization import CURRENT_WORLD_SCHEMA_VERSION, retired_world_schema_fields
 
 
 MESH_BACKEND_IDS = {
@@ -103,11 +107,6 @@ class NativeConfigV3(ctypes.Structure):
     ]
 
 
-# Internal compatibility alias for code that imported the previous private
-# class name while the versioned ABI was being introduced.
-NativeConfig = NativeConfigV3
-
-
 def _library_path() -> Path:
     override = os.environ.get("MAGIC_GEO_NATIVE_LIBRARY")
     if override:
@@ -130,48 +129,40 @@ def _library_path() -> Path:
 
 def _load_library() -> ctypes.CDLL:
     lib = ctypes.CDLL(str(_library_path()))
-    lib.magic_geo_backend_info_json.argtypes = []
-    lib.magic_geo_backend_info_json.restype = ctypes.c_void_p
-    lib.magic_geo_generate_json.argtypes = [ctypes.POINTER(NativeConfigV1)]
-    lib.magic_geo_generate_json.restype = ctypes.c_void_p
-    lib.magic_geo_generate_json_v2.argtypes = [ctypes.POINTER(NativeConfigV2)]
-    lib.magic_geo_generate_json_v2.restype = ctypes.c_void_p
-    generate_v3 = getattr(lib, "magic_geo_generate_json_v3", None)
-    if generate_v3 is not None:
-        generate_v3.argtypes = [ctypes.POINTER(NativeConfigV3)]
-        generate_v3.restype = ctypes.c_void_p
-    geo_generate = getattr(lib, "magic_geo_generate_geo_json_v2", None)
-    if geo_generate is not None:
-        geo_generate.argtypes = [ctypes.POINTER(NativeConfigV2)]
-        geo_generate.restype = ctypes.c_void_p
-    geo_generate_v3 = getattr(lib, "magic_geo_generate_geo_json_v3", None)
-    if geo_generate_v3 is not None:
-        geo_generate_v3.argtypes = [ctypes.POINTER(NativeConfigV3)]
-        geo_generate_v3.restype = ctypes.c_void_p
-    msgpack_generate_v3 = getattr(lib, "magic_geo_generate_msgpack_v3", None)
-    if msgpack_generate_v3 is not None:
-        msgpack_generate_v3.argtypes = [
-            ctypes.POINTER(NativeConfigV3),
-            ctypes.POINTER(ctypes.c_size_t),
-        ]
-        msgpack_generate_v3.restype = ctypes.c_void_p
-    geo_msgpack_generate_v3 = getattr(
-        lib,
-        "magic_geo_generate_geo_msgpack_v3",
-        None,
-    )
-    if geo_msgpack_generate_v3 is not None:
-        geo_msgpack_generate_v3.argtypes = [
-            ctypes.POINTER(NativeConfigV3),
-            ctypes.POINTER(ctypes.c_size_t),
-        ]
-        geo_msgpack_generate_v3.restype = ctypes.c_void_p
-    lib.magic_geo_free_string.argtypes = [ctypes.c_void_p]
-    lib.magic_geo_free_string.restype = None
-    free_buffer = getattr(lib, "magic_geo_free_buffer", None)
-    if free_buffer is not None:
-        free_buffer.argtypes = [ctypes.c_void_p]
-        free_buffer.restype = None
+    try:
+        backend_info = lib.magic_geo_backend_info_json
+        generate_v3 = lib.magic_geo_generate_json_v3
+        geo_generate_v3 = lib.magic_geo_generate_geo_json_v3
+        msgpack_generate_v3 = lib.magic_geo_generate_msgpack_v3
+        geo_msgpack_generate_v3 = lib.magic_geo_generate_geo_msgpack_v3
+        free_string = lib.magic_geo_free_string
+        free_buffer = lib.magic_geo_free_buffer
+    except AttributeError as exc:
+        raise RuntimeError(
+            "native library does not expose the current V3 JSON and MessagePack ABI; "
+            "rebuild magic_geo_native from the current source tree"
+        ) from exc
+
+    backend_info.argtypes = []
+    backend_info.restype = ctypes.c_void_p
+    generate_v3.argtypes = [ctypes.POINTER(NativeConfigV3)]
+    generate_v3.restype = ctypes.c_void_p
+    geo_generate_v3.argtypes = [ctypes.POINTER(NativeConfigV3)]
+    geo_generate_v3.restype = ctypes.c_void_p
+    msgpack_generate_v3.argtypes = [
+        ctypes.POINTER(NativeConfigV3),
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    msgpack_generate_v3.restype = ctypes.c_void_p
+    geo_msgpack_generate_v3.argtypes = [
+        ctypes.POINTER(NativeConfigV3),
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    geo_msgpack_generate_v3.restype = ctypes.c_void_p
+    free_string.argtypes = [ctypes.c_void_p]
+    free_string.restype = None
+    free_buffer.argtypes = [ctypes.c_void_p]
+    free_buffer.restype = None
     return lib
 
 
@@ -195,11 +186,7 @@ def _consume_msgpack_pointer(
     ptr: int,
     size: int,
 ) -> dict[str, Any]:
-    free_buffer = getattr(lib, "magic_geo_free_buffer", None)
-    if free_buffer is None:
-        raise RuntimeError(
-            "native library exposes MessagePack generation without its buffer releaser"
-        )
+    free_buffer = lib.magic_geo_free_buffer
     if not ptr:
         raise RuntimeError("native library returned a null MessagePack pointer")
     if size <= 0:
@@ -241,6 +228,53 @@ def _consume_msgpack_pointer(
         raise RuntimeError("native MessagePack root is not an object")
     if "error" in payload:
         raise RuntimeError(str(payload["error"]))
+    return payload
+
+
+def _require_current_world_schema(payload: dict[str, Any]) -> dict[str, Any]:
+    actual = payload.get("schema_version") if isinstance(payload, dict) else None
+    if type(actual) is not int or actual != CURRENT_WORLD_SCHEMA_VERSION:
+        raise RuntimeError(
+            "native library returned unsupported world schema_version "
+            f"{actual!r}; expected {CURRENT_WORLD_SCHEMA_VERSION}; rebuild "
+            "magic_geo_native from the current source tree"
+        )
+    retired_fields = retired_world_schema_fields(payload)
+    if retired_fields:
+        raise RuntimeError(
+            "native library returned retired fields in a schema-2 world: "
+            + ", ".join(retired_fields)
+        )
+    parameters = payload.get("planet_parameters")
+    if not isinstance(parameters, dict):
+        raise RuntimeError(
+            "native library returned schema 2 without explicit planet_parameters"
+        )
+    missing_parameters = set(PLANET_PARAMETER_DEFAULTS) - set(parameters)
+    if missing_parameters:
+        raise RuntimeError(
+            "native library returned an incomplete planet_parameters snapshot: "
+            + ", ".join(sorted(missing_parameters))
+        )
+    for key in PLANET_PARAMETER_DEFAULTS:
+        raw = parameters[key]
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise RuntimeError(
+                f"native library returned invalid planet_parameters.{key}"
+            )
+        try:
+            value = float(raw)
+        except OverflowError as exc:
+            raise RuntimeError(
+                f"native library returned invalid planet_parameters.{key}"
+            ) from exc
+        if not math.isfinite(value) or (
+            key in {"radius_km", "gravity_g", "geological_age_ga"}
+            and value <= 0.0
+        ):
+            raise RuntimeError(
+                f"native library returned invalid planet_parameters.{key}"
+            )
     return payload
 
 
@@ -318,31 +352,24 @@ def generate_world(
     serialization: str = "auto",
 ) -> dict[str, Any]:
     lib = _load_library()
-    generate_v3 = getattr(lib, "magic_geo_generate_json_v3", None)
-    if generate_v3 is None:
-        raise RuntimeError(
-            "native library does not support the nominal maturation clock; "
-            "rebuild magic_geo_native from the current source tree"
-        )
     native_config = _native_config(data)
     if serialization not in {"auto", "json", "msgpack"}:
         raise ValueError("serialization must be auto, json, or msgpack")
-    msgpack_generate_v3 = getattr(lib, "magic_geo_generate_msgpack_v3", None)
-    free_buffer = getattr(lib, "magic_geo_free_buffer", None)
-    if serialization == "msgpack" and (
-        msgpack_generate_v3 is None or free_buffer is None
-    ):
-        raise RuntimeError(
-            "native library does not support MessagePack generation; rebuild "
-            "magic_geo_native from the current source tree"
-        )
-    if msgpack_generate_v3 is not None and free_buffer is not None and (
-        serialization in {"auto", "msgpack"}
-    ):
+    if serialization in {"auto", "msgpack"}:
         size = ctypes.c_size_t()
-        ptr = msgpack_generate_v3(ctypes.byref(native_config), ctypes.byref(size))
-        return _consume_msgpack_pointer(lib, ptr, size.value)
-    return _consume_json_pointer(lib, generate_v3(ctypes.byref(native_config)))
+        ptr = lib.magic_geo_generate_msgpack_v3(
+            ctypes.byref(native_config),
+            ctypes.byref(size),
+        )
+        return _require_current_world_schema(
+            _consume_msgpack_pointer(lib, ptr, size.value)
+        )
+    return _require_current_world_schema(
+        _consume_json_pointer(
+            lib,
+            lib.magic_geo_generate_json_v3(ctypes.byref(native_config)),
+        )
+    )
 
 
 def generate_geo_world(
@@ -351,39 +378,21 @@ def generate_geo_world(
     serialization: str = "auto",
 ) -> dict[str, Any]:
     lib = _load_library()
-    geo_generate_v3 = getattr(lib, "magic_geo_generate_geo_json_v3", None)
-    if geo_generate_v3 is None:
-        raise RuntimeError(
-            "native library does not support geo-only generation with the "
-            "nominal maturation clock; rebuild "
-            "magic_geo_native from the current source tree"
-        )
     native_config = _native_config(data)
     if serialization not in {"auto", "json", "msgpack"}:
         raise ValueError("serialization must be auto, json, or msgpack")
-    geo_msgpack_generate_v3 = getattr(
-        lib,
-        "magic_geo_generate_geo_msgpack_v3",
-        None,
-    )
-    free_buffer = getattr(lib, "magic_geo_free_buffer", None)
-    if serialization == "msgpack" and (
-        geo_msgpack_generate_v3 is None or free_buffer is None
-    ):
-        raise RuntimeError(
-            "native library does not support geo-only MessagePack generation; "
-            "rebuild magic_geo_native from the current source tree"
-        )
-    if geo_msgpack_generate_v3 is not None and free_buffer is not None and (
-        serialization in {"auto", "msgpack"}
-    ):
+    if serialization in {"auto", "msgpack"}:
         size = ctypes.c_size_t()
-        ptr = geo_msgpack_generate_v3(
+        ptr = lib.magic_geo_generate_geo_msgpack_v3(
             ctypes.byref(native_config),
             ctypes.byref(size),
         )
-        return _consume_msgpack_pointer(lib, ptr, size.value)
-    return _consume_json_pointer(
-        lib,
-        geo_generate_v3(ctypes.byref(native_config)),
+        return _require_current_world_schema(
+            _consume_msgpack_pointer(lib, ptr, size.value)
+        )
+    return _require_current_world_schema(
+        _consume_json_pointer(
+            lib,
+            lib.magic_geo_generate_geo_json_v3(ctypes.byref(native_config)),
+        )
     )

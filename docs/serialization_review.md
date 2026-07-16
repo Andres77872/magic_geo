@@ -12,9 +12,9 @@ JSON remains the default, stable interchange format. The project now also has:
   generated world; and
 - a reproducible serialization benchmark.
 
-No world schema was replaced. Both transports produce the same Python
-dictionary after the native serializer's established rounding rules have been
-applied.
+World content now uses schema 2 after retiring schema-1 compatibility fields.
+Both transports produce the same schema-2 Python dictionary after the native
+serializer's established rounding rules have been applied.
 
 ## Audit findings
 
@@ -44,8 +44,9 @@ Python aliases.
 
 Important compatibility constraints found during the review:
 
-- `schema_version` remains the world-content schema. It is independent of the
-  `.mgeo` container version.
+- `schema_version` remains the world-content schema. Current generation emits
+  version 2 after retiring schema-1 compatibility fields; it is independent of
+  the `.mgeo` container version.
 - Critical native numeric fields already use binary64 round-trip JSON text;
   other fields deliberately use configured decimal precision. The optimized
   native path transcodes that same JSON document, so downstream calculations
@@ -145,10 +146,10 @@ Native C++ and C ABI additions:
 
 The C ABI returns a byte pointer and explicit `size_t`; it never treats binary
 data as a NUL-terminated string. Python uses a `memoryview` over that allocation,
-decodes it without an intermediate bytes copy, and frees it afterward. Current
-libraries use this path automatically; older libraries without the new symbols
-fall back to JSON. Callers can request `serialization="json"` or
-`serialization="msgpack"` explicitly for testing and compatibility.
+decodes it without an intermediate bytes copy, and frees it afterward. The
+Python package requires the current V3 JSON and MessagePack symbols when loading
+the native library. Callers can request `serialization="json"` or
+`serialization="msgpack"` explicitly for transport parity testing.
 
 The generation command remains JSON by default, based on its default filename:
 

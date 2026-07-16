@@ -232,7 +232,7 @@ effectively `-O0`. A Release build is likely several-fold faster for free.
 | Data | GUI use |
 |---|---|
 | 160–400 per-cell fields (elevation, monthly climate, hydrology with `flow_to`/accumulation, sediment, cryosphere, soils/biomes, political/culture/language ids) | Dozens of choropleth layers, zero new computation |
-| `hydrologic_water_budget_history` (17 per-cell arrays × 16 recomputes), `plate_motion_history` (per-cell plate/crust provenance per step), hillslope/fluvial/glacial per-edge ledgers, depression-fill events with breach paths, `earth_system_feedback_history` (~110 scalars/stage) | Stage/time scrubbing, per-cell ledger drill-down, convergence sparklines |
+| `hydrologic_water_budget_history` (17 per-cell arrays × 16 recomputes), `plate_motion_history` (per-cell plate/crust provenance per step), hillslope/fluvial/glacial per-edge ledgers, depression-correction events with breach paths and counterfactual fill candidates, `earth_system_feedback_history` | Stage/time scrubbing, per-cell ledger drill-down, convergence sparklines |
 | `position_3d`/`normal_3d`, boundary rings + quality metrics, 24-field adjacency edges, watershed/territorial boundary polylines | 3D globe geometry, edge/boundary overlays |
 | `mesh_lod` quadtree tiles, HEALPix/S2-like indices | LOD/culling scaffolding at scale |
 | Five graphs (plate/river/watershed/trade/political), settlements/routes/dynasties/cultures/markets/campaigns with self-describing model-provenance records | Node-link views, entity pages, "why is this here" panels |

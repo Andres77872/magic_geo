@@ -71,3 +71,17 @@ class WebDocumentationTests(TestCase):
 
         self.assertIn("Remaining limitations", review)
         self.assertIn("Verification evidence", review)
+
+    def test_layer_reference_generation_uses_current_cache_and_variable_stage_counts(
+        self,
+    ) -> None:
+        generator = Path("scripts/gen_layers_reference.mjs").read_text(encoding="utf-8")
+        catalog = Path("src/magic_geo/debug_ui/layer_docs.js").read_text(
+            encoding="utf-8"
+        )
+        reference = Path("docs/layers_reference.md").read_text(encoding="utf-8")
+
+        self.assertIn("runs/debug/manifest.json", generator)
+        self.assertNotIn("runs/earthlike/debug/manifest.json", generator)
+        for text in (generator, catalog, reference):
+            self.assertNotIn("1,600", text)

@@ -14,7 +14,7 @@ struct EarthSystemState {
     CrustDryRockAccountingState crust_dry_rock_accounting;
     std::vector<Plate> plates;
     std::vector<PlateMotionStep> plate_motion_history;
-    std::vector<NumericDepressionFillEvent> numeric_depression_fill_history;
+    std::vector<NumericDepressionCorrectionEvent> numeric_depression_correction_history;
     std::vector<HydrologicWaterBudgetStage> hydrologic_water_budget_history;
     std::vector<EarthSystemFeedbackStep> feedback_history;
     std::vector<FluvialSedimentRoutingStage> sediment_routing_history;

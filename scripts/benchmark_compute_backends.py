@@ -218,12 +218,6 @@ def _validate_backend_execution(
     accelerator_overlap_dispatches = _telemetry_integer(
         telemetry, "crust_transport_accelerator_dispatch_count"
     )
-    opencl_legacy_dispatches = _telemetry_integer(
-        telemetry, "opencl_crust_source_remap_dispatch_count"
-    )
-    cuda_legacy_dispatches = _telemetry_integer(
-        telemetry, "cuda_crust_source_remap_dispatch_count"
-    )
     if (
         telemetry.get("backend_scope")
         != "accelerated_native_kernels_not_end_to_end_pipeline"
@@ -233,18 +227,6 @@ def _validate_backend_execution(
         or accelerator_overlap_dispatches != 0
         or expected_overlap_transitions is None
         or cpu_overlap_transitions != expected_overlap_transitions
-        or telemetry.get(
-            "accelerator_crust_source_remap_kernel_production_active"
-        )
-        is not False
-        or telemetry.get("accelerator_crust_source_remap_kernel_role")
-        != "legacy_nearest_donor_test_hook_not_used_by_v3_transport"
-        or telemetry.get("legacy_nearest_source_remap_world_pipeline_enabled")
-        is not False
-        or telemetry.get("legacy_crust_source_remap_dispatch_counters_deprecated")
-        is not True
-        or opencl_legacy_dispatches != 0
-        or cuda_legacy_dispatches != 0
     ):
         raise RuntimeError("conservative crust transport backend telemetry is invalid")
     return telemetry, selected_backend

@@ -1980,14 +1980,15 @@ def _world_metric_values(world: dict[str, Any]) -> dict[str, float]:
 
     watersheds = world.get("watersheds", [])
     if isinstance(watersheds, list) and watersheds:
+        if not all(isinstance(watershed, dict) for watershed in watersheds):
+            raise CalibrationError("each world watershed must be an object")
         hack_length_presence = ["main_channel_length_km" in watershed for watershed in watersheds]
         if any(hack_length_presence) and not all(hack_length_presence):
             raise CalibrationError("world watersheds must provide main_channel_length_km consistently")
-        outlet_semantics_presence = [
+        if not all(
             "is_endorheic" in watershed and "outlet_type" in watershed
             for watershed in watersheds
-        ]
-        if any(outlet_semantics_presence) and not all(outlet_semantics_presence):
+        ):
             raise CalibrationError(
                 "world watersheds must provide is_endorheic and outlet_type consistently"
             )
@@ -1998,8 +1999,6 @@ def _world_metric_values(world: dict[str, Any]) -> dict[str, float]:
         watershed_area = 0.0
         endorheic_area = 0.0
         for watershed in watersheds:
-            if not isinstance(watershed, dict):
-                raise CalibrationError("each world watershed must be an object")
             try:
                 area = float(watershed["area_km2"])
             except (KeyError, TypeError, ValueError) as exc:
@@ -2020,38 +2019,32 @@ def _world_metric_values(world: dict[str, Any]) -> dict[str, float]:
                     and area >= HACK_FIT_MINIMUM_BASIN_AREA_KM2
                 ):
                     hack_observations.append((area, main_channel_length))
-            if all(outlet_semantics_presence):
-                is_endorheic_raw = watershed["is_endorheic"]
-                outlet_type_raw = watershed["outlet_type"]
-                if not isinstance(is_endorheic_raw, bool):
-                    raise CalibrationError(
-                        "world watershed is_endorheic must be boolean"
-                    )
-                if not isinstance(outlet_type_raw, str) or not outlet_type_raw:
-                    raise CalibrationError(
-                        "world watershed outlet_type must be a non-empty string"
-                    )
-                is_endorheic = is_endorheic_raw
-                outlet_type = outlet_type_raw
-                if (outlet_type == "ocean") == is_endorheic:
-                    raise CalibrationError(
-                        "world watershed ocean outlet_type conflicts with is_endorheic"
-                    )
-                if (
-                    all(hack_length_presence)
-                    and not is_endorheic
-                    and outlet_type == "ocean"
-                    and main_channel_length > 0.0
-                    and area >= HACK_FIT_MINIMUM_BASIN_AREA_KM2
-                ):
-                    exorheic_backbone_hack_observations.append(
-                        (area, main_channel_length)
-                    )
-            else:
-                # Legacy worlds may omit outlet semantics. Their all-terminal
-                # diagnostics remain reconstructible, but they cannot be used
-                # for the source-matched HydroRIVERS exorheic population.
-                is_endorheic = bool(watershed.get("is_endorheic", False))
+            is_endorheic_raw = watershed["is_endorheic"]
+            outlet_type_raw = watershed["outlet_type"]
+            if not isinstance(is_endorheic_raw, bool):
+                raise CalibrationError(
+                    "world watershed is_endorheic must be boolean"
+                )
+            if not isinstance(outlet_type_raw, str) or not outlet_type_raw:
+                raise CalibrationError(
+                    "world watershed outlet_type must be a non-empty string"
+                )
+            is_endorheic = is_endorheic_raw
+            outlet_type = outlet_type_raw
+            if (outlet_type == "ocean") == is_endorheic:
+                raise CalibrationError(
+                    "world watershed ocean outlet_type conflicts with is_endorheic"
+                )
+            if (
+                all(hack_length_presence)
+                and not is_endorheic
+                and outlet_type == "ocean"
+                and main_channel_length > 0.0
+                and area >= HACK_FIT_MINIMUM_BASIN_AREA_KM2
+            ):
+                exorheic_backbone_hack_observations.append(
+                    (area, main_channel_length)
+                )
             watershed_count += 1
             watershed_area += area
             if is_endorheic:
@@ -2079,7 +2072,7 @@ def _world_metric_values(world: dict[str, Any]) -> dict[str, float]:
                 if centroid_latitude < _HYDROBASINS_GENERATED_MIN_CENTROID_LAT_DEG:
                     continue
                 area = float(watershed["area_km2"])
-                is_endorheic = bool(watershed.get("is_endorheic", False))
+                is_endorheic = watershed["is_endorheic"]
                 coverage_watershed_count += 1
                 coverage_watershed_area += area
                 if is_endorheic:

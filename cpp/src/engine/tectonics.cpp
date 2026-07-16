@@ -484,7 +484,6 @@ void derive_crust_and_topography(
             (oceanic ? 260.0 : 620.0) * n0 +
             180.0 * std::sin(9.0 * cell.lon + 4.0 * cell.lat);
         cell.initial_isostatic_elevation_m = isostatic;
-        cell.initial_thermal_subsidence_m = thermal;
         cell.thermal_subsidence_target_m = thermal;
         cell.initial_ridge_uplift_m = ridge;
         cell.initial_orogenic_uplift_m = orogen;
@@ -505,10 +504,6 @@ void derive_crust_and_topography(
             maturation_timestep_scale(params);
         cell.elevation_m = cell.initial_elevation_m;
         cell.initial_plate_id = cell.plate_id;
-        cell.last_crust_source_cell_id = cell.id;
-        cell.initial_crust_age_ma = cell.crust_age_ma;
-        cell.initial_crust_thickness_km = cell.crust_thickness_km;
-        cell.initial_crust_density = cell.crust_density;
     }
     for (Cell& cell : cells) {
         initialize_sediment_interface(cell, "initial topography");
@@ -664,11 +659,6 @@ PlateMotionStep summarize_plate_motion_step(
     step.control_volume_boundary_incident_cell_count = static_cast<int>(
         boundary_incident_cell_ids.size()
     );
-    step.crust_source_cell_ids = crust_motion.source_cell_ids;
-    if (step.crust_source_cell_ids.size() != cells.size()) {
-        step.crust_source_cell_ids.resize(cells.size());
-        std::iota(step.crust_source_cell_ids.begin(), step.crust_source_cell_ids.end(), 0);
-    }
     step.crust_transport_distance_km_by_cell = crust_motion.transport_distance_km_by_cell;
     step.crust_age_transport_change_ma_by_cell = crust_motion.age_transport_change_ma_by_cell;
     step.crust_thickness_transport_change_km_by_cell = crust_motion.thickness_transport_change_km_by_cell;
@@ -707,7 +697,6 @@ PlateMotionStep summarize_plate_motion_step(
     step.previous_local_thermal_subsidence_target_m.reserve(cells.size());
     step.post_process_local_thermal_subsidence_target_m.reserve(cells.size());
     step.thermal_equilibrium_change_m.reserve(cells.size());
-    step.thermal_target_difference_tendency_m.reserve(cells.size());
     step.unbounded_dynamic_relief_change_m.reserve(cells.size());
     step.bounded_dynamic_relief_change_m.reserve(cells.size());
     step.boundary_convergent_by_cell.reserve(cells.size());
@@ -716,7 +705,6 @@ PlateMotionStep summarize_plate_motion_step(
 
     std::vector<int> plate_cell_counts(plates.size(), 0);
     std::vector<double> plate_areas(plates.size(), 0.0);
-    std::unordered_set<int> unique_crust_sources;
     for (std::size_t index = 0; index < cells.size(); ++index) {
         const Cell& cell = cells[index];
         step.cell_plate_ids.push_back(cell.plate_id);
@@ -771,18 +759,18 @@ PlateMotionStep summarize_plate_motion_step(
                 "plate-motion thermal checkpoint is non-finite or stale"
             );
         }
-        const double expected_thermal_target_difference_tendency_m =
+        const double expected_thermal_equilibrium_change_m =
             OCEANIC_AGE_DEPTH_TARGET_DIFFERENCE_GAIN * (
                 cell.thermal_subsidence_target_m -
                     previous_thermal_subsidence_m
             );
-        const double recorded_thermal_target_difference_tendency_m =
+        const double recorded_thermal_equilibrium_change_m =
             thermal_equilibrium_change_m[index];
-        if (!std::isfinite(recorded_thermal_target_difference_tendency_m) ||
-            recorded_thermal_target_difference_tendency_m !=
-                expected_thermal_target_difference_tendency_m) {
+        if (!std::isfinite(recorded_thermal_equilibrium_change_m) ||
+            recorded_thermal_equilibrium_change_m !=
+                expected_thermal_equilibrium_change_m) {
             throw std::runtime_error(
-                "plate-motion thermal equilibrium tendency is non-finite or stale"
+                "plate-motion thermal equilibrium change is non-finite or stale"
             );
         }
         const double expected_bounded_dynamic_relief_change_m = clamp(
@@ -802,7 +790,7 @@ PlateMotionStep summarize_plate_motion_step(
         }
         const double expected_tectonic_elevation_change_m =
             expected_isostatic_equilibrium_change_m +
-            expected_thermal_target_difference_tendency_m +
+            expected_thermal_equilibrium_change_m +
             expected_bounded_dynamic_relief_change_m;
         if (
             index >= tectonic_elevation_change_m.size() ||
@@ -830,10 +818,7 @@ PlateMotionStep summarize_plate_motion_step(
             cell.thermal_subsidence_target_m
         );
         step.thermal_equilibrium_change_m.push_back(
-            recorded_thermal_target_difference_tendency_m
-        );
-        step.thermal_target_difference_tendency_m.push_back(
-            recorded_thermal_target_difference_tendency_m
+            recorded_thermal_equilibrium_change_m
         );
         step.unbounded_dynamic_relief_change_m.push_back(
             unbounded_dynamic_relief_change_m[index]
@@ -841,11 +826,6 @@ PlateMotionStep summarize_plate_motion_step(
         step.bounded_dynamic_relief_change_m.push_back(
             bounded_dynamic_relief_change_m[index]
         );
-        const int source_cell_id = step.crust_source_cell_ids[index];
-        if (source_cell_id != static_cast<int>(index)) {
-            step.crust_source_remap_cell_count++;
-        }
-        unique_crust_sources.insert(source_cell_id);
         const double transport_distance_km = step.crust_transport_distance_km_by_cell[index];
         step.mean_crust_transport_distance_km += transport_distance_km;
         step.max_crust_transport_distance_km = std::max(
@@ -908,8 +888,6 @@ PlateMotionStep summarize_plate_motion_step(
     }
 
     const double cell_divisor = cells.empty() ? 1.0 : static_cast<double>(cells.size());
-    step.unique_crust_source_cell_count = static_cast<int>(unique_crust_sources.size());
-    step.crust_source_reuse_count = static_cast<int>(cells.size()) - step.unique_crust_source_cell_count;
     step.reassigned_cell_fraction = static_cast<double>(step.reassigned_cell_count) / cell_divisor;
     step.mean_crust_transport_distance_km /= cell_divisor;
     step.mean_abs_crust_age_change_ma /= cell_divisor;
@@ -1186,8 +1164,6 @@ std::vector<double> advance_plate_motion_and_crust(
         crust_material_shadow
     );
     record_cpu_conservative_crust_overlap_transition();
-    crust_motion.source_cell_ids =
-        crust_motion.transport_plan.dominant_source_cell_ids;
     crust_motion.transport_distance_km_by_cell.assign(static_cast<std::size_t>(n), 0.0);
     crust_motion.age_transport_change_ma_by_cell.assign(static_cast<std::size_t>(n), 0.0);
     crust_motion.thickness_transport_change_km_by_cell.assign(static_cast<std::size_t>(n), 0.0);
@@ -1272,7 +1248,6 @@ std::vector<double> advance_plate_motion_and_crust(
     for (int i = 0; i < n; ++i) {
         Cell& cell = cells[static_cast<std::size_t>(i)];
         const std::size_t index = static_cast<std::size_t>(i);
-        const std::size_t source_index = static_cast<std::size_t>(crust_motion.source_cell_ids[index]);
         const int old_plate_id = previous_plate_ids[index];
         const bool plate_changed = cell.plate_id != old_plate_id;
         const bool local_old_oceanic = is_oceanic_crust_state(
@@ -1578,11 +1553,7 @@ std::vector<double> advance_plate_motion_and_crust(
         cell.crust_age_ma = crust_age;
         cell.crust_thickness_km = crust_thickness;
         cell.crust_density = crust_density;
-        cell.last_crust_source_cell_id = static_cast<int>(source_index);
         cell.cumulative_crust_transport_distance_km += crust_motion.transport_distance_km_by_cell[index];
-        if (source_index != index) {
-            cell.crust_source_remap_event_count++;
-        }
         if (crust_motion.age_process_change_ma_by_cell[index] > 1.0e-6 && old_oceanic) {
             aged_oceanic_flags[index] = 1;
             cell.oceanic_crust_aging_event_count++;
@@ -1620,16 +1591,16 @@ std::vector<double> advance_plate_motion_and_crust(
                 crust_age,
                 new_oceanic
             );
-        const double thermal_target_difference_tendency =
+        const double thermal_equilibrium_change =
             OCEANIC_AGE_DEPTH_TARGET_DIFFERENCE_GAIN * (
                 new_thermal_subsidence_m - old_thermal_subsidence_m
             );
-        if (!std::isfinite(thermal_target_difference_tendency)) {
+        if (!std::isfinite(thermal_equilibrium_change)) {
             crust_material_errors[index] =
-                "non-finite oceanic age-depth equilibrium tendency";
+                "non-finite oceanic age-depth equilibrium change";
         }
         thermal_equilibrium_change_m[index] =
-            thermal_target_difference_tendency;
+            thermal_equilibrium_change;
         cell.thermal_subsidence_target_m = new_thermal_subsidence_m;
         cell.volcanic_potential_index = clamp(
             0.42 * div + 0.38 * conv * (crust_type == 3 ? 1.0 : 0.35) +
@@ -1657,7 +1628,7 @@ std::vector<double> advance_plate_motion_and_crust(
         // crust-state transition, with no carried residual.  Only the
         // heuristic dynamic relief increment remains bounded here.
         const double equilibrium_change =
-            isostatic_equilibrium_tendency_m + thermal_target_difference_tendency;
+            isostatic_equilibrium_tendency_m + thermal_equilibrium_change;
         const double unbounded_dynamic_relief_change =
             cell.uplift_rate * TECTONIC_UPLIFT_RATE_RESPONSE_FRACTION +
             boundary_change;

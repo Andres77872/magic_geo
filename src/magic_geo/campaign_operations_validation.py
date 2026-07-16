@@ -829,8 +829,6 @@ def _expected_campaign_operations(
         conflict.pop("tactical_engagement_id", None)
         conflict.pop("strategic_campaign_plan_id", None)
     cells = payload["cells"]
-    # Legacy artifacts predate planet_parameters and were generated at Earth
-    # scale; planet_radius_km preserves that replay behavior only for them.
     radius_km = planet_radius_km(payload)
     settlement_regions = _settlement_regions(payload)
     borders_by_pair = _border_by_pair(payload)
@@ -1421,6 +1419,10 @@ def _contains_expected(actual: Any, expected: Any) -> bool:
 
 
 def validate_campaign_operations_replay(payload: dict[str, Any]) -> list[str]:
+    try:
+        planet_radius_km(payload)
+    except ValueError as exc:
+        return [f"campaign operations replay rejected: {exc}"]
     try:
         summary = payload.get("summary", {})
         required_lists = (

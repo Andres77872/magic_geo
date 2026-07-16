@@ -44,25 +44,45 @@ def planet_parameter_snapshot(planet: Any | None = None) -> dict[str, float]:
     """Return the stable top-level planet snapshot used by Python enrichers."""
 
     return {
-        key: round(_value(planet, key, default), 6)
+        key: _value(planet, key, default)
         for key, default in PLANET_PARAMETER_DEFAULTS.items()
     }
 
 
-def planet_radius_km(world: dict[str, Any]) -> float:
-    """Read configured radius, retaining Earth scale for legacy payloads."""
+def _positive_world_parameter(world: dict[str, Any], key: str) -> float:
+    if not isinstance(world, dict):
+        raise ValueError("world must be an object")
+    if "planet_parameters" not in world:
+        raise ValueError("world must provide planet_parameters")
+    parameters = world["planet_parameters"]
+    if not isinstance(parameters, dict):
+        raise ValueError("planet_parameters must be an object")
+    if key not in parameters:
+        raise ValueError(f"planet_parameters.{key} is required")
+    raw = parameters[key]
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError(f"planet_parameters.{key} must be numeric")
+    try:
+        value = float(raw)
+    except OverflowError as exc:
+        raise ValueError(
+            f"planet_parameters.{key} must be finite and positive"
+        ) from exc
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError(f"planet_parameters.{key} must be finite and positive")
+    return value
 
-    parameters = world.get("planet_parameters", {})
-    radius = _value(parameters if isinstance(parameters, dict) else None, "radius_km", EARTH_RADIUS_KM)
-    return radius if radius > 0.0 else EARTH_RADIUS_KM
+
+def planet_radius_km(world: dict[str, Any]) -> float:
+    """Read the required finite, positive configured planet radius."""
+
+    return _positive_world_parameter(world, "radius_km")
 
 
 def planet_gravity_g(world: dict[str, Any]) -> float:
-    """Read configured relative surface gravity with a legacy Earth default."""
+    """Read the required finite, positive relative surface gravity."""
 
-    parameters = world.get("planet_parameters", {})
-    gravity = _value(parameters if isinstance(parameters, dict) else None, "gravity_g", 1.0)
-    return gravity if gravity > 0.0 else 1.0
+    return _positive_world_parameter(world, "gravity_g")
 
 
 def surface_gravity_m_s2(

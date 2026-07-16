@@ -45,7 +45,7 @@ Original issue: the resolved fetch was guarded only with
 `if (state.activeLayer !== layer)` — object identity. Scrubbing the same layer issued
 concurrent fetches for different stages; the guard passed for all of them, so whichever
 response resolved **last** won, not the one matching the UI state (easy to hit on the
-1,600-stage `numeric_depression_fill_history`).
+1,600-stage `numeric_depression_correction_history`).
 
 ### F2 — High-cardinality string fields are dropped silently (confirmed, contract violation — **fixed**)
 
@@ -171,7 +171,7 @@ With 446 layers, search is the primary navigation — this deserves a fix.
 - Every layer request re-reads Parquet through DuckDB with no server-side caching; fine at
   32k cells (415-column file, but projection pushdown keeps it cheap), will not scale to
   million-cell runs. An in-memory LRU of materialized columns is the obvious lever.
-- `numeric_depression_fill_history` has 1,600 stages; scrubbing it end-to-end is 1,600
+- `numeric_depression_correction_history` has 1,600 stages; scrubbing it end-to-end is 1,600
   requests (×5 with prefetch). Server-side downsampling or range requests would help.
 - Stats for `numeric_monthly` layers are computed over all 12 months flattened
   ([debug_export.py:213](../src/magic_geo/debug_export.py:213)), and `numeric_stage` stats
@@ -209,7 +209,7 @@ With 446 layers, search is the primary navigation — this deserves a fix.
 ## 4. Reviewed inventory snapshot (earthlike run)
 
 - 446 layers = 415 `cells/*` + 16 `hydrologic_water_budget_history/*` +
-  11 `numeric_depression_fill_history/*` + 4 `monthly/*`.
+  11 `numeric_depression_correction_history/*` + 4 `monthly/*`.
 - 47 categorical layers, 2–18 categories each; 64-category limit not hit by any kept layer.
 - Stage histories: water budget 16 stages (8 clock stages × recomputes), depression fill
   1,600 stages.

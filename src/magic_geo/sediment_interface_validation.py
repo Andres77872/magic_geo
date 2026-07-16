@@ -69,7 +69,6 @@ INTERFACE_REPLAY_INPUT_DECIMAL_PRECISION = 8
 
 INITIAL_ELEVATION_COMPONENT_FIELDS = (
     "initial_isostatic_elevation_m",
-    "initial_thermal_subsidence_m",
     "initial_ridge_uplift_m",
     "initial_orogenic_uplift_m",
     "initial_volcanic_uplift_m",
@@ -283,6 +282,15 @@ def validate_sediment_interfaces(world: Any) -> dict[str, Any]:
             == "zero_depth_all_cells_v1",
             "initial mobile sediment state is not the declared zero state",
         )
+        plate_history = _records(
+            world.get("plate_motion_history"), "plate_motion_history"
+        )
+        _require(plate_history, "plate motion history is empty")
+        initial_thermal_targets = _cell_array(
+            plate_history[0],
+            "post_process_local_thermal_subsidence_target_m",
+            cell_count=cell_count,
+        )
 
         bedrock = [0.0] * cell_count
         mobile = [0.0] * cell_count
@@ -303,6 +311,7 @@ def validate_sediment_interfaces(world: Any) -> dict[str, Any]:
                 _finite(cell.get(field), field)
                 for field in INITIAL_ELEVATION_COMPONENT_FIELDS
             ]
+            initial_components.append(initial_thermal_targets[cell_id])
             reconstructed_initial = math.fsum(initial_components)
             initial_bound = _replay_tolerance(
                 actual=initial,
@@ -344,9 +353,6 @@ def validate_sediment_interfaces(world: Any) -> dict[str, Any]:
                 _integer(record.get("id"), "feedback.id") == expected_id,
                 "feedback IDs are not canonical",
             )
-        plate_history = _records(
-            world.get("plate_motion_history"), "plate_motion_history"
-        )
         plate_by_id: dict[int, Mapping[str, Any]] = {}
         for record in plate_history:
             record_id = _integer(record.get("id"), "plate_motion.id")
@@ -390,8 +396,8 @@ def validate_sediment_interfaces(world: Any) -> dict[str, Any]:
         )
         numeric_by_feedback: dict[int, list[Mapping[str, Any]]] = defaultdict(list)
         for expected_event_id, event in enumerate(_records(
-            world.get("numeric_depression_fill_history"),
-            "numeric_depression_fill_history",
+            world.get("numeric_depression_correction_history"),
+            "numeric_depression_correction_history",
         )):
             _require(
                 _integer(event.get("id"), "numeric.id") == expected_event_id,

@@ -2037,25 +2037,12 @@ async function switchWorld() {
 async function loadServerStatus() {
   const requestId = ++state.statusRequest;
   let status;
-  let legacyManifest = null;
   try {
     status = await fetchJson('/api/status');
   } catch (error) {
     if (requestId !== state.statusRequest) return state.status;
-    if (error.status !== 404) {
-      showStatusRefreshFailure(error);
-      return state.status;
-    }
-    // Compatibility with a pre-workbench server: a readable manifest proves a cache exists.
-    legacyManifest = await optionalJson('/api/manifest');
-    if (requestId !== state.statusRequest) return state.status;
-    status = {
-      cache_available: Boolean(legacyManifest),
-      cache_dir: legacyManifest ? 'legacy-debug-cache' : null,
-      cache_revision: legacyManifest?.generated_at ?? null,
-      workspace: 'legacy debug cache',
-      version: 1,
-    };
+    showStatusRefreshFailure(error);
+    return state.status;
   }
   if (requestId !== state.statusRequest) return state.status;
 
@@ -2065,7 +2052,6 @@ async function loadServerStatus() {
     state.cacheIdentity = nextIdentity;
   }
   applyServerStatus(status);
-  if (legacyManifest && state.cacheAvailable) state.manifest = legacyManifest;
   void refreshWorlds();
 
   if (state.cacheAvailable) {

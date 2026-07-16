@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ctypes
 import json
 import struct
 from copy import deepcopy
@@ -11,6 +10,7 @@ from unittest.mock import patch
 from magic_geo import native as native_module
 from magic_geo.config import config_to_native, load_config
 from magic_geo.native import generate_geo_world, generate_world
+from magic_geo.planet_parameters import planet_parameter_snapshot
 
 
 class NativeMessagePackTests(TestCase):
@@ -18,11 +18,14 @@ class NativeMessagePackTests(TestCase):
         config = load_config(Path("configs/earthlike_seed.yaml"))
         data = config.model_dump(mode="python")
         data["run"]["name"] = "binary \"world\"\n🌍\u0001"
+        data["planet"]["radius_km"] = 6200.123456789
+        data["planet"]["gravity_g"] = 0.987654321
         data["mesh"]["cell_count"] = 128
         data["tectonics"]["plate_count"] = 8
         data["erosion"]["iterations"] = 0
         data["output"]["include_cells"] = True
-        native = config_to_native(type(config).model_validate(data))
+        configured = type(config).model_validate(data)
+        native = config_to_native(configured)
 
         json_world = generate_world(native, serialization="json")
         msgpack_world = generate_world(native, serialization="msgpack")
@@ -31,6 +34,9 @@ class NativeMessagePackTests(TestCase):
 
         self.assertEqual(msgpack_world, json_world)
         self.assertEqual(msgpack_geo_world, json_geo_world)
+        expected_planet = planet_parameter_snapshot(configured.planet)
+        self.assertEqual(json_world["planet_parameters"], expected_planet)
+        self.assertEqual(json_geo_world["planet_parameters"], expected_planet)
         self.assertEqual(msgpack_world["name"], data["run"]["name"])
         self.assertEqual(
             json.dumps(msgpack_world, sort_keys=True, separators=(",", ":")),
@@ -60,33 +66,70 @@ class NativeMessagePackTests(TestCase):
         with self.assertRaisesRegex(ValueError, "auto, json, or msgpack"):
             generate_world(native, serialization="unknown")
 
-    def test_auto_mode_falls_back_to_json_for_current_older_library(self) -> None:
+    def test_generation_rejects_a_symbol_complete_stale_world_schema(self) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))
         native = config_to_native(config)
-        raw = ctypes.create_string_buffer(
-            b'{"schema_version":1,"source":"json fallback"}'
-        )
 
-        class JsonOnlyLibrary:
+        class StaleLibrary:
             @staticmethod
-            def magic_geo_generate_json_v3(_config: object) -> int:
-                return ctypes.addressof(raw)
+            def magic_geo_generate_json_v3(*_args: object) -> int:
+                return 1
 
-            @staticmethod
-            def magic_geo_free_string(_pointer: object) -> None:
-                return None
+            magic_geo_generate_geo_json_v3 = magic_geo_generate_json_v3
+            magic_geo_generate_msgpack_v3 = magic_geo_generate_json_v3
+            magic_geo_generate_geo_msgpack_v3 = magic_geo_generate_json_v3
 
-        with patch.object(
-            native_module,
-            "_load_library",
-            return_value=JsonOnlyLibrary(),
+        stale_payload = {"schema_version": 1}
+        with (
+            patch.object(native_module, "_load_library", return_value=StaleLibrary()),
+            patch.object(
+                native_module,
+                "_consume_json_pointer",
+                return_value=stale_payload,
+            ),
+            patch.object(
+                native_module,
+                "_consume_msgpack_pointer",
+                return_value=stale_payload,
+            ),
         ):
-            self.assertEqual(
-                generate_world(native),
-                {"schema_version": 1, "source": "json fallback"},
+            for generator in (generate_world, generate_geo_world):
+                for serialization in ("json", "msgpack"):
+                    with self.subTest(
+                        generator=generator.__name__,
+                        serialization=serialization,
+                    ):
+                        with self.assertRaisesRegex(
+                            RuntimeError,
+                            "unsupported world schema_version 1; expected 2",
+                        ):
+                            generator(native, serialization=serialization)
+
+        for stale_payload in ({"schema_version": 2.0}, {"schema_version": True}, {}):
+            with self.subTest(stale_payload=stale_payload):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "unsupported world schema_version",
+                ):
+                    native_module._require_current_world_schema(stale_payload)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "retired fields",
+        ):
+            native_module._require_current_world_schema(
+                {
+                    "schema_version": 2,
+                    "plate_kinematic_model": {
+                        "accelerator_crust_source_remap_kernel_used": False,
+                    },
+                }
             )
-            with self.assertRaisesRegex(RuntimeError, "does not support MessagePack"):
-                generate_world(native, serialization="msgpack")
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "without explicit planet_parameters",
+        ):
+            native_module._require_current_world_schema({"schema_version": 2})
 
     def test_native_library_probe_prefers_the_host_format(self) -> None:
         expected = {

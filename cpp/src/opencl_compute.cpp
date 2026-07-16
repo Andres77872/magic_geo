@@ -662,42 +662,6 @@ __kernel void reduce_crust_overlap_continuous_shadow(
         : 0.0;
 }
 
-__kernel void remap_crust_sources(
-    __global const double4* mesh_positions,
-    __global const double4* backtraced_positions,
-    __global const int* current_plate_ids,
-    __global const int* candidate_offsets,
-    __global const int* candidate_ids,
-    const int plate_count,
-    const int cell_count,
-    __global int* source_cell_ids
-) {
-    const int cell_id = (int)get_global_id(0);
-    if (cell_id >= cell_count) {
-        return;
-    }
-    const int plate_id = current_plate_ids[cell_id];
-    if (plate_id < 0 || plate_id >= plate_count) {
-        source_cell_ids[cell_id] = -1;
-        return;
-    }
-    const double4 query = backtraced_positions[cell_id];
-    const int begin = candidate_offsets[plate_id];
-    const int end = candidate_offsets[plate_id + 1];
-    int best_source = cell_id;
-    double best_score = -2.0;
-    for (int position = begin; position < end; ++position) {
-        const int candidate = candidate_ids[position];
-        const double4 source = mesh_positions[candidate];
-        const double score =
-            query.x * source.x + query.y * source.y + query.z * source.z;
-        if (score > best_score) {
-            best_score = score;
-            best_source = candidate;
-        }
-    }
-    source_cell_ids[cell_id] = best_source;
-}
 )CLC";
 
 std::string json_escape_local(const std::string& value) {
@@ -1200,21 +1164,6 @@ struct ComputeSession::Impl {
         runtime_ready = true;
     }
 
-    void ensure_legacy_remap_kernel() {
-        if (remap_kernel != nullptr) {
-            return;
-        }
-        cl_int rc = CL_SUCCESS;
-        remap_kernel = api->create_kernel(program, "remap_crust_sources", &rc);
-        require_success(rc, "clCreateKernel(remap_crust_sources legacy test hook)");
-        if (remap_kernel == nullptr) {
-            throw std::runtime_error(
-                "clCreateKernel(remap_crust_sources legacy test hook) returned null"
-            );
-        }
-        remap_local_work_size = choose_local_work_size(remap_kernel);
-    }
-
     std::size_t choose_local_work_size(cl_kernel kernel) const {
         const DeviceRecord* record = selected_device();
         if (record == nullptr) {
@@ -1283,11 +1232,6 @@ struct ComputeSession::Impl {
         release_mem(smooth_b_buffer);
         release_mem(smooth_three_a_buffer);
         release_mem(smooth_three_b_buffer);
-        release_mem(remap_query_buffer);
-        release_mem(remap_plate_id_buffer);
-        release_mem(remap_candidate_offset_buffer);
-        release_mem(remap_candidate_id_buffer);
-        release_mem(remap_source_id_buffer);
         release_mem(overlap_shadow_destination_offset_buffer);
         release_mem(overlap_shadow_source_id_buffer);
         release_mem(overlap_shadow_area_buffer);
@@ -1298,9 +1242,6 @@ struct ComputeSession::Impl {
         plate_capacity = 0;
         smooth_capacity = 0;
         smooth_three_capacity = 0;
-        remap_cell_capacity = 0;
-        remap_plate_capacity = 0;
-        remap_candidate_capacity = 0;
         overlap_shadow_cell_capacity = 0;
         overlap_shadow_edge_capacity = 0;
         if (assign_kernel != nullptr && api) {
@@ -1314,10 +1255,6 @@ struct ComputeSession::Impl {
         if (smooth_three_kernel != nullptr && api) {
             api->release_kernel(smooth_three_kernel);
             smooth_three_kernel = nullptr;
-        }
-        if (remap_kernel != nullptr && api) {
-            api->release_kernel(remap_kernel);
-            remap_kernel = nullptr;
         }
         if (overlap_shadow_kernel != nullptr && api) {
             api->release_kernel(overlap_shadow_kernel);
@@ -1516,52 +1453,6 @@ struct ComputeSession::Impl {
             CL_MEM_READ_WRITE, bytes, "batched smoothing output buffer allocation"
         );
         smooth_three_capacity = cell_count;
-    }
-
-    void ensure_remap_buffers(
-        std::size_t cell_count,
-        std::size_t plate_count,
-        std::size_t candidate_count
-    ) {
-        if (cell_count > remap_cell_capacity) {
-            release_mem(remap_query_buffer);
-            release_mem(remap_plate_id_buffer);
-            release_mem(remap_source_id_buffer);
-            remap_query_buffer = create_buffer(
-                CL_MEM_READ_ONLY,
-                cell_count * sizeof(PackedVec4),
-                "crust remap query buffer allocation"
-            );
-            remap_plate_id_buffer = create_buffer(
-                CL_MEM_READ_ONLY,
-                cell_count * sizeof(cl_int),
-                "crust remap plate buffer allocation"
-            );
-            remap_source_id_buffer = create_buffer(
-                CL_MEM_READ_WRITE,
-                cell_count * sizeof(cl_int),
-                "crust remap output buffer allocation"
-            );
-            remap_cell_capacity = cell_count;
-        }
-        if (plate_count + 1 > remap_plate_capacity) {
-            release_mem(remap_candidate_offset_buffer);
-            remap_candidate_offset_buffer = create_buffer(
-                CL_MEM_READ_ONLY,
-                (plate_count + 1) * sizeof(cl_int),
-                "crust remap candidate-offset buffer allocation"
-            );
-            remap_plate_capacity = plate_count + 1;
-        }
-        if (candidate_count > remap_candidate_capacity) {
-            release_mem(remap_candidate_id_buffer);
-            remap_candidate_id_buffer = create_buffer(
-                CL_MEM_READ_ONLY,
-                candidate_count * sizeof(cl_int),
-                "crust remap candidate-id buffer allocation"
-            );
-            remap_candidate_capacity = candidate_count;
-        }
     }
 
     static std::size_t checked_opencl_bytes(
@@ -2139,166 +2030,6 @@ struct ComputeSession::Impl {
         last_local_work_size = overlap_shadow_local_work_size;
     }
 
-    void run_remap_crust_sources(
-        const std::vector<Cell>& cells,
-        const std::vector<Vec3>& backtraced_positions,
-        const std::vector<std::vector<int>>& previous_cells_by_plate,
-        std::vector<int>& source_cell_ids
-    ) {
-        if (!runtime_ready || selected_backend != "opencl") {
-            throw std::runtime_error("OpenCL crust-source remap runtime is not active");
-        }
-        if (cells.size() != backtraced_positions.size() ||
-            previous_cells_by_plate.empty()) {
-            throw std::runtime_error("OpenCL crust-source remap input shape is invalid");
-        }
-        if (cells.size() > static_cast<std::size_t>(std::numeric_limits<cl_int>::max()) ||
-            previous_cells_by_plate.size() >
-                static_cast<std::size_t>(std::numeric_limits<cl_int>::max())) {
-            throw std::runtime_error("OpenCL crust-source remap exceeds 32-bit kernel indices");
-        }
-        ensure_legacy_remap_kernel();
-
-        std::vector<PackedVec4> packed_queries(cells.size());
-        std::vector<cl_int> current_plate_ids(cells.size(), -1);
-        for (std::size_t index = 0; index < cells.size(); ++index) {
-            const Vec3& query = backtraced_positions[index];
-            packed_queries[index] = {query.x, query.y, query.z, 0.0};
-            const int plate_id = cells[index].plate_id;
-            if (plate_id < 0 ||
-                plate_id >= static_cast<int>(previous_cells_by_plate.size())) {
-                throw std::runtime_error("OpenCL crust-source remap has an invalid plate id");
-            }
-            current_plate_ids[index] = static_cast<cl_int>(plate_id);
-        }
-
-        std::vector<cl_int> candidate_offsets(
-            previous_cells_by_plate.size() + 1, 0
-        );
-        std::vector<cl_int> candidate_ids;
-        candidate_ids.reserve(cells.size());
-        for (std::size_t plate_id = 0;
-             plate_id < previous_cells_by_plate.size();
-             ++plate_id) {
-            int previous_id = -1;
-            for (int candidate : previous_cells_by_plate[plate_id]) {
-                if (candidate < 0 || candidate >= static_cast<int>(cells.size()) ||
-                    candidate <= previous_id) {
-                    throw std::runtime_error(
-                        "OpenCL crust-source candidates must be valid ascending cell ids"
-                    );
-                }
-                candidate_ids.push_back(static_cast<cl_int>(candidate));
-                previous_id = candidate;
-            }
-            if (candidate_ids.size() >
-                static_cast<std::size_t>(std::numeric_limits<cl_int>::max())) {
-                throw std::runtime_error(
-                    "OpenCL crust-source candidate list exceeds 32-bit kernel indices"
-                );
-            }
-            candidate_offsets[plate_id + 1] =
-                static_cast<cl_int>(candidate_ids.size());
-        }
-        if (candidate_ids.empty()) {
-            throw std::runtime_error("OpenCL crust-source remap has no candidates");
-        }
-
-        ensure_positions(cells);
-        ensure_remap_buffers(
-            cells.size(), previous_cells_by_plate.size(), candidate_ids.size()
-        );
-        write_buffer(
-            remap_query_buffer,
-            packed_queries.size() * sizeof(PackedVec4),
-            packed_queries.data()
-        );
-        write_buffer(
-            remap_plate_id_buffer,
-            current_plate_ids.size() * sizeof(cl_int),
-            current_plate_ids.data()
-        );
-        write_buffer(
-            remap_candidate_offset_buffer,
-            candidate_offsets.size() * sizeof(cl_int),
-            candidate_offsets.data()
-        );
-        write_buffer(
-            remap_candidate_id_buffer,
-            candidate_ids.size() * sizeof(cl_int),
-            candidate_ids.data()
-        );
-
-        const cl_int plate_count =
-            static_cast<cl_int>(previous_cells_by_plate.size());
-        const cl_int cell_count = static_cast<cl_int>(cells.size());
-        set_arg(remap_kernel, 0, sizeof(position_buffer), &position_buffer);
-        set_arg(remap_kernel, 1, sizeof(remap_query_buffer), &remap_query_buffer);
-        set_arg(remap_kernel, 2, sizeof(remap_plate_id_buffer), &remap_plate_id_buffer);
-        set_arg(
-            remap_kernel,
-            3,
-            sizeof(remap_candidate_offset_buffer),
-            &remap_candidate_offset_buffer
-        );
-        set_arg(
-            remap_kernel,
-            4,
-            sizeof(remap_candidate_id_buffer),
-            &remap_candidate_id_buffer
-        );
-        set_arg(remap_kernel, 5, sizeof(plate_count), &plate_count);
-        set_arg(remap_kernel, 6, sizeof(cell_count), &cell_count);
-        set_arg(
-            remap_kernel, 7, sizeof(remap_source_id_buffer), &remap_source_id_buffer
-        );
-
-        const std::size_t global = rounded_global_size(
-            cells.size(), remap_local_work_size
-        );
-        require_success(
-            api->enqueue_ndrange_kernel(
-                queue,
-                remap_kernel,
-                1,
-                nullptr,
-                &global,
-                &remap_local_work_size,
-                0,
-                nullptr,
-                nullptr
-            ),
-            "clEnqueueNDRangeKernel(remap_crust_sources)"
-        );
-        std::vector<cl_int> gpu_source_ids(cells.size(), -1);
-        read_buffer(
-            remap_source_id_buffer,
-            gpu_source_ids.size() * sizeof(cl_int),
-            gpu_source_ids.data()
-        );
-
-        source_cell_ids.resize(gpu_source_ids.size());
-        for (std::size_t index = 0; index < gpu_source_ids.size(); ++index) {
-            const int source_id = static_cast<int>(gpu_source_ids[index]);
-            const int plate_id = current_plate_ids[index];
-            const std::vector<int>& candidates =
-                previous_cells_by_plate[static_cast<std::size_t>(plate_id)];
-            const bool valid_source = candidates.empty()
-                ? source_id == static_cast<int>(index)
-                : std::binary_search(candidates.begin(), candidates.end(), source_id);
-            if (!valid_source) {
-                throw std::runtime_error(
-                    "OpenCL crust-source remap returned a source outside its plate segment"
-                );
-            }
-            source_cell_ids[index] = source_id;
-        }
-        kernel_dispatch_count++;
-        crust_remap_dispatch_count++;
-        last_global_work_size = global;
-        last_local_work_size = remap_local_work_size;
-    }
-
     std::string json() const {
         std::string output = "{";
         bool first = true;
@@ -2585,30 +2316,6 @@ struct ComputeSession::Impl {
             "crust_overlap_continuous_shadow_maximum_error_to_bound_ratio",
             crust_overlap_continuous_shadow_maxima.maximum_error_to_bound_ratio
         );
-        json_bool(
-            output,
-            first,
-            "accelerator_crust_source_remap_kernel_production_active",
-            false
-        );
-        json_bool(
-            output,
-            first,
-            "legacy_nearest_source_remap_world_pipeline_enabled",
-            false
-        );
-        json_bool(
-            output,
-            first,
-            "legacy_crust_source_remap_dispatch_counters_deprecated",
-            true
-        );
-        json_string(
-            output,
-            first,
-            "accelerator_crust_source_remap_kernel_role",
-            "legacy_nearest_donor_test_hook_not_used_by_v3_transport"
-        );
         json_integer(
             output, first, "automatic_planning_cell_count", auto_planning_cell_count
         );
@@ -2783,12 +2490,6 @@ struct ComputeSession::Impl {
         json_integer(
             output,
             first,
-            "cuda_crust_source_remap_dispatch_count",
-            cuda.crust_source_remap_dispatch_count
-        );
-        json_integer(
-            output,
-            first,
             "cuda_crust_overlap_continuous_shadow_dispatch_count",
             cuda.crust_overlap_continuous_shadow_dispatch_count
         );
@@ -2903,12 +2604,6 @@ struct ComputeSession::Impl {
             first,
             "opencl_batched_smoothing_kernel_dispatch_count",
             batched_smoothing_kernel_dispatch_count
-        );
-        json_integer(
-            output,
-            first,
-            "opencl_crust_source_remap_dispatch_count",
-            crust_remap_dispatch_count
         );
         json_integer(
             output,
@@ -3073,7 +2768,6 @@ struct ComputeSession::Impl {
     cl_kernel smooth_kernel = nullptr;
     cl_kernel smooth_three_kernel = nullptr;
     cl_kernel overlap_shadow_kernel = nullptr;
-    cl_kernel remap_kernel = nullptr;
     bool runtime_ready = false;
     bool program_built = false;
     bool program_ever_built = false;
@@ -3081,7 +2775,6 @@ struct ComputeSession::Impl {
     std::size_t smooth_local_work_size = 1;
     std::size_t smooth_three_local_work_size = 1;
     std::size_t overlap_shadow_local_work_size = 1;
-    std::size_t remap_local_work_size = 1;
 
     const Cell* mesh_identity = nullptr;
     std::size_t mesh_cell_count = 0;
@@ -3096,11 +2789,6 @@ struct ComputeSession::Impl {
     cl_mem smooth_b_buffer = nullptr;
     cl_mem smooth_three_a_buffer = nullptr;
     cl_mem smooth_three_b_buffer = nullptr;
-    cl_mem remap_query_buffer = nullptr;
-    cl_mem remap_plate_id_buffer = nullptr;
-    cl_mem remap_candidate_offset_buffer = nullptr;
-    cl_mem remap_candidate_id_buffer = nullptr;
-    cl_mem remap_source_id_buffer = nullptr;
     cl_mem overlap_shadow_destination_offset_buffer = nullptr;
     cl_mem overlap_shadow_source_id_buffer = nullptr;
     cl_mem overlap_shadow_area_buffer = nullptr;
@@ -3111,9 +2799,6 @@ struct ComputeSession::Impl {
     std::size_t plate_capacity = 0;
     std::size_t smooth_capacity = 0;
     std::size_t smooth_three_capacity = 0;
-    std::size_t remap_cell_capacity = 0;
-    std::size_t remap_plate_capacity = 0;
-    std::size_t remap_candidate_capacity = 0;
     std::size_t overlap_shadow_cell_capacity = 0;
     std::size_t overlap_shadow_edge_capacity = 0;
 
@@ -3123,7 +2808,6 @@ struct ComputeSession::Impl {
     std::uint64_t smoothing_kernel_dispatch_count = 0;
     std::uint64_t batched_smoothing_operation_count = 0;
     std::uint64_t batched_smoothing_kernel_dispatch_count = 0;
-    std::uint64_t crust_remap_dispatch_count = 0;
     std::uint64_t crust_overlap_continuous_shadow_dispatch_count = 0;
     std::uint64_t host_to_device_bytes = 0;
     std::uint64_t device_to_host_bytes = 0;
@@ -3269,45 +2953,6 @@ bool try_accelerated_smooth_three_fields(
         active_compute_session->fall_back_to_cpu(
             "batched_neighbor_field_smoothing", error.what()
         );
-        return false;
-    }
-}
-
-bool try_accelerated_remap_crust_sources(
-    const std::vector<Cell>& cells,
-    const std::vector<Vec3>& backtraced_positions,
-    const std::vector<std::vector<int>>& previous_cells_by_plate,
-    std::vector<int>& source_cell_ids
-) {
-    if (active_compute_session == nullptr) {
-        return false;
-    }
-    try {
-        active_compute_session->ensure_auto_backend(cells.size());
-        if (active_compute_session->selected_backend == "cuda") {
-            active_compute_session->cuda_session->run_remap_crust_sources(
-                cells,
-                backtraced_positions,
-                previous_cells_by_plate,
-                source_cell_ids
-            );
-        } else if (active_compute_session->selected_backend == "opencl") {
-            active_compute_session->run_remap_crust_sources(
-                cells,
-                backtraced_positions,
-                previous_cells_by_plate,
-                source_cell_ids
-            );
-        } else {
-            return false;
-        }
-        return true;
-    } catch (const std::exception& error) {
-        if (active_compute_session->requested_backend == 2 ||
-            active_compute_session->requested_backend == 3) {
-            throw;
-        }
-        active_compute_session->fall_back_to_cpu("crust_source_remap", error.what());
         return false;
     }
 }

@@ -14,6 +14,7 @@ from .geo_evolution_provenance import validate_geo_evolution_provenance
 from .geo_layer_contracts import evaluate_geo_layer_contracts
 from .geo_validation_physics import validate_physics_replays
 from .geo_validation_subsystems import validate_natural_subsystems
+from .serialization import CURRENT_WORLD_SCHEMA_VERSION, retired_world_schema_fields
 
 
 GEO_VALIDATION_SCHEMA_VERSION = 1
@@ -241,6 +242,32 @@ def _area_weighted_mean(cells: list[dict[str, Any]], field: str) -> float:
     ) / total_area
 
 
+def _initial_crust_numeric_state(
+    world: dict[str, Any], cell_count: int
+) -> tuple[list[float], list[float], list[float]] | None:
+    history = world.get("plate_motion_history")
+    if not isinstance(history, list) or not history or not isinstance(history[0], dict):
+        return None
+    ledger = history[0].get("crust_overlap_ledger")
+    if not isinstance(ledger, dict):
+        return None
+    columns: list[list[float]] = []
+    for field in (
+        "remapped_crust_age_ma_by_cell",
+        "remapped_crust_thickness_km_by_cell",
+        "remapped_crust_density_by_cell",
+    ):
+        values = ledger.get(field)
+        if (
+            not isinstance(values, list)
+            or len(values) != cell_count
+            or any(not _finite_number(value) for value in values)
+        ):
+            return None
+        columns.append([float(value) for value in values])
+    return columns[0], columns[1], columns[2]
+
+
 def _check(
     checks: list[dict[str, Any]],
     *,
@@ -383,23 +410,27 @@ def extract_geo_metrics(world: dict[str, Any]) -> dict[str, Any]:
         if isinstance(record, dict)
         and _finite_number(record.get("cumulative_rotation_deg"))
     ] if isinstance(plates, list) else []
+    initial_crust_state = _initial_crust_numeric_state(world, len(cells))
+    if initial_crust_state is None:
+        initial_crust_state = ([0.0] * len(cells),) * 3
+    initial_ages, initial_thicknesses, initial_densities = initial_crust_state
     crust_evolved_cell_count = sum(
         abs(
             float(cell.get("crust_age_ma", 0.0))
-            - float(cell.get("initial_crust_age_ma", 0.0))
+            - initial_ages[cell_id]
         )
         > 1.0e-6
         or abs(
             float(cell.get("crust_thickness_km", 0.0))
-            - float(cell.get("initial_crust_thickness_km", 0.0))
+            - initial_thicknesses[cell_id]
         )
         > 1.0e-6
         or abs(
             float(cell.get("crust_density", 0.0))
-            - float(cell.get("initial_crust_density", 0.0))
+            - initial_densities[cell_id]
         )
         > 1.0e-6
-        for cell in cells
+        for cell_id, cell in enumerate(cells)
     )
     reassigned_plate_cell_count = sum(
         int(cell.get("plate_assignment_change_count", 0)) > 0 for cell in cells
@@ -794,6 +825,28 @@ def _validate_geo_world_impl(
         return _finalize_report(profile, {}, checks)
     summary = world.get("summary", {})
     cells = world.get("cells", [])
+    _check(
+        checks,
+        domain="contract",
+        name="world_schema_version",
+        passed=(
+            type(world.get("schema_version")) is int
+            and world["schema_version"] == CURRENT_WORLD_SCHEMA_VERSION
+        ),
+        message="natural-world validation requires the current world schema",
+        observed=world.get("schema_version"),
+        expected=CURRENT_WORLD_SCHEMA_VERSION,
+    )
+    retired_fields = retired_world_schema_fields(world)
+    _check(
+        checks,
+        domain="contract",
+        name="retired_world_schema_fields",
+        passed=not retired_fields,
+        message="schema-1 compatibility fields must not reappear in current worlds",
+        observed=list(retired_fields),
+        expected=[],
+    )
     if not isinstance(summary, dict):
         _check(
             checks,
@@ -868,6 +921,39 @@ def _validate_geo_world_impl(
         },
         expected={"planet_parameter_keys": sorted(required_planet_parameters)},
     )
+    expected_climate_contract = {
+        "model_type": "equilibrium_latitude_circulation_climate_v5",
+        "precipitation_model": (
+            "bounded_thermal_moisture_circulation_orography_wind_transport_v3"
+        ),
+        "negative_precipitation_behavior": (
+            "clamped_to_zero_before_thermal_moisture_multiplier"
+        ),
+        "zero_precipitation_scale_behavior": (
+            "exact_zero_monthly_and_annual_precipitation"
+        ),
+    }
+    climate_model = world.get("climate_model")
+    observed_climate_contract = (
+        {
+            key: climate_model.get(key)
+            for key in expected_climate_contract
+        }
+        if isinstance(climate_model, dict)
+        else None
+    )
+    _check(
+        checks,
+        domain="contract",
+        name="current_climate_model",
+        passed=observed_climate_contract == expected_climate_contract,
+        message=(
+            "natural-world validation requires the current climate and "
+            "precipitation semantics"
+        ),
+        observed=observed_climate_contract,
+        expected=expected_climate_contract,
+    )
     all_cells_are_objects = all(isinstance(cell, dict) for cell in cells)
     cell_ids = [cell.get("id") for cell in cells if isinstance(cell, dict)]
     integer_ids = all(isinstance(cell_id, int) and not isinstance(cell_id, bool) for cell_id in cell_ids)
@@ -898,7 +984,6 @@ def _validate_geo_world_impl(
         "runoff_mm_y",
         "flow_accumulation",
         "hydrologic_surface_elevation_m",
-        "initial_crust_age_ma",
         "crust_age_ma",
         "ice_thickness_m",
         "groundwater_recharge_source_infiltration_mm_y",
@@ -1208,21 +1293,23 @@ def _validate_geo_world_impl(
         observed={"plate_count": len(plate_ids), "invalid_cell_count": len(invalid_plate_cells)},
         expected="all cells assigned",
     )
+    initial_crust_state = _initial_crust_numeric_state(world, len(cells))
+    _check(
+        checks,
+        domain="tectonics",
+        name="initial_crust_identity_checkpoint",
+        passed=initial_crust_state is not None,
+        message="plate-motion step zero must provide complete numeric initial crust state",
+        observed="complete" if initial_crust_state is not None else "missing_or_invalid",
+        expected="complete step-zero overlap ledger",
+    )
+    initial_ages = initial_crust_state[0] if initial_crust_state is not None else []
     maximum_planet_crust_age_ma = _planet_value(world, "geological_age_ga", 4.5) * 1000.0
-    maximum_generated_crust_age_ma = max(
-        max(
-            float(cell.get("crust_age_ma", 0.0)),
-            float(cell.get("initial_crust_age_ma", 0.0)),
-        )
-        for cell in cells
-    )
-    minimum_generated_crust_age_ma = min(
-        min(
-            float(cell.get("crust_age_ma", 0.0)),
-            float(cell.get("initial_crust_age_ma", 0.0)),
-        )
-        for cell in cells
-    )
+    generated_crust_ages = [
+        float(cell.get("crust_age_ma", 0.0)) for cell in cells
+    ] + initial_ages
+    maximum_generated_crust_age_ma = max(generated_crust_ages, default=0.0)
+    minimum_generated_crust_age_ma = min(generated_crust_ages, default=0.0)
     _check(
         checks,
         domain="tectonics",
@@ -1858,7 +1945,7 @@ def _validate_geo_world_impl(
                     sum(float(record[history_field]) for record in history)
                     - sediment_number(model, model_field)
                 )
-    numeric_history = world.get("numeric_depression_fill_history", [])
+    numeric_history = world.get("numeric_depression_correction_history", [])
     if isinstance(numeric_history, list) and all(
         isinstance(record, dict)
         and _finite_number(record.get("applied_breach_excavation_volume_km3"))

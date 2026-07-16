@@ -24,6 +24,7 @@ import msgpack
 
 WorldFormat = Literal["auto", "json", "mgeo", "msgpack", "binary"]
 
+CURRENT_WORLD_SCHEMA_VERSION = 2
 MGEO_MAGIC = b"MGEO\r\n\x1a\n"
 MGEO_VERSION_MAJOR = 1
 MGEO_VERSION_MINOR = 0
@@ -62,6 +63,163 @@ def _world_schema(payload: dict[str, Any]) -> int:
             "binary worlds require an integer schema_version between 0 and 2^32-1"
         )
     return schema
+
+
+def retired_world_schema_fields(payload: dict[str, Any]) -> tuple[str, ...]:
+    """Return retired fields and container aliases forbidden in current worlds."""
+
+    found: list[str] = []
+
+    def record_object_fields(
+        object_name: str,
+        field_names: tuple[str, ...],
+    ) -> None:
+        value = payload.get(object_name)
+        if not isinstance(value, dict):
+            return
+        found.extend(
+            f"{object_name}.{field_name}"
+            for field_name in field_names
+            if field_name in value
+        )
+
+    record_object_fields(
+        "simulation_clock",
+        ("legacy_mean_erosion_rate_field_semantics",),
+    )
+    record_object_fields(
+        "plate_kinematic_model",
+        (
+            "accelerator_crust_source_remap_kernel_used",
+            "legacy_crust_source_cell_id_semantics",
+            "legacy_crust_source_remap_event_semantics",
+            "legacy_crust_source_reuse_count_semantics",
+        ),
+    )
+    record_object_fields(
+        "backend",
+        (
+            "accelerator_crust_source_remap_kernel_production_active",
+            "accelerator_crust_source_remap_kernel_role",
+            "legacy_nearest_source_remap_world_pipeline_enabled",
+            "legacy_crust_source_remap_dispatch_counters_deprecated",
+            "opencl_crust_source_remap_dispatch_count",
+            "cuda_crust_source_remap_dispatch_count",
+        ),
+    )
+    record_object_fields(
+        "climate_model",
+        (
+            "positive_precipitation_pre_thermal_annual_floor_mm",
+            "positive_precipitation_effective_annual_floor_mm",
+            "positive_precipitation_floor_application",
+        ),
+    )
+    record_object_fields(
+        "oceanic_age_depth_model",
+        (
+            "thermal_target_difference_tendency_formula",
+            "thermal_target_difference_tendency_application",
+            "thermal_target_difference_tendency_compatibility_alias",
+            "thermal_target_difference_tendency_application_replayed",
+        ),
+    )
+    record_object_fields(
+        "initial_oceanic_crust_age_model",
+        (
+            "compatibility_cell_alias_location",
+            "compatibility_history_alias_location",
+            "compatibility_alias_scope",
+        ),
+    )
+    record_object_fields(
+        "summary",
+        (
+            "total_crust_source_remap_event_count",
+            "total_crust_source_reuse_count",
+            "numeric_depression_fill_max_pass_count",
+            "numeric_depression_fill_pass_count",
+            "numeric_depression_fill_event_count",
+            "numeric_depression_fill_cell_application_count",
+            "numeric_depression_filled_unique_cell_count",
+            "numeric_depression_fill_geologic_source_event_count",
+            "numeric_depression_fill_area_km2",
+            "numeric_depression_fill_volume_km3",
+            "mean_numeric_depression_fill_depth_m",
+            "max_numeric_depression_fill_depth_m",
+            "cumulative_numeric_depression_fill_sum_m",
+            "max_cumulative_numeric_depression_fill_m",
+            "numeric_depression_unbalanced_fill_event_count",
+        ),
+    )
+    if "numeric_depression_fill_history" in payload:
+        found.append("numeric_depression_fill_history")
+
+    cells = payload.get("cells")
+    if isinstance(cells, list):
+        for index, cell in enumerate(cells):
+            if not isinstance(cell, dict):
+                continue
+            for field_name in (
+                "last_crust_source_cell_id",
+                "crust_source_remap_event_count",
+                "initial_crust_age_ma",
+                "initial_crust_thickness_km",
+                "initial_crust_density",
+                "initial_thermal_subsidence_m",
+                "sediment_production_m",
+                "cumulative_numeric_depression_fill_m",
+                "numeric_depression_fill_event_count",
+            ):
+                if field_name in cell:
+                    found.append(f"cells[{index}].{field_name}")
+
+    feedback_history = payload.get("earth_system_feedback_history")
+    if isinstance(feedback_history, list):
+        for index, step in enumerate(feedback_history):
+            if not isinstance(step, dict):
+                continue
+            for field_name in (
+                "mean_erosion_rate_m_per_step",
+                "numeric_depression_fill_pass_count",
+                "numeric_depression_fill_event_count",
+                "numeric_depression_fill_cell_application_count",
+                "numeric_depression_filled_unique_cell_count",
+                "numeric_depression_fill_area_km2",
+                "numeric_depression_fill_volume_km3",
+                "max_numeric_depression_fill_depth_m",
+            ):
+                if field_name in step:
+                    found.append(
+                        f"earth_system_feedback_history[{index}].{field_name}"
+                    )
+
+    correction_history = payload.get("numeric_depression_correction_history")
+    if isinstance(correction_history, list):
+        for index, event in enumerate(correction_history):
+            if isinstance(event, dict) and "applied_fill_volume_km3" in event:
+                found.append(
+                    "numeric_depression_correction_history"
+                    f"[{index}].applied_fill_volume_km3"
+                )
+
+    motion_history = payload.get("plate_motion_history")
+    if isinstance(motion_history, list):
+        for index, step in enumerate(motion_history):
+            if not isinstance(step, dict):
+                continue
+            for field_name in (
+                "crust_source_remap_cell_count",
+                "unique_crust_source_cell_count",
+                "crust_source_reuse_count",
+                "crust_source_cell_ids",
+                "thermal_target_difference_tendency_m",
+            ):
+                if field_name in step:
+                    found.append(
+                        f"plate_motion_history[{index}].{field_name}"
+                    )
+    return tuple(found)
 
 
 def validate_world_payload(payload: dict[str, Any]) -> None:

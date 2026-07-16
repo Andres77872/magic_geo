@@ -99,10 +99,10 @@ public:
         state.visited_ids.reserve(static_cast<std::size_t>(count * 4));
         search(root_, query_id, state);
 
-        // Tree traversal is ordered for pruning efficiency, while the legacy
-        // all-pairs implementation considered cell IDs in ascending order.
-        // Replay the retained superset in that order to preserve its exact
-        // boundary-tie behavior and score-ascending neighbor ordering.
+        // Tree traversal is ordered for pruning efficiency, while the
+        // deterministic all-pairs reference considers cell IDs in ascending
+        // order. Replay the retained superset in that order to preserve the
+        // boundary-tie and score-ascending neighbor-ordering contract.
         std::sort(state.visited_ids.begin(), state.visited_ids.end());
         return select_neighbor_ids(cells_, query_id, state.visited_ids, count);
     }

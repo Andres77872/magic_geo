@@ -251,7 +251,7 @@ HydrologyStabilizationResult stabilize_numeric_depressions(
     int feedback_stage_id,
     const std::string& stage,
     int erosion_iteration,
-    std::vector<NumericDepressionFillEvent>& fill_history,
+    std::vector<NumericDepressionCorrectionEvent>& correction_history,
     std::vector<HydrologicWaterBudgetStage>& water_budget_history
 );
 FeedbackReference capture_feedback_reference(const std::vector<Cell>& cells);
@@ -308,7 +308,7 @@ void erode(
     std::vector<PlateMotionStep>& plate_motion_history,
     CrustMaterialShadowState& crust_material_shadow,
     CrustDryRockAccountingState& crust_dry_rock_accounting,
-    std::vector<NumericDepressionFillEvent>& numeric_depression_fill_history,
+    std::vector<NumericDepressionCorrectionEvent>& numeric_depression_correction_history,
     std::vector<HydrologicWaterBudgetStage>& hydrologic_water_budget_history,
     std::vector<FluvialSedimentRoutingStage>& sediment_routing_history,
     std::vector<HillslopeSedimentTransportStage>& hillslope_transport_history
@@ -460,7 +460,7 @@ std::string summary_json(
     const std::vector<Route>& routes,
     const std::vector<EarthSystemFeedbackStep>& feedback_history,
     const std::vector<PlateMotionStep>& plate_motion_history,
-    const std::vector<NumericDepressionFillEvent>& numeric_depression_fill_history,
+    const std::vector<NumericDepressionCorrectionEvent>& numeric_depression_correction_history,
     const std::vector<HillslopeSedimentTransportStage>& hillslope_transport_history,
     const std::vector<GlacialSedimentTransportStage>& glacial_transport_history
 );
@@ -530,9 +530,9 @@ std::string hydrologic_water_budget_history_json(
     const std::vector<HydrologicWaterBudgetStage>& history,
     int precision
 );
-std::string numeric_depression_fill_history_json(
+std::string numeric_depression_correction_history_json(
     const Params& params,
-    const std::vector<NumericDepressionFillEvent>& history,
+    const std::vector<NumericDepressionCorrectionEvent>& history,
     int precision
 );
 std::string glacial_sediment_transport_model_json(
@@ -565,7 +565,7 @@ std::string fluvial_sediment_routing_history_json(
 std::string sediment_inventory_model_json(
     const std::vector<Cell>& cells,
     const std::vector<EarthSystemFeedbackStep>& feedback_history,
-    const std::vector<NumericDepressionFillEvent>& numeric_history,
+    const std::vector<NumericDepressionCorrectionEvent>& numeric_history,
     const std::vector<HillslopeSedimentTransportStage>& hillslope_history,
     const std::vector<FluvialSedimentRoutingStage>& fluvial_history,
     const std::vector<GlacialSedimentTransportStage>& glacial_history,

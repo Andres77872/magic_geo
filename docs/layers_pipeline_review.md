@@ -18,7 +18,7 @@ Verified against the earthlike run: 32 768 cells, 446 layers, stage histories of
 *stage/month* on the same layer. Dragging the slider fires one fetch per input
 event; whichever response resolves last wins the texture, while
 `updateStageBar()` always shows the *requested* stage. On
-`numeric_depression_fill_history` (1600 stages) this reproduces easily: the
+`numeric_depression_correction_history` (1600 stages) this reproduces easily: the
 label says stage 900 while the colors are stage 850's.
 
 Fix shape: capture `const requested = ${layer.id}|${state.stage}|${state.month}`

@@ -26,7 +26,7 @@ NATIVE_STATE_HISTORY_FAMILIES: tuple[str, ...] = (
     "plate_motion_history",
     "earth_system_feedback_history",
     "hydrologic_water_budget_history",
-    "numeric_depression_fill_history",
+    "numeric_depression_correction_history",
     "hillslope_sediment_transport_history",
     "fluvial_sediment_routing_history",
     "glacial_sediment_transport_history",
@@ -36,7 +36,7 @@ NATIVE_STATE_HISTORY_FAMILIES: tuple[str, ...] = (
 NATIVE_STATE_MUTATION_EVIDENCE: dict[str, str] = {
     family: (
         "mixed"
-        if family == "numeric_depression_fill_history"
+        if family == "numeric_depression_correction_history"
         else "yes"
     )
     for family in NATIVE_STATE_HISTORY_FAMILIES
@@ -76,7 +76,7 @@ def enrich_world_with_geo_evolution_provenance(
                 "record_count": len(records) if isinstance(records, list) else -1,
                 "temporal_role": (
                     "native_mixed_mutation_and_counterfactual_event_ledger"
-                    if family == "numeric_depression_fill_history"
+                    if family == "numeric_depression_correction_history"
                     else "native_state_mutation_ledger"
                 ),
                 "state_mutation_evidence": NATIVE_STATE_MUTATION_EVIDENCE[
@@ -247,7 +247,7 @@ def validate_geo_evolution_provenance(world: Any) -> dict[str, Any]:
             violations.append(f"{family}: state_mutation_evidence")
         expected_role = (
             "native_mixed_mutation_and_counterfactual_event_ledger"
-            if family == "numeric_depression_fill_history"
+            if family == "numeric_depression_correction_history"
             else (
                 "native_state_mutation_ledger"
                 if expected_native

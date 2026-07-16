@@ -940,10 +940,10 @@ class CalibrationSourceTests(TestCase):
         world = {
             "calibration_checks": [{"metric": "endorheic_watershed_fraction", "value": 0.5}],
             "watersheds": [
-                {"area_km2": 100.0, "is_endorheic": False, "centroid_lat_deg": 20.0},
-                {"area_km2": 50.0, "is_endorheic": True, "centroid_lat_deg": 10.0},
-                {"area_km2": 25.0, "is_endorheic": True, "centroid_lat_deg": -10.0},
-                {"area_km2": 75.0, "is_endorheic": False, "centroid_lat_deg": -20.0},
+                {"area_km2": 100.0, "is_endorheic": False, "outlet_type": "ocean", "centroid_lat_deg": 20.0},
+                {"area_km2": 50.0, "is_endorheic": True, "outlet_type": "closed_land", "centroid_lat_deg": 10.0},
+                {"area_km2": 25.0, "is_endorheic": True, "outlet_type": "closed_land", "centroid_lat_deg": -10.0},
+                {"area_km2": 75.0, "is_endorheic": False, "outlet_type": "ocean", "centroid_lat_deg": -20.0},
             ],
         }
         evaluation = evaluate_calibration_targets(world, report["targets"])
@@ -1162,7 +1162,7 @@ class CalibrationSourceTests(TestCase):
             places=12,
         )
 
-        legacy_world = {
+        missing_outlet_semantics_world = {
             "calibration_checks": [],
             "watersheds": [
                 {
@@ -1172,17 +1172,25 @@ class CalibrationSourceTests(TestCase):
                 for watershed in world["watersheds"]
             ],
         }
-        missing_evaluation = evaluate_calibration_targets(
-            legacy_world,
-            report["targets"],
-        )
-        self.assertEqual(
-            missing_evaluation["summary"]["external_calibration_missing_metric_count"],
-            2,
-        )
-        self.assertFalse(
-            missing_evaluation["summary"]["external_calibration_complete"]
-        )
+        with self.assertRaisesRegex(
+            CalibrationError,
+            "must provide is_endorheic and outlet_type consistently",
+        ):
+            evaluate_calibration_targets(
+                missing_outlet_semantics_world,
+                report["targets"],
+            )
+
+        incomplete_outlet_semantics_world = json.loads(json.dumps(world))
+        incomplete_outlet_semantics_world["watersheds"][0].pop("outlet_type")
+        with self.assertRaisesRegex(
+            CalibrationError,
+            "must provide is_endorheic and outlet_type consistently",
+        ):
+            evaluate_calibration_targets(
+                incomplete_outlet_semantics_world,
+                report["targets"],
+            )
 
         conflicting_world = json.loads(json.dumps(world))
         conflicting_world["watersheds"][0]["is_endorheic"] = True

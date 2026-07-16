@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
-from importlib import resources
 from os import PathLike, link, replace
 from pathlib import Path
 from typing import Any, Iterable, Literal, TypeAlias
@@ -798,14 +797,6 @@ def config_schema() -> dict[str, Any]:
     return schema
 
 
-def seed_config_text() -> str:
-    """Return the packaged Earth-like seed YAML template."""
-
-    return resources.files("magic_geo").joinpath("seed_config.yaml").read_text(
-        encoding="utf-8"
-    )
-
-
 def write_config(path: str | PathLike[str], config: WorldConfig, *, force: bool = False) -> None:
     """Atomically write validated YAML, creating parent directories as needed."""
 
@@ -833,15 +824,6 @@ def write_config(path: str | PathLike[str], config: WorldConfig, *, force: bool 
     finally:
         if temporary.exists():
             temporary.unlink()
-
-
-def write_seed_config(path: Path, *, force: bool = False) -> None:
-    """Write the packaged Earth-like seed while preserving overwrite behavior."""
-
-    if path.exists() and not force:
-        raise FileExistsError(f"{path} already exists; pass --force to overwrite")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(seed_config_text(), encoding="utf-8")
 
 
 def load_config(path: str | PathLike[str]) -> WorldConfig:
