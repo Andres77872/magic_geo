@@ -512,17 +512,17 @@ if(BUILD_TESTING)
   endif()
   if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     add_executable(
-      magic_geo_legacy_v1_client_test
-      cpp/tests/legacy_v1_client_test.cpp
+      magic_geo_c_api_v1_client_test
+      cpp/tests/c_api_v1_client_test.cpp
     )
     target_link_libraries(
-      magic_geo_legacy_v1_client_test
+      magic_geo_c_api_v1_client_test
       PRIVATE magic_geo_native
     )
-    target_compile_features(magic_geo_legacy_v1_client_test PRIVATE cxx_std_20)
+    target_compile_features(magic_geo_c_api_v1_client_test PRIVATE cxx_std_20)
     add_test(
-      NAME magic_geo_legacy_v1_client
-      COMMAND magic_geo_legacy_v1_client_test
+      NAME magic_geo_c_api_v1_client
+      COMMAND magic_geo_c_api_v1_client_test
     )
   endif()
 endif()

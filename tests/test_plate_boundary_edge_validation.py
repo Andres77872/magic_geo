@@ -48,7 +48,7 @@ class PlateBoundaryEdgeValidationTests(TestCase):
         self.assertTrue(metrics["step_rotations_replayed"])
         self.assertTrue(metrics["plate_center_history_replayed"])
         self.assertTrue(metrics["cell_plate_assignments_replayed"])
-        self.assertFalse(metrics["legacy_smoothed_boundary_fields_used"])
+        self.assertFalse(metrics["smoothed_cell_boundary_fields_used"])
         self.assertFalse(metrics["subduction_polarity_resolved"])
         self.assertGreater(metrics["mesh_reciprocal_segment_count"], 0)
         self.assertGreater(metrics["total_boundary_segment_count"], 0)
@@ -119,7 +119,7 @@ class PlateBoundaryEdgeValidationTests(TestCase):
             self.assertEqual(record["physical_subducting_side"], "unknown")
             self.assertEqual(record["physical_overriding_side"], "unknown")
 
-    def test_legacy_smoothed_boundary_fields_are_not_replay_inputs(self) -> None:
+    def test_smoothed_cell_boundary_fields_are_not_replay_inputs(self) -> None:
         altered = deepcopy(self.world)
         for cell in altered["cells"]:
             cell["boundary_convergent"] = 999.0
@@ -130,7 +130,7 @@ class PlateBoundaryEdgeValidationTests(TestCase):
         result = validate_plate_boundary_edges(altered)
 
         self.assertTrue(result["passed"], result["failures"])
-        self.assertFalse(result["metrics"]["legacy_smoothed_boundary_fields_used"])
+        self.assertFalse(result["metrics"]["smoothed_cell_boundary_fields_used"])
 
     def test_geometry_and_mesh_identity_mutations_fail(self) -> None:
         for mutation in ("geometry", "identity", "omission"):
@@ -406,7 +406,7 @@ class PlateBoundaryEdgeValidationTests(TestCase):
             "slab_selection_resolved",
             "slab_transfer_resolved",
             "physical_material_fate_resolved",
-            "boundary_segments_drive_legacy_smoothed_forcing",
+            "boundary_segments_drive_smoothed_cell_boundary_forcing",
             "boundary_segments_drive_slab_transfers",
         ):
             with self.subTest(field=field):

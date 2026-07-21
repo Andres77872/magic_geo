@@ -97,6 +97,18 @@ def retired_world_schema_fields(payload: dict[str, Any]) -> tuple[str, ...]:
         ),
     )
     record_object_fields(
+        "plate_boundary_segment_model",
+        (
+            "unavailable_opening_crust_fallback_semantics",
+            "legacy_smoothed_cell_boundary_forcing_retained",
+            "boundary_segments_drive_legacy_smoothed_forcing",
+        ),
+    )
+    record_object_fields(
+        "crust_dry_rock_accounting_model",
+        ("legacy_proxy_compensations_exposed",),
+    )
+    record_object_fields(
         "backend",
         (
             "accelerator_crust_source_remap_kernel_production_active",

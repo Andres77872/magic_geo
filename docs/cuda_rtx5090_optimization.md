@@ -62,7 +62,7 @@ CUDA is optional and does not weaken the dependency-free CPU path:
   static `cudart` does not bundle the driver.
 - The original 304-byte v1 C configuration and 312-byte v2 extension are
   unchanged. Backend ID 3 fits the existing `compute_backend` field, so this
-  addition does not change either ABI layout. The legacy one-argument C++ API
+  addition does not change either ABI layout. The unversioned one-argument C++ API
   and v1 C API remain CPU-only.
 
 Reproduce the audited Blackwell build while keeping its artifact separate from
@@ -257,7 +257,7 @@ equal to the CPU reference.
 
 The default multi-architecture CUDA Release build passed all four CTest targets
 on the RTX 5090, including the raw-kernel test, for the audited pre-v3 tree. The integrated native API test
-exercised complete CPU/CUDA payload parity, odd-sized 129-cell legacy remapping,
+exercised complete CPU/CUDA payload parity, odd-sized 129-cell nearest-donor remapping,
 repeated erosion dispatches, explicit failure behavior, telemetry, and
 concurrent CPU/CUDA sessions. A CUDA-disabled/stub build separately passed its
 three CPU/ABI tests.

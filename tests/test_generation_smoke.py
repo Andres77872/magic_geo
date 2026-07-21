@@ -11882,7 +11882,7 @@ class GenerationSmokeTests(TestCase):
         )
         self.assertTrue(all(cell["infiltration_mm_y"] == 0.0 for cell in land))
 
-    def test_near_zero_precipitation_scale_has_no_legacy_floor(self) -> None:
+    def test_near_zero_precipitation_scale_preserves_proportional_forcing(self) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))
         data = config.model_dump(mode="python")
         data["mesh"]["cell_count"] = 128

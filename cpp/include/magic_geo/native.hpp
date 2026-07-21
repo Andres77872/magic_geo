@@ -67,7 +67,7 @@ struct Params {
 };
 
 // Compute policy is intentionally separate from scientific parameters. The
-// legacy one-argument generate_world_json overload always uses the CPU; callers
+// The unversioned one-argument generate_world_json overload always uses the CPU; callers
 // opt into automatic, OpenCL, or CUDA execution through the two-argument
 // overload. Stable binary compatibility is provided by the versioned CConfig
 // structs below; C++ callers should rebuild when Params grows.

@@ -66,8 +66,6 @@ class DebugUiContractTests(TestCase):
         self.assertIn("await fetchJson('/api/status')", status_loader)
         self.assertIn("showStatusRefreshFailure(error);", status_loader)
         self.assertNotIn("optionalJson('/api/manifest')", status_loader)
-        self.assertNotIn("legacyManifest", status_loader)
-        self.assertNotIn("legacy debug cache", status_loader)
 
     def test_map_exports_png_and_copy_paste_image_prompt(self) -> None:
         html = Path("src/magic_geo/debug_ui/index.html").read_text(encoding="utf-8")

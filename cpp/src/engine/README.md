@@ -27,7 +27,8 @@ stages must not depend on JSON serializers.
 The MessagePack facade intentionally transcodes the canonical JSON document.
 This preserves every established decimal-quantization boundary consumed by the
 Python enrichers. The C ABI exposes binary as pointer plus byte length and frees
-it with `magic_geo_free_buffer`; legacy NUL-terminated JSON symbols are unchanged.
+it with `magic_geo_free_buffer`; the supported NUL-terminated JSON symbols are
+unchanged.
 
 ## Source responsibilities
 
@@ -57,7 +58,7 @@ it with `magic_geo_free_buffer`; legacy NUL-terminated JSON symbols are unchange
   not implement solid volume, phase, mantle, slab, or global crust-cycle
   conservation.
 - `crust_reservoir.cpp`: the non-authoritative finite three-reservoir dry-rock
-  accounting counter-model. It replays legacy shadow adjustments as ordered
+  accounting counter-model. It replays rule-derived shadow adjustments as ordered
   surface/mantle proxy transfers while maintaining empty plate-owned slab
   tables; no transfer has a resolved physical basis.
 - `oceanic_age_depth.cpp`: the centralized continuity-adjusted relative
@@ -193,17 +194,17 @@ is a nominal reference-step scale, not a calibrated physical velocity. The
 same-step `CrustTransportPlan` supplies remapped pre-process age, thickness,
 density, type, and lithology for each side. Exactly zero age plus zero thickness
 means that remap supplied no opening crust volume; retained category and density
-values in that case are compatibility fallbacks, and `opening_oceanic_like` is
+values in that case are fixed-shape unavailable-state sentinels, and `opening_oceanic_like` is
 false.
 
-Strict Python replay deliberately ignores the legacy per-cell smoothed boundary
+Strict Python replay deliberately ignores the smoothed per-cell boundary
 arrays. Starting from high-precision centers, axes, and intrinsic speeds, it
 reconstructs Rodrigues center transitions, nearest-center cell assignments,
 reciprocal segment identity/orientation, geometry, velocities, signed rates and
 indices, strengths/classes, and opening-crust/polarity-candidate fields. The
 ledger is authoritative for segment geometry and direct unsmoothed kinematics,
-but the old degree-normalized smoothed cell forcing still drives the current
-tectonic rules and does not consume it. A sole oceanic-like side at a convergent
+but the degree-normalized smoothed cell forcing drives the tectonic rules and
+does not consume it. A sole oceanic-like side at a convergent
 segment supplies candidate subducting and inverse overriding sides only.
 Thresholded normal convergence is independent of the dominant class, so an
 oblique transform-dominant segment is not discarded. The physical sides remain
@@ -328,16 +329,16 @@ They are numerical memory-safety limits, not physical flux or capacity limits.
   unsmoothed kinematics are authoritative, nominal km/Ma is uncalibrated, the
   oceanic-side result is only a subducting/overriding candidate pair, physical
   sides remain explicitly unknown, and the ledger must not be described as
-  driving legacy forcing or slab transfers until those consumers are implemented
+  driving smoothed cell forcing or slab transfers until those consumers are implemented
   and independently validated.
 - Preserve RNG consumption, OpenMP schedules, floating-point expression order,
   serializer key order, and precision unless a schema/behavior change is intended.
 - Keep the v1 `CConfig` and v2 `CConfigV2` field order, types, and 64-bit sizes
   stable. `Params` may grow at the tail for source-level C++ use; C++ clients
-  rebuild when it changes. The legacy C++ overload and v1 C entry point always
+  rebuild when it changes. The unversioned C++ overload and v1 C entry point always
   use CPU. Compute controls belong to `ComputeOptions`/`CConfigV2`; the nominal
   timestep belongs to `CConfigV3`. Python mirrors every C layout via `ctypes`.
-- Keep all declared legacy public symbols visible and all `magic_geo::detail`
+- Keep all declared public symbols visible and all `magic_geo::detail`
   symbols hidden.
 - Preserve backend truthfulness: `cpu` must not initialize or probe CUDA or
   OpenCL, below-threshold `auto` CPU selection is not a fallback, explicit
@@ -353,6 +354,6 @@ They are numerical memory-safety limits, not physical flux or capacity limits.
   read-only over `GeneratedWorld`.
 
 `cpp/tests/native_api_test.cpp` protects the public boundary and concurrent
-session behavior. `legacy_v1_client_test.cpp` compiles against a frozen layout
+session behavior. `c_api_v1_client_test.cpp` compiles against a frozen layout
 without including the current header. The Python suite provides the end-to-end
 physics, replay, schema, and mutation-rejection gates.

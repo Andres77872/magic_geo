@@ -3096,8 +3096,8 @@ std::string plate_boundary_segment_model_json(
         "same_step_crust_overlap_ledger_remapped_pre_process_state");
     add_str(out, first, "opening_crust_state_availability_rule",
         "unavailable_iff_age_ma_and_thickness_km_are_both_zero_density_always_positive_available_states_require_positive_thickness");
-    add_str(out, first, "unavailable_opening_crust_fallback_semantics",
-        "retained_categorical_and_density_values_are_compatibility_fallback_not_available_material_state");
+    add_str(out, first, "unavailable_opening_crust_sentinel_semantics",
+        "retained_categorical_and_density_values_are_fixed_shape_unavailable_state_sentinels_not_material_state");
     add_str(out, first, "opening_oceanic_like_predicate",
         "crust_type_0_or_crust_type_2_with_lithology_0_or_crust_type_3_with_age_le_320_ma_thickness_le_18_km_density_ge_2_84_g_cm3");
     add_str(out, first, "opening_oceanic_like_evaluation_scope",
@@ -3129,8 +3129,9 @@ std::string plate_boundary_segment_model_json(
     add_bool(out, first, "authoritative_for_direct_unsmoothed_kinematics", true);
     add_bool(out, first, "reciprocal_segment_identity_resolved", true);
     add_bool(out, first, "opening_remapped_crust_state_recorded", true);
-    add_bool(out, first, "legacy_smoothed_cell_boundary_forcing_retained", true);
-    add_bool(out, first, "boundary_segments_drive_legacy_smoothed_forcing", false);
+    add_bool(out, first, "smoothed_cell_boundary_forcing_active", true);
+    add_bool(out, first,
+        "boundary_segments_drive_smoothed_cell_boundary_forcing", false);
     add_bool(out, first, "nominal_time_calibrated", false);
     add_bool(out, first, "physical_time_resolved", false);
     add_bool(out, first, "physical_plate_velocity_calibrated", false);
@@ -3143,7 +3144,7 @@ std::string plate_boundary_segment_model_json(
     add_bool(out, first, "physical_material_fate_resolved", false);
     add_bool(out, first, "boundary_segments_drive_slab_transfers", false);
     add_str(out, first, "model_limitation",
-        "kinematic_candidate_evidence_only_without_physical_polarity_slab_geometry_material_fate_or_feedback_into_legacy_smoothed_forcing");
+        "kinematic_candidate_evidence_only_without_physical_polarity_slab_geometry_material_fate_or_feedback_into_smoothed_cell_boundary_forcing");
     out += "}";
     return out;
 }

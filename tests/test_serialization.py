@@ -107,6 +107,14 @@ class WorldSerializationTests(TestCase):
                 "legacy_crust_source_remap_event_semantics": "retired",
                 "legacy_crust_source_reuse_count_semantics": "retired",
             },
+            "plate_boundary_segment_model": {
+                "unavailable_opening_crust_fallback_semantics": "retired",
+                "legacy_smoothed_cell_boundary_forcing_retained": True,
+                "boundary_segments_drive_legacy_smoothed_forcing": False,
+            },
+            "crust_dry_rock_accounting_model": {
+                "legacy_proxy_compensations_exposed": True,
+            },
             "initial_oceanic_crust_age_model": {
                 "compatibility_cell_alias_location": "retired",
                 "compatibility_history_alias_location": "retired",
@@ -153,7 +161,7 @@ class WorldSerializationTests(TestCase):
 
         retired = serialization_module.retired_world_schema_fields(payload)
 
-        self.assertEqual(len(retired), 60)
+        self.assertEqual(len(retired), 64)
         self.assertEqual(len(set(retired)), len(retired))
         self.assertTrue(
             all(

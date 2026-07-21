@@ -2514,7 +2514,7 @@ def validate_physics_replays(world: dict[str, Any]) -> list[dict[str, Any]]:
             "every cross-plate reciprocal control-volume segment, including "
             "duplicate neighbor segments, must replay in canonical order from "
             "the mesh, per-step plate assignments, Euler kinematics, and "
-            "opening crust state without legacy smoothed boundary inputs; "
+            "opening crust state without smoothed cell-boundary inputs; "
             "candidate sides remain separate from an explicit unknown physical "
             "polarity decision and cannot select a slab"
         ),
@@ -2528,7 +2528,7 @@ def validate_physics_replays(world: dict[str, Any]) -> list[dict[str, Any]]:
             "step_rotations_replayed": True,
             "plate_center_history_replayed": True,
             "cell_plate_assignments_replayed": True,
-            "legacy_smoothed_boundary_fields_used": False,
+            "smoothed_cell_boundary_fields_used": False,
             "subduction_polarity_resolved": False,
             "subducted_slab_geometry_resolved": False,
         },
@@ -2712,7 +2712,7 @@ def validate_physics_replays(world: dict[str, Any]) -> list[dict[str, Any]]:
         passed=bool(crust_dry_rock_accounting["passed"]),
         message=(
             "the bounded surface/exchange/empty-slab dry-rock counter-model, "
-            "source-normalized transport, and ordered legacy compensation "
+            "source-normalized transport, and ordered rule-derived proxy compensation "
             "transactions must replay independently; numerical closure does "
             "not resolve physical mantle, slab, sediment, phase, or fate"
         ),

@@ -253,8 +253,8 @@ MODEL_STRING_VALUES: dict[str, str] = {
     "opening_crust_state_availability_rule": (
         "unavailable_iff_age_ma_and_thickness_km_are_both_zero_density_always_positive_available_states_require_positive_thickness"
     ),
-    "unavailable_opening_crust_fallback_semantics": (
-        "retained_categorical_and_density_values_are_compatibility_fallback_not_available_material_state"
+    "unavailable_opening_crust_sentinel_semantics": (
+        "retained_categorical_and_density_values_are_fixed_shape_unavailable_state_sentinels_not_material_state"
     ),
     "opening_oceanic_like_predicate": (
         "crust_type_0_or_crust_type_2_with_lithology_0_or_crust_type_3_with_age_le_320_ma_thickness_le_18_km_density_ge_2_84_g_cm3"
@@ -281,7 +281,7 @@ MODEL_STRING_VALUES: dict[str, str] = {
         "align_supplied_feature_direction_to_canonical_segment_then_left_or_right_names_overriding_side_and_opposite_names_subducting_side"
     ),
     "model_limitation": (
-        "kinematic_candidate_evidence_only_without_physical_polarity_slab_geometry_material_fate_or_feedback_into_legacy_smoothed_forcing"
+        "kinematic_candidate_evidence_only_without_physical_polarity_slab_geometry_material_fate_or_feedback_into_smoothed_cell_boundary_forcing"
     ),
 }
 MODEL_FLOAT_FIELDS = frozenset(
@@ -316,8 +316,8 @@ MODEL_BOOLEAN_VALUES: dict[str, bool] = {
     "authoritative_for_direct_unsmoothed_kinematics": True,
     "reciprocal_segment_identity_resolved": True,
     "opening_remapped_crust_state_recorded": True,
-    "legacy_smoothed_cell_boundary_forcing_retained": True,
-    "boundary_segments_drive_legacy_smoothed_forcing": False,
+    "smoothed_cell_boundary_forcing_active": True,
+    "boundary_segments_drive_smoothed_cell_boundary_forcing": False,
     "nominal_time_calibrated": False,
     "physical_time_resolved": False,
     "physical_plate_velocity_calibrated": False,
@@ -1115,7 +1115,7 @@ def validate_plate_boundary_edges(world: Mapping[str, Any]) -> dict[str, Any]:
         "step_rotations_replayed": False,
         "plate_center_history_replayed": False,
         "cell_plate_assignments_replayed": False,
-        "legacy_smoothed_boundary_fields_used": False,
+        "smoothed_cell_boundary_fields_used": False,
         "subduction_polarity_resolved": False,
         "subducted_slab_geometry_resolved": False,
     }

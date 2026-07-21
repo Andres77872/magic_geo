@@ -1,5 +1,5 @@
 #include "magic_geo/native.hpp"
-#include "legacy_v1_layout.hpp"
+#include "c_api_v1_layout.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -47,7 +47,7 @@ static_assert(offsetof(magic_geo::CConfigV3, maturation_timestep_ma) == 312);
     static_assert(offsetof(magic_geo::CConfig, name) == expected_offset);       \
     static_assert(                                                               \
         offsetof(magic_geo::CConfig, name) ==                                   \
-        offsetof(magic_geo_legacy_v1::CConfig, name)                            \
+        offsetof(magic_geo_c_api_v1::CConfig, name)                            \
     );
 MAGIC_GEO_V1_CONFIG_FIELD_LIST(MAGIC_GEO_ASSERT_CURRENT_V1_FIELD)
 #undef MAGIC_GEO_ASSERT_CURRENT_V1_FIELD
@@ -289,10 +289,10 @@ bool public_api_is_usable() {
         generated, "authoritative_for_direct_unsmoothed_kinematics"
     ));
     CHECK(json_bool(
-        generated, "legacy_smoothed_cell_boundary_forcing_retained"
+        generated, "smoothed_cell_boundary_forcing_active"
     ));
     CHECK(!json_bool(
-        generated, "boundary_segments_drive_legacy_smoothed_forcing"
+        generated, "boundary_segments_drive_smoothed_cell_boundary_forcing"
     ));
     CHECK(!json_bool(generated, "physical_subduction_polarity_resolved"));
     CHECK(!json_bool(generated, "slab_transfer_resolved"));

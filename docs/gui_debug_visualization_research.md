@@ -253,7 +253,7 @@ effectively `-O0`. A Release build is likely several-fold faster for free.
    export as "stage N full cell state".
 4. **Structured validation divergence records** — refactor `validate()`'s early-return sites to
    `{model, stage_id, cell_id, field, expected, actual, tolerance}` objects with a compat renderer
-   back to the pinned legacy strings. This unlocks replay-divergence overlays on the map — the
+   back to the pinned flat strings. This unlocks replay-divergence overlays on the map — the
    debugger's most differentiated feature.
 5. **Machine-readable schema/manifest** (field catalog, units, dtypes, legend hints).
 6. **Later (engine work):** C-ABI progress/cancel callback + per-section retrieval; per-stage
@@ -329,7 +329,7 @@ diffing, and validation-divergence display. Generation stays in the CLI.
 | napari | Image-viewer data model (per-vertex triangles only, no cell_data); its automatic time sliders don't compensate. |
 | matplotlib + cartopy | Report-grade projected snapshots only; seconds-per-frame repaint at 100k+ polygons. |
 | pyqtgraph | Not for the globe (no colormap/picking in GL module, documented leak on mesh updates); ideal for the 2D ledger/time-series panels inside a Qt app. |
-| Mayavi | Maintenance-only legacy; strictly dominated by PyVista. |
+| Mayavi | Maintenance-only; strictly dominated by PyVista. |
 
 **Dashboard frameworks (as the shell)**
 
@@ -460,7 +460,7 @@ time-to-value advantage.
 4. **Structured-divergence refactor, staged inside v1:** convert `_validate_*` early-return sites
    (start with the hydrologic water budget's 19) to divergence objects
    `{model, stage_id, cell_id, field, expected, actual, tolerance}` with a renderer back to the
-   legacy strings so the smoke test stays green. The GUI renders divergences as overlay layers —
+   flat strings so the smoke test stays green. The GUI renders divergences as overlay layers —
    replay debugging on the sphere, the tool's most differentiated feature.
 
 **v2 — differential and live debugging**
@@ -520,7 +520,7 @@ time-to-value advantage.
 | Tauri (Linux) | WebKitGTK's documented WebGL context-loss/NVIDIA DMABUF instability — exactly this workload on exactly this platform |
 | Electron | Three runtimes for one local user; the system browser + Python server needs none of it |
 | Streamlit / Dash / Gradio / Solara / raw Bokeh | Rerun-model or callback-shape mismatch with deep stateful drill-down; or niche/dormant ecosystems |
-| napari / Mayavi / matplotlib-cartopy (as primary) | Data-model mismatch (per-vertex triangles), legacy maintenance, repaint cost respectively |
+| napari / Mayavi / matplotlib-cartopy (as primary) | Data-model mismatch (per-vertex triangles), maintenance-only status, repaint cost respectively |
 | PMTiles / FlatGeobuf / msgpack (as core formats) | Solve remote distribution problems this local tool doesn't have; no zero-copy; Mercator assumptions |
 | H3 re-binning for LOD | Destroys causal cell identity; use the exported cube_quadtree_v0/HEALPix-like ids instead |
 | C++ ImGui tool linked to engine.cpp (now) | Forfeits the entire Python layer; becomes attractive later for live native-state stepping, alongside the main GUI |
@@ -531,7 +531,7 @@ Independent of the GUI, in rough order of value:
 
 1. Default `CMAKE_BUILD_TYPE=Release` (+`-O2`) in CMakeLists.txt — likely multi-fold speedup.
 2. Decompose `validate()` (21,340 lines) into the same pure `payload -> failures` contract as the
-   30 extracted validators; emit structured divergence records with a legacy-string renderer.
+   30 extracted validators; emit structured divergence records with a flat-string renderer.
 3. Regenerate the stale `runs/earthlike` sample (current one fails validation with 550 errors).
 4. Extract projection/styling closures from `write_svg_map`/`write_raster_map` into an importable
    module and de-duplicate the ~330 drifted lines; add `data-cell-id` to SVG cells.

@@ -13,7 +13,7 @@ constexpr int INITIAL_EXCHANGE_ORIGIN_PLATE_ID = -1;
 constexpr int SURFACE_RESERVOIR_ID = 0;
 constexpr int UPPER_MANTLE_EXCHANGE_RESERVOIR_ID = 1;
 constexpr int SUBDUCTED_SLAB_RESERVOIR_ID = 2;
-constexpr int LEGACY_RULE_PROXY_COMPENSATION_MECHANISM_ID = 0;
+constexpr int RULE_PROXY_COMPENSATION_MECHANISM_ID = 0;
 constexpr int NO_FRAGMENT_ID = -1;
 constexpr int NO_OWNER_ID = -1;
 constexpr double DRY_ROCK_MASS_KG_PER_DENSITY_WEIGHTED_KM3 = 1.0e12;
@@ -750,7 +750,7 @@ void append_transfer(
     const int sequence_id = static_cast<int>(table.dry_rock_mass_kg.size());
     table.sequence_ids.push_back(sequence_id);
     table.mechanism_ids.push_back(
-        LEGACY_RULE_PROXY_COMPENSATION_MECHANISM_ID
+        RULE_PROXY_COMPENSATION_MECHANISM_ID
     );
     table.process_reason_ids.push_back(process_reason_id);
     table.cell_ids.push_back(cell_id);
@@ -911,7 +911,7 @@ void validate_transfer_table(
         if (
             table.sequence_ids[index] != static_cast<int>(index) ||
             table.mechanism_ids[index] !=
-                LEGACY_RULE_PROXY_COMPENSATION_MECHANISM_ID ||
+                RULE_PROXY_COMPENSATION_MECHANISM_ID ||
             table.process_reason_ids[index] < 0 ||
             table.process_reason_ids[index] >= CRUST_PROCESS_REASON_COUNT ||
             cell_id < 0 || cell_id >= cell_count ||

@@ -74,7 +74,7 @@ MODEL_LITERAL_VALUES: dict[str, Any] = {
         "process_reason_then_all_surface_sinks_by_ascending_cell_and_origin_"
         "key_then_all_surface_sources_by_ascending_cell_and_origin_key"
     ),
-    "proxy_transfer_mechanism": "legacy_rule_mass_compensation_v1",
+    "proxy_transfer_mechanism": "ordered_rule_mass_compensation_v1",
     "mantle_withdrawal_model": (
         "initial_exchange_reserve_first_then_largest_packet_lowest_key_tie_"
         "break_v1"
@@ -108,7 +108,7 @@ MODEL_LITERAL_VALUES: dict[str, Any] = {
     "closed_three_reservoir_dry_rock_accounting": True,
     "per_origin_accounting_closed": True,
     "finite_exchange_inventory_enforced": True,
-    "legacy_proxy_compensations_exposed": True,
+    "proxy_compensations_exposed": True,
     "plate_resolved_slab_accounting_state_present": True,
     "authoritative_for_cell_state": False,
     "physical_source_sink_resolved": False,

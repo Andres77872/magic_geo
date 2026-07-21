@@ -3,11 +3,10 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from .planet_parameters import (
-    LEGACY_ICE_FLOW_EARTH_GRAVITY_M_S2,
-    planet_radius_km,
-    surface_gravity_m_s2,
-)
+from .planet_parameters import planet_radius_km, surface_gravity_m_s2
+
+
+ICE_FLOW_REFERENCE_GRAVITY_M_S2 = 9.81
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:
@@ -96,7 +95,7 @@ def enrich_world_with_ice_flowline_history(
     radius_km = planet_radius_km(world)
     gravity_m_s2 = surface_gravity_m_s2(
         world,
-        earth_reference_m_s2=LEGACY_ICE_FLOW_EARTH_GRAVITY_M_S2,
+        earth_reference_m_s2=ICE_FLOW_REFERENCE_GRAVITY_M_S2,
     )
     cells_by_id = {int(cell.get("id", index)): cell for index, cell in enumerate(cells)}
     for cell in cells:

@@ -363,6 +363,11 @@ class CrustDryRockGeneratedValidationTests(TestCase):
                 "maximum_surface_packets_per_owner"
             ] += 1
 
+        def restore_retired_proxy_mechanism(world: dict) -> None:
+            world["crust_dry_rock_accounting_model"][
+                "proxy_transfer_mechanism"
+            ] = "legacy_rule_mass_compensation_v1"
+
         def corrupt_peak_telemetry_coherently(world: dict) -> None:
             record = world["crust_dry_rock_accounting_history"][1]
             record["maximum_surface_packet_count_per_owner"] = (
@@ -390,6 +395,7 @@ class CrustDryRockGeneratedValidationTests(TestCase):
             "age_only_request": corrupt_age_only_request,
             "summary": corrupt_summary,
             "model_cap": corrupt_model_cap,
+            "retired_proxy_mechanism": restore_retired_proxy_mechanism,
             "coherent_peak_cap": corrupt_peak_telemetry_coherently,
             "dimensionless_summary": corrupt_dimensionless_summary,
         }

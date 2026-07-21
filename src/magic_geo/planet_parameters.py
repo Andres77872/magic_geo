@@ -6,9 +6,6 @@ from typing import Any
 
 EARTH_RADIUS_KM = 6371.0
 EARTH_STANDARD_GRAVITY_M_S2 = 9.80665
-# Preserve the ice-flow model's historical Earth baseline while still scaling
-# it by configured relative gravity.
-LEGACY_ICE_FLOW_EARTH_GRAVITY_M_S2 = 9.81
 
 PLANET_PARAMETER_DEFAULTS: dict[str, float] = {
     "radius_km": EARTH_RADIUS_KM,

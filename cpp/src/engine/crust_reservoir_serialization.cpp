@@ -152,7 +152,7 @@ std::string crust_dry_rock_accounting_model_json() {
     add_str(out, first, "proxy_transaction_order",
         "process_reason_then_all_surface_sinks_by_ascending_cell_and_origin_key_then_all_surface_sources_by_ascending_cell_and_origin_key");
     add_str(out, first, "proxy_transfer_mechanism",
-        "legacy_rule_mass_compensation_v1");
+        "ordered_rule_mass_compensation_v1");
     add_str(out, first, "mantle_withdrawal_model",
         "initial_exchange_reserve_first_then_largest_packet_lowest_key_tie_break_v1");
     add_str(out, first, "mantle_exchange_topology",
@@ -176,7 +176,7 @@ std::string crust_dry_rock_accounting_model_json() {
     add_bool(out, first, "closed_three_reservoir_dry_rock_accounting", true);
     add_bool(out, first, "per_origin_accounting_closed", true);
     add_bool(out, first, "finite_exchange_inventory_enforced", true);
-    add_bool(out, first, "legacy_proxy_compensations_exposed", true);
+    add_bool(out, first, "proxy_compensations_exposed", true);
     add_bool(out, first, "plate_resolved_slab_accounting_state_present", true);
     add_bool(out, first, "authoritative_for_cell_state", false);
     add_bool(out, first, "physical_source_sink_resolved", false);

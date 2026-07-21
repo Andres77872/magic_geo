@@ -109,7 +109,7 @@ bathymetric reconstruction architecture.
 | --- | --- | --- | --- | --- | --- |
 | `backend` | enum | `fibonacci_sphere` | `fibonacci_sphere`, `geodesic_icosahedron` | Cell tessellation. Fibonacci gives near-uniform areas; geodesic gives icosahedral structure. Recorded as `mesh_backend`. | geometry (all) |
 | `cell_count` | int | `4096` | `[128, 200000]` | Requested spatial resolution. The canonical Earth validation reference (and the shipped `configs/earthlike_seed.yaml`) uses 4,096 cells. A geodesic mesh rounds the request to a realizable `10·frequency²+2` vertex count. | Everything (resolution) |
-| `neighbor_count` | int | `7` | `[4, 16]` | Target degree of the legacy Fibonacci process-stencil graph used by climate, hydrology, and sediment operators. It does not change the exact spherical Voronoi control-volume topology. The geodesic backend derives its process stencil from primal triangle edges. | hydrology, sediment |
+| `neighbor_count` | int | `7` | `[4, 16]` | Target degree of the Fibonacci process-stencil graph used by climate, hydrology, and sediment operators. It does not change the exact spherical Voronoi control-volume topology. The geodesic backend derives its process stencil from primal triangle edges. | hydrology, sediment |
 
 > **Constraint:** `plate_count` must be `< cell_count` (validated in `WorldConfig`).
 
@@ -189,8 +189,8 @@ subducting/overriding sides where convergence is active. Physical sides remain
 explicitly unknown, with source `none` and confidence zero; GPGIM left/right
 input would name the overriding side, but its feature direction must first be
 aligned to the canonical segment before choosing the opposite subducting side.
-The legacy smoothed cell forcing still drives the existing
-crust/relief rules and does not consume this ledger; physical polarity,
+The smoothed cell forcing drives the crust/relief rules and does not consume
+this ledger; physical polarity,
 slab geometry/selection/transfer, material fate, physical time, and plate-speed
 calibration remain false. See the [deep scientific
 audit](geo_generation_maturation_deep_audit.md) for the evidence and physical
@@ -346,7 +346,7 @@ rejected at load. Every property is documented above with its first-order effect
   diagnostic overlap-class crosswalk completely partitions overlap excess into
   conservative pair-wide candidate/unknown buckets, but it does not allocate
   material or resolve a local segment link. The
-  existing smoothed cell forcing remains separate and is not driven by the
+  smoothed cell forcing is separate and is not driven by the
   ledger. Those records are not physical material-reservoir
   provenance; the current moving-domain diagnostic does not support convergence.
   Continuous CSR moments now have a bounded discarded-output accelerator shadow,
@@ -376,7 +376,7 @@ rejected at load. Every property is documented above with its first-order effect
   `(origin_domain_id, origin_kind_id, origin_plate_id)` and packet tables use
   owner-offset CSR. The finite `76 km * 3.08 g/cm3` capacity is an uncalibrated
   numerical surface-state envelope, not an estimate of upper-mantle mass.
-  Transfers replay legacy proxy compensations and every transfer declares
+  Transfers replay rule-derived proxy compensations and every transfer declares
   `physical_basis_resolved: false`; surface sinks are proportional, while
   mantle withdrawals consume the initial exchange reserve first and then the
   largest lowest-key packet. Every cell has instantaneous access to the same

@@ -152,7 +152,7 @@ class HydrologyRealismRegressionTests(TestCase):
                     {f"watershed_outlet:{outlet_type}": 1},
                 )
 
-    def test_legacy_watershed_outlet_aliases_are_rejected(self) -> None:
+    def test_retired_watershed_outlet_aliases_are_rejected(self) -> None:
         for outlet_type in ("fresh_lake", "endorheic"):
             with self.subTest(outlet_type=outlet_type):
                 world = _closed_land_river_world(

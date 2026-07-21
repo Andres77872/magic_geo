@@ -151,7 +151,7 @@ state and process histories. The measured peak still remained about 338 MB.
 The Fibonacci mesh formerly tested every cell against every other cell. The
 current KD tree changed the observed mesh-build times as follows:
 
-| Cells | Legacy all-pairs | Deterministic KD tree | Directional speedup |
+| Cells | Brute-force all-pairs | Deterministic KD tree | Directional speedup |
 | ---: | ---: | ---: | ---: |
 | 16,384 | 0.791 s | 0.663 s | 1.19x |
 | 65,536 | 4.697 s | 2.845 s | 1.65x |
@@ -198,7 +198,7 @@ fault-injected release-path testing.
 
 `cpp/src/engine/mesh.cpp` now builds a three-axis KD tree with subtree AABBs.
 Queries retain a conservative candidate superset, sort retained IDs, and replay
-the legacy ascending-ID candidate evaluation. This deliberately preserves:
+the original ascending-ID candidate evaluation. This deliberately preserves:
 
 - strict `score > best_score` tie behavior;
 - score-ascending final neighbor storage;
@@ -232,13 +232,13 @@ field shape explicit without changing serialized arrays or month order.
 
 Public C++ `ComputeOptions` and Python expose `compute.backend =
 auto|cpu|opencl` plus `opencl_prefer_gpu`; the original `Params` layout no
-longer carries compute policy. The legacy one-argument C++ overload, original
+longer carries compute policy. The unversioned one-argument C++ overload, original
 304-byte `CConfig`, and v1 C entry point preserve historical CPU execution.
 `CConfigV2` nests `CConfig` and adds the two compute controls; Python uses the
 v2 entry point and its dedicated conversion helper.
 
 Compile-time checks freeze the type and 64-bit offset of every v1 field. A
-separate legacy-client test does not include the current public header: it
+separate C API v1 client test does not include the current public header: it
 declares the old 304-byte layout and C symbols, links to the new library, and
 verifies CPU-only generation. This catches same-size field reordering as well
 as total-size changes.
@@ -482,7 +482,7 @@ Every performance change should cover these axes:
 Current evidence:
 
 - Release and strict-warning (`-Wall -Wextra -Wpedantic -Werror`) native CTest:
-  3/3 passing, including brute-force Fibonacci KNN and the frozen legacy client;
+  3/3 passing, including brute-force Fibonacci KNN and the frozen C API v1 client;
 - final optimized Python suite: 105 tests passing in 90.350 s;
 - focused configuration/planet-scaling and numeric-extrema tests pass; a
   128-cell full-API maximum-supported-parameter run produced 89,329 finite
