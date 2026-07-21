@@ -32454,11 +32454,24 @@ def serve(
         Path,
         typer.Option(
             "--workspace",
+            envvar="MAGIC_GEO_WORKSPACE",
             help="Directory for browser-created configs, worlds, reports, and exports.",
         ),
     ] = Path("runs"),
-    host: Annotated[str, typer.Option("--host", help="Bind address.")] = "127.0.0.1",
-    port: Annotated[int, typer.Option("--port", min=1, max=65535, help="Bind port.")] = 8642,
+    host: Annotated[
+        str,
+        typer.Option("--host", envvar="MAGIC_GEO_HOST", help="Bind address."),
+    ] = "127.0.0.1",
+    port: Annotated[
+        int,
+        typer.Option(
+            "--port",
+            envvar="MAGIC_GEO_PORT",
+            min=1,
+            max=65535,
+            help="Bind port.",
+        ),
+    ] = 8642,
 ) -> None:
     """Serve the browser workbench; an existing debug cache is optional."""
     project_root = Path.cwd().resolve()

@@ -61,7 +61,11 @@ configured workspace: the prepared-cache and browser
 `export-debug` default is `<workspace>/debug` (`runs/debug` by default). This is
 different from CLI `export-debug` with no `--output`, which uses
 `<world parent>/debug`. Use `-d <cache>` only to select a custom existing cache,
-and `--workspace <dir>` to change and confine browser-created outputs.
+and `--workspace <dir>` to change and confine browser-created outputs. The
+`--workspace`, `--host`, and `--port` options also read the
+`MAGIC_GEO_WORKSPACE`, `MAGIC_GEO_HOST`, and `MAGIC_GEO_PORT` environment
+variables (explicit flags win), which is how the Docker deployment configures
+the server from `.env`.
 
 Browser cache exports are built in staging and published only after success, so
 a failed or cancelled replacement does not damage the selected cache. File
@@ -83,6 +87,33 @@ See the [web workbench architecture](https://github.com/Andres77872/magic_geo/bl
 [UI guide](https://github.com/Andres77872/magic_geo/blob/master/docs/debug_ui_guide.md),
 [deep refactor review](https://github.com/Andres77872/magic_geo/blob/master/docs/web_refactor_review.md), and live Swagger
 documentation at `/api/docs`.
+
+## Docker Deployment
+
+An all-in-one image builds the native core, CLI, and web workbench together;
+`.env` (copy `.env.example`) holds the deployment configuration, including the
+host directory where worlds are saved (`MAGIC_GEO_WORLDS_DIR`) and the
+container workspace path (`MAGIC_GEO_WORKSPACE`):
+
+```bash
+cp .env.example .env
+mkdir -p worlds                # host directory that persists generated worlds
+docker compose up --build -d
+# web workbench: http://127.0.0.1:8642
+```
+
+The same image runs any CLI subcommand against the shared worlds volume:
+
+```bash
+docker compose run --rm magic-geo generate \
+  --config configs/earthlike_seed.yaml --output runs/world.json
+docker compose run --rm magic-geo backend
+```
+
+The compose file publishes the unauthenticated workbench on loopback only;
+see the [Docker deployment guide](https://github.com/Andres77872/magic_geo/blob/master/docs/docker_deployment.md)
+for the `.env` reference, persistence model, GPU notes, and how to expose it
+safely.
 
 ## YAML and Python configuration helpers
 

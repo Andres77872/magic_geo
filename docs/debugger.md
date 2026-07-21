@@ -49,7 +49,10 @@ rebased under that root, so both **Prepare browser cache** and the browser
 `export-debug` operation default to `<workspace>/debug`, including when a
 non-default workspace is selected. CLI `export-debug` is different: omitting
 its `--output` derives `<world parent>/debug`. `--host` defaults to loopback and
-`--port` defaults to `8642`.
+`--port` defaults to `8642`. `--workspace`, `--host`, and `--port` also read
+the `MAGIC_GEO_WORKSPACE`, `MAGIC_GEO_HOST`, and `MAGIC_GEO_PORT` environment
+variables when the flag is omitted; the Docker deployment
+(`docs/docker_deployment.md`) configures the server this way from `.env`.
 
 ## Feature parity
 

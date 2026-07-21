@@ -6,6 +6,10 @@ __pycache__/
 
 # Generated world outputs are intentionally easy to recreate.
 runs/
+worlds/
+
+# Local deployment configuration; .env.example is the tracked template.
+.env
 
 # Downloaded empirical calibration datasets are fetched on demand.
 calibration_data/
