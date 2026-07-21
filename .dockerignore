@@ -1,0 +1,40 @@
+# Version control, IDE, and agent state.
+.git
+.idea
+.claude
+.agents
+.codex
+
+# Local environments and caches.
+.venv
+__pycache__/
+**/__pycache__
+*.py[cod]
+*.egg-info/
+
+# Host build trees; the image builds the native core itself.
+build/
+cmake-build-*/
+
+# Staged host binaries must never leak into the image build.
+src/magic_geo/libmagic_geo_native.so
+src/magic_geo/magic_geo_native.dll
+src/magic_geo/libmagic_geo_native.dylib
+
+# Generated outputs and downloaded datasets.
+runs/
+worlds/
+calibration_data/
+
+# Deployment files themselves and local configuration.
+Dockerfile
+docker-compose.yml
+.dockerignore
+.env
+.env.example
+
+# Not needed inside the image.
+docs/
+tests/
+scripts/
+r1.md

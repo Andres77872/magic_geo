@@ -1,0 +1,30 @@
+# All-in-one magic-geo deployment. Configuration lives in .env (copy
+# .env.example). Worlds persist in ${MAGIC_GEO_WORLDS_DIR} on the host.
+#
+#   mkdir -p worlds        # keep it owned by your user before the first up
+#   docker compose up --build -d
+#   # web workbench: http://127.0.0.1:8642
+#
+# One-off CLI runs reuse the same image and worlds volume:
+#   docker compose run --rm magic-geo generate \
+#     --config configs/earthlike_seed.yaml --output runs/world.json
+
+services:
+  magic-geo:
+    build:
+      context: .
+      args:
+        MAGIC_GEO_ENABLE_CUDA: ${MAGIC_GEO_ENABLE_CUDA:-OFF}
+    image: magic-geo:latest
+    container_name: magic-geo
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      # The workbench has no authentication; the default publishes only on
+      # loopback. Set MAGIC_GEO_PUBLISH_HOST=0.0.0.0 only behind a trusted
+      # network boundary or authenticating reverse proxy.
+      - "${MAGIC_GEO_PUBLISH_HOST:-127.0.0.1}:${MAGIC_GEO_PORT:-8642}:${MAGIC_GEO_PORT:-8642}"
+    volumes:
+      - "${MAGIC_GEO_WORLDS_DIR:-./worlds}:${MAGIC_GEO_WORKSPACE:-/app/runs}"
+    restart: unless-stopped
