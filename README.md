@@ -15,11 +15,15 @@ an external service.
 
 ## Quick Start
 
+Prerequisites: Python 3.11+, CMake 3.20+, and a C++20 compiler. OpenMP is
+used when found; a CUDA 12.8+ toolkit additionally enables the GPU backend,
+otherwise the build falls back to the CPU core with a CUDA runtime stub.
+
 ```bash
-python -m pip install -e .
-cmake -S . -B build
-cmake --build build
-magic-geo backend
+python -m pip install -e .   # Python CLI + library (editable)
+cmake -S . -B build          # configure the C++ simulation core
+cmake --build build          # stages libmagic_geo_native.so into src/magic_geo/
+magic-geo backend            # verify the native core loads (prints backend info)
 magic-geo generate --config configs/earthlike_seed.yaml --output runs/earthlike/world.json --summary runs/earthlike/summary.md --cells-csv runs/earthlike/cells.csv
 magic-geo generate --geo-only --config configs/earthlike_seed.yaml --output runs/earthlike/geo-world.json
 magic-geo render --world runs/earthlike/world.json --output runs/earthlike/world.svg --projection mollweide --labels
@@ -255,6 +259,20 @@ worlds are cached per process by `tests/support/worlds.py`, so parallel runners
 pay one generation per worker. Without the `debug` extra the FastAPI workbench
 tests skip themselves, and `tests/test_debug_rerun.py` skips unless `rerun-sdk`
 is installed.
+
+The C++ simulation core has its own test suite, registered with CTest by the
+same CMake build (`BUILD_TESTING` is on by default):
+
+```bash
+cmake --build build                          # builds the test executables too
+ctest --test-dir build --output-on-failure   # 13 native tests, ~5 s
+```
+
+These cover the C API v1 client contract, the native API and fibonacci-kNN
+reference check, messagepack/serialization round trips, plate boundary
+segments, crust overlap/reservoir/fate accounting, sediment partitioning, and
+oceanic age/depth. A CUDA build adds a `magic_geo_cuda_compute` test that
+skips itself (exit code 77) when no compatible GPU is present.
 
 ## Architecture
 
