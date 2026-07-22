@@ -220,8 +220,11 @@ P('- **`numeric`** — an int/float cell field. Coloured with viridis normalised
 P('- **`categorical`** — a string/bool cell field with ≤ 64 distinct values. One colour per class.');
 P('- **`numeric_monthly`** — a 12-element numeric cell field. Scrub the month control (1–12).');
 P('- **`numeric_stage`** — a per-cell field inside a record family shaped as `cell_ids` + `*_by_cell`');
-P('  parallel arrays. Scrub the stage control; the colour scale is fixed across all stages.', '');
-P('Every layer carries **props** used throughout this doc: its `id` (`source/name`), `kind`, inferred');
+P('  parallel arrays. Scrub the stage control; the colour scale is fixed across all stages.');
+P('- **`categorical_stage`** — a string/bool field inside such a record family with ≤ 64 distinct');
+P('  values. One colour per class, scrubbed by stage.', '');
+P('Every layer carries **props** used throughout this doc: its `id` (`source/name`; monthly layers');
+P('use `monthly/name`), `kind`, inferred');
 P('`unit`, `role` (below), value `range` (min…max), and for stage/monthly layers the stage/month count.');
 P('Categorical layers carry the full class list instead of a numeric range.', '');
 P('### Role (how to read the values)', '');
@@ -274,7 +277,7 @@ for (const [key, title, meta] of DOMAINS) {
 P('## Status & gaps summary', '');
 P(`**Documentation gaps.** ${cov.counts.generated} of ${cov.counts.total} layers (${(100 * cov.counts.generated / cov.counts.total).toFixed(1)}%) fall to the generated tier — coordinate components, a few dimensionless physics quantities, and stage-ledger coordinates. Listed per domain above; each is a one-line addition to \`CURATED\`.`, '');
 P('**Data-model gaps** (from the pipeline review — see [layers_review.md](layers_review.md) for detail):', '');
-P('- **Silent drops:** high-cardinality string fields (`healpix_like_pixel_code`, `s2_like_token`) become no layer *and* no skip record; reachable only via the cell inspector. *(review F2)*');
+P('- **Silent drops:** high-cardinality string fields (`healpix_like_pixel_code`, `s2_like_token`) still become no layer, but the exporter now records each one under the `skipped_layers` manifest key with a reason and keeps the column in `cells.parquet`; values remain reachable via the cell inspector. *(review F2, fixed)*');
 P('- **Code/name mismatch:** per-stage `lithology` ships as numeric codes 0–6 while `cells/lithology` uses alphabetical names; no code→name table is emitted. *(review F3)*');
 P('- **Identifiers as gradients:** ~30 `*_id` / `*_to` layers render as continuous ramps; flagged with the `identifier` role here and in the UI. *(review F8)*');
 P('- **Heavy-tailed scales:** layers like `flow_accumulation` (max ≫ p98) saturate under the p2–p98 ramp; the legend now shows `≥`/`≤` clip markers. *(review F6, fixed)*');

@@ -12,6 +12,8 @@ from magic_geo.config import config_to_native, load_config
 from magic_geo.native import generate_geo_world, generate_world
 from magic_geo.planet_parameters import planet_parameter_snapshot
 
+from support.nativestub import patch_generation_payload
+
 
 class NativeMessagePackTests(TestCase):
     def test_native_messagepack_matches_the_preserved_json_boundary(self) -> None:
@@ -80,19 +82,7 @@ class NativeMessagePackTests(TestCase):
             magic_geo_generate_geo_msgpack_v3 = magic_geo_generate_json_v3
 
         stale_payload = {"schema_version": 1}
-        with (
-            patch.object(native_module, "_load_library", return_value=StaleLibrary()),
-            patch.object(
-                native_module,
-                "_consume_json_pointer",
-                return_value=stale_payload,
-            ),
-            patch.object(
-                native_module,
-                "_consume_msgpack_pointer",
-                return_value=stale_payload,
-            ),
-        ):
+        with patch_generation_payload(StaleLibrary(), stale_payload):
             for generator in (generate_world, generate_geo_world):
                 for serialization in ("json", "msgpack"):
                     with self.subTest(

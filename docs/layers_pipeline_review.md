@@ -1,5 +1,11 @@
 # Layers Pipeline Review (2026-07-10)
 
+> **Historical snapshot.** Findings and their **fixed**/open marks describe the
+> tree as of 2026-07-10; several items not marked fixed here have since been
+> fixed. Read it for the analysis, not for current status. Companion to the
+> same-day [layers_review.md](layers_review.md); see [debugger.md](debugger.md)
+> for the current contract.
+
 Deep review of the layer path: `debug_export.py` (world.json → debug cache) →
 `debug_server.py` (cache → HTTP) → `debug_ui/app.js` (HTTP → pixels). Findings
 are ordered by severity within each component; none block day-to-day use.

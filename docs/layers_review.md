@@ -1,5 +1,12 @@
 # Deep Review: the Debugger Layer Pipeline
 
+> **Historical snapshot (2026-07-10).** Findings, status marks, and the
+> `file:line` anchors below describe the tree as of that date; the anchors no
+> longer resolve to the quoted code and several items still marked open have
+> since been fixed. Read it for the analysis, not for current status — see
+> [debugger.md](debugger.md) and [layers_reference.md](layers_reference.md) for
+> the current contract.
+
 Reviewed 2026-07-10 against the code in this branch and the real `runs/earthlike/debug`
 cache (32,768 cells, **446 layers**: 368 `numeric`, 47 `categorical`, 27 `numeric_stage`,
 4 `numeric_monthly`; 2 stage histories with 16 and 1,600 stages; 118 record families).

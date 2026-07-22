@@ -9,8 +9,12 @@ host-specific engineering evidence, not universal NVIDIA performance claims.
 > now runs authoritatively on CPU for `cpu`, `opencl`, and `cuda` backends. The
 > CUDA nearest-source kernel measured below has since been removed; no current
 > generation or low-level API exposes it. None of the historical remap speedups
-> below measures the overlap path; GPU implementation, complete-ledger parity,
-> telemetry, fallback behavior, and new crossover calibration remain pending.
+> below measures the overlap path; authoritative GPU transport, complete-ledger
+> parity, and new crossover calibration remain pending. What does ship on this
+> path is a diagnostic-only CUDA/OpenCL continuous-moment shadow reduction over
+> the CPU-authoritative overlap CSR, with its own `backend` telemetry (27
+> `crust_overlap_continuous_shadow_*` keys) and CPU fallback; its device results
+> are reconciled and discarded, never used as state.
 
 ## Audited target
 

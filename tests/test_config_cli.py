@@ -11,6 +11,8 @@ from typer.testing import CliRunner
 from magic_geo import create_config, load_config
 from magic_geo.cli import app
 
+from support.cli import assert_no_cli_crash
+
 
 class ConfigCliTests(TestCase):
     def test_init_config_uses_safe_local_target_and_earthlike_profile(self) -> None:
@@ -77,7 +79,7 @@ class ConfigCliTests(TestCase):
 
             self.assertEqual(result.exit_code, 2, result.output)
             self.assertIn("invalid YAML", result.output)
-            self.assertNotIn("Traceback", result.output)
+            assert_no_cli_crash(self, result)
 
     def test_init_config_normalizes_complex_yaml_and_write_errors(self) -> None:
         deeply_nested = "[" * 80 + "0" + "]" * 80
@@ -87,7 +89,7 @@ class ConfigCliTests(TestCase):
         )
         self.assertEqual(complex_result.exit_code, 2, complex_result.output)
         self.assertIn("nesting exceeds", complex_result.output)
-        self.assertNotIn("Traceback", complex_result.output)
+        assert_no_cli_crash(self, complex_result)
 
         for assignment in (
             "run.seed=" + "1" * 4301,
@@ -97,10 +99,10 @@ class ConfigCliTests(TestCase):
                 result = CliRunner().invoke(app, ["init-config", "--set", assignment])
                 self.assertEqual(result.exit_code, 2, result.output)
                 self.assertIn("invalid", result.output.lower())
-                self.assertNotIn("Traceback", result.output)
+                assert_no_cli_crash(self, result)
 
         with patch("magic_geo.cli.write_config", side_effect=PermissionError("read-only")):
             write_result = CliRunner().invoke(app, ["init-config"])
         self.assertEqual(write_result.exit_code, 2, write_result.output)
         self.assertIn("read-only", write_result.output)
-        self.assertNotIn("Traceback", write_result.output)
+        assert_no_cli_crash(self, write_result)

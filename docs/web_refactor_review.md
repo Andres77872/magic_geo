@@ -139,8 +139,8 @@ crashing/partially flattening.
 ### Typed operations and jobs
 
 `web_jobs.py` defines a fixed typed catalog for 11 executable workflows; config,
-backend, and serve are three direct equivalents. The coverage set exactly
-matches all 14 CLI commands.
+backend, map-reference export, and serve are four direct equivalents. The
+coverage set exactly matches all 15 CLI commands.
 
 The browser renders forms from that catalog. The job manager:
 
@@ -262,7 +262,7 @@ Focused unit coverage now proves:
 - indexed full-cell merge and ragged-monthly retention;
 - path-prefix escape rejection;
 - arbitrary world-key filename confinement;
-- fixed 14-command parity, direct/transitive job input confinement, and
+- fixed 15-command parity, direct/transitive job input confinement, and
   input/output collision rejection;
 - non-default-workspace rebasing for browser output defaults;
 - strict debug format/version rejection;

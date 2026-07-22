@@ -136,7 +136,7 @@ const CURATED = {
   is_lake: 'Whether the cell is part of a standing water body (lake).',
   is_closed_basin: 'Whether the cell drains to an internal sink with no path to the ocean (endorheic).',
   biome: 'Whittaker-style biome classification from temperature, moisture, and elevation.',
-  climate_class: 'Köppen–Geiger climate class (Af, BWh, Cfb, ET, …). 17 classes on the earthlike run.',
+  climate_class: 'Köppen–Geiger climate class (Af, BWh, Cfb, ET, …). The class set is world-dependent; the classes actually present are listed with the layer.',
   landform: 'Geomorphic landform class (mountain_belt, coastal_plain, trench, …) from elevation and tectonic context.',
   plate_id: 'Tectonic plate the cell belongs to. Identifier — colour groups plates, magnitude is meaningless.',
   crust_type: 'Crust classification (continental, oceanic, craton, orogen, …).',

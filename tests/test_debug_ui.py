@@ -70,7 +70,7 @@ class DebugUiContractTests(TestCase):
     def test_map_exports_png_and_copy_paste_image_prompt(self) -> None:
         html = Path("src/magic_geo/debug_ui/index.html").read_text(encoding="utf-8")
         script = Path("src/magic_geo/debug_ui/app.js").read_text(encoding="utf-8")
-        cli = Path("src/magic_geo/cli.py").read_text(encoding="utf-8")
+        cli = Path("src/magic_geo/cli/commands/export.py").read_text(encoding="utf-8")
         web_jobs = Path("src/magic_geo/web_jobs.py").read_text(encoding="utf-8")
         guide = Path("docs/debug_ui_guide.md").read_text(encoding="utf-8")
 

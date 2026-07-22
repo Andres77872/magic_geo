@@ -63,7 +63,7 @@ for edited parameters or future engine versions.
 | Seed | Cells | Ocean | Mean °C | Land precipitation mm/y | Defining generated evidence | Generic result |
 | --- | ---: | ---: | ---: | ---: | --- | --- |
 | `continental_realm` | 2,562 | 0.340 | 14.0 | 932 | 6 landmasses; 33.0% forest land; 19.0°C seasonal land range | 14/14 layers, 0 warnings |
-| `glasswind_desert` | 2,048 | 0.000 | 31.9 | 108 | 87.5% desert land; no rivers; one landmass | 14/14 layers, 2 warnings |
+| `glasswind_desert` | 2,048 | 0.000 | 31.9 | 94 | 87.5% desert land; no rivers; one landmass | 14/14 layers, 2 warnings |
 | `pelagic_archipelago` | 2,048 | 0.916 | 20.1 | 3,317 | 10 landmasses in the remaining 8.4% land area | 14/14 layers, 1 warning |
 | `cryogenic_slushball` | 2,048 | 0.616 | −21.2 | 268 | 24.4% ice cells; no forest/desert land | 14/14 layers, 2 warnings |
 | `young_volcanic` | 2,048 | 0.240 | 42.0 | 1,174 | 326 volcanic-arc cells; 286 high-seismic-hazard cells; 7 landmasses | 14/14 layers, 2 warnings |

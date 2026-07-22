@@ -276,7 +276,8 @@ curl -X POST http://127.0.0.1:8642/api/config/validate \
 ```
 
 The YAML string is limited to 1,000,000 UTF-8 bytes and to bounded nesting,
-event, and alias counts. YAML/config failures use HTTP 422 with the structured
+event, and alias counts. Exceeding the byte limit uses HTTP 413 with a plain
+string `detail`; other YAML/config failures use HTTP 422 with the structured
 Python `ConfigError` under `detail`; malformed JSON or an invalid request
 envelope uses FastAPI's standard validation-detail list. Saving an existing name
 without confirmation uses HTTP 409. The complete live contract is at `/api/docs`

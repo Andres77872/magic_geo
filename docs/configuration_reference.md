@@ -326,7 +326,8 @@ rejected at load. Every property is documented above with its first-order effect
   (`planet`/`tectonics`/`climate`/`hydrology`/`erosion`) are exposed. Tuning a
   biome threshold or an aquifer index means editing the module, not the config.
 - **Determinism vs threads (known regression).** Output currently varies with
-  `compute.threads` / `OMP_NUM_THREADS` (documented in [debugger.md](debugger.md));
+  `compute.threads` / `OMP_NUM_THREADS` (documented in the
+  [reproducibility checklist](configuration_helpers.md#reproducibility-checklist));
   a fixed thread count is bit-stable, but different counts differ. `seed` alone is
   not sufficient for reproducibility until this is fixed.
 - **Non-Earth planets are lightly validated.** The schema permits extreme planets
@@ -391,8 +392,8 @@ rejected at load. Every property is documented above with its first-order effect
   serialized; the final reference peaks are 22 packets for one surface owner,
   22,145 live packets, and 5,896 transfers in one step. They are numerical
   memory-safety limits, not physical flux or reservoir-capacity limits. The
-  geometry-stable 4,096-cell, seven-step reference coalesces `3,483,059` raw
-  arrangement atoms to `109,777` membership-area classes (about `31.7x`), with
+  geometry-stable 4,096-cell, seven-step reference coalesces `3,503,886` raw
+  arrangement atoms to `111,022` membership-area classes (about `31.6x`), with
   at most 14 per destination. At the historical pre-initial-age/expanded-round-trip
   checkpoint, its exact boundary/candidate, thermal-target, and sediment audit
   payload was `178,764,102` uncompressed JSON bytes and direct-native-process

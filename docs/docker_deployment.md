@@ -73,15 +73,16 @@ docker compose run --rm magic-geo backend
 
 # validation against a generated world
 docker compose run --rm magic-geo validate-geo \
-  --config configs/earthlike_seed.yaml --output runs/geo_validation.json
+  --world runs/world.json --output runs/geo_validation.json
 
 # shell inside the running workbench container
 docker compose exec magic-geo bash   # (entrypoint bypass: docker compose exec is not affected)
 ```
 
 Note that `docker compose run` starts a new container that shares the worlds
-volume with the workbench service, so generated files appear in the browser's
-Data/Worlds views after a refresh.
+volume with the workbench service, so generated files land in the same
+workspace. Run `export-debug` on a world to make it selectable in the
+workbench's debug-cache picker.
 
 ## Image layout
 

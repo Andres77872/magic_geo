@@ -3,7 +3,6 @@ import ctypes
 import math
 from tempfile import TemporaryDirectory
 from unittest import TestCase
-from unittest.mock import patch
 
 import magic_geo.native as native_module
 import yaml
@@ -37,6 +36,8 @@ from magic_geo.native import (
     NativeConfigV3,
     _native_config,
 )
+
+from support.nativestub import patch_loaded_library
 
 
 class ConfigTests(TestCase):
@@ -225,12 +226,7 @@ class ConfigTests(TestCase):
             magic_geo_free_string = FakeFunction()
 
         incomplete = IncompleteLibrary()
-        with (
-            patch.object(
-                native_module, "_library_path", return_value=Path("incomplete.so")
-            ),
-            patch.object(native_module.ctypes, "CDLL", return_value=incomplete),
-        ):
+        with patch_loaded_library(incomplete):
             with self.assertRaisesRegex(
                 RuntimeError, "does not expose the current V3 JSON and MessagePack ABI"
             ):

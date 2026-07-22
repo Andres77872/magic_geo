@@ -27,8 +27,9 @@ magic-geo serve
 ```
 
 `-d` is optional. With the default `--workspace runs`, the server auto-selects
-`runs/debug` when it contains a manifest. Otherwise it opens cacheless: Config,
-Operations, Backend, jobs, and OpenAPI still work. A successful browser
+`runs/debug` when it contains a manifest, and otherwise falls back to the newest
+nested `runs/**/debug` cache. Only when no cache exists at all does it open
+cacheless: Config, Operations, Backend, jobs, and OpenAPI still work. A successful browser
 generation can create and select the cache without a restart.
 
 If a cache already exists:
@@ -220,8 +221,10 @@ boundary and authenticating proxy.
 
 ## API groups
 
-The complete interactive contract is served at `/api/docs` (Swagger),
-`/api/redoc`, and `/api/openapi.json`.
+Every endpoint below except `GET /mesh/{asset}` is served as an interactive
+contract at `/api/docs` (Swagger), `/api/redoc`, and `/api/openapi.json`; the
+mesh asset route is registered with `include_in_schema=False` and so does not
+appear there.
 
 ### Workbench and worlds
 

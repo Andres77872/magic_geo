@@ -926,10 +926,10 @@ def _compare_record(
         f"{label} fields do not match the canonical boundary-segment schema",
     )
     maximum_residual = 0.0
-    for field in INTEGER_RECORD_FIELDS:
+    for field in sorted(INTEGER_RECORD_FIELDS):
         observed = _integer(actual.get(field), f"{label}.{field}")
         _require(observed == expected[field], f"{label}.{field} does not replay")
-    for field in BOOLEAN_RECORD_FIELDS:
+    for field in sorted(BOOLEAN_RECORD_FIELDS):
         _require(
             type(actual.get(field)) is bool,
             f"{label}.{field} must be boolean",
@@ -937,7 +937,7 @@ def _compare_record(
         _require(
             actual[field] is expected[field], f"{label}.{field} does not replay"
         )
-    for field in STRING_RECORD_FIELDS:
+    for field in sorted(STRING_RECORD_FIELDS):
         observed = actual.get(field)
         _require(type(observed) is str, f"{label}.{field} must be a string")
         if field == "direct_boundary_class":
@@ -962,7 +962,7 @@ def _compare_record(
                 f"{label}.{field} is invalid",
             )
         _require(observed == expected[field], f"{label}.{field} does not replay")
-    for field in FLOAT_RECORD_FIELDS:
+    for field in sorted(FLOAT_RECORD_FIELDS):
         observed = _number(actual.get(field), f"{label}.{field}")
         wanted = float(expected[field])
         residual = abs(observed - wanted)
@@ -998,9 +998,9 @@ def _validate_model(
     for field, expected in MODEL_BOOLEAN_VALUES.items():
         _require(type(model.get(field)) is bool, f"model.{field} must be boolean")
         _require(model[field] is expected, f"model.{field} is invalid")
-    for field in MODEL_FLOAT_FIELDS:
+    for field in sorted(MODEL_FLOAT_FIELDS):
         _number(model.get(field), f"model.{field}")
-    for field in MODEL_INTEGER_FIELDS:
+    for field in sorted(MODEL_INTEGER_FIELDS):
         _integer(model.get(field), f"model.{field}")
     _require(
         model.get("polarity_candidate_status_order")

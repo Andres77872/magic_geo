@@ -1,8 +1,10 @@
 .venv/
 build/
+cmake-build-debug/
 __pycache__/
 *.py[cod]
 *.egg-info/
+.pytest_cache/
 
 # Generated world outputs are intentionally easy to recreate.
 runs/
@@ -20,3 +22,8 @@ src/magic_geo/libmagic_geo_native.so
 .codex
 .idea
 .claude
+
+# Coverage artifacts from `pytest --cov`.
+.coverage
+.coverage.*
+htmlcov/

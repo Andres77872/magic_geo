@@ -130,7 +130,7 @@ required: an installed wheel does not pretend the repository's example
   built in staging and published to its workspace destination only on success.
 - **Export Rerun** — available only when `rerun-sdk` is installed.
 
-Configuration creation, backend inspection, and serving are shown as direct
+Configuration creation, backend inspection, map-reference export, and serving are shown as direct
 equivalent views rather than recursive background jobs.
 
 ### Job states and logs
@@ -215,7 +215,7 @@ interpreted as a best-effort older/newer cache.
   non-scalar metadata and mixed per-cell fields.
 - **Record families** includes every exported list-of-records. Choose **Full
   nested records** for JSONL arrays/objects/provenance or **Scalar columns** for
-  the compact Parquet sidecar. Pagination supports 25/50/100/200 rows.
+  the compact Parquet sidecar. Pagination supports 10/25/50/100 rows.
 - **Model sections** renders every exported dictionary—summary/model contracts,
   graphs, simulation clock, backend telemetry, validation/calibration content,
   and other named sections—as formatted JSON.
@@ -245,7 +245,7 @@ every record family into bespoke geometry; use Data for generic access.
 ### Layers and legend
 
 A layer is one per-cell column cataloged by the manifest and served as Float32
-(`format=f32`, with Arrow also available to API clients). Four kinds exist:
+(`format=f32`, with Arrow also available to API clients). Five kinds exist:
 
 | Kind | Time axis | Example |
 |---|---|---|
@@ -281,7 +281,7 @@ Image refinement workflow:
   using the current camera framing and every currently visible map overlay. It
   also reflects the selected stage or month. The browser writes an `image/png`
   file; the workbench does not send the map anywhere.
-- **Export image prompt** writes a complete, copy/paste-ready GPT Image prompt
+- **Prompt .md** writes a complete, copy/paste-ready GPT Image prompt
   as `text/markdown`. It names the paired PNG reference and records the world,
   layer, projection, time selection, and visible overlays. Its color codex lists
   every category and its cell color for categorical layers, or explains the
@@ -412,7 +412,8 @@ overlay only when spatial visualization materially helps.
 ### Layer documentation
 
 `debug_ui/layer_docs.js` resolves a layer in this order: curated field text,
-pattern/role rule, unit rule, source-family text, then generated fallback. After
+pattern/role rule, unit rule, then generated fallback; source-family text is
+attached alongside whichever tier resolved. After
 changes, regenerate [layers_reference.md](layers_reference.md):
 
 ```bash

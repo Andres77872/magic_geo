@@ -18,8 +18,11 @@ discovers layers generically from the world-payload shape ([debug_export.py](../
 - **`numeric_monthly`** — a 12-element numeric cell field. Scrub the month control (1–12).
 - **`numeric_stage`** — a per-cell field inside a record family shaped as `cell_ids` + `*_by_cell`
   parallel arrays. Scrub the stage control; the colour scale is fixed across all stages.
+- **`categorical_stage`** — a string/bool field inside such a record family with ≤ 64 distinct
+  values. One colour per class, scrubbed by stage.
 
-Every layer carries **props** used throughout this doc: its `id` (`source/name`), `kind`, inferred
+Every layer carries **props** used throughout this doc: its `id` (`source/name`; monthly layers
+use `monthly/name`), `kind`, inferred
 `unit`, `role` (below), value `range` (min…max), and for stage/monthly layers the stage/month count.
 Categorical layers carry the full class list instead of a numeric range.
 
@@ -483,7 +486,7 @@ Layers by domain (documentation gaps = generated tier):
 | --- | --- | --- | --- | --- | --- | --- |
 | `absorbed_shortwave_w_m2` | numeric | `W/m²` | 37.94 … 341.1 | measurement | curated | Solar energy absorbed at the surface after albedo. |
 | `atmospheric_cell` | categorical | `category` | 4 classes | classification | curated | Which meridional circulation cell (Hadley / Ferrel / Polar) the cell sits in. **Classes:** midlatitude_westerly, polar_cell, subtropical_high, tropical_ascent. |
-| `climate_class` | categorical | `category` | 18 classes | classification | curated | Köppen–Geiger climate class (Af, BWh, Cfb, ET, …). 17 classes on the earthlike run. **Classes:** Af, Am, Aw, BSh, BSk, BWh, BWk, Cfa, Cfb, Cfc, Cwa, Cwb, Cwc, Dfa, Dfb, Dfc, EF, ET. |
+| `climate_class` | categorical | `category` | 18 classes | classification | curated | Köppen–Geiger climate class (Af, BWh, Cfb, ET, …). The class set is world-dependent; the classes actually present are listed with the layer. **Classes:** Af, Am, Aw, BSh, BSk, BWh, BWk, Cfa, Cfb, Cfc, Cwa, Cwb, Cwc, Dfa, Dfb, Dfc, EF, ET. |
 | `continentality_index` | numeric | `index` | 4.00e-5 … 0.9955 | index | curated | How continental (vs maritime) the local climate is; drives seasonal temperature range. |
 | `energy_balance_residual_c` | numeric | `°C` | -7.98 … 71.84 | diagnostic | curated | Generated temperature minus the separately parameterized radiative-equilibrium temperature, in degrees Celsius. This is a diagnostic model mismatch, not the residual of a solved energy-closure equation and is not expected to be zero. |
 | `greenhouse_trapping_w_m2` | numeric | `W/m²` | 12.62 … 112.1 | measurement | curated | Longwave energy retained by the atmosphere. |
@@ -774,7 +777,7 @@ Layers by domain (documentation gaps = generated tier):
 
 **Data-model gaps** (from the pipeline review — see [layers_review.md](layers_review.md) for detail):
 
-- **Silent drops:** high-cardinality string fields (`healpix_like_pixel_code`, `s2_like_token`) become no layer *and* no skip record; reachable only via the cell inspector. *(review F2)*
+- **Silent drops:** high-cardinality string fields (`healpix_like_pixel_code`, `s2_like_token`) still become no layer, but the exporter now records each one under the `skipped_layers` manifest key with a reason and keeps the column in `cells.parquet`; values remain reachable via the cell inspector. *(review F2, fixed)*
 - **Code/name mismatch:** per-stage `lithology` ships as numeric codes 0–6 while `cells/lithology` uses alphabetical names; no code→name table is emitted. *(review F3)*
 - **Identifiers as gradients:** ~30 `*_id` / `*_to` layers render as continuous ramps; flagged with the `identifier` role here and in the UI. *(review F8)*
 - **Heavy-tailed scales:** layers like `flow_accumulation` (max ≫ p98) saturate under the p2–p98 ramp; the legend now shows `≥`/`≤` clip markers. *(review F6, fixed)*

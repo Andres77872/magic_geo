@@ -4,14 +4,20 @@ This plan executes the `r1.md` review as a CLI-first causal planet generator. Th
 
 ## Current Scope
 
-No GUI is implemented. The deliverables are:
+> **Plan of record, not current state.** This section states the scope as
+> originally planned. A browser workbench GUI has since shipped
+> (`magic-geo serve`, see [debug_ui_guide.md](debug_ui_guide.md)), and the
+> output set has grown well past the three formats listed here.
+
+The CLI is the primary interface. The deliverables are:
 
 - Python API/config layer.
 - C++ native simulation core for expensive operations.
 - CLI commands.
 - Seed YAML config.
-- JSON, CSV, and Markdown outputs.
-- Runtime backend inspection, including OpenCL probing.
+- JSON/`.mgeo`, CSV, Markdown, SVG/PPM map, Parquet/JSONL debug-cache, VTU,
+  PNG debug-map, and Rerun `.rrd` outputs.
+- Runtime backend inspection, including OpenCL and CUDA probing.
 
 ## Research-Driven Stack Decisions
 

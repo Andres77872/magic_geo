@@ -33,7 +33,7 @@ The native boundary is implemented by `serialize_world` in
 `cpp/src/engine/world_serialization.cpp`, copied in `cpp/src/c_api.cpp`, and
 decoded in `src/magic_geo/native.py`. The final object is much larger because
 `src/magic_geo/api.py` adds all Python-derived layers before
-`src/magic_geo/io.py` writes it.
+`src/magic_geo/io/json_writer.py` writes it.
 
 The final 4,096-cell reference artifact contains only the portable value model
 needed by MessagePack: string-keyed objects, arrays, UTF-8 strings, signed and

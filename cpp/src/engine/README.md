@@ -63,6 +63,11 @@ unchanged.
   tables; no transfer has a resolved physical basis.
 - `oceanic_age_depth.cpp`: the centralized continuity-adjusted relative
   oceanic basement-subsidence curve and its finite, nonnegative age guard.
+- `initial_oceanic_age.cpp`: the deterministic multi-source ridge-graph
+  travel-time field for initial oceanic-like crust ages
+  (`multi_source_nominal_ridge_graph_travel_time_v1`), including ridge seeding,
+  the single nominal half-rate, and the reachable, ceiling-clamped, and
+  no-active-ridge-path statuses described below.
 - `sediment_partition.cpp`: checked mutation primitives for the canonical
   bedrock-surface/mobile-sediment geometry and native aggregation checks for the
   cell-indexed alluvium-versus-bedrock source partitions.
@@ -279,7 +284,7 @@ physical fate, local pairwise kinematics, slab selection, and subduction
 polarity unresolved; the separate segment ledger supplies direct local
 kinematic evidence without upgrading those other claims. The geometry-stable
 4,096-cell, seven-step reference reduces
-`3,483,059` raw atoms to `109,777` classes (about `31.7x`), with at most 14
+`3,503,886` raw atoms to `111,022` classes (about `31.6x`), with at most 14
 classes per destination. At the historical pre-initial-age/expanded-round-trip
 checkpoint, with the exact segment, candidate-crosswalk, sediment, and
 thermal-target replay witnesses, it wrote `178,764,102` uncompressed JSON bytes

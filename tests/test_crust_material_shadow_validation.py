@@ -3,16 +3,20 @@ from __future__ import annotations
 import math
 from copy import deepcopy
 from pathlib import Path
+from typing import Any
 from unittest import TestCase
 
 from magic_geo.crust_material_shadow_validation import (
     DENSITY_VOLUME_TO_MASS_KG,
     MODEL_LITERAL_VALUES,
+    UNRESOLVED_ORIGIN_KIND_ID,
     PacketKey,
     initial_crust_material_shadow_packets,
     replay_crust_material_shadow_step,
     validate_crust_material_shadow,
+    _adjustment_cells,
     _operation_mass_tolerance,
+    _snapshot_cells,
 )
 from magic_geo.crust_process_validation import CRUST_PROCESS_REASON_ORDER
 from magic_geo.config import WorldConfig, config_to_native, load_config
@@ -105,8 +109,10 @@ def _plate_step(
     thickness_process_change_km: float,
     density_process_change: float,
     reason_mass_delta_kg: list[float],
+    area_km2: float = 1.0,
+    overlap_area_km2: float = 1.0,
 ) -> dict:
-    transported_density_volume = thickness_km * density
+    transported_density_volume = area_km2 * thickness_km * density
     return {
         "id": step_id,
         "stage": "initial_plate_domains" if step_id == 0 else "erosion_tectonics_0",
@@ -121,7 +127,7 @@ def _plate_step(
         "crust_overlap_ledger": {
             "destination_offsets": [0, 1],
             "source_cell_ids": [0],
-            "overlap_area_km2": [1.0],
+            "overlap_area_km2": [overlap_area_km2],
             "contributor_count_by_cell": [1],
             "remapped_crust_thickness_km_by_cell": [thickness_km],
             "remapped_crust_density_by_cell": [density],
@@ -135,7 +141,7 @@ def _plate_step(
     }
 
 
-def _history_record(step: dict, replay: dict) -> dict:
+def _history_record(step: dict, replay: dict, area_km2: float = 1.0) -> dict:
     overlap = step["crust_overlap_ledger"]
     final_thickness = (
         overlap["remapped_crust_thickness_km_by_cell"][0]
@@ -145,7 +151,9 @@ def _history_record(step: dict, replay: dict) -> dict:
         overlap["remapped_crust_density_by_cell"][0]
         + step["crust_density_process_change_by_cell"][0]
     )
-    scalar_mass = final_thickness * final_density * DENSITY_VOLUME_TO_MASS_KG
+    scalar_mass = (
+        area_km2 * final_thickness * final_density * DENSITY_VOLUME_TO_MASS_KG
+    )
     closing_cells = _packet_cells(replay["closing_packets"])
     closing_cell_mass = math.fsum(closing_cells[0].values())
     raw_mass = (
@@ -204,10 +212,17 @@ def _history_record(step: dict, replay: dict) -> dict:
     }
 
 
-def _sequential_world(*, mass_neutral_state_change: bool = False) -> dict:
-    cells = [{"id": 0, "area_km2": 1.0}]
+def _sequential_world(
+    *,
+    mass_neutral_state_change: bool = False,
+    area_km2: float = 1.0,
+    overlap_area_km2: float = 1.0,
+    second_thickness_km: float = 10.0,
+    second_density: float = 3.0,
+) -> dict:
+    cells = [{"id": 0, "area_km2": area_km2}]
     opening = initial_crust_material_shadow_packets(
-        areas_km2=[1.0],
+        areas_km2=[area_km2],
         crust_thickness_km=[10.0],
         crust_density_g_cm3=[3.0],
         crust_type_ids=[0],
@@ -218,7 +233,7 @@ def _sequential_world(*, mass_neutral_state_change: bool = False) -> dict:
         opening_packets=opening,
         destination_offsets=[0, 1],
         source_cell_ids=[0],
-        overlap_area_km2=[1.0],
+        overlap_area_km2=[overlap_area_km2],
         current_plate_ids=[0],
         ordered_reason_mass_delta_kg_by_cell=initial_deltas,
     )
@@ -229,6 +244,8 @@ def _sequential_world(*, mass_neutral_state_change: bool = False) -> dict:
         thickness_process_change_km=0.0,
         density_process_change=0.0,
         reason_mass_delta_kg=[0.0] * len(CRUST_PROCESS_REASON_ORDER),
+        area_km2=area_km2,
+        overlap_area_km2=overlap_area_km2,
     )
 
     opening_second = _packet_cells(initial_replay["closing_packets"])
@@ -247,21 +264,23 @@ def _sequential_world(*, mass_neutral_state_change: bool = False) -> dict:
         opening_packets=opening_second,
         destination_offsets=[0, 1],
         source_cell_ids=[0],
-        overlap_area_km2=[1.0],
+        overlap_area_km2=[overlap_area_km2],
         current_plate_ids=[0],
         ordered_reason_mass_delta_kg_by_cell=second_deltas,
     )
     second_step = _plate_step(
         step_id=1,
-        thickness_km=10.0,
-        density=3.0,
+        thickness_km=second_thickness_km,
+        density=second_density,
         thickness_process_change_km=thickness_change,
         density_process_change=density_change,
         reason_mass_delta_kg=reason_totals,
+        area_km2=area_km2,
+        overlap_area_km2=overlap_area_km2,
     )
     history = [
-        _history_record(initial_step, initial_replay),
-        _history_record(second_step, second_replay),
+        _history_record(initial_step, initial_replay, area_km2),
+        _history_record(second_step, second_replay, area_km2),
     ]
     opening_counts = [record["opening_packet_count"] for record in history]
     transported_counts = [
@@ -794,3 +813,927 @@ class CrustMaterialShadowReplayTests(TestCase):
                 replay = validate_crust_material_shadow(world)
                 self.assertFalse(replay["passed"], replay)
                 self.assertTrue(replay["failures"])
+
+
+def _set_field(container: Any, key: Any, value: Any) -> None:
+    """Assign ``value``, refusing a tamper that would change nothing.
+
+    A hardcoded tamper value that already equals what the fixture produced
+    would make its case silently inert, so the guard lives in the helper
+    rather than in each individual mutation.
+    """
+
+    current = container[key]
+    if current == value and type(current) is type(value):
+        raise AssertionError(
+            f"tamper is a no-op: {key!r} is already {value!r}"
+        )
+    container[key] = value
+
+
+class CrustMaterialShadowToleranceOperandTests(TestCase):
+    def test_tolerance_operands_must_be_finite_and_nonnegative(self) -> None:
+        cases = (
+            ("negative_term_sum", {"absolute_term_sum": -1.0, "operation_count": 1}),
+            (
+                "nonfinite_term_sum",
+                {"absolute_term_sum": math.inf, "operation_count": 1},
+            ),
+            (
+                "negative_operation_count",
+                {"absolute_term_sum": 1.0, "operation_count": -1},
+            ),
+        )
+        for name, overrides in cases:
+            with self.subTest(case=name):
+                with self.assertRaisesRegex(
+                    ValueError, "finite and nonnegative"
+                ):
+                    _operation_mass_tolerance(1.0, 1.0, **overrides)
+
+    def test_infinite_tolerance_is_rejected_without_an_overflow_error(
+        self,
+    ) -> None:
+        # 10**300 is representable, so the product silently reaches infinity
+        # instead of raising OverflowError as the 10**400 bound does.
+        with self.assertRaisesRegex(
+            ValueError, "mass tolerance overflowed"
+        ) as caught:
+            _operation_mass_tolerance(
+                1.0,
+                1.0,
+                absolute_term_sum=1.0e308,
+                operation_count=10**300,
+            )
+        # Two raises share that message.  Only the OverflowError guard chains
+        # a cause, so a null cause is what proves this reached the separate
+        # nonfinite-product raise rather than the bound-overflow one.
+        self.assertIsNone(caught.exception.__cause__)
+
+
+class InitialCrustMaterialShadowPacketTests(TestCase):
+    def _packets(self, **overrides: Any) -> list[dict[PacketKey, float]]:
+        arguments: dict[str, Any] = {
+            "areas_km2": [1.0],
+            "crust_thickness_km": [10.0],
+            "crust_density_g_cm3": [3.0],
+            "crust_type_ids": [0],
+            "plate_ids": [0],
+        }
+        arguments.update(overrides)
+        return initial_crust_material_shadow_packets(**arguments)
+
+    def test_healthy_inputs_produce_one_typed_packet_per_cell(self) -> None:
+        self.assertEqual(
+            self._packets(),
+            [{PacketKey(0, 0, -1): 3.0e13}],
+        )
+
+    def test_input_length_and_emptiness_are_rejected(self) -> None:
+        cases = (
+            ("length_mismatch", {"plate_ids": [0, 0]}),
+            ("all_empty", {
+                "areas_km2": [],
+                "crust_thickness_km": [],
+                "crust_density_g_cm3": [],
+                "crust_type_ids": [],
+                "plate_ids": [],
+            }),
+        )
+        for name, overrides in cases:
+            with self.subTest(case=name):
+                with self.assertRaisesRegex(
+                    ValueError, "lengths differ or are empty"
+                ):
+                    self._packets(**overrides)
+
+    def test_nonphysical_initial_state_is_rejected(self) -> None:
+        cases = (
+            ("zero_area", {"areas_km2": [0.0]}),
+            ("zero_thickness", {"crust_thickness_km": [0.0]}),
+            ("negative_density", {"crust_density_g_cm3": [-3.0]}),
+            ("unresolved_crust_type", {"crust_type_ids": [9]}),
+            ("negative_plate", {"plate_ids": [-1]}),
+        )
+        for name, overrides in cases:
+            with self.subTest(case=name):
+                with self.assertRaisesRegex(
+                    ValueError, "initial shadow packet state is invalid"
+                ):
+                    self._packets(**overrides)
+
+
+class CrustMaterialShadowStepGuardTests(TestCase):
+    """Fail-closed guards inside the independent single-step replay."""
+
+    def _replay(self, **overrides: Any) -> dict[str, Any]:
+        arguments: dict[str, Any] = {
+            "opening_packets": [{PacketKey(0, 0, -1): 100.0}],
+            "destination_offsets": [0, 1],
+            "source_cell_ids": [0],
+            "overlap_area_km2": [1.0],
+            "current_plate_ids": [0],
+            "ordered_reason_mass_delta_kg_by_cell": _zero_reason_deltas(1),
+        }
+        arguments.update(overrides)
+        return replay_crust_material_shadow_step(**arguments)
+
+    def test_healthy_single_cell_step_is_the_control(self) -> None:
+        replay = self._replay()
+        self.assertEqual(replay["global_closing_mass_kg"], 100.0)
+        self.assertEqual(replay["closing_packet_count"], 1)
+
+    def test_malformed_step_inputs_are_rejected(self) -> None:
+        two_cell_deltas = _zero_reason_deltas(2)
+        sink_deltas = _zero_reason_deltas(1)
+        sink_deltas[0][0] = -1.0e6
+        empty_cell_deltas = _zero_reason_deltas(1)
+        empty_cell_deltas[0][0] = -1.0
+        short_row_deltas = _zero_reason_deltas(1)
+        short_row_deltas[3] = [0.0, 0.0]
+        cases = (
+            (
+                "empty_cell_arrays",
+                {"opening_packets": [], "current_plate_ids": []},
+                "equal nonempty cell arrays",
+            ),
+            (
+                "plate_array_length_mismatch",
+                {"current_plate_ids": [0, 0]},
+                "equal nonempty cell arrays",
+            ),
+            (
+                "nonpositive_overlap_area",
+                {"overlap_area_km2": [0.0]},
+                "overlap CSR is invalid",
+            ),
+            (
+                "source_out_of_range",
+                {"source_cell_ids": [1]},
+                "overlap CSR is invalid",
+            ),
+            (
+                "repeated_source_in_one_row",
+                {
+                    "destination_offsets": [0, 2],
+                    "source_cell_ids": [0, 0],
+                    "overlap_area_km2": [1.0, 1.0],
+                },
+                "overlap CSR is not canonical",
+            ),
+            (
+                "wrong_reason_row_count",
+                {"ordered_reason_mass_delta_kg_by_cell": [[0.0]]},
+                "one mass-delta row per reason",
+            ),
+            (
+                "wrong_reason_row_length",
+                {"ordered_reason_mass_delta_kg_by_cell": short_row_deltas},
+                "reason-delta rows have invalid length",
+            ),
+            (
+                "nonpositive_opening_mass",
+                {"opening_packets": [{PacketKey(0, 0, -1): 0.0}]},
+                "opening shadow packets are invalid",
+            ),
+            (
+                "untyped_opening_key",
+                {"opening_packets": [{(0, 0, -1): 100.0}]},
+                "opening shadow packets are invalid",
+            ),
+            (
+                "source_without_transport_edge",
+                {
+                    "opening_packets": [
+                        {PacketKey(0, 0, -1): 100.0},
+                        {PacketKey(0, 0, -1): 100.0},
+                    ],
+                    "destination_offsets": [0, 1, 2],
+                    "source_cell_ids": [0, 0],
+                    "overlap_area_km2": [1.0, 1.0],
+                    "current_plate_ids": [0, 0],
+                    "ordered_reason_mass_delta_kg_by_cell": two_cell_deltas,
+                },
+                "every shadow source must have a transport edge",
+            ),
+            (
+                "overflowing_source_overlap_area",
+                {
+                    "opening_packets": [
+                        {PacketKey(0, 0, -1): 100.0},
+                        {PacketKey(0, 0, -1): 100.0},
+                    ],
+                    "destination_offsets": [0, 1, 3],
+                    "source_cell_ids": [0, 0, 1],
+                    "overlap_area_km2": [1.0e308, 1.0e308, 1.0],
+                    "current_plate_ids": [0, 0],
+                    "ordered_reason_mass_delta_kg_by_cell": two_cell_deltas,
+                },
+                "shadow source overlap area is invalid",
+            ),
+            (
+                "underflowing_transport_contribution",
+                {
+                    "opening_packets": [
+                        {PacketKey(0, 0, -1): 1.0e-300},
+                        {PacketKey(0, 0, -1): 100.0},
+                    ],
+                    "destination_offsets": [0, 1, 3],
+                    "source_cell_ids": [0, 0, 1],
+                    "overlap_area_km2": [5.0e-324, 1.0, 1.0],
+                    "current_plate_ids": [0, 0],
+                    "ordered_reason_mass_delta_kg_by_cell": two_cell_deltas,
+                },
+                "transport underflowed or overflowed",
+            ),
+            (
+                "exhausted_final_edge_remainder",
+                {
+                    "opening_packets": [
+                        {PacketKey(0, 0, -1): 100.0},
+                        {PacketKey(0, 0, -1): 100.0},
+                    ],
+                    "destination_offsets": [0, 1, 3],
+                    "source_cell_ids": [0, 0, 1],
+                    "overlap_area_km2": [1.0, 5.0e-324, 1.0],
+                    "current_plate_ids": [0, 0],
+                    "ordered_reason_mass_delta_kg_by_cell": two_cell_deltas,
+                },
+                "final-edge remainder is invalid",
+            ),
+            (
+                "sink_on_an_empty_cell",
+                {
+                    "opening_packets": [{}],
+                    "ordered_reason_mass_delta_kg_by_cell": empty_cell_deltas,
+                },
+                "sink cannot draw from an empty cell",
+            ),
+            (
+                "sink_exceeds_available_mass",
+                {"ordered_reason_mass_delta_kg_by_cell": sink_deltas},
+                "sink exceeds available packet mass",
+            ),
+        )
+        for name, overrides, message in cases:
+            with self.subTest(case=name):
+                with self.assertRaisesRegex(ValueError, message):
+                    self._replay(**overrides)
+
+
+class CrustMaterialShadowViolationTests(TestCase):
+    """Every serialized-ledger check that reports a violation.
+
+    Each case tampers with exactly one field of an otherwise healthy
+    sequential world.  :meth:`_expect_single_failure` first proves the
+    untampered copy replays clean and then proves the tampered copy differs
+    from it, so the reported violation can only come from the tamper.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.base = _sequential_world()
+
+    def _expect_single_failure(self, mutate: Any, fragment: str) -> None:
+        control = deepcopy(self.base)
+        control_result = validate_crust_material_shadow(control)
+        self.assertTrue(control_result["passed"], control_result["failures"])
+
+        world = deepcopy(self.base)
+        mutate(world)
+        self.assertNotEqual(world, control, "tamper changed nothing")
+        result = validate_crust_material_shadow(world)
+        self.assertFalse(result["passed"], result)
+        self.assertEqual(len(result["failures"]), 1, result["failures"])
+        self.assertIn(fragment, result["failures"][0])
+
+    def _run_cases(self, cases: tuple[tuple[str, Any, str], ...]) -> None:
+        for name, mutate, fragment in cases:
+            with self.subTest(case=name):
+                self._expect_single_failure(mutate, fragment)
+
+    def test_missing_or_misaligned_top_level_structures_are_reported(
+        self,
+    ) -> None:
+        def drop_history(world: dict) -> None:
+            del world["crust_material_shadow_history"]
+
+        def misalign_history_lengths(world: dict) -> None:
+            world["plate_motion_history"].append(
+                deepcopy(world["plate_motion_history"][1])
+            )
+
+        def nonpositive_cell_area(world: dict) -> None:
+            _set_field(world["cells"][0], "area_km2", 0.0)
+
+        def no_plate_snapshots(world: dict) -> None:
+            for step in world["plate_motion_history"]:
+                _set_field(step, "plates", [])
+
+        def drop_summary(world: dict) -> None:
+            del world["summary"]
+
+        self._run_cases(
+            (
+                (
+                    "missing_history",
+                    drop_history,
+                    "crust material shadow model or aligned histories are missing",
+                ),
+                (
+                    "history_length_mismatch",
+                    misalign_history_lengths,
+                    "crust material shadow model or aligned histories are missing",
+                ),
+                (
+                    "nonpositive_cell_area",
+                    nonpositive_cell_area,
+                    "crust material shadow geometry is invalid",
+                ),
+                (
+                    "no_plate_snapshots",
+                    no_plate_snapshots,
+                    "crust material shadow geometry is invalid",
+                ),
+                (
+                    "missing_summary",
+                    drop_summary,
+                    "crust material shadow summary mirrors do not replay",
+                ),
+            )
+        )
+
+    def test_malformed_records_and_packet_tables_are_reported(self) -> None:
+        def record_is_not_a_dict(world: dict) -> None:
+            _set_field(world["crust_material_shadow_history"], 1, [])
+
+        def record_has_an_extra_key(world: dict) -> None:
+            world["crust_material_shadow_history"][1]["unexpected"] = 1
+
+        def boolean_packet_mass(world: dict) -> None:
+            _set_field(
+                world["crust_material_shadow_history"][1]["closing_packets"][
+                    "dry_rock_mass_kg"
+                ],
+                0,
+                True,
+            )
+
+        def packet_column_is_not_a_list(world: dict) -> None:
+            table = world["crust_material_shadow_history"][1]["opening_packets"]
+            _set_field(table, "cell_offsets", tuple(table["cell_offsets"]))
+
+        def packet_offsets_do_not_close(world: dict) -> None:
+            _set_field(
+                world["crust_material_shadow_history"][1]["opening_packets"][
+                    "cell_offsets"
+                ],
+                -1,
+                5,
+            )
+
+        def origin_kind_out_of_range(world: dict) -> None:
+            _set_field(
+                world["crust_material_shadow_history"][1]["opening_packets"][
+                    "origin_kind_ids"
+                ],
+                0,
+                42,
+            )
+
+        def origin_plate_out_of_range(world: dict) -> None:
+            _set_field(
+                world["crust_material_shadow_history"][1]["opening_packets"][
+                    "origin_plate_ids"
+                ],
+                0,
+                7,
+            )
+
+        def adjustment_column_is_missing(world: dict) -> None:
+            del world["crust_material_shadow_history"][1][
+                "unresolved_sink_adjustments"
+            ]["process_reason_ids"]
+
+        def adjustment_column_is_not_a_list(world: dict) -> None:
+            table = world["crust_material_shadow_history"][1][
+                "unresolved_sink_adjustments"
+            ]
+            _set_field(
+                table,
+                "process_reason_ids",
+                tuple(table["process_reason_ids"]),
+            )
+
+        def adjustment_offsets_do_not_close(world: dict) -> None:
+            _set_field(
+                world["crust_material_shadow_history"][1][
+                    "unresolved_sink_adjustments"
+                ]["cell_offsets"],
+                -1,
+                9,
+            )
+
+        def contributor_count_out_of_range(world: dict) -> None:
+            _set_field(
+                world["plate_motion_history"][1]["crust_overlap_ledger"][
+                    "contributor_count_by_cell"
+                ],
+                0,
+                5,
+            )
+
+        def reason_adjustment_row_is_missing(world: dict) -> None:
+            world["crust_material_shadow_history"][1][
+                "ordered_reason_adjustments"
+            ].pop()
+
+        schema_failure = "crust material shadow history 1 schema is invalid"
+        field_failure = "crust material shadow history 1 fields are invalid"
+        self._run_cases(
+            (
+                ("record_is_not_a_dict", record_is_not_a_dict, schema_failure),
+                ("record_extra_key", record_has_an_extra_key, schema_failure),
+                ("boolean_packet_mass", boolean_packet_mass, field_failure),
+                (
+                    "packet_column_not_a_list",
+                    packet_column_is_not_a_list,
+                    field_failure,
+                ),
+                (
+                    "packet_offsets_do_not_close",
+                    packet_offsets_do_not_close,
+                    field_failure,
+                ),
+                (
+                    "origin_kind_out_of_range",
+                    origin_kind_out_of_range,
+                    field_failure,
+                ),
+                (
+                    "origin_plate_out_of_range",
+                    origin_plate_out_of_range,
+                    field_failure,
+                ),
+                (
+                    "adjustment_column_missing",
+                    adjustment_column_is_missing,
+                    field_failure,
+                ),
+                (
+                    "adjustment_column_not_a_list",
+                    adjustment_column_is_not_a_list,
+                    field_failure,
+                ),
+                (
+                    "adjustment_offsets_do_not_close",
+                    adjustment_offsets_do_not_close,
+                    field_failure,
+                ),
+                (
+                    "contributor_count_out_of_range",
+                    contributor_count_out_of_range,
+                    field_failure,
+                ),
+                (
+                    "reason_adjustment_row_missing",
+                    reason_adjustment_row_is_missing,
+                    field_failure,
+                ),
+            )
+        )
+
+    def test_step_replay_disagreements_are_reported(self) -> None:
+        def nonphysical_initial_thickness(world: dict) -> None:
+            _set_field(
+                world["plate_motion_history"][0]["crust_overlap_ledger"][
+                    "remapped_crust_thickness_km_by_cell"
+                ],
+                0,
+                0.0,
+            )
+
+        def initial_packets_do_not_replay(world: dict) -> None:
+            table = world["crust_material_shadow_history"][0]["opening_packets"]
+            _set_field(
+                table,
+                "dry_rock_mass_kg",
+                [2.0 * table["dry_rock_mass_kg"][0]],
+            )
+
+        def transport_replay_raises(world: dict) -> None:
+            _set_field(
+                world["plate_motion_history"][1]["crust_overlap_ledger"][
+                    "overlap_area_km2"
+                ],
+                0,
+                -1.0,
+            )
+
+        def transported_packet_key_differs(world: dict) -> None:
+            _set_field(
+                world["crust_material_shadow_history"][1][
+                    "transported_packets"
+                ]["origin_kind_ids"],
+                0,
+                1,
+            )
+
+        def source_area_does_not_close(world: dict) -> None:
+            _set_field(
+                world["plate_motion_history"][1]["crust_overlap_ledger"][
+                    "overlap_area_km2"
+                ],
+                0,
+                2.0,
+            )
+
+        def source_and_sink_share_a_reason(world: dict) -> None:
+            table = world["crust_material_shadow_history"][1][
+                "unresolved_sink_adjustments"
+            ]
+            _set_field(table, "process_reason_ids", [0, 0])
+
+        def two_source_records_for_one_reason(world: dict) -> None:
+            world["plate_motion_history"][1]["plates"].append({"plate_id": 1})
+            table = world["crust_material_shadow_history"][1][
+                "unresolved_source_adjustments"
+            ]
+            table["origin_kind_ids"].append(UNRESOLVED_ORIGIN_KIND_ID)
+            table["origin_plate_ids"].append(1)
+            table["origin_reason_ids"].append(0)
+            table["process_reason_ids"].append(0)
+            table["dry_rock_mass_kg"].append(1.0e6)
+            table["cell_offsets"][-1] += 1
+
+        def source_record_names_another_plate(world: dict) -> None:
+            world["plate_motion_history"][1]["plates"].append({"plate_id": 1})
+            _set_field(
+                world["crust_material_shadow_history"][1][
+                    "unresolved_source_adjustments"
+                ]["origin_plate_ids"],
+                0,
+                1,
+            )
+
+        def sink_exceeds_available_mass(world: dict) -> None:
+            table = world["crust_material_shadow_history"][1][
+                "unresolved_sink_adjustments"
+            ]
+            _set_field(
+                table,
+                "dry_rock_mass_kg",
+                [value + 1.0e14 for value in table["dry_rock_mass_kg"]],
+            )
+
+        def nonfinite_final_scalar(world: dict) -> None:
+            _set_field(
+                world["plate_motion_history"][1]["crust_overlap_ledger"][
+                    "remapped_crust_thickness_km_by_cell"
+                ],
+                0,
+                1.0e300,
+            )
+
+        def final_scalar_residual(world: dict) -> None:
+            _set_field(
+                world["plate_motion_history"][1]["crust_overlap_ledger"][
+                    "remapped_crust_thickness_km_by_cell"
+                ],
+                0,
+                11.0,
+            )
+
+        # The four ordered-adjustment conditions below share one subsystem
+        # verdict, so the case name records which condition each tamper hits.
+        ordered_failure = (
+            "crust material shadow ordered adjustments failed at step 1"
+        )
+        self._run_cases(
+            (
+                (
+                    "nonphysical_initial_thickness",
+                    nonphysical_initial_thickness,
+                    "initial crust material shadow state is invalid",
+                ),
+                (
+                    "initial_packets_do_not_replay",
+                    initial_packets_do_not_replay,
+                    "initial crust material shadow packets do not replay",
+                ),
+                (
+                    "transport_replay_raises",
+                    transport_replay_raises,
+                    "crust material shadow transport replay failed at step 1",
+                ),
+                (
+                    "transported_packet_key_differs",
+                    transported_packet_key_differs,
+                    "crust material shadow transported packets differ at step 1",
+                ),
+                (
+                    "source_area_does_not_close",
+                    source_area_does_not_close,
+                    "crust material shadow source-area closure failed at "
+                    "step 1, source 0",
+                ),
+                (
+                    "source_and_sink_share_a_reason",
+                    source_and_sink_share_a_reason,
+                    ordered_failure,
+                ),
+                (
+                    "two_source_records_for_one_reason",
+                    two_source_records_for_one_reason,
+                    ordered_failure,
+                ),
+                (
+                    "source_record_names_another_plate",
+                    source_record_names_another_plate,
+                    ordered_failure,
+                ),
+                (
+                    "sink_exceeds_available_mass",
+                    sink_exceeds_available_mass,
+                    ordered_failure,
+                ),
+                (
+                    "nonfinite_final_scalar",
+                    nonfinite_final_scalar,
+                    "crust material shadow final scalar is nonfinite at "
+                    "step 1, cell 0",
+                ),
+                (
+                    "final_scalar_residual",
+                    final_scalar_residual,
+                    "crust material shadow final scalar failed at step 1, cell 0",
+                ),
+            )
+        )
+
+    def test_serialized_mirror_disagreements_are_reported(self) -> None:
+        def nonfinite_global_scalar(world: dict) -> None:
+            _set_field(
+                world["crust_material_shadow_history"][1],
+                "global_closing_mass_kg",
+                math.nan,
+            )
+
+        def stale_packet_count(world: dict) -> None:
+            record = world["crust_material_shadow_history"][1]
+            _set_field(
+                record,
+                "closing_packet_count",
+                record["closing_packet_count"] + 1,
+            )
+
+        def reason_record_has_an_extra_key(world: dict) -> None:
+            world["crust_material_shadow_history"][1][
+                "ordered_reason_adjustments"
+            ][0]["unexpected"] = 1
+
+        def process_reason_delta_overflows(world: dict) -> None:
+            _set_field(
+                world["plate_motion_history"][1]["crust_overlap_ledger"][
+                    "process_inventory_attribution"
+                ]["reasons"][0]["net_delta"],
+                "density_weighted_crust_volume",
+                1.0e300,
+            )
+
+        def changed_cell_count_out_of_range(world: dict) -> None:
+            reason = world["plate_motion_history"][1]["crust_overlap_ledger"][
+                "process_inventory_attribution"
+            ]["reasons"][0]
+            self.assertNotIn("extensive_state_changed_cell_count", reason)
+            reason["extensive_state_changed_cell_count"] = 7
+
+        reason_failure = "crust material shadow reason record 0 is invalid"
+        self._run_cases(
+            (
+                (
+                    "nonfinite_global_scalar",
+                    nonfinite_global_scalar,
+                    "crust material shadow scalar global_closing_mass_kg is invalid",
+                ),
+                (
+                    "stale_packet_count",
+                    stale_packet_count,
+                    "crust material shadow packet counts failed at step 1",
+                ),
+                (
+                    "reason_record_extra_key",
+                    reason_record_has_an_extra_key,
+                    reason_failure,
+                ),
+                (
+                    "process_reason_delta_overflows",
+                    process_reason_delta_overflows,
+                    reason_failure,
+                ),
+                (
+                    "changed_cell_count_out_of_range",
+                    changed_cell_count_out_of_range,
+                    reason_failure,
+                ),
+            )
+        )
+
+    def test_ill_conditioned_source_geometry_fails_closed_on_tolerance(
+        self,
+    ) -> None:
+        """The composite final-scalar tolerance is reported, not swallowed.
+
+        ``source_geometry_relative_error`` is bounded by ``closure_error /
+        source_area``, and the closure guard only requires an absolute error
+        under ``1e-6``.  A cell whose area is far below that floor therefore
+        passes closure with a relative error near ``1e293``, and the tolerance
+        term ``4 * relative_error * (1 + local_mass_terms)`` overflows as soon
+        as the cell's scalar mass is large.  The validator must turn that into
+        a failure rather than an unbounded (fail-open) tolerance.
+        """
+
+        # Same geometry, benign step-1 scalar state: still a clean replay, so
+        # the failure below is attributable to the mass scale alone.
+        control = _sequential_world(
+            mass_neutral_state_change=True,
+            area_km2=1.0e-300,
+            overlap_area_km2=1.0e-7,
+        )
+        control_result = validate_crust_material_shadow(control)
+        self.assertTrue(control_result["passed"], control_result["failures"])
+
+        world = _sequential_world(
+            mass_neutral_state_change=True,
+            area_km2=1.0e-300,
+            overlap_area_km2=1.0e-7,
+            second_thickness_km=1.0e300,
+            second_density=1.0e8,
+        )
+        ledger = world["plate_motion_history"][1]["crust_overlap_ledger"]
+        self.assertNotEqual(
+            ledger["remapped_crust_thickness_km_by_cell"],
+            control["plate_motion_history"][1]["crust_overlap_ledger"][
+                "remapped_crust_thickness_km_by_cell"
+            ],
+        )
+        # The scalar mass itself stays finite; only the tolerance overflows.
+        self.assertTrue(
+            math.isfinite(
+                world["crust_material_shadow_history"][1][
+                    "closing_scalar_mass_kg"
+                ]
+            )
+        )
+        result = validate_crust_material_shadow(world)
+        self.assertFalse(result["passed"], result)
+        self.assertEqual(result["failures"], [
+            "crust material shadow final scalar tolerance is invalid at "
+            "step 1, cell 0"
+        ])
+
+
+class CrustMaterialShadowTableParserTests(TestCase):
+    """Per-check discrimination behind one aggregated subsystem verdict.
+
+    ``validate_crust_material_shadow`` collapses every packet- and
+    adjustment-table guard into ``history N fields are invalid``, so these
+    cases drive the private parsers that raise underneath it and pin the
+    individual message.  The aggregate verdict alone cannot tell a schema
+    error from a shape error from a non-canonical key.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        record = _sequential_world()["crust_material_shadow_history"][1]
+        cls.packets = record["closing_packets"]
+        cls.adjustments = record["unresolved_sink_adjustments"]
+
+    def _snapshot(self, table: dict) -> list[dict[PacketKey, float]]:
+        return _snapshot_cells(
+            table, cell_count=1, plate_count=1, field="closing_packets"
+        )
+
+    def _adjustment(self, table: dict) -> list[list[Any]]:
+        return _adjustment_cells(
+            table,
+            cell_count=1,
+            plate_count=1,
+            field="unresolved_sink_adjustments",
+            source=False,
+        )
+
+    def test_untampered_tables_parse_as_the_control(self) -> None:
+        self.assertEqual(
+            self._snapshot(deepcopy(self.packets)),
+            [{PacketKey(0, 0, -1): 2.25e13, PacketKey(9, 0, 0): 4.5e12}],
+        )
+        self.assertEqual(len(self._adjustment(deepcopy(self.adjustments))[0]), 2)
+
+    def test_each_packet_table_guard_reports_its_own_message(self) -> None:
+        def extra_column(table: dict) -> None:
+            table["unexpected"] = []
+
+        def column_is_a_tuple(table: dict) -> None:
+            _set_field(table, "cell_offsets", tuple(table["cell_offsets"]))
+
+        def boolean_mass(table: dict) -> None:
+            _set_field(table["dry_rock_mass_kg"], 0, True)
+
+        def offsets_do_not_close(table: dict) -> None:
+            _set_field(table["cell_offsets"], -1, 5)
+
+        def origin_kind_out_of_range(table: dict) -> None:
+            _set_field(table["origin_kind_ids"], 0, 42)
+
+        cases = (
+            (
+                "extra_column",
+                extra_column,
+                TypeError,
+                "closing_packets has an invalid schema",
+            ),
+            (
+                "column_is_a_tuple",
+                column_is_a_tuple,
+                TypeError,
+                "closing_packets arrays must be lists",
+            ),
+            (
+                "boolean_mass",
+                boolean_mass,
+                TypeError,
+                r"closing_packets\.dry_rock_mass_kg must be numeric",
+            ),
+            (
+                "offsets_do_not_close",
+                offsets_do_not_close,
+                ValueError,
+                "closing_packets has an invalid sparse shape",
+            ),
+            (
+                "origin_kind_out_of_range",
+                origin_kind_out_of_range,
+                ValueError,
+                "closing_packets packet keys or masses are not canonical",
+            ),
+        )
+        for name, mutate, exception, message in cases:
+            with self.subTest(case=name):
+                table = deepcopy(self.packets)
+                mutate(table)
+                self.assertNotEqual(table, self.packets, "tamper changed nothing")
+                with self.assertRaisesRegex(exception, message):
+                    self._snapshot(table)
+
+    def test_each_adjustment_table_guard_reports_its_own_message(self) -> None:
+        def missing_column(table: dict) -> None:
+            del table["process_reason_ids"]
+
+        def column_is_a_tuple(table: dict) -> None:
+            _set_field(
+                table, "process_reason_ids", tuple(table["process_reason_ids"])
+            )
+
+        def offsets_do_not_close(table: dict) -> None:
+            _set_field(table["cell_offsets"], -1, 9)
+
+        def process_reason_out_of_range(table: dict) -> None:
+            _set_field(table["process_reason_ids"], 0, 99)
+
+        cases = (
+            (
+                "missing_column",
+                missing_column,
+                TypeError,
+                "unresolved_sink_adjustments has an invalid schema",
+            ),
+            (
+                "column_is_a_tuple",
+                column_is_a_tuple,
+                TypeError,
+                "unresolved_sink_adjustments arrays must be lists",
+            ),
+            (
+                "offsets_do_not_close",
+                offsets_do_not_close,
+                ValueError,
+                "unresolved_sink_adjustments has an invalid sparse shape",
+            ),
+            (
+                "process_reason_out_of_range",
+                process_reason_out_of_range,
+                ValueError,
+                "unresolved_sink_adjustments adjustment keys or masses are "
+                "not canonical",
+            ),
+        )
+        for name, mutate, exception, message in cases:
+            with self.subTest(case=name):
+                table = deepcopy(self.adjustments)
+                mutate(table)
+                self.assertNotEqual(
+                    table, self.adjustments, "tamper changed nothing"
+                )
+                with self.assertRaisesRegex(exception, message):
+                    self._adjustment(table)

@@ -12,6 +12,8 @@ from typer.testing import CliRunner
 
 from magic_geo.cli import app
 
+from support.cli import assert_no_cli_crash
+
 
 class DebugCliTests(TestCase):
     @staticmethod
@@ -92,7 +94,7 @@ class DebugCliTests(TestCase):
 
         self.assertEqual(result.exit_code, 2, result.output)
         self.assertIn("at least one of PNG or Markdown output must be enabled", result.output)
-        self.assertNotIn("Traceback", result.output)
+        assert_no_cli_crash(self, result)
 
     def test_serve_uses_runs_debug_when_directory_is_omitted(self) -> None:
         runner = CliRunner()
@@ -227,5 +229,5 @@ class DebugCliTests(TestCase):
         self.assertEqual(result.exit_code, 2, result.output)
         self.assertIn("Unable to start web workbench", result.output)
         self.assertIn("not a directory", result.output)
-        self.assertNotIn("Traceback", result.output)
+        assert_no_cli_crash(self, result)
         uvicorn_run.assert_not_called()

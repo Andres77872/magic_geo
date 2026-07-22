@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import struct
 import threading
@@ -12,12 +13,14 @@ import xml.etree.ElementTree as ET
 from importlib import resources
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any, Callable
 from urllib.parse import quote, unquote, urlsplit
 from unittest import SkipTest, TestCase
 from unittest.mock import Mock, patch
 
 try:
     import pyarrow as pa
+    import pyarrow.ipc as pa_ipc
     import pyarrow.parquet as pq
     from fastapi import HTTPException
     from fastapi.routing import APIRoute
@@ -32,12 +35,15 @@ from magic_geo.debug_export import (
     _export_stage_history,
     _write_vtu_stages,
 )
+from magic_geo.config import config_schema
 from magic_geo.debug_server import (
     CacheSelectRequest,
     ConfigSaveRequest,
     ConfigTextRequest,
     _CacheManager,
     _DebugCache,
+    _json_safe,
+    _quote_identifier,
     create_app,
 )
 from magic_geo.cli import app as cli_app
@@ -184,17 +190,24 @@ def endpoint(app: object, path: str, method: str = "GET") -> object:
     raise AssertionError(f"route not found: {method} {path}")
 
 
-def asgi_get(app: object, path: str) -> tuple[int, bytes]:
-    """Issue one dependency-free ASGI GET through real routing/serialization."""
+def asgi_call(
+    app: object,
+    method: str,
+    path: str,
+    *,
+    json_body: object = None,
+) -> tuple[int, dict[str, str], bytes]:
+    """Issue one dependency-free ASGI request through real routing/serialization."""
 
     messages: list[dict[str, object]] = []
+    payload = b"" if json_body is None else json.dumps(json_body).encode("utf-8")
     request_sent = False
 
     async def receive() -> dict[str, object]:
         nonlocal request_sent
         if not request_sent:
             request_sent = True
-            return {"type": "http.request", "body": b"", "more_body": False}
+            return {"type": "http.request", "body": payload, "more_body": False}
         return {"type": "http.disconnect"}
 
     async def send(message: dict[str, object]) -> None:
@@ -207,17 +220,21 @@ def asgi_get(app: object, path: str) -> tuple[int, bytes]:
         return function(*args, **kwargs)
 
     parsed = urlsplit(path)
+    headers = [(b"accept", b"application/json")]
+    if json_body is not None:
+        headers.append((b"content-type", b"application/json"))
+        headers.append((b"content-length", str(len(payload)).encode("ascii")))
     scope = {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": "2.3"},
         "http_version": "1.1",
-        "method": "GET",
+        "method": method.upper(),
         "scheme": "http",
         "path": unquote(parsed.path),
         "raw_path": parsed.path.encode("utf-8"),
         "query_string": parsed.query.encode("ascii"),
         "root_path": "",
-        "headers": [(b"accept", b"application/json")],
+        "headers": headers,
         "client": ("127.0.0.1", 12345),
         "server": ("testserver", 80),
     }
@@ -229,7 +246,108 @@ def asgi_get(app: object, path: str) -> tuple[int, bytes]:
         for message in messages
         if message["type"] == "http.response.body"
     )
-    return int(start["status"]), body
+    response_headers = {
+        key.decode("latin-1").lower(): value.decode("latin-1")
+        for key, value in start.get("headers", [])
+    }
+    return int(start["status"]), response_headers, body
+
+
+def asgi_get(app: object, path: str) -> tuple[int, bytes]:
+    """Issue one dependency-free ASGI GET through real routing/serialization."""
+
+    status, _headers, body = asgi_call(app, "GET", path)
+    return status, body
+
+
+def _detail(body: bytes) -> Any:
+    """Return the ``detail`` payload of a JSON error response."""
+
+    return json.loads(body)["detail"]
+
+
+def _drop(manifest: dict[str, Any], *keys: str) -> None:
+    """Remove one nested manifest key in place."""
+
+    target: Any = manifest
+    for key in keys[:-1]:
+        target = target[key]
+    target.pop(keys[-1], None)
+
+
+def _assign(manifest: dict[str, Any], keys: tuple[str, ...], value: Any) -> None:
+    """Replace one nested manifest value in place."""
+
+    target: Any = manifest
+    for key in keys[:-1]:
+        target = target[key]
+    target[keys[-1]] = value
+
+
+def _mutate_manifest(cache_dir: Path, change: Callable[[dict[str, Any]], Any]) -> None:
+    """Rewrite manifest.json after an in-place change (or a returned replacement)."""
+
+    path = cache_dir / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    replacement = change(manifest)
+    path.write_text(
+        json.dumps(manifest if replacement is None else replacement), encoding="utf-8"
+    )
+
+
+def _case_cache(
+    parent: Path, name: str, change: Callable[[dict[str, Any]], Any] | None = None
+) -> Path:
+    """Create an isolated fixture cache under ``parent`` and optionally break it."""
+
+    case_root = parent / name
+    case_root.mkdir(parents=True)
+    cache_dir = _make_cache(case_root)
+    if change is not None:
+        _mutate_manifest(cache_dir, change)
+    return cache_dir
+
+
+def _with_extra_layers(manifest: dict[str, Any]) -> None:
+    """Publish a monthly layer plus a layer whose stage history does not exist."""
+
+    manifest["layers"].append(
+        {
+            "id": "monthly/temperature_c",
+            "source": "monthly",
+            "name": "temperature_c",
+            "kind": "numeric_monthly",
+            "month_count": 2,
+        }
+    )
+    manifest["layers"].append(
+        {
+            "id": "ghost/runoff",
+            "source": "ghost",
+            "name": "runoff",
+            "kind": "numeric_stage",
+            "stage_count": 2,
+        }
+    )
+
+
+def _with_extra_layers_but_no_monthly_table(manifest: dict[str, Any]) -> None:
+    _with_extra_layers(manifest)
+    _drop(manifest, "monthly")
+
+
+def _without_cell_details(manifest: dict[str, Any]) -> None:
+    _drop(manifest, "cells", "details_jsonl")
+    _drop(manifest, "cells", "details_index")
+
+
+def _with_paged_families(manifest: dict[str, Any]) -> None:
+    _assign(manifest, ("families", "nested", "row_count"), 3)
+    _assign(
+        manifest,
+        ("families", "jsonl_only"),
+        {"jsonl": "events/nested.jsonl", "row_count": 3},
+    )
 
 
 class DebugServerTests(TestCase):
@@ -1417,3 +1535,1303 @@ class DebugServerTests(TestCase):
                     cache.close()
             finally:
                 manager.close()
+
+
+class _WorkbenchTestCase(TestCase):
+    """Shared lifecycle helpers; this base class holds no tests of its own."""
+
+    def temp_root(self) -> Path:
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        return Path(temporary.name).resolve()
+
+    def serve(self, root: Path, cache_dir: Path | None = None) -> Any:
+        app = create_app(cache_dir, project_root=root, workspace=Path("runs"))
+        self.addCleanup(app.state.cache_manager.close)
+        self.addCleanup(app.state.job_manager.close)
+        return app
+
+    def manager(
+        self, root: Path, workspace: Path, selected: Path | None = None
+    ) -> _CacheManager:
+        manager = _CacheManager(root, workspace, selected)
+        self.addCleanup(manager.close)
+        return manager
+
+    def cache(self, cache_dir: Path) -> _DebugCache:
+        cache = _DebugCache(cache_dir)
+        self.addCleanup(cache.close)
+        return cache
+
+
+class DebugCacheValidationTests(_WorkbenchTestCase):
+    """Manifest validation, confinement guards, and JSON/identifier helpers."""
+
+    def test_manifest_validation_rejects_every_malformed_cache_shape(self) -> None:
+        cases: list[tuple[str, Callable[[dict[str, Any]], Any], str]] = [
+            (
+                "manifest_is_not_an_object",
+                lambda manifest: [],
+                "manifest and sections must be objects",
+            ),
+            (
+                "world_metadata_missing",
+                lambda manifest: _drop(manifest, "world"),
+                "missing world/layer metadata",
+            ),
+            (
+                "cell_count_not_numeric",
+                lambda manifest: _assign(manifest, ("world", "cell_count"), "many"),
+                "missing world/layer metadata",
+            ),
+            (
+                "cell_count_below_one",
+                lambda manifest: _assign(manifest, ("world", "cell_count"), 0),
+                "invalid cell/layer metadata",
+            ),
+            (
+                "layers_not_a_list",
+                lambda manifest: _assign(manifest, ("layers",), {}),
+                "invalid cell/layer metadata",
+            ),
+            (
+                "duplicate_layer_ids",
+                lambda manifest: manifest["layers"].append(dict(manifest["layers"][0])),
+                "duplicate or malformed layer ids",
+            ),
+            (
+                "layer_id_not_a_string",
+                lambda manifest: _assign(manifest, ("layers", 0, "id"), 7),
+                "duplicate or malformed layer ids",
+            ),
+            (
+                "cells_metadata_not_an_object",
+                lambda manifest: _assign(manifest, ("cells",), "tables/cells.parquet"),
+                "missing cells metadata",
+            ),
+            (
+                "cells_parquet_path_missing",
+                lambda manifest: _drop(manifest, "cells", "parquet"),
+                "cells parquet path is missing",
+            ),
+            (
+                "cells_parquet_path_absolute",
+                lambda manifest: _assign(manifest, ("cells", "parquet"), "/etc/passwd"),
+                "cells parquet path must be relative",
+            ),
+            (
+                "cells_parquet_path_escapes",
+                lambda manifest: _assign(
+                    manifest, ("cells", "parquet"), "../../outside.parquet"
+                ),
+                "cells parquet path escapes root",
+            ),
+            (
+                "cells_parquet_file_absent",
+                lambda manifest: _assign(
+                    manifest, ("cells", "parquet"), "tables/absent.parquet"
+                ),
+                "missing cells parquet file tables/absent.parquet",
+            ),
+            (
+                "monthly_metadata_not_an_object",
+                lambda manifest: _assign(manifest, ("monthly",), 5),
+                "malformed monthly metadata",
+            ),
+            (
+                "stage_histories_not_an_object",
+                lambda manifest: _assign(manifest, ("stage_histories",), []),
+                "malformed stage histories",
+            ),
+            (
+                "stage_history_not_an_object",
+                lambda manifest: _assign(manifest, ("stage_histories", "history"), 3),
+                "malformed history history",
+            ),
+            (
+                "stage_extras_file_absent",
+                lambda manifest: _assign(
+                    manifest,
+                    ("stage_histories", "history", "extras_jsonl"),
+                    "events/absent.jsonl",
+                ),
+                "missing history stage extras file events/absent.jsonl",
+            ),
+            (
+                "families_not_an_object",
+                lambda manifest: _assign(manifest, ("families",), 7),
+                "malformed families",
+            ),
+            (
+                "family_not_an_object",
+                lambda manifest: _assign(manifest, ("families", "flat"), 1),
+                "malformed family flat",
+            ),
+            (
+                "family_without_any_data_file",
+                lambda manifest: _assign(manifest, ("families", "flat"), {"row_count": 2}),
+                "family flat has no data file",
+            ),
+            (
+                "sections_catalog_not_a_list",
+                lambda manifest: _assign(manifest, ("sections",), "model"),
+                "malformed section catalog",
+            ),
+            (
+                "section_missing_from_sections_json",
+                lambda manifest: manifest["sections"].append("ghost"),
+                "malformed section catalog",
+            ),
+            (
+                "mesh_metadata_not_an_object",
+                lambda manifest: _assign(manifest, ("mesh",), []),
+                "missing mesh buffer catalog",
+            ),
+            (
+                "mesh_buffer_catalog_missing",
+                lambda manifest: _drop(manifest, "mesh", "buffers"),
+                "missing mesh buffer catalog",
+            ),
+            (
+                "mesh_buffer_descriptor_missing",
+                lambda manifest: _drop(manifest, "mesh", "buffers", "indices"),
+                "missing mesh buffer indices",
+            ),
+            (
+                "mesh_buffer_file_absent",
+                lambda manifest: _assign(
+                    manifest, ("mesh", "buffers", "positions", "file"), "mesh/absent.f32"
+                ),
+                "missing mesh positions file mesh/absent.f32",
+            ),
+            (
+                "paraview_metadata_not_an_object",
+                lambda manifest: _assign(manifest, ("paraview",), 4),
+                "malformed ParaView metadata",
+            ),
+            (
+                "paraview_collection_absent",
+                lambda manifest: _assign(manifest, ("paraview",), {"pvd": "vtu/scene.pvd"}),
+                "missing ParaView collection file vtu/scene.pvd",
+            ),
+        ]
+        parent = self.temp_root()
+        for index, (label, change, expected) in enumerate(cases):
+            with self.subTest(case=label):
+                cache_dir = _case_cache(parent, f"case-{index:02d}", change)
+                with self.assertRaisesRegex(ValueError, expected):
+                    _DebugCache(cache_dir)
+
+    def test_unreadable_metadata_and_backend_failures_become_cache_errors(self) -> None:
+        parent = self.temp_root()
+        cache_dir = _case_cache(parent, "resolvable")
+        real_resolve = Path.resolve
+
+        def refuse(target_name: str) -> Callable[..., Path]:
+            def resolve(self_path: Path, *args: object, **kwargs: object) -> Path:
+                if self_path.name == target_name:
+                    raise OSError(f"injected resolve failure for {target_name}")
+                return real_resolve(self_path, *args, **kwargs)
+
+            return resolve
+
+        with patch.object(Path, "resolve", refuse("manifest.json")):
+            with self.assertRaisesRegex(ValueError, "metadata path resolution failed"):
+                _DebugCache(cache_dir)
+
+        with patch.object(Path, "resolve", refuse("cells.parquet")):
+            with self.assertRaisesRegex(
+                ValueError, "unable to resolve cells parquet path"
+            ):
+                _DebugCache(cache_dir)
+
+        with patch(
+            "magic_geo.debug_server.duckdb.connect",
+            side_effect=RuntimeError("no database handles left"),
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "unable to open DuckDB for debug cache .*no database handles left"
+            ):
+                _DebugCache(cache_dir)
+
+        # The unpatched fixture still loads, so the guards above are the only cause.
+        self.assertEqual(self.cache(cache_dir).cell_count, 2)
+
+    def test_identifier_quoting_and_json_normalisation_reject_unsafe_values(self) -> None:
+        self.assertEqual(_quote_identifier('elev"ation'), '"elev""ation"')
+        with self.assertRaises(HTTPException) as context:
+            _quote_identifier("bad\x00name")
+        self.assertEqual(context.exception.status_code, 400)
+        self.assertEqual(context.exception.detail, "invalid NUL in field name")
+
+        self.assertEqual(
+            _json_safe(
+                {
+                    "tuple": (1.0, float("inf")),
+                    "list": [float("nan"), "text", 3],
+                    "scalar": float("-inf"),
+                    "finite": -0.5,
+                }
+            ),
+            {
+                "tuple": [1.0, None],
+                "list": [None, "text", 3],
+                "scalar": None,
+                "finite": -0.5,
+            },
+        )
+
+    def test_cache_paths_reject_absolute_missing_and_escaping_targets(self) -> None:
+        root = self.temp_root()
+        cache_dir = _make_cache(root)
+        cache = self.cache(cache_dir)
+
+        with self.assertRaises(HTTPException) as absolute:
+            cache._data_path("/etc/passwd")
+        self.assertEqual(absolute.exception.status_code, 400)
+        self.assertEqual(absolute.exception.detail, "cache paths must be relative")
+
+        with self.assertRaises(HTTPException) as missing:
+            cache._data_path("tables/absent.parquet")
+        self.assertEqual(missing.exception.status_code, 404)
+        self.assertEqual(
+            missing.exception.detail, "missing cache file tables/absent.parquet"
+        )
+        self.assertEqual(
+            cache._data_path("tables/absent.parquet", require_file=False),
+            cache_dir / "tables" / "absent.parquet",
+        )
+
+        with self.assertRaises(HTTPException) as mesh_absolute:
+            cache.mesh_path("/etc/positions.f32")
+        self.assertEqual(mesh_absolute.exception.status_code, 400)
+        self.assertEqual(mesh_absolute.exception.detail, "mesh paths must be relative")
+
+        with self.assertRaises(HTTPException) as mesh_missing:
+            cache.mesh_path("absent.f32")
+        self.assertEqual(mesh_missing.exception.status_code, 404)
+        self.assertEqual(mesh_missing.exception.detail, "missing mesh asset absent.f32")
+
+        # A mesh directory swapped for a symlink after startup stops serving.
+        external = root / "external-mesh"
+        shutil.move(str(cache_dir / "mesh"), str(external))
+        (cache_dir / "mesh").symlink_to(external, target_is_directory=True)
+        with self.assertRaises(HTTPException) as escaping:
+            cache.mesh_path("positions.f32")
+        self.assertEqual(escaping.exception.status_code, 400)
+        self.assertEqual(
+            escaping.exception.detail, "mesh directory escapes cache root"
+        )
+
+    def test_missing_manifest_tables_degrade_to_not_found_responses(self) -> None:
+        root = self.temp_root()
+        cache = self.cache(_make_cache(root))
+
+        cache.manifest["cells"] = None
+        with self.assertRaises(HTTPException) as cells:
+            cache.layer_values("cells/elevation_m", None, None)
+        self.assertEqual(cells.exception.status_code, 404)
+        self.assertEqual(cells.exception.detail, "cells table is unavailable")
+
+        cache.manifest["families"]["orphan"] = {"row_count": 0}
+        with self.assertRaises(HTTPException) as family:
+            cache.family_rows("orphan", 10, 0, "full")
+        self.assertEqual(family.exception.status_code, 404)
+        self.assertEqual(
+            family.exception.detail, "family orphan has no readable data"
+        )
+
+
+class CacheManagerDegradationTests(_WorkbenchTestCase):
+    """Selection, discovery, publication rollback, and cache-loss behaviour."""
+
+    def test_workspace_must_stay_inside_the_project_and_selection_needs_a_manifest(
+        self,
+    ) -> None:
+        root = self.temp_root()
+        project = root / "project"
+        project.mkdir()
+        with self.assertRaisesRegex(
+            ValueError, "web workspace must be inside the project directory"
+        ):
+            _CacheManager(project, root / "outside", None)
+
+        _make_cache(project)
+        manager = self.manager(project, Path("runs"), Path("runs/debug"))
+        self.assertEqual(manager.selected_relative(), "runs/debug")
+
+        empty = project / "runs" / "empty"
+        empty.mkdir()
+        with self.assertRaisesRegex(
+            ValueError, f"no manifest.json in {re.escape(str(empty))}"
+        ):
+            manager.select(empty)
+        self.assertEqual(manager.selected_relative(), "runs/debug")
+        self.assertEqual(manager.get().manifest["world"]["name"], "tiny")
+
+    def test_cacheless_manager_reports_no_selection_revision_or_error(self) -> None:
+        root = self.temp_root()
+        manager = self.manager(root, Path("runs"), None)
+        self.assertIsNone(manager._revision_unlocked())
+        self.assertEqual(
+            manager.status(),
+            {
+                "cache_available": False,
+                "cache_dir": None,
+                "cache_error": None,
+                "cache_revision": None,
+            },
+        )
+        self.assertIsNone(manager.get(required=False))
+        with self.assertRaises(HTTPException) as context:
+            manager.get()
+        self.assertEqual(context.exception.status_code, 409)
+        self.assertEqual(
+            context.exception.detail,
+            "no debug cache selected; generate a world or run export-debug",
+        )
+
+    def test_default_discovery_prefers_direct_then_newest_nested_cache(self) -> None:
+        parent = self.temp_root()
+        direct_root = parent / "direct"
+        direct_root.mkdir()
+        _make_cache(direct_root)
+        direct_manager = self.manager(direct_root, Path("runs"), None)
+        self.assertEqual(direct_manager.selected_relative(), "runs/debug")
+        self.assertTrue(direct_manager.status()["cache_available"])
+
+        nested_root = parent / "nested"
+        nested_root.mkdir()
+        seed = _make_cache(nested_root)
+        alpha = nested_root / "runs" / "alpha" / "debug"
+        beta = nested_root / "runs" / "beta" / "debug"
+        shutil.copytree(seed, alpha)
+        shutil.copytree(seed, beta)
+        shutil.rmtree(seed)
+        _mutate_manifest(beta, lambda manifest: _assign(manifest, ("world", "name"), "newest"))
+        stale = (alpha / "manifest.json").stat()
+        os.utime(
+            alpha / "manifest.json",
+            ns=(stale.st_atime_ns, stale.st_mtime_ns - 5_000_000_000),
+        )
+
+        nested_manager = self.manager(nested_root, Path("runs"), None)
+        self.assertEqual(nested_manager.selected_relative(), "runs/beta/debug")
+        self.assertEqual(nested_manager.get().manifest["world"]["name"], "newest")
+
+    def test_discovery_ignores_caches_that_resolve_outside_the_workspace(self) -> None:
+        parent = self.temp_root()
+        root = parent / "project"
+        (root / "runs" / "linked").mkdir(parents=True)
+        external = parent / "external"
+        external.mkdir()
+        smuggled = _make_cache(external)
+        (root / "runs" / "linked" / "debug").symlink_to(smuggled, target_is_directory=True)
+
+        manager = self.manager(root, Path("runs"), None)
+        self.assertEqual(
+            manager.status(),
+            {
+                "cache_available": False,
+                "cache_dir": None,
+                "cache_error": None,
+                "cache_revision": None,
+            },
+        )
+        self.assertEqual(manager.available(), [])
+
+    def test_discovery_skips_candidates_whose_metadata_cannot_be_read(self) -> None:
+        root = self.temp_root()
+        seed = _make_cache(root)
+        nested = root / "runs" / "nested" / "debug"
+        shutil.copytree(seed, nested)
+        shutil.rmtree(seed)
+        real_resolve = Path.resolve
+
+        def failing_resolve(self_path: Path, *args: object, **kwargs: object) -> Path:
+            if self_path.name == "debug":
+                raise OSError("injected discovery failure")
+            return real_resolve(self_path, *args, **kwargs)
+
+        with patch.object(Path, "resolve", failing_resolve):
+            manager = self.manager(root, Path("runs"), None)
+            self.assertIsNone(manager.selected_relative())
+
+        # Without the injected failure the very same workspace is discovered.
+        self.assertEqual(
+            self.manager(root, Path("runs"), None).selected_relative(),
+            "runs/nested/debug",
+        )
+
+    def test_select_reports_stat_failures_after_validating_the_candidate(self) -> None:
+        root = self.temp_root()
+        cache_dir = _make_cache(root)
+        manager = self.manager(root, Path("runs"), cache_dir)
+        replacement = root / "runs" / "replacement"
+        shutil.copytree(cache_dir, replacement)
+        _mutate_manifest(
+            replacement, lambda manifest: _assign(manifest, ("world", "name"), "replacement")
+        )
+        real_stat = Path.stat
+        real_cache = _DebugCache
+        armed = {"value": False}
+
+        def arm_after_validation(path: Path) -> _DebugCache:
+            candidate = real_cache(path)
+            armed["value"] = True
+            return candidate
+
+        def flaky_stat(self_path: Path, *args: object, **kwargs: object) -> os.stat_result:
+            if armed["value"] and self_path.name == "manifest.json":
+                raise OSError("injected stat failure")
+            return real_stat(self_path, *args, **kwargs)
+
+        try:
+            with (
+                patch("magic_geo.debug_server._DebugCache", arm_after_validation),
+                patch.object(Path, "stat", flaky_stat),
+            ):
+                with self.assertRaisesRegex(OSError, "injected stat failure"):
+                    manager.select(replacement)
+        finally:
+            armed["value"] = False
+
+        self.assertEqual(manager.selected_relative(), "runs/debug")
+        self.assertEqual(manager.get().manifest["world"]["name"], "tiny")
+
+    def test_status_and_reads_degrade_when_the_manifest_disappears(self) -> None:
+        root = self.temp_root()
+        cache_dir = _make_cache(root)
+        app = self.serve(root, cache_dir)
+        manager = app.state.cache_manager
+        self.assertEqual(asgi_call(app, "GET", "/api/manifest")[0], 200)
+
+        (cache_dir / "manifest.json").unlink()
+        status, _headers, body = asgi_call(app, "GET", "/api/manifest")
+        self.assertEqual(status, 409, body)
+        self.assertEqual(_detail(body), f"no manifest.json in {cache_dir}")
+
+        payload = json.loads(asgi_call(app, "GET", "/api/status")[2])
+        self.assertFalse(payload["cache_available"])
+        self.assertEqual(payload["cache_error"], f"no manifest.json in {cache_dir}")
+        self.assertIsNone(payload["cache_revision"])
+        self.assertIsNone(manager._cache)
+
+    def test_corrupt_manifest_without_a_live_cache_is_reported_and_recovers(self) -> None:
+        root = self.temp_root()
+        cache_dir = _make_cache(root)
+        valid = json.loads((cache_dir / "manifest.json").read_text(encoding="utf-8"))
+        app = self.serve(root, None)
+
+        (cache_dir / "manifest.json").write_text("{", encoding="utf-8")
+        status, _headers, body = asgi_call(app, "GET", "/api/catalog")
+        self.assertEqual(status, 500, body)
+        self.assertRegex(_detail(body), r"^invalid debug cache .*: Expecting")
+
+        payload = json.loads(asgi_call(app, "GET", "/api/status")[2])
+        self.assertFalse(payload["cache_available"])
+        self.assertRegex(payload["cache_error"], r"^invalid debug cache ")
+        self.assertIsNone(payload["cache_revision"])
+
+        (cache_dir / "manifest.json").write_text(json.dumps(valid), encoding="utf-8")
+        status, _headers, body = asgi_call(app, "GET", "/api/catalog")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["world"]["name"], "tiny")
+        self.assertIsNone(json.loads(asgi_call(app, "GET", "/api/status")[2])["cache_error"])
+
+    def test_manifest_stat_failures_are_surfaced_as_conflicts(self) -> None:
+        root = self.temp_root()
+        cache_dir = _make_cache(root)
+        manager = self.manager(root, Path("runs"), cache_dir)
+        revision = manager.status()["cache_revision"]
+        real_stat = Path.stat
+        calls = {"count": 0}
+
+        def flaky_stat(self_path: Path, *args: object, **kwargs: object) -> os.stat_result:
+            if self_path.name == "manifest.json":
+                calls["count"] += 1
+                if calls["count"] >= 2:
+                    raise OSError("injected stat failure")
+            return real_stat(self_path, *args, **kwargs)
+
+        with patch.object(Path, "stat", flaky_stat):
+            calls["count"] = 0
+            optional = manager.status()
+            calls["count"] = 0
+            with self.assertRaises(HTTPException) as context:
+                manager.get()
+        self.assertFalse(optional["cache_available"])
+        self.assertRegex(optional["cache_error"], r"^unable to stat .*: injected stat failure$")
+        # The fingerprint of the last good load survives the failed stat, but an
+        # unavailable cache must never advertise a revision clients could pin to.
+        self.assertIsNone(optional["cache_revision"])
+        self.assertEqual(optional["cache_dir"], "runs/debug")
+        self.assertEqual(context.exception.status_code, 409)
+        self.assertRegex(
+            context.exception.detail, r"^unable to stat .*: injected stat failure$"
+        )
+        self.assertTrue(manager.status()["cache_available"])
+        self.assertEqual(manager.status()["cache_revision"], revision)
+
+    def test_selected_relative_falls_back_to_the_absolute_path(self) -> None:
+        root = self.temp_root()
+        cache_dir = _make_cache(root)
+        manager = self.manager(root, Path("runs"), cache_dir)
+        self.assertEqual(manager.selected_relative(), "runs/debug")
+        elsewhere = Path("/var/tmp/magic-geo-elsewhere")
+        manager._selected = elsewhere
+        self.assertEqual(manager.selected_relative(), str(elsewhere))
+
+    def test_remove_path_deletes_trees_and_swallows_filesystem_errors(self) -> None:
+        root = self.temp_root()
+        tree = root / "tree"
+        (tree / "inner").mkdir(parents=True)
+        (tree / "inner" / "file.txt").write_text("payload", encoding="utf-8")
+        loose = root / "loose.txt"
+        loose.write_text("payload", encoding="utf-8")
+
+        _CacheManager._remove_path(loose)
+        self.assertFalse(loose.exists())
+        _CacheManager._remove_path(root / "never-existed")
+
+        with patch(
+            "magic_geo.debug_server.shutil.rmtree", side_effect=OSError("device busy")
+        ):
+            _CacheManager._remove_path(tree)
+        self.assertTrue((tree / "inner" / "file.txt").is_file())
+
+        _CacheManager._remove_path(tree)
+        self.assertFalse(tree.exists())
+
+    def test_publish_rejects_targets_outside_the_workspace(self) -> None:
+        root = self.temp_root()
+        cache_dir = _make_cache(root)
+        manager = self.manager(root, Path("runs"), cache_dir)
+        outside = root / "outside-staging"
+        shutil.copytree(cache_dir, outside)
+
+        with self.assertRaisesRegex(
+            ValueError, "published cache must stay inside the web workspace"
+        ):
+            manager.publish(outside, root / "runs" / "published")
+        with self.assertRaisesRegex(
+            ValueError, "published cache must stay inside the web workspace"
+        ):
+            manager.publish(root / "runs" / "staging", root / "outside-destination")
+
+        blocker = root / "runs" / "blocker.txt"
+        blocker.write_text("not a directory", encoding="utf-8")
+        staging = root / "runs" / "staging"
+        shutil.copytree(cache_dir, staging)
+        with self.assertRaisesRegex(
+            ValueError, "cache destination is not a directory"
+        ):
+            manager.publish(staging, blocker)
+        self.assertTrue((staging / "manifest.json").is_file())
+        self.assertEqual(manager.get().manifest["world"]["name"], "tiny")
+
+    def test_publish_rolls_back_when_the_moved_cache_fails_validation(self) -> None:
+        root = self.temp_root()
+        cache_dir = _make_cache(root)
+        manager = self.manager(root, Path("runs"), cache_dir)
+        staging = root / "runs" / ".debug.staging"
+        shutil.copytree(cache_dir, staging)
+        _mutate_manifest(
+            staging, lambda manifest: _assign(manifest, ("world", "name"), "candidate")
+        )
+        real_cache = _DebugCache
+        calls = {"count": 0}
+
+        def fail_after_the_move(path: Path) -> _DebugCache:
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise ValueError("injected post-move validation failure")
+            return real_cache(path)
+
+        with patch("magic_geo.debug_server._DebugCache", fail_after_the_move):
+            with self.assertRaisesRegex(
+                ValueError, "injected post-move validation failure"
+            ):
+                manager.publish(staging, cache_dir)
+
+        self.assertEqual(calls["count"], 2)
+        self.assertFalse(staging.exists())
+        self.assertEqual(manager.get().manifest["world"]["name"], "tiny")
+        self.assertEqual(list((root / "runs").glob(".debug.*.backup")), [])
+
+    def test_publish_restores_the_destination_when_the_commit_step_fails(self) -> None:
+        root = self.temp_root()
+        cache_dir = _make_cache(root)
+        manager = self.manager(root, Path("runs"), cache_dir)
+        original = (cache_dir / "manifest.json").read_bytes()
+        staging = root / "runs" / ".debug.staging"
+        shutil.copytree(cache_dir, staging)
+        _mutate_manifest(
+            staging, lambda manifest: _assign(manifest, ("world", "name"), "half-published")
+        )
+
+        def explode(_stat: os.stat_result) -> tuple[int, int, int, int]:
+            raise RuntimeError("injected fingerprint failure")
+
+        # The staged cache validates after the move, so the failure lands past
+        # the inner rollback and only the outer handler can undo the swap.
+        with patch.object(_CacheManager, "_manifest_fingerprint", staticmethod(explode)):
+            with self.assertRaisesRegex(RuntimeError, "injected fingerprint failure"):
+                manager.publish(staging, cache_dir)
+
+        self.assertEqual((cache_dir / "manifest.json").read_bytes(), original)
+        self.assertEqual(json.loads(original)["world"]["name"], "tiny")
+        self.assertFalse(staging.exists())
+        self.assertEqual(list((root / "runs").glob(".debug.*.backup")), [])
+        self.assertEqual(self.cache(cache_dir).manifest["world"]["name"], "tiny")
+
+    def test_publish_survives_a_failing_close_of_the_replaced_cache(self) -> None:
+        root = self.temp_root()
+        cache_dir = _make_cache(root)
+        manager = self.manager(root, Path("runs"), cache_dir)
+        previous = manager.get()
+        previous.close = Mock(side_effect=RuntimeError("connection already gone"))
+        staging = root / "runs" / ".debug.staging"
+        shutil.copytree(cache_dir, staging)
+        _mutate_manifest(
+            staging, lambda manifest: _assign(manifest, ("world", "name"), "republished")
+        )
+
+        published = manager.publish(staging, cache_dir)
+
+        self.assertEqual(published, cache_dir)
+        previous.close.assert_called_once_with()
+        self.assertEqual(manager.get().manifest["world"]["name"], "republished")
+        self.assertEqual(list((root / "runs").glob(".debug.*.backup")), [])
+        self.assertFalse(staging.exists())
+
+    def test_available_worlds_skip_hidden_unreadable_and_unsupported_manifests(
+        self,
+    ) -> None:
+        root = self.temp_root()
+        cache_dir = _make_cache(root)
+        workspace = root / "runs"
+        shutil.copytree(cache_dir, workspace, dirs_exist_ok=True)
+
+        outside = root / "outside-manifest.json"
+        outside.write_text(
+            json.dumps(
+                {"format": FORMAT_NAME, "version": FORMAT_VERSION, "world": {"name": "leak"}}
+            ),
+            encoding="utf-8",
+        )
+        (workspace / "linked").mkdir()
+        (workspace / "linked" / "manifest.json").symlink_to(outside)
+        (workspace / "listy").mkdir()
+        (workspace / "listy" / "manifest.json").write_text("[]", encoding="utf-8")
+        (workspace / "future").mkdir()
+        (workspace / "future" / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "format": FORMAT_NAME,
+                    "version": FORMAT_VERSION + 1,
+                    "world": {"name": "future"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (workspace / "worldless").mkdir()
+        (workspace / "worldless" / "manifest.json").write_text(
+            json.dumps({"format": FORMAT_NAME, "version": FORMAT_VERSION, "world": []}),
+            encoding="utf-8",
+        )
+        (workspace / "broken").mkdir()
+        (workspace / "broken" / "manifest.json").write_text("{", encoding="utf-8")
+        (workspace / ".magic-geo-web" / "jobs").mkdir(parents=True)
+        shutil.copy2(
+            cache_dir / "manifest.json", workspace / ".magic-geo-web" / "jobs" / "manifest.json"
+        )
+        (workspace / ".debug.abc123.staging").mkdir()
+        shutil.copy2(
+            cache_dir / "manifest.json", workspace / ".debug.abc123.staging" / "manifest.json"
+        )
+        (workspace / ".debug.abc123.backup").mkdir()
+        shutil.copy2(
+            cache_dir / "manifest.json", workspace / ".debug.abc123.backup" / "manifest.json"
+        )
+
+        manager = self.manager(root, Path("runs"), cache_dir)
+        worlds = {world["id"]: world for world in manager.available()}
+        self.assertEqual(sorted(worlds), ["runs", "runs/debug"])
+        self.assertEqual(
+            {identifier: world["selected"] for identifier, world in worlds.items()},
+            {"runs": False, "runs/debug": True},
+        )
+        self.assertEqual(
+            {identifier: world["cell_count"] for identifier, world in worlds.items()},
+            {"runs": 2, "runs/debug": 2},
+        )
+        self.assertEqual(
+            {identifier: world["name"] for identifier, world in worlds.items()},
+            {"runs": "tiny", "runs/debug": "tiny"},
+        )
+        self.assertEqual(worlds["runs/debug"]["generation_scope"], "full")
+
+
+class DebugServerApiErrorTests(_WorkbenchTestCase):
+    """Every 4xx/5xx the HTTP surface can return, asserted through real routing."""
+
+    def test_layer_endpoint_rejects_unknown_ids_and_out_of_range_selectors(self) -> None:
+        parent = self.temp_root()
+        cache_dir = _case_cache(parent, "layers", _with_extra_layers)
+        app = self.serve(parent / "layers", cache_dir)
+
+        status, _headers, body = asgi_call(
+            app, "GET", "/api/layer/monthly/temperature_c?month=1"
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(struct.unpack("<2f", body), (13.0, 3.0))
+        self.assertEqual(
+            struct.unpack("<2f", asgi_call(app, "GET", "/api/layer/monthly/temperature_c")[2]),
+            (12.0, 2.0),
+        )
+
+        for path, expected_status, expected_detail in (
+            ("/api/layer/cells/missing", 404, "unknown layer cells/missing"),
+            ("/api/layer/monthly/temperature_c?month=5", 400, "month 5 out of range"),
+            ("/api/layer/ghost/runoff", 404, "missing stage history ghost"),
+            ("/api/layer/history/runoff?stage=7", 400, "stage 7 out of range"),
+        ):
+            with self.subTest(path=path):
+                status, _headers, body = asgi_call(app, "GET", path)
+                self.assertEqual(status, expected_status, body)
+                self.assertEqual(_detail(body), expected_detail)
+
+        for path, expected_type, expected_loc in (
+            ("/api/layer/cells/elevation_m?month=12", "less_than_equal", ["query", "month"]),
+            ("/api/layer/cells/elevation_m?stage=-1", "greater_than_equal", ["query", "stage"]),
+            ("/api/layer/cells/elevation_m?format=csv", "literal_error", ["query", "format"]),
+            ("/api/layer/cells/elevation_m?month=many", "int_parsing", ["query", "month"]),
+        ):
+            with self.subTest(path=path):
+                status, _headers, body = asgi_call(app, "GET", path)
+                self.assertEqual(status, 422, body)
+                error = _detail(body)[0]
+                self.assertEqual(error["type"], expected_type)
+                self.assertEqual(error["loc"], expected_loc)
+
+        degraded_dir = _case_cache(
+            parent, "monthly-missing", _with_extra_layers_but_no_monthly_table
+        )
+        degraded_app = self.serve(parent / "monthly-missing", degraded_dir)
+        status, _headers, body = asgi_call(
+            degraded_app, "GET", "/api/layer/monthly/temperature_c"
+        )
+        self.assertEqual(status, 404, body)
+        self.assertEqual(_detail(body), "monthly table is unavailable")
+
+    def test_arrow_layer_response_carries_typed_cell_values(self) -> None:
+        root = self.temp_root()
+        app = self.serve(root, _make_cache(root))
+        status, headers, body = asgi_call(
+            app, "GET", "/api/layer/cells/elevation_m?format=arrow"
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(headers["content-type"], "application/vnd.apache.arrow.stream")
+        self.assertEqual(headers["cache-control"], "no-store")
+        table = pa_ipc.open_stream(pa.py_buffer(body)).read_all()
+        self.assertEqual(table.column_names, ["cell_id", "value"])
+        # The browser decodes these buffers by fixed width, so the narrow
+        # Arrow types are part of the wire contract, not an implementation
+        # detail of pyarrow's default inference.
+        self.assertEqual(table.schema.field("cell_id").type, pa.int32())
+        self.assertEqual(table.schema.field("value").type, pa.float32())
+        self.assertEqual(table.column("cell_id").to_pylist(), [0, 1])
+        self.assertEqual(table.column("value").to_pylist(), [10.0, -20.0])
+
+    def test_cell_endpoint_rejects_out_of_range_ids_and_degrades_without_details(
+        self,
+    ) -> None:
+        parent = self.temp_root()
+        cache_dir = _case_cache(parent, "cells")
+        app = self.serve(parent / "cells", cache_dir)
+
+        status, _headers, body = asgi_call(app, "GET", "/api/cell/99")
+        self.assertEqual(status, 404, body)
+        self.assertEqual(_detail(body), "cell 99 out of range")
+
+        # Cell 1 has no entry in the detail index, so the record stays partial.
+        status, _headers, body = asgi_call(app, "GET", "/api/cell/1")
+        self.assertEqual(status, 200, body)
+        payload = json.loads(body)
+        self.assertTrue(payload["complete"])
+        self.assertEqual(payload["cell"]["biome"], "ocean")
+        self.assertNotIn("neighbors", payload["cell"])
+
+        sparse_dir = _case_cache(
+            parent, "sparse", lambda manifest: _assign(manifest, ("world", "cell_count"), 5)
+        )
+        sparse_app = self.serve(parent / "sparse", sparse_dir)
+        status, _headers, body = asgi_call(sparse_app, "GET", "/api/cell/3")
+        self.assertEqual(status, 404, body)
+        self.assertEqual(_detail(body), "cell 3 not found")
+
+        detail_less_dir = _case_cache(parent, "detail-less", _without_cell_details)
+        detail_less_app = self.serve(parent / "detail-less", detail_less_dir)
+        status, _headers, body = asgi_call(detail_less_app, "GET", "/api/cell/0")
+        self.assertEqual(status, 200, body)
+        payload = json.loads(body)
+        self.assertFalse(payload["complete"])
+        self.assertNotIn("neighbors", payload["cell"])
+        self.assertEqual(payload["cell"]["elevation_m"], 10.0)
+
+    def test_corrupt_cell_detail_sidecars_report_server_errors(self) -> None:
+        parent = self.temp_root()
+        index_dir = _case_cache(parent, "bad-index")
+        (index_dir / "tables/cell_details_index.json").write_text("[]", encoding="utf-8")
+        index_app = self.serve(parent / "bad-index", index_dir)
+        status, _headers, body = asgi_call(index_app, "GET", "/api/cell/0")
+        self.assertEqual(status, 500, body)
+        self.assertEqual(_detail(body), "invalid cell details index")
+
+        record_dir = _case_cache(parent, "bad-record")
+        (record_dir / "events/cell_details.jsonl").write_text(
+            "this is not json\n", encoding="utf-8"
+        )
+        record_app = self.serve(parent / "bad-record", record_dir)
+        status, _headers, body = asgi_call(record_app, "GET", "/api/cell/0")
+        self.assertEqual(status, 500, body)
+        self.assertEqual(_detail(body), "invalid cell details record")
+
+    def test_family_endpoint_pages_rejects_and_falls_back_to_jsonl(self) -> None:
+        parent = self.temp_root()
+        cache_dir = _case_cache(parent, "families", _with_paged_families)
+        records = [
+            {"id": index, "score": index / 2, "cell_ids": [index]} for index in range(3)
+        ]
+        (cache_dir / "events/nested.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
+        )
+        app = self.serve(parent / "families", cache_dir)
+
+        status, _headers, body = asgi_call(app, "GET", "/api/family/nested?limit=1&offset=1")
+        self.assertEqual(status, 200, body)
+        payload = json.loads(body)
+        self.assertEqual(payload["rows"], [records[1]])
+        self.assertEqual(
+            (
+                payload["name"],
+                payload["total"],
+                payload["offset"],
+                payload["limit"],
+                payload["next_offset"],
+                payload["detail"],
+            ),
+            ("nested", 3, 1, 1, 2, "full"),
+        )
+
+        payload = json.loads(asgi_call(app, "GET", "/api/family/nested?offset=2")[2])
+        self.assertEqual(payload["rows"], [records[2]])
+        self.assertIsNone(payload["next_offset"])
+
+        # Without a scalars table the scalars view falls back to the JSONL rows.
+        payload = json.loads(
+            asgi_call(app, "GET", "/api/family/jsonl_only?detail=scalars&limit=2")[2]
+        )
+        self.assertEqual(payload["rows"], records[:2])
+        self.assertEqual(payload["detail"], "full")
+
+        status, _headers, body = asgi_call(app, "GET", "/api/family/ghost")
+        self.assertEqual(status, 404, body)
+        self.assertEqual(_detail(body), "unknown family ghost")
+
+        status, _headers, body = asgi_call(app, "GET", "/api/section/ghost")
+        self.assertEqual(status, 404, body)
+        self.assertEqual(_detail(body), "unknown section ghost")
+
+        status, _headers, body = asgi_call(app, "GET", "/api/stage-summary/ghost")
+        self.assertEqual(status, 404, body)
+        self.assertEqual(_detail(body), "unknown stage history ghost")
+
+        for query, expected_type, field in (
+            ("limit=0", "greater_than_equal", "limit"),
+            ("limit=5001", "less_than_equal", "limit"),
+            ("offset=-1", "greater_than_equal", "offset"),
+            ("detail=partial", "literal_error", "detail"),
+        ):
+            with self.subTest(query=query):
+                status, _headers, body = asgi_call(app, "GET", f"/api/family/nested?{query}")
+                self.assertEqual(status, 422, body)
+                error = _detail(body)[0]
+                self.assertEqual(error["type"], expected_type)
+                self.assertEqual(error["loc"], ["query", field])
+
+    def test_plate_boundaries_are_empty_without_an_adjacency_family(self) -> None:
+        parent = self.temp_root()
+        cache_dir = _case_cache(
+            parent,
+            "no-edges",
+            lambda manifest: _drop(manifest, "families", "cell_adjacency_edges"),
+        )
+        app = self.serve(parent / "no-edges", cache_dir)
+        status, _headers, body = asgi_call(app, "GET", "/api/plate-boundaries")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body), [])
+        self.assertEqual(
+            json.loads(asgi_call(app, "GET", "/api/cell/0")[2])["adjacency_edges"], []
+        )
+
+    def test_mesh_assets_are_served_and_confined_to_the_mesh_directory(self) -> None:
+        root = self.temp_root()
+        app = self.serve(root, _make_cache(root))
+
+        status, headers, body = asgi_call(app, "GET", "/mesh/positions.f32")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(struct.unpack("<3f", body), (0.0, 0.0, 1.0))
+        self.assertEqual(headers["content-type"], "application/octet-stream")
+        self.assertEqual(headers["cache-control"], "no-store")
+
+        status, _headers, body = asgi_call(app, "GET", "/mesh/absent.f32")
+        self.assertEqual(status, 404, body)
+        self.assertEqual(_detail(body), "missing mesh asset absent.f32")
+
+        status, _headers, body = asgi_call(app, "GET", "/mesh/../manifest.json")
+        self.assertEqual(status, 400, body)
+        self.assertEqual(
+            _detail(body), "mesh path escapes mesh root: ../manifest.json"
+        )
+
+    def test_job_endpoints_reject_unknown_jobs_and_invalid_operations(self) -> None:
+        root = self.temp_root()
+        app = self.serve(root, None)
+        jobs = app.state.job_manager
+
+        status, _headers, body = asgi_call(app, "GET", "/api/jobs")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body), {"jobs": []})
+
+        status, _headers, body = asgi_call(
+            app, "POST", "/api/jobs", json_body={"operation": "teleport", "arguments": {}}
+        )
+        self.assertEqual(status, 422, body)
+        self.assertEqual(_detail(body), "unknown operation: teleport")
+
+        status, _headers, body = asgi_call(
+            app,
+            "POST",
+            "/api/jobs",
+            json_body={"operation": "validate", "arguments": {"world": "/etc/passwd"}},
+        )
+        self.assertEqual(status, 422, body)
+        self.assertEqual(_detail(body), f"input path must stay inside {root}: /etc/passwd")
+
+        status, _headers, body = asgi_call(
+            app, "POST", "/api/jobs", json_body={"operation": "validate", "unexpected": 1}
+        )
+        self.assertEqual(status, 422, body)
+        self.assertEqual(_detail(body)[0]["type"], "extra_forbidden")
+        self.assertEqual(_detail(body)[0]["loc"], ["body", "unexpected"])
+
+        status, _headers, body = asgi_call(app, "GET", "/api/jobs/nope")
+        self.assertEqual(status, 404, body)
+        self.assertEqual(_detail(body), "unknown job nope")
+
+        status, _headers, body = asgi_call(app, "POST", "/api/jobs/nope/cancel")
+        self.assertEqual(status, 404, body)
+        self.assertEqual(_detail(body), "unknown job nope")
+
+        status, _headers, body = asgi_call(app, "GET", "/api/jobs/nope/artifacts/0")
+        self.assertEqual(status, 404, body)
+        self.assertEqual(_detail(body), "unknown artifact")
+
+        artifact = root / "runs" / "report.json"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(b'{"passed":true}')
+        with patch.object(jobs, "artifact_path", side_effect=FileNotFoundError("gone")):
+            status, _headers, body = asgi_call(app, "GET", "/api/jobs/nope/artifacts/0")
+        self.assertEqual(status, 404, body)
+        self.assertEqual(_detail(body), "artifact is not available")
+
+        with patch.object(jobs, "artifact_path", return_value=artifact):
+            status, headers, body = asgi_call(app, "GET", "/api/jobs/nope/artifacts/0")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body, b'{"passed":true}')
+        self.assertEqual(
+            headers["content-disposition"], 'attachment; filename="report.json"'
+        )
+
+    def test_world_selection_rejects_unresolvable_and_out_of_workspace_paths(self) -> None:
+        root = self.temp_root()
+        cache_dir = _make_cache(root)
+        app = self.serve(root, cache_dir)
+        (root / "outside").mkdir()
+
+        status, _headers, body = asgi_call(
+            app, "POST", "/api/worlds/select", json_body={"cache_dir": "outside"}
+        )
+        self.assertEqual(status, 422, body)
+        self.assertEqual(_detail(body), "cache must be inside the web workspace")
+
+        empty = root / "runs" / "empty"
+        empty.mkdir()
+        status, _headers, body = asgi_call(
+            app, "POST", "/api/worlds/select", json_body={"cache_dir": "runs/empty"}
+        )
+        self.assertEqual(status, 422, body)
+        self.assertEqual(_detail(body), f"no manifest.json in {empty}")
+
+        real_resolve = Path.resolve
+
+        def failing_resolve(self_path: Path, *args: object, **kwargs: object) -> Path:
+            if self_path.name == "unresolvable":
+                raise OSError("injected resolve failure")
+            return real_resolve(self_path, *args, **kwargs)
+
+        with patch.object(Path, "resolve", failing_resolve):
+            status, _headers, body = asgi_call(
+                app,
+                "POST",
+                "/api/worlds/select",
+                json_body={"cache_dir": "runs/unresolvable"},
+            )
+        self.assertEqual(status, 422, body)
+        self.assertEqual(
+            _detail(body), "unable to resolve cache path: injected resolve failure"
+        )
+
+        status, _headers, body = asgi_call(
+            app, "POST", "/api/worlds/select", json_body={"cache_dir": "runs/debug"}
+        )
+        self.assertEqual(status, 200, body)
+        payload = json.loads(body)
+        self.assertTrue(payload["cache_available"])
+        self.assertEqual(payload["cache_dir"], "runs/debug")
+
+    def test_config_endpoints_reject_unknown_profiles_overrides_and_names(self) -> None:
+        root = self.temp_root()
+        app = self.serve(root, None)
+
+        profiles = json.loads(asgi_call(app, "GET", "/api/config/profiles")[2])
+        self.assertEqual(profiles["default"], "earthlike")
+        self.assertEqual(
+            {entry["name"] for entry in profiles["profiles"]},
+            {"default", "earthlike", "smoke"},
+        )
+        # The endpoint projects exactly name/description out of the schema
+        # metadata; nothing else about a profile is published to the browser.
+        self.assertEqual(
+            {entry["name"]: entry["description"] for entry in profiles["profiles"]},
+            {
+                item["name"]: item["description"]
+                for item in config_schema()["x-magic-geo"]["profiles"]
+            },
+        )
+        for entry in profiles["profiles"]:
+            with self.subTest(profile=entry["name"]):
+                self.assertEqual(sorted(entry), ["description", "name"])
+                self.assertIsInstance(entry["description"], str)
+                self.assertNotEqual(entry["description"].strip(), "")
+                self.assertNotEqual(entry["description"], entry["name"])
+
+        status, _headers, body = asgi_call(app, "GET", "/api/config/template?profile=smoke")
+        self.assertEqual(status, 200, body)
+        template = json.loads(body)
+        self.assertEqual(template["profile"], "smoke")
+        revalidated = json.loads(
+            asgi_call(
+                app, "POST", "/api/config/validate", json_body={"yaml": template["yaml"]}
+            )[2]
+        )
+        self.assertEqual(revalidated["config"], template["config"])
+
+        status, _headers, body = asgi_call(app, "GET", "/api/config/template?profile=nope")
+        self.assertEqual(status, 422, body)
+        self.assertEqual(
+            _detail(body)["message"],
+            "unknown configuration profile 'nope'; choose one of: default, earthlike, smoke",
+        )
+        self.assertEqual(_detail(body)["source"], "<profile>")
+
+        status, _headers, body = asgi_call(
+            app,
+            "POST",
+            "/api/config/render",
+            json_body={"profile": "earthlike", "overrides": {"mesh.cell_count": 512}},
+        )
+        self.assertEqual(status, 200, body)
+        rendered = json.loads(body)
+        self.assertEqual(rendered["profile"], "earthlike")
+        self.assertEqual(rendered["config"]["mesh"]["cell_count"], 512)
+        self.assertIn("cell_count: 512", rendered["yaml"])
+
+        status, _headers, body = asgi_call(
+            app,
+            "POST",
+            "/api/config/render",
+            json_body={"profile": "earthlike", "overrides": {"mesh.nope": 1}},
+        )
+        self.assertEqual(status, 422, body)
+        self.assertEqual(
+            _detail(body)["message"], "unknown configuration override 'mesh.nope'"
+        )
+        self.assertEqual(_detail(body)["source"], "<web overrides>")
+
+        status, _headers, body = asgi_call(
+            app, "POST", "/api/config/save", json_body={"yaml": "{}\n", "name": "bad name"}
+        )
+        self.assertEqual(status, 422, body)
+        self.assertEqual(
+            _detail(body), "name must use only letters, digits, '.', '_', and '-'"
+        )
+
+        status, _headers, body = asgi_call(
+            app,
+            "POST",
+            "/api/config/save",
+            json_body={"yaml": "run:\n  seed: 1\n  seed: 2\n", "name": "duplicate.yaml"},
+        )
+        self.assertEqual(status, 422, body)
+        self.assertIn("duplicate key", _detail(body)["message"])
+        self.assertEqual(_detail(body)["source"], "<web:duplicate.yaml>")
+        self.assertFalse((root / "runs" / "configs" / "duplicate.yaml").exists())
+
+        blocked = root / "runs" / "configs" / "blocked.yaml"
+        blocked.mkdir(parents=True)
+        status, _headers, body = asgi_call(
+            app,
+            "POST",
+            "/api/config/save",
+            json_body={"yaml": "{}\n", "name": "blocked.yaml", "force": True},
+        )
+        self.assertEqual(status, 500, body)
+        self.assertRegex(_detail(body), r"^unable to save configuration: ")
+        self.assertTrue(blocked.is_dir())
+
+        with patch(
+            "magic_geo.debug_server.write_config",
+            side_effect=FileExistsError("configuration already exists: raced.yaml"),
+        ):
+            status, _headers, body = asgi_call(
+                app,
+                "POST",
+                "/api/config/save",
+                json_body={"yaml": "{}\n", "name": "raced.yaml", "force": True},
+            )
+        self.assertEqual(status, 409, body)
+        self.assertEqual(_detail(body), "configuration already exists: raced.yaml")
+
+    def test_config_save_rechecks_confinement_after_the_symlink_checks(self) -> None:
+        root = self.temp_root()
+        app = self.serve(root, None)
+        outside_dir = root / "outside-configs"
+        outside_dir.mkdir()
+        configs = root / "runs" / "configs"
+        real_mkdir = Path.mkdir
+
+        def racing_mkdir(self_path: Path, *args: object, **kwargs: object) -> None:
+            # Simulate the directory being swapped for a symlink between the
+            # is_symlink() check and the mkdir() call.
+            if self_path == configs and not self_path.exists():
+                self_path.symlink_to(outside_dir, target_is_directory=True)
+                return None
+            return real_mkdir(self_path, *args, **kwargs)
+
+        with patch.object(Path, "mkdir", racing_mkdir):
+            status, _headers, body = asgi_call(
+                app,
+                "POST",
+                "/api/config/save",
+                json_body={"yaml": "{}\n", "name": "raced-directory.yaml"},
+            )
+        self.assertEqual(status, 422, body)
+        self.assertEqual(_detail(body), "config directory escapes workspace")
+        self.assertFalse((outside_dir / "raced-directory.yaml").exists())
+
+        configs.unlink()
+        configs.mkdir(parents=True)
+        victim = root / "outside-config.yaml"
+        (configs / "raced-file.yaml").symlink_to(victim)
+        real_is_symlink = Path.is_symlink
+
+        def lying_is_symlink(self_path: Path) -> bool:
+            # Simulate the target becoming a symlink after its own check.
+            if self_path.name == "raced-file.yaml":
+                return False
+            return real_is_symlink(self_path)
+
+        with patch.object(Path, "is_symlink", lying_is_symlink):
+            status, _headers, body = asgi_call(
+                app,
+                "POST",
+                "/api/config/save",
+                json_body={"yaml": "{}\n", "name": "raced-file.yaml", "force": True},
+            )
+        self.assertEqual(status, 422, body)
+        self.assertEqual(_detail(body), "invalid configuration name")
+        self.assertFalse(victim.exists())
+
+    def test_backend_endpoint_reports_probe_failures(self) -> None:
+        root = self.temp_root()
+        app = self.serve(root, None)
+
+        status, _headers, body = asgi_call(app, "GET", "/api/backend")
+        self.assertEqual(status, 200, body)
+        self.assertIn("active_backend", json.loads(body))
+
+        with patch(
+            "magic_geo.api.backend_info", side_effect=RuntimeError("probe exploded")
+        ):
+            status, _headers, body = asgi_call(app, "GET", "/api/backend")
+        self.assertEqual(status, 503, body)
+        self.assertEqual(_detail(body), "backend probe failed: probe exploded")
+
+    def test_lifespan_shutdown_closes_the_job_manager_and_cache(self) -> None:
+        root = self.temp_root()
+        cache_dir = _make_cache(root)
+        app = self.serve(root, cache_dir)
+        caches = app.state.cache_manager
+        jobs = app.state.job_manager
+        self.assertIsNotNone(caches.get())
+
+        async def run_lifespan() -> None:
+            async with app.router.lifespan_context(app):
+                pass
+
+        asyncio.run(run_lifespan())
+
+        self.assertIsNone(caches._cache)
+        with self.assertRaisesRegex(JobInputError, "web job manager is closed"):
+            jobs.submit("validate", {"world": "runs/world.json"})
+
+    def test_completed_job_selection_failures_leave_the_current_cache(self) -> None:
+        root = self.temp_root()
+        cache_dir = _make_cache(root)
+        app = self.serve(root, cache_dir)
+        caches = app.state.cache_manager
+        on_complete = app.state.job_manager._on_complete
+        live = caches.get()
+
+        # A directory that was never exported cannot be selected, and the
+        # rejection leaves the live connection untouched.
+        on_complete(Mock(status="succeeded", cache_dir="runs/never-exported"))
+        self.assertEqual(caches.selected_relative(), "runs/debug")
+        self.assertIs(caches.get(), live)
+
+        published = root / "runs" / "second"
+        shutil.copytree(cache_dir, published)
+        _mutate_manifest(
+            published, lambda manifest: _assign(manifest, ("world", "name"), "second")
+        )
+
+        # A job that did not succeed never switches the selection, even when its
+        # cache directory is a perfectly loadable export.
+        on_complete(Mock(status="failed", cache_dir="runs/second"))
+        self.assertEqual(caches.selected_relative(), "runs/debug")
+        self.assertEqual(caches.get().manifest["world"]["name"], "tiny")
+        on_complete(Mock(status="succeeded", cache_dir=None))
+        self.assertEqual(caches.selected_relative(), "runs/debug")
+
+        # Re-reporting the directory that is already selected reuses the live
+        # connection instead of reopening the cache.
+        on_complete(Mock(status="succeeded", cache_dir="runs/debug"))
+        self.assertIs(caches.get(), live)
+
+        on_complete(Mock(status="succeeded", cache_dir="runs/second"))
+        self.assertEqual(caches.selected_relative(), "runs/second")
+        self.assertEqual(caches.get().manifest["world"]["name"], "second")
+        self.assertIsNot(caches.get(), live)

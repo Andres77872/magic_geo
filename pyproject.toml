@@ -22,6 +22,10 @@ debug = [
   "fastapi>=0.115",
   "uvicorn[standard]>=0.34",
 ]
+test = [
+  "pytest>=9,<10",
+  "pytest-cov>=7",
+]
 
 [project.scripts]
 magic-geo = "magic_geo.cli:main"
@@ -42,3 +46,28 @@ magic_geo = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+norecursedirs = [".claude", "build", "cmake-build-debug", "cpp", "worlds", "runs"]
+markers = [
+  "slow: exhaustive CLI validate-command coverage; deselect with -m \"not slow\"",
+]
+
+[tool.coverage.run]
+# Import name rather than a path so the editable install resolves to src/magic_geo
+# and stale worktree copies are never measured.
+source = ["magic_geo"]
+omit = [
+  "*/magic_geo/debug_ui/*",
+  "*.egg-info/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+precision = 1
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  'if __name__ == "__main__":',
+]
+
+[tool.coverage.paths]
+magic_geo = ["src/magic_geo", "*/site-packages/magic_geo"]

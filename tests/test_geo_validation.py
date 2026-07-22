@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import math
 from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any, Callable
 from unittest import TestCase
 
 from typer.testing import CliRunner
+
+from support import worlds
 
 from magic_geo.api import (
     NATIVE_CIVILIZATION_CELL_FIELDS,
@@ -1222,4 +1226,1087 @@ relations:
                 "simulation_stage_count"
             ],
             8,
+        )
+
+
+class GeoValidationViolationBranchTests(TestCase):
+    """The reporting branches a healthy generated world never reaches.
+
+    ``validate_geo_world`` takes the passing path through every check when the
+    world is well formed, so the branches that report a violation only run on a
+    deliberately damaged payload.  Each case here changes exactly one field,
+    proves the field held a different value beforehand, and is paired with the
+    untampered verdict for the same check so a broken fixture cannot masquerade
+    as a detected violation.
+    """
+
+    WORLD_KEY = "coupled_128"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.control = validate_geo_world(worlds.cached_world_readonly(cls.WORLD_KEY))
+
+    def world(self) -> dict:
+        return worlds.cached_world(self.WORLD_KEY)
+
+    def assign(self, container: dict, key: str, value: Any) -> None:
+        """Write ``value`` after proving it is not what the generator produced."""
+        self.assertIn(key, container)
+        self.assertNotEqual(
+            container[key], value, f"inert tamper: {key} already holds {value!r}"
+        )
+        container[key] = value
+
+    def append(self, sequence: list, value: Any) -> None:
+        self.assertNotIn(value, sequence)
+        sequence.append(value)
+
+    def replace_at(self, sequence: list, index: int, value: Any) -> None:
+        """Overwrite one element after proving it held something else."""
+        self.assertNotEqual(sequence[index], value)
+        sequence[index] = value
+
+    def report_for(self, mutate: Callable[[dict], None], **kwargs: Any) -> dict:
+        world = self.world()
+        mutate(world)
+        return validate_geo_world(world, **kwargs)
+
+    def assert_flipped(self, report: dict, domain: str, name: str) -> dict:
+        """Assert ``domain.name`` passes untampered and failed in ``report``."""
+        self.assertEqual(
+            _check(self.control, domain, name)["status"],
+            "passed",
+            f"{domain}.{name} is not clean before the tamper",
+        )
+        check = _check(report, domain, name)
+        self.assertEqual(check["status"], "failed", check)
+        self.assertFalse(report["passed"])
+        return check
+
+    def assert_newly_reported(self, report: dict, domain: str, name: str) -> dict:
+        """Assert ``domain.name`` is emitted only because of the tamper."""
+        self.assertFalse(
+            any(
+                check["domain"] == domain and check["name"] == name
+                for check in self.control["checks"]
+            ),
+            f"{domain}.{name} already exists before the tamper",
+        )
+        check = _check(report, domain, name)
+        self.assertEqual(check["status"], "failed", check)
+        self.assertFalse(report["passed"])
+        return check
+
+    def assert_only_plate_graph_broke(
+        self, check: dict, *, invalid_edge_semantics: int
+    ) -> None:
+        """Pin the damaged graph, its cause, and the two graphs left alone.
+
+        ``physical_graph_coverage`` reports one verdict per graph and exposes no
+        per-condition counter for shape damage, so ``valid`` alone cannot say
+        which graph broke.  Asserting the sibling graphs stay valid, and whether
+        the edge-semantics counter moved, separates a shape defect in
+        ``plate_graph`` from a semantic one and from a world-wide collapse.
+        """
+        observed = check["observed"]
+        self.assertFalse(observed["plate_graph"]["valid"])
+        self.assertEqual(
+            observed["plate_graph"]["invalid_edge_semantics_count"],
+            invalid_edge_semantics,
+        )
+        self.assertTrue(observed["river_graph"]["valid"])
+        self.assertTrue(observed["watershed_graph"]["valid"])
+
+    def run_cases(self, cases: tuple) -> None:
+        for label, mutate, domain, name, assertion in cases:
+            with self.subTest(case=label):
+                report = self.report_for(mutate)
+                assertion(self.assert_flipped(report, domain, name))
+
+    def test_untampered_world_reports_a_clean_verdict(self) -> None:
+        failed = [
+            (check["domain"], check["name"])
+            for check in self.control["checks"]
+            if check["status"] == "failed"
+        ]
+
+        self.assertTrue(self.control["passed"], failed)
+        self.assertEqual(failed, [])
+        self.assertEqual(self.control["profile"], "generic")
+        self.assertTrue(self.control["layer_contracts"]["all_layer_contracts_passed"])
+
+    def test_mesh_geometry_violations_are_reported_per_defect(self) -> None:
+        self.run_cases(
+            (
+                (
+                    "position vector is not a 3-component point",
+                    lambda world: self.assign(
+                        world["cells"][0], "position_3d", [0.0, 0.0]
+                    ),
+                    "mesh",
+                    "unit_sphere_positions",
+                    lambda check: self.assertEqual(check["observed"], math.inf),
+                ),
+                (
+                    "latitude outside the polar range",
+                    lambda world: self.assign(world["cells"][0], "lat_deg", 95.0),
+                    "mesh",
+                    "coordinate_position_consistency",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_coordinate_count"], 1
+                    ),
+                ),
+                (
+                    "neighbor list replaced by a mapping",
+                    lambda world: self.assign(world["cells"][0], "neighbors", {}),
+                    "mesh",
+                    "adjacency_graph_integrity",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_links"], 1
+                    ),
+                ),
+                (
+                    "neighbor id outside the mesh",
+                    lambda world: self.assign(
+                        world["cells"][0],
+                        "neighbors",
+                        list(world["cells"][0]["neighbors"]) + [99999],
+                    ),
+                    "mesh",
+                    "adjacency_graph_integrity",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_links"], 1
+                    ),
+                ),
+                (
+                    "cell listed as its own neighbor",
+                    lambda world: self.assign(
+                        world["cells"][0],
+                        "neighbors",
+                        list(world["cells"][0]["neighbors"])
+                        + [int(world["cells"][0]["id"])],
+                    ),
+                    "mesh",
+                    "adjacency_graph_integrity",
+                    lambda check: self.assertEqual(check["observed"]["self_links"], 1),
+                ),
+                (
+                    "adjacency edge record is not an object",
+                    lambda world: self.append(
+                        world["cell_adjacency_edges"], "not-an-edge"
+                    ),
+                    "mesh",
+                    "configured_radius_distance_scaling",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_edge_count"], 1
+                    ),
+                ),
+                (
+                    "adjacency edge endpoint outside the mesh",
+                    lambda world: self.assign(
+                        world["cell_adjacency_edges"][0], "cell_a_id", 99999
+                    ),
+                    "mesh",
+                    "configured_radius_distance_scaling",
+                    lambda check: self.assertEqual(
+                        check["observed"]["missing_edge_count"], 1
+                    ),
+                ),
+                (
+                    "great-circle distance no longer uses the planet radius",
+                    lambda world: self.assign(
+                        world["cell_adjacency_edges"][0],
+                        "great_circle_distance_km",
+                        world["cell_adjacency_edges"][0]["great_circle_distance_km"]
+                        + 500.0,
+                    ),
+                    "mesh",
+                    "configured_radius_distance_scaling",
+                    lambda check: self.assertGreater(
+                        check["observed"]["maximum_distance_error_km"], 499.0
+                    ),
+                ),
+                (
+                    "edge ledger replaced by a mapping",
+                    lambda world: self.assign(world, "cell_adjacency_edges", {}),
+                    "mesh",
+                    "configured_radius_distance_scaling",
+                    lambda check: self.assertIsNone(check["observed"]["edge_count"]),
+                ),
+            )
+        )
+
+    def test_tectonic_and_sea_level_violations_are_reported(self) -> None:
+        def drain_the_ocean(world: dict) -> None:
+            marine = [cell for cell in world["cells"] if cell["is_water"]]
+            self.assertTrue(marine)
+            for cell in marine:
+                cell["is_water"] = False
+
+        self.run_cases(
+            (
+                (
+                    "plate id is not coercible to an integer",
+                    lambda world: self.assign(world["cells"][0], "plate_id", {}),
+                    "tectonics",
+                    "plate_assignment_coverage",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_cell_count"], 1
+                    ),
+                ),
+                (
+                    "plate id names no exported plate",
+                    lambda world: self.assign(world["cells"][0], "plate_id", 99999),
+                    "tectonics",
+                    "plate_assignment_coverage",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_cell_count"], 1
+                    ),
+                ),
+                (
+                    "every marine cell relabelled as land",
+                    drain_the_ocean,
+                    "sea_level",
+                    "single_connected_ocean",
+                    lambda check: self.assertEqual(
+                        check["observed"],
+                        {"connected_water_cell_count": 0, "water_cell_count": 0},
+                    ),
+                ),
+            )
+        )
+
+    def test_climate_and_hydrology_violations_are_reported(self) -> None:
+        def break_groundwater_link(world: dict) -> None:
+            cell = next(
+                cell
+                for cell in world["cells"]
+                if cell["groundwater_internal_lateral_outflow_km3_y"] > 1.0e-10
+            )
+            self.assign(cell, "groundwater_flow_to_cell_id", -1)
+
+        def wet_the_seafloor(world: dict) -> None:
+            cell = next(cell for cell in world["cells"] if cell["is_water"])
+            self.assign(cell, "groundwater_recharge_mm_y", 5.0)
+
+        def flow_from_the_sea(world: dict) -> None:
+            cell = next(cell for cell in world["cells"] if cell["is_water"])
+            self.assign(cell, "flow_to", int(cell["neighbors"][0]))
+
+        def flow_to_a_stranger(world: dict) -> None:
+            cell = next(
+                cell
+                for cell in world["cells"]
+                if not cell["is_water"] and cell["flow_to"] >= 0
+            )
+            neighbors = set(cell["neighbors"]) | {int(cell["id"])}
+            stranger = next(
+                other["id"] for other in world["cells"] if other["id"] not in neighbors
+            )
+            self.assign(cell, "flow_to", int(stranger))
+
+        def flow_uphill(world: dict) -> None:
+            cell = next(
+                cell
+                for cell in world["cells"]
+                if not cell["is_water"] and cell["flow_to"] >= 0
+            )
+            self.assign(cell, "hydrologic_surface_elevation_m", -9999.0)
+
+        def claim_a_dry_river(world: dict) -> None:
+            cell = next(
+                cell
+                for cell in world["cells"]
+                if not cell["is_water"]
+                and not cell["is_river"]
+                and cell["runoff_mm_y"] <= 10.0
+            )
+            self.assign(cell, "is_river", True)
+
+        self.run_cases(
+            (
+                (
+                    "monthly climate array is not twelve values",
+                    lambda world: self.assign(
+                        world["cells"][0], "temperature_monthly_c", [1.0]
+                    ),
+                    "climate",
+                    "monthly_annual_climate_closure",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_cell_count"], 1
+                    ),
+                ),
+                (
+                    "energy record is not an object",
+                    lambda world: self.append(
+                        world["climate_energy_balance_records"], "not-a-record"
+                    ),
+                    "climate",
+                    "climate_energy_record_coverage",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_record_count"], 1
+                    ),
+                ),
+                (
+                    "energy record cell id is not coercible",
+                    lambda world: self.assign(
+                        world["climate_energy_balance_records"][0], "cell_id", {}
+                    ),
+                    "climate",
+                    "climate_energy_record_coverage",
+                    lambda check: self.assertEqual(
+                        check["observed"]["unique_cell_count"], 127
+                    ),
+                ),
+                (
+                    "energy record temperature drifts from its cell",
+                    lambda world: self.assign(
+                        world["climate_energy_balance_records"][0],
+                        "temperature_c",
+                        world["climate_energy_balance_records"][0]["temperature_c"]
+                        + 5.0,
+                    ),
+                    "climate",
+                    "climate_energy_record_coverage",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_record_count"], 1
+                    ),
+                ),
+                (
+                    "energy ledger replaced by a mapping",
+                    lambda world: self.assign(
+                        world, "climate_energy_balance_records", {}
+                    ),
+                    "climate",
+                    "climate_energy_record_coverage",
+                    lambda check: self.assertIsNone(check["observed"]["record_count"]),
+                ),
+                (
+                    "groundwater outflow has no valid receiver",
+                    break_groundwater_link,
+                    "hydrology",
+                    "groundwater_partition_closure",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_groundwater_link_count"], 1
+                    ),
+                ),
+                (
+                    "marine cell carries groundwater recharge",
+                    wet_the_seafloor,
+                    "hydrology",
+                    "groundwater_partition_closure",
+                    lambda check: self.assertEqual(
+                        check["observed"]["marine_nonzero_groundwater_count"], 1
+                    ),
+                ),
+                (
+                    "flow target is not an integer",
+                    lambda world: self.assign(world["cells"][0], "flow_to", "downhill"),
+                    "hydrology",
+                    "acyclic_downhill_drainage",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_target_count"], 1
+                    ),
+                ),
+                (
+                    "marine cell routes surface flow",
+                    flow_from_the_sea,
+                    "hydrology",
+                    "acyclic_downhill_drainage",
+                    lambda check: self.assertEqual(
+                        (
+                            check["observed"]["invalid_target_count"],
+                            check["observed"]["cycle_cell_count"],
+                        ),
+                        (1, 2),
+                    ),
+                ),
+                (
+                    "flow target is not adjacent",
+                    flow_to_a_stranger,
+                    "hydrology",
+                    "acyclic_downhill_drainage",
+                    lambda check: self.assertEqual(
+                        check["observed"]["nonneighbor_link_count"], 1
+                    ),
+                ),
+                (
+                    "flow target is not downhill",
+                    flow_uphill,
+                    "hydrology",
+                    "acyclic_downhill_drainage",
+                    lambda check: self.assertEqual(
+                        check["observed"]["uphill_link_count"], 1
+                    ),
+                ),
+                (
+                    "river flag on a cell without river runoff",
+                    claim_a_dry_river,
+                    "hydrology",
+                    "acyclic_downhill_drainage",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_river_cell_count"], 1
+                    ),
+                ),
+            )
+        )
+
+    def test_sediment_ledger_violations_are_reported(self) -> None:
+        def assert_nan_residual(check: dict, key: str) -> None:
+            self.assertTrue(
+                math.isnan(check["evidence"]["reconstructed_residuals"][key]),
+                check["evidence"]["reconstructed_residuals"][key],
+            )
+
+        self.run_cases(
+            (
+                (
+                    "transport model is not an object",
+                    lambda world: self.assign(
+                        world, "hillslope_sediment_transport_model", "gone"
+                    ),
+                    "sediment",
+                    "sediment_mass_conservation",
+                    lambda check: self.assertEqual(
+                        check["observed"]["missing_required_residuals"],
+                        [
+                            "hillslope_sediment_transport_model."
+                            "total_mass_balance_residual_km3"
+                        ],
+                    ),
+                ),
+                (
+                    "stage history volume is not a number",
+                    lambda world: self.assign(
+                        world["hillslope_sediment_transport_history"][0],
+                        "production_volume_km3",
+                        None,
+                    ),
+                    "sediment",
+                    "sediment_mass_conservation",
+                    lambda check: assert_nan_residual(
+                        check,
+                        "hillslope_sediment_transport_history.production_volume_km3",
+                    ),
+                ),
+                (
+                    "numeric breach history replaced by a mapping",
+                    lambda world: self.assign(
+                        world, "numeric_depression_correction_history", {}
+                    ),
+                    "sediment",
+                    "sediment_mass_conservation",
+                    lambda check: assert_nan_residual(check, "numeric_history_gross"),
+                ),
+            )
+        )
+
+    def test_cryosphere_soil_and_biome_violations_are_reported(self) -> None:
+        def unassigned_ice(world: dict) -> None:
+            cell = next(
+                cell
+                for cell in world["cells"]
+                if not cell["is_water"]
+                and cell["ice_thickness_m"] <= 25.0
+                and int(cell["ice_sheet_id"]) == -1
+            )
+            self.assign(cell, "ice_thickness_m", 400.0)
+
+        def glacier_without_ice(world: dict) -> None:
+            cell = next(
+                cell for cell in world["cells"] if cell["ice_thickness_m"] <= 0.0
+            )
+            self.assign(cell, "glacier_flow_to", int(cell["neighbors"][0]))
+
+        self.run_cases(
+            (
+                (
+                    "thick ice belongs to no ice sheet",
+                    unassigned_ice,
+                    "cryosphere",
+                    "ice_sheet_and_flow_coherence",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_ice_cell_count"], 1
+                    ),
+                ),
+                (
+                    "glacier target is not an integer",
+                    lambda world: self.assign(
+                        world["cells"][0], "glacier_flow_to", "downhill"
+                    ),
+                    "cryosphere",
+                    "ice_sheet_and_flow_coherence",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_glacier_link_count"], 1
+                    ),
+                ),
+                (
+                    "glacier flows from a cell holding no ice",
+                    glacier_without_ice,
+                    "cryosphere",
+                    "ice_sheet_and_flow_coherence",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_glacier_link_count"], 1
+                    ),
+                ),
+                (
+                    "ice sheet aggregate contradicts its member cells",
+                    lambda world: self.assign(
+                        world["ice_sheets"][0],
+                        "cell_count",
+                        int(world["ice_sheets"][0]["cell_count"]) + 7,
+                    ),
+                    "cryosphere",
+                    "ice_sheet_and_flow_coherence",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_ice_sheet_record_count"], 1
+                    ),
+                ),
+                (
+                    "soil profile record is not an object",
+                    lambda world: self.append(world["soil_profiles"], "not-a-profile"),
+                    "soil_biome",
+                    "soil_profile_coverage_and_bounds",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_profile_count"], 1
+                    ),
+                ),
+                (
+                    "soil profile cell id is not coercible",
+                    lambda world: self.assign(
+                        world["soil_profiles"][0], "cell_id", {}
+                    ),
+                    "soil_biome",
+                    "soil_profile_coverage_and_bounds",
+                    lambda check: self.assertEqual(
+                        check["observed"]["profile_cell_count"], 46
+                    ),
+                ),
+                (
+                    "soil pH outside the physical scale",
+                    lambda world: self.assign(world["soil_profiles"][0], "ph", 20.0),
+                    "soil_biome",
+                    "soil_profile_coverage_and_bounds",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_profile_count"], 1
+                    ),
+                ),
+                (
+                    "soil profile ledger replaced by a mapping",
+                    lambda world: self.assign(world, "soil_profiles", {}),
+                    "soil_biome",
+                    "soil_profile_coverage_and_bounds",
+                    lambda check: self.assertEqual(
+                        check["observed"]["profile_cell_count"], 0
+                    ),
+                ),
+                (
+                    "biome diagnostic is not an object",
+                    lambda world: self.append(
+                        world["biome_diagnostics"], "not-a-diagnostic"
+                    ),
+                    "soil_biome",
+                    "biome_diagnostic_coverage",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_diagnostic_count"], 1
+                    ),
+                ),
+                (
+                    "biome diagnostic cell id is not coercible",
+                    lambda world: self.assign(
+                        world["biome_diagnostics"][0], "cell_id", {}
+                    ),
+                    "soil_biome",
+                    "biome_diagnostic_coverage",
+                    lambda check: self.assertEqual(
+                        check["observed"]["diagnostic_cell_count"], 127
+                    ),
+                ),
+                (
+                    "biome confidence outside the unit interval",
+                    lambda world: self.assign(
+                        world["biome_diagnostics"][0], "biome_confidence_index", 2.0
+                    ),
+                    "soil_biome",
+                    "biome_diagnostic_coverage",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_diagnostic_count"], 1
+                    ),
+                ),
+                (
+                    "biome diagnostic ledger replaced by a mapping",
+                    lambda world: self.assign(world, "biome_diagnostics", {}),
+                    "soil_biome",
+                    "biome_diagnostic_coverage",
+                    lambda check: self.assertEqual(
+                        check["observed"]["diagnostic_cell_count"], 0
+                    ),
+                ),
+            )
+        )
+
+    def test_resource_graph_and_boundary_violations_are_reported(self) -> None:
+        self.run_cases(
+            (
+                (
+                    "deposit record is not an object",
+                    lambda world: self.append(
+                        world["resource_deposits"], "not-a-deposit"
+                    ),
+                    "natural_resources",
+                    "deposit_and_commodity_linkage",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_deposit_count"], 1
+                    ),
+                ),
+                (
+                    "deposit index outside the unit interval",
+                    lambda world: self.assign(
+                        world["resource_deposits"][0], "reserve_potential_index", 2.0
+                    ),
+                    "natural_resources",
+                    "deposit_and_commodity_linkage",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_deposit_count"], 1
+                    ),
+                ),
+                (
+                    "deposit ledger replaced by a mapping",
+                    lambda world: self.assign(world, "resource_deposits", {}),
+                    "natural_resources",
+                    "deposit_and_commodity_linkage",
+                    lambda check: self.assertEqual(
+                        check["observed"]["deposit_count"], 0
+                    ),
+                ),
+                (
+                    "commodity ledger replaced by a mapping",
+                    lambda world: self.assign(world, "commodity_occurrences", {}),
+                    "natural_resources",
+                    "deposit_and_commodity_linkage",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_commodity_link_count"], 1
+                    ),
+                ),
+                (
+                    "graph node is not an object",
+                    lambda world: self.append(
+                        world["plate_graph"]["nodes"], "not-a-node"
+                    ),
+                    "natural_graphs",
+                    "physical_graph_coverage",
+                    lambda check: self.assert_only_plate_graph_broke(
+                        check, invalid_edge_semantics=0
+                    ),
+                ),
+                (
+                    "graph node id is not coercible",
+                    lambda world: self.assign(
+                        world["plate_graph"]["nodes"][0], "id", {}
+                    ),
+                    "natural_graphs",
+                    "physical_graph_coverage",
+                    lambda check: self.assert_only_plate_graph_broke(
+                        check, invalid_edge_semantics=0
+                    ),
+                ),
+                (
+                    "graph edge is not an object",
+                    lambda world: self.append(
+                        world["plate_graph"]["edges"], "not-an-edge"
+                    ),
+                    "natural_graphs",
+                    "physical_graph_coverage",
+                    lambda check: self.assert_only_plate_graph_broke(
+                        check, invalid_edge_semantics=0
+                    ),
+                ),
+                (
+                    "graph edge endpoint is not coercible",
+                    lambda world: self.assign(
+                        world["plate_graph"]["edges"][0], "plate_a", {}
+                    ),
+                    "natural_graphs",
+                    "physical_graph_coverage",
+                    lambda check: self.assert_only_plate_graph_broke(
+                        check, invalid_edge_semantics=0
+                    ),
+                ),
+                (
+                    "graph edge joins a node to itself",
+                    lambda world: self.assign(
+                        world["plate_graph"]["edges"][0],
+                        "plate_b",
+                        world["plate_graph"]["edges"][0]["plate_a"],
+                    ),
+                    "natural_graphs",
+                    "physical_graph_coverage",
+                    lambda check: self.assertEqual(
+                        check["observed"]["plate_graph"]["invalid_edge_semantics_count"],
+                        1,
+                    ),
+                ),
+                (
+                    "boundary segment is not an object",
+                    lambda world: self.append(
+                        world["watershed_boundary_segments"], "not-a-segment"
+                    ),
+                    "natural_graphs",
+                    "watershed_boundary_ledger",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_segment_count"], 2
+                    ),
+                ),
+                (
+                    "boundary segment length is not coercible",
+                    lambda world: self.assign(
+                        world["watershed_boundary_segments"][0], "length_km", {}
+                    ),
+                    "natural_graphs",
+                    "watershed_boundary_ledger",
+                    lambda check: self.assertEqual(
+                        (
+                            check["observed"]["recorded_segment_count"],
+                            check["observed"]["invalid_segment_count"],
+                        ),
+                        (132, 2),
+                    ),
+                ),
+                (
+                    "boundary segment quality outside the unit interval",
+                    lambda world: self.assign(
+                        world["watershed_boundary_segments"][0],
+                        "boundary_segment_quality",
+                        2.0,
+                    ),
+                    "natural_graphs",
+                    "watershed_boundary_ledger",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_segment_count"], 1
+                    ),
+                ),
+                (
+                    "boundary segment ids are not a dense range",
+                    lambda world: self.assign(
+                        world["watershed_boundary_segments"][0], "id", 99999
+                    ),
+                    "natural_graphs",
+                    "watershed_boundary_ledger",
+                    lambda check: self.assertEqual(
+                        check["observed"]["invalid_segment_count"], 1
+                    ),
+                ),
+                (
+                    "boundary segment ledger replaced by a mapping",
+                    lambda world: self.assign(
+                        world, "watershed_boundary_segments", {}
+                    ),
+                    "natural_graphs",
+                    "watershed_boundary_ledger",
+                    lambda check: self.assertEqual(
+                        (
+                            check["observed"]["recorded_segment_count"],
+                            check["observed"]["invalid_segment_count"],
+                        ),
+                        (0, 1),
+                    ),
+                ),
+            )
+        )
+
+    def test_calibration_and_realism_evidence_violations_are_reported(self) -> None:
+        self.run_cases(
+            (
+                (
+                    "calibration record is not an object",
+                    lambda world: self.replace_at(
+                        world["calibration_checks"], 0, "not-a-record"
+                    ),
+                    "earth_calibration",
+                    "built_in_calibration_integrity",
+                    lambda check: self.assertEqual(
+                        check["observed"]["metrics"],
+                        _check(
+                            self.control,
+                            "earth_calibration",
+                            "built_in_calibration_integrity",
+                        )["observed"]["metrics"][1:],
+                    ),
+                ),
+                (
+                    "calibration ledger is empty",
+                    lambda world: self.assign(world, "calibration_checks", []),
+                    "earth_calibration",
+                    "built_in_calibration_integrity",
+                    lambda check: self.assertEqual(check["observed"]["metrics"], []),
+                ),
+            )
+        )
+
+    def test_damaged_realism_family_reports_a_check_a_clean_world_never_emits(
+        self,
+    ) -> None:
+        empty_family = self.report_for(
+            lambda world: self.assign(world, "biome_realism_checks", [])
+        )
+        text_record = self.report_for(
+            lambda world: self.replace_at(
+                world["planet_realism_checks"], 0, "not-a-record"
+            )
+        )
+
+        missing = self.assert_newly_reported(
+            empty_family, "realism_evidence_integrity", "biome_realism_checks_records"
+        )
+        self.assertEqual(missing["observed"], 0)
+        self.assertEqual(missing["expected"], "non-empty list")
+        self.assertFalse(
+            any(
+                check["name"].startswith("biome_realism_checks.")
+                for check in empty_family["checks"]
+            )
+        )
+
+        shape = self.assert_newly_reported(
+            text_record, "realism_evidence_integrity", "planet_realism_checks.record_shape"
+        )
+        self.assertEqual(shape["observed"], "str")
+        self.assertEqual(
+            _check(
+                text_record, "realism_evidence_integrity", "planet_realism_checks.registry"
+            )["status"],
+            "failed",
+        )
+
+    def test_empty_calibration_ledger_zeroes_the_reported_pass_fraction(self) -> None:
+        self.assertGreater(self.control["metrics"]["calibration_pass_fraction"], 0.0)
+
+        report = self.report_for(
+            lambda world: self.assign(world, "calibration_checks", [])
+        )
+        mapping_report = self.report_for(
+            lambda world: self.assign(world, "calibration_checks", {})
+        )
+
+        self.assertEqual(report["metrics"]["calibration_pass_fraction"], 0.0)
+        self.assertEqual(mapping_report["metrics"]["calibration_pass_fraction"], 0.0)
+
+    def test_realism_claim_without_object_evidence_is_not_applicable(self) -> None:
+        name = "hydrology_realism_checks.river_terminal_sink_validity"
+
+        report = self.report_for(
+            lambda world: self.assign(
+                world["hydrology_realism_checks"][0], "evidence", []
+            )
+        )
+
+        integrity = self.assert_flipped(report, "realism_evidence_integrity", name)
+        self.assertEqual(integrity["observed"]["declared_passed"], True)
+        claim = _check(report, "realism_evidence", name)
+        self.assertEqual(_check(self.control, "realism_evidence", name)["status"], "passed")
+        self.assertEqual(claim["status"], "not_applicable")
+        self.assertFalse(claim["passed"])
+        self.assertIn("vacuous", claim["message"])
+
+    def test_non_world_payload_shapes_fail_before_deep_validation(self) -> None:
+        schema_version = worlds.cached_world_readonly(self.WORLD_KEY)["schema_version"]
+
+        root = validate_geo_world("not-a-world")
+        self.assertFalse(root["passed"])
+        self.assertEqual(_check(root, "contract", "world_object")["observed"], "str")
+
+        shell = validate_geo_world(
+            {"schema_version": schema_version, "summary": [], "cells": []}
+        )
+        self.assertFalse(shell["passed"])
+        self.assertEqual(
+            _check(shell, "contract", "summary_object")["observed"], "list"
+        )
+        self.assertEqual(
+            _check(shell, "contract", "cell_payload_available")["observed"], 0
+        )
+        self.assertEqual(
+            _check(shell, "contract", "world_schema_version")["status"], "passed"
+        )
+
+        text_ids = validate_geo_world(
+            {
+                "schema_version": schema_version,
+                "summary": {"cell_count": {}},
+                "cells": [{"id": "first"}],
+            }
+        )
+        self.assertFalse(text_ids["passed"])
+        self.assertEqual(
+            _check(text_ids, "contract", "cell_count")["observed"],
+            {"summary": {}, "payload": 1},
+        )
+        self.assertEqual(
+            _check(text_ids, "mesh", "unique_cell_ids")["observed"]["unique_id_count"],
+            None,
+        )
+        self.assertFalse(
+            any(check["domain"] == "hydrology" for check in text_ids["checks"])
+        )
+
+        missing_fields = validate_geo_world(
+            {
+                "schema_version": schema_version,
+                "summary": {"cell_count": 1},
+                "cells": [{"id": 0}],
+            }
+        )
+        finite = _check(missing_fields, "contract", "finite_core_geo_fields")
+        self.assertEqual(finite["status"], "failed")
+        self.assertEqual(finite["observed"]["area_km2"], 1)
+        self.assertEqual(
+            _check(missing_fields, "mesh", "unique_cell_ids")["status"], "passed"
+        )
+        self.assertFalse(
+            any(check["domain"] == "climate" for check in missing_fields["checks"])
+        )
+
+    def test_malformed_optional_payloads_are_reported_not_raised(self) -> None:
+        cases = (
+            (
+                "planet parameters replaced by text",
+                lambda world: self.assign(world, "planet_parameters", "nope"),
+                "AttributeError",
+            ),
+            (
+                "adjacency edge endpoint replaced by a mapping",
+                lambda world: self.assign(
+                    world["cell_adjacency_edges"][0], "cell_a_id", {}
+                ),
+                "TypeError",
+            ),
+            (
+                "neighbor list replaced by text",
+                lambda world: self.assign(
+                    world["cells"][0], "neighbors", "not-a-list"
+                ),
+                "ValueError",
+            ),
+        )
+        self.assertFalse(
+            any(
+                check["name"] == "malformed_optional_payload"
+                for check in self.control["checks"]
+            )
+        )
+        for label, mutate, exception_type in cases:
+            with self.subTest(case=label):
+                report = self.report_for(mutate)
+                check = _check(report, "contract", "malformed_optional_payload")
+
+                self.assertFalse(report["passed"])
+                self.assertEqual(check["status"], "failed")
+                self.assertEqual(check["observed"]["exception_type"], exception_type)
+                self.assertTrue(check["observed"]["detail"])
+                self.assertEqual(
+                    check["expected"],
+                    "all exported natural fields are type-safe and internally coherent",
+                )
+
+    def test_uncoercible_planet_parameter_falls_back_to_the_declared_default(
+        self,
+    ) -> None:
+        world = self.world()
+        self.assign(world["planet_parameters"], "radius_km", "wide")
+        report = validate_geo_world(world)
+
+        check = self.assert_flipped(
+            report, "contract", "explicit_planet_and_physics_models"
+        )
+        # The key is still present and both physics models are still declared,
+        # so the uncoercible value is the only clause left that can fail.
+        self.assertTrue(check["observed"]["climate_model_present"])
+        self.assertTrue(check["observed"]["sea_level_model_present"])
+        self.assertIn("radius_km", check["observed"]["planet_parameter_keys"])
+        # The radius reader still hands the declared 6371.0 km default to the
+        # area closure instead of raising or reporting the text it was given.
+        area = _check(report, "mesh", "spherical_surface_area_closure")
+        self.assertEqual(world["planet_parameters"]["radius_km"], "wide")
+        self.assertEqual(area["observed"]["radius_km"], 6371.0)
+        self.assertEqual(area["status"], "passed")
+
+    def test_earthlike_profile_adds_gates_a_generic_run_skips(self) -> None:
+        def drain_the_ocean(world: dict) -> None:
+            marine = [cell for cell in world["cells"] if cell["is_water"]]
+            self.assertTrue(marine)
+            for cell in marine:
+                cell["is_water"] = False
+
+        earthlike_control = validate_geo_world(
+            worlds.cached_world_readonly(self.WORLD_KEY), profile="earthlike"
+        )
+        report = self.report_for(drain_the_ocean, profile="earthlike")
+
+        self.assertFalse(
+            any(check["domain"] == "earthlike_profile" for check in self.control["checks"])
+        )
+        self.assertEqual(
+            _check(earthlike_control, "earthlike_profile", "ocean_fraction")["status"],
+            "passed",
+        )
+        gate = _check(report, "earthlike_profile", "ocean_fraction")
+        self.assertEqual(gate["status"], "failed")
+        self.assertEqual(gate["observed"], 0.0)
+        self.assertEqual(gate["expected"], {"minimum": 0.55, "maximum": 0.85})
+        self.assertEqual(report["profile"], "earthlike")
+
+    def test_unknown_profile_is_reported_as_a_failed_contract(self) -> None:
+        report = validate_geo_world(
+            worlds.cached_world_readonly(self.WORLD_KEY), profile="martian"
+        )
+        check = _check(report, "contract", "known_validation_profile")
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(check["status"], "failed")
+        self.assertEqual(check["observed"], "martian")
+        self.assertEqual(check["expected"], ["generic", "earthlike"])
+        self.assertEqual(report["profile"], "martian")
+        self.assertFalse(
+            any(check["domain"] == "earthlike_profile" for check in report["checks"])
+        )
+
+    def test_extract_geo_metrics_degrades_on_partial_worlds(self) -> None:
+        self.assertEqual(extract_geo_metrics({}), {"cell_count": 0})
+        self.assertEqual(
+            extract_geo_metrics({"cells": ["not-a-cell"]}), {"cell_count": 0}
+        )
+
+        partial = {
+            "cells": [
+                {"id": 0, "area_km2": 0.0, "elevation_m": 0.0, "temperature_c": 3.0},
+                {"id": 1, "area_km2": 0.0, "elevation_m": 1.0, "temperature_c": 4.0},
+            ],
+            "geology_realism_checks": {"not": "a list"},
+            "calibration_checks": ["not-a-record"],
+        }
+        ledgers = {
+            "absent step-zero ledger": {},
+            "step-zero record without a ledger": {"plate_motion_history": [{}]},
+            "step-zero ledger with a truncated column": {
+                "plate_motion_history": [
+                    {"crust_overlap_ledger": {"remapped_crust_age_ma_by_cell": [1.0]}}
+                ]
+            },
+        }
+        for label, extra in ledgers.items():
+            with self.subTest(case=label):
+                metrics = extract_geo_metrics({**partial, **extra})
+
+                self.assertEqual(metrics["cell_count"], 2)
+                self.assertEqual(metrics["surface_area_km2"], 0.0)
+                self.assertEqual(metrics["global_mean_temperature_c"], 0.0)
+                self.assertEqual(metrics["crust_evolved_cell_fraction"], 0.0)
+                self.assertEqual(metrics["mountain_convergent_alignment"], 0.0)
+                self.assertEqual(metrics["calibration_pass_fraction"], 0.0)
+
+        self.assertEqual(
+            extract_geo_metrics({**partial, "calibration_checks": {}})[
+                "calibration_pass_fraction"
+            ],
+            0.0,
         )

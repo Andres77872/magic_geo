@@ -23,27 +23,7 @@ from magic_geo.serialization import (
     loads_world,
 )
 
-
-def sample_world() -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "name": "Tierra \"rápida\"\n🌍\u0001",
-        "none": None,
-        "truth": True,
-        "integer": 1,
-        "uint64": 2**64 - 1,
-        "int64": -(2**63),
-        "values": [
-            -0.0,
-            0.0,
-            math.nextafter(0.0, 1.0),
-            1.2345678901234567,
-            1.7976931348623157e308,
-        ],
-        "empty_object": {},
-        "empty_array": [],
-        "nested": {"records": [{"id": 0}, {"id": 1}]},
-    }
+from support.builders import sample_world
 
 
 class WorldSerializationTests(TestCase):

@@ -16,7 +16,9 @@ from magic_geo.crust_process_validation import (
     validate_crust_process_reason_ledger,
 )
 from magic_geo.crust_transport_validation import (
+    _atomic_partition_error_upper_bound,
     _dominant_crust_category_pair,
+    _process_attribution_values,
     _validate_coverage_membership_area_classes,
     validate_crust_overlap_transport,
 )
@@ -81,6 +83,42 @@ def _extreme_rotation_config(
 
 def _different_id(value: int, cell_count: int) -> int:
     return (value + 1) % cell_count
+
+
+def _replaced(container: dict, field: str, value: object) -> None:
+    """Overwrite ``field`` after proving the write is not a silent no-op.
+
+    A hardcoded replacement can coincide with what the generator already
+    produced, which would leave the "tampered" world identical to the healthy
+    one and make the assertion that follows vacuous.  Re-typing a field (``0``
+    to ``0.0``) is a real tamper for the type guards under test, so equality
+    alone is not enough to reject the write.
+    """
+
+    previous = container[field]
+    if previous == value and type(previous) is type(value):
+        raise AssertionError(
+            f"tamper is a no-op: {field} is already {value!r}"
+        )
+    container[field] = value
+
+
+def _bumped(container: dict, field: str, delta: float) -> float:
+    """Add ``delta`` to ``field`` and prove the stored value really moved.
+
+    The stored type is preserved: an integer mirror stays an integer so the
+    tamper cannot accidentally trip a type guard instead of the identity the
+    caller is aiming at.
+    """
+
+    previous = container[field]
+    updated = previous + delta
+    if updated == previous:
+        raise AssertionError(
+            f"tamper is a no-op: {field} absorbed {delta!r} at {previous!r}"
+        )
+    container[field] = updated
+    return updated
 
 
 class ConservativeCrustTransportValidationTests(TestCase):
@@ -1810,3 +1848,824 @@ class ConservativeCrustTransportValidationTests(TestCase):
                 replay = validate_crust_overlap_transport(altered)
                 self.assertFalse(replay["passed"], replay)
                 self.assertTrue(replay["failures"])
+
+    def test_missing_transport_inputs_short_circuit_before_any_replay(
+        self,
+    ) -> None:
+        control = validate_crust_overlap_transport(self.world)
+        self.assertTrue(control["passed"], control["failures"])
+        self.assertTrue(control["metrics"])
+
+        empty_history = deepcopy(self.world)
+        empty_history["plate_motion_history"] = []
+        no_cells = deepcopy(self.world)
+        no_cells["cells"] = []
+        model_not_an_object = deepcopy(self.world)
+        model_not_an_object["plate_kinematic_model"] = None
+        history_not_a_list = deepcopy(self.world)
+        history_not_a_list["plate_motion_history"] = {}
+
+        for name, world in {
+            "empty_world": {},
+            "empty_history": empty_history,
+            "no_cells": no_cells,
+            "model_not_an_object": model_not_an_object,
+            "history_not_a_list": history_not_a_list,
+        }.items():
+            with self.subTest(world=name):
+                replay = validate_crust_overlap_transport(world)
+                self.assertFalse(replay["passed"], replay)
+                self.assertEqual(
+                    replay["failures"],
+                    ["crust transport model, history, or cells are missing"],
+                )
+                self.assertEqual(replay["metrics"], {})
+
+    def test_atomic_partition_bound_rejects_invalid_fragment_inputs(
+        self,
+    ) -> None:
+        """The private forward-error bound guards its own preconditions.
+
+        ``validate_crust_overlap_transport`` only reaches this helper after the
+        ledger shape check has already constrained the fragment count to
+        ``1..16384`` and the membership-area classes to strictly positive
+        areas, so these guards are exercised directly.
+        """
+
+        bound = _atomic_partition_error_upper_bound(100.0, [40.0, 60.0], 3)
+        self.assertTrue(math.isfinite(bound))
+        self.assertGreater(bound, 0.0)
+        self.assertLess(bound, 1.0e-9)
+
+        fragment_message = "atomic partition bound inputs are invalid"
+        area_message = "coalesced partition areas are invalid"
+        for name, arguments, message in (
+            ("zero_fragments", (100.0, [40.0, 60.0], 0), fragment_message),
+            (
+                "over_fragment_limit",
+                (100.0, [40.0, 60.0], 16385),
+                fragment_message,
+            ),
+            ("no_area_classes", (100.0, [], 3), fragment_message),
+            ("zero_class_area", (100.0, [40.0, 0.0], 3), area_message),
+            (
+                "negative_class_area",
+                (100.0, [40.0, -1.0e-12], 3),
+                area_message,
+            ),
+            (
+                "non_finite_class_area",
+                (100.0, [40.0, math.inf], 3),
+                area_message,
+            ),
+        ):
+            with self.subTest(inputs=name):
+                with self.assertRaises(ValueError) as caught:
+                    _atomic_partition_error_upper_bound(*arguments)
+                self.assertEqual(str(caught.exception), message)
+
+    def test_process_attribution_guards_name_each_malformed_record(
+        self,
+    ) -> None:
+        """Pin the per-guard message behind one shared public verdict.
+
+        ``validate_crust_overlap_transport`` collapses every one of these
+        conditions into ``post-process crust inventory <step> is invalid``, so
+        the distinct diagnostics are asserted on the private replay helper that
+        raises them; the public surface is exercised in
+        ``test_process_inventory_mirrors_fail_their_own_check``.
+        """
+
+        cell_count = len(self.world["cells"])
+        attribution = self.world["plate_motion_history"][1][
+            "crust_overlap_ledger"
+        ]["process_inventory_attribution"]
+        control = _process_attribution_values(
+            deepcopy(attribution), cell_count
+        )
+        self.assertEqual(
+            set(control), {"reasons", "attributed", "residual", "reconciled"}
+        )
+        self.assertEqual(
+            len(control["reasons"]), len(CRUST_PROCESS_REASON_ORDER)
+        )
+
+        def add_attribution_key(payload: dict) -> None:
+            self.assertNotIn("unexpected", payload)
+            payload["unexpected"] = 1
+
+        def retype_reason_array(payload: dict) -> None:
+            _replaced(payload, "reasons", tuple(payload["reasons"]))
+
+        def drop_reason_record(payload: dict) -> None:
+            del payload["reasons"][-1]
+
+        def add_record_key(payload: dict) -> None:
+            self.assertNotIn("note", payload["reasons"][0])
+            payload["reasons"][0]["note"] = "annotated"
+
+        def retype_reason_count(payload: dict) -> None:
+            record = payload["reasons"][0]
+            _replaced(
+                record,
+                "triggered_cell_count",
+                float(record["triggered_cell_count"]),
+            )
+
+        def swap_reason_counts(payload: dict) -> None:
+            record = payload["reasons"][0]
+            _replaced(
+                record,
+                "extensive_state_changed_cell_count",
+                record["triggered_cell_count"] + 1,
+            )
+
+        def overflow_triggered_count(payload: dict) -> None:
+            _replaced(
+                payload["reasons"][0], "triggered_cell_count", cell_count + 1
+            )
+
+        def negative_magnitude(payload: dict) -> None:
+            _replaced(
+                payload["reasons"][0]["negative_delta_magnitude"],
+                "crust_volume_km3",
+                -1.0,
+            )
+
+        def unbalanced_net_delta(payload: dict) -> None:
+            _bumped(
+                payload["reasons"][0]["net_delta"],
+                "crust_volume_km3",
+                1.0e-12,
+            )
+
+        def add_extensive_key(payload: dict) -> None:
+            self.assertNotIn("extra", payload["numerical_closure_residual"])
+            payload["numerical_closure_residual"]["extra"] = 0.0
+
+        def non_finite_extensive(payload: dict) -> None:
+            _replaced(
+                payload["reconciled_inventory_delta"],
+                "crust_volume_km3",
+                math.inf,
+            )
+
+        def broken_total(payload: dict) -> None:
+            _bumped(
+                payload["attributed_inventory_delta"],
+                "crust_volume_km3",
+                1.0,
+            )
+
+        cases = (
+            (
+                "attribution_schema",
+                add_attribution_key,
+                TypeError,
+                "crust process attribution has an invalid schema",
+            ),
+            (
+                "attribution_semantics",
+                lambda payload: _replaced(payload, "format", "unordered_v0"),
+                ValueError,
+                "crust process attribution semantics are invalid",
+            ),
+            (
+                "reason_array_not_a_list",
+                retype_reason_array,
+                TypeError,
+                "crust process reason array has an invalid shape",
+            ),
+            (
+                "reason_array_too_short",
+                drop_reason_record,
+                TypeError,
+                "crust process reason array has an invalid shape",
+            ),
+            (
+                "reason_record_schema",
+                add_record_key,
+                TypeError,
+                "crust process reason record has an invalid schema",
+            ),
+            (
+                "reason_identity",
+                lambda payload: _replaced(
+                    payload["reasons"][0], "reason", "unknown_process"
+                ),
+                ValueError,
+                "crust process reason identity or counts are invalid",
+            ),
+            (
+                "reason_count_type",
+                retype_reason_count,
+                ValueError,
+                "crust process reason identity or counts are invalid",
+            ),
+            (
+                "changed_exceeds_triggered",
+                swap_reason_counts,
+                ValueError,
+                "crust process reason identity or counts are invalid",
+            ),
+            (
+                "triggered_exceeds_cell_count",
+                overflow_triggered_count,
+                ValueError,
+                "crust process reason identity or counts are invalid",
+            ),
+            (
+                "negative_signed_magnitude",
+                negative_magnitude,
+                ValueError,
+                "crust process signed magnitudes must be nonnegative",
+            ),
+            (
+                "net_delta_does_not_reconcile",
+                unbalanced_net_delta,
+                ValueError,
+                "crust process positive/negative record does not reconcile",
+            ),
+            (
+                "extensive_record_schema",
+                add_extensive_key,
+                TypeError,
+                "crust extensive record has an invalid schema",
+            ),
+            (
+                "extensive_record_non_finite",
+                non_finite_extensive,
+                ValueError,
+                "crust extensive record must be finite",
+            ),
+            (
+                "attributed_total",
+                broken_total,
+                ValueError,
+                "crust process attributed totals do not reconcile",
+            ),
+        )
+        for name, mutate, expected_type, message in cases:
+            with self.subTest(record=name):
+                payload = deepcopy(attribution)
+                mutate(payload)
+                with self.assertRaises(expected_type) as caught:
+                    _process_attribution_values(payload, cell_count)
+                self.assertEqual(str(caught.exception), message)
+
+    def test_membership_area_class_tampers_name_the_failing_check(self) -> None:
+        control = validate_crust_overlap_transport(self.world)
+        self.assertTrue(control["passed"], control["failures"])
+        cell_count = len(self.world["cells"])
+
+        def ledger(world: dict, step_index: int) -> dict:
+            return world["plate_motion_history"][step_index][
+                "crust_overlap_ledger"
+            ]
+
+        def classes(world: dict, step_index: int) -> dict:
+            return ledger(world, step_index)[
+                "coverage_membership_area_class_ledger"
+            ]
+
+        def non_finite_class_area(world: dict) -> None:
+            areas = classes(world, 0)["area_km2"]
+            self.assertTrue(math.isfinite(areas[0]))
+            areas[0] = math.inf
+
+        def class_count_mirror_without_classes(world: dict) -> None:
+            step_ledger = ledger(world, 1)
+            counts = step_ledger[
+                "coverage_membership_area_class_count_by_cell"
+            ]
+            fragments = step_ledger[
+                "coverage_arrangement_fragment_count_by_cell"
+            ]
+            for index, (count, fragment) in enumerate(
+                zip(counts, fragments, strict=True)
+            ):
+                if count < fragment:
+                    counts[index] = count + 1
+                    _bumped(
+                        step_ledger,
+                        "total_coverage_membership_area_class_count",
+                        1,
+                    )
+                    step_ledger[
+                        "maximum_coverage_membership_area_class_count"
+                    ] = max(counts)
+                    return
+            raise AssertionError(
+                "fixture has no destination whose class count can grow"
+            )
+
+        def out_of_range_class_contributor(world: dict) -> None:
+            class_ledger = classes(world, 1)
+            offsets = class_ledger["contributor_offsets"]
+            source_ids = class_ledger["source_cell_ids"]
+            for area_class in range(len(class_ledger["multiplicity"])):
+                end = offsets[area_class + 1]
+                if end > offsets[area_class]:
+                    self.assertLess(source_ids[end - 1], cell_count)
+                    source_ids[end - 1] = cell_count
+                    return
+            raise AssertionError("fixture has no membership contributor")
+
+        def shrink_maximum_multiplicity(world: dict) -> None:
+            multiplicities = ledger(world, 0)[
+                "maximum_coverage_multiplicity_by_cell"
+            ]
+            self.assertEqual(multiplicities[0], 1)
+            multiplicities[0] = 0
+
+        def inflate_coverage_sum(world: dict) -> None:
+            sums = ledger(world, 0)["coverage_area_sum_km2_by_cell"]
+            previous = sums[0]
+            sums[0] = previous + 1.0
+            self.assertNotEqual(sums[0], previous)
+
+        cases = (
+            (
+                "non_finite_class_area",
+                non_finite_class_area,
+                "crust coverage membership-area-class ledger 0 is invalid: "
+                "area_km2 must contain only finite values",
+            ),
+            (
+                "class_count_mirror_without_classes",
+                class_count_mirror_without_classes,
+                "crust coverage membership-area-class ledger 1 is invalid: "
+                "coverage membership-area-class destination offsets are "
+                "invalid",
+            ),
+            (
+                "shrunk_maximum_multiplicity",
+                shrink_maximum_multiplicity,
+                "crust coverage membership-area-class ledger 0 is invalid: "
+                "coverage membership-area-class maximum multiplicity is "
+                "invalid",
+            ),
+            (
+                "inflated_coverage_sum",
+                inflate_coverage_sum,
+                "crust coverage membership-area-class ledger 0 is invalid: "
+                "coverage membership-area-class destination aggregate is "
+                "invalid",
+            ),
+        )
+        for name, mutate, expected in cases:
+            with self.subTest(mutation=name):
+                altered = deepcopy(self.world)
+                mutate(altered)
+                replay = validate_crust_overlap_transport(altered)
+                self.assertFalse(replay["passed"], replay)
+                self.assertEqual(replay["failures"], [expected])
+
+        altered = deepcopy(self.world)
+        out_of_range_class_contributor(altered)
+        replay = validate_crust_overlap_transport(altered)
+        self.assertFalse(replay["passed"], replay)
+        self.assertEqual(len(replay["failures"]), 1)
+        failure = replay["failures"][0]
+        self.assertIn(
+            "crust coverage membership-area-class ledger 1 is invalid: "
+            "coverage membership-area-class source membership is invalid",
+            failure,
+        )
+        self.assertIn(f"out-of-range source IDs [{cell_count}]", failure)
+
+    def test_initial_state_and_input_metadata_guards_are_distinct(self) -> None:
+        control = validate_crust_overlap_transport(self.world)
+        self.assertTrue(control["passed"], control["failures"])
+
+        def unusable_mass_factor(world: dict) -> None:
+            _replaced(
+                world["plate_kinematic_model"],
+                "density_weighted_crust_volume_to_mass_kg_factor",
+                None,
+            )
+
+        def inconsistent_activity_index(world: dict) -> None:
+            model = world["plate_kinematic_model"]
+            _replaced(
+                model,
+                "tectonic_activity_index",
+                float(model["tectonic_activity_index"]) * 1.5,
+            )
+
+        def missing_heat_input(world: dict) -> None:
+            del world["plate_kinematic_model"][
+                "tectonic_process_internal_heat_input"
+            ]
+
+        def empty_plate_array(world: dict) -> None:
+            _replaced(world, "plates", [])
+
+        def non_canonical_plate_id(world: dict) -> None:
+            plate = world["plates"][0]
+            _replaced(
+                plate, "id", _different_id(plate["id"], len(world["plates"]))
+            )
+
+        def unnormalized_plate_axis(world: dict) -> None:
+            _replaced(world["plates"][0], "axis", [1.0, 1.0, 1.0])
+
+        def unnormalized_cell_position(world: dict) -> None:
+            _replaced(world["cells"][0], "position_3d", [0.5, 0.0, 0.0])
+
+        def negative_cell_area(world: dict) -> None:
+            _replaced(
+                world["cells"][0],
+                "area_km2",
+                -abs(float(world["cells"][0]["area_km2"])),
+            )
+
+        # `initial crust state is invalid` is one verdict for three distinct
+        # guards; the tamper name records which guard each case trips.
+        cases = (
+            (
+                "unusable_mass_factor",
+                unusable_mass_factor,
+                "conservative crust transport model metadata is invalid",
+            ),
+            (
+                "inconsistent_activity_index",
+                inconsistent_activity_index,
+                "tectonic process input metadata is invalid",
+            ),
+            (
+                "missing_heat_input",
+                missing_heat_input,
+                "tectonic process input metadata is invalid",
+            ),
+            (
+                "empty_plate_array",
+                empty_plate_array,
+                "initial crust state is invalid",
+            ),
+            (
+                "non_canonical_plate_id",
+                non_canonical_plate_id,
+                "initial crust state is invalid",
+            ),
+            (
+                "unnormalized_plate_axis",
+                unnormalized_plate_axis,
+                "initial crust state is invalid",
+            ),
+            (
+                "unnormalized_cell_position",
+                unnormalized_cell_position,
+                "initial crust state is non-finite or out of range",
+            ),
+            (
+                "negative_cell_area",
+                negative_cell_area,
+                "initial crust state is non-finite or out of range",
+            ),
+        )
+        for name, mutate, expected in cases:
+            with self.subTest(mutation=name):
+                altered = deepcopy(self.world)
+                mutate(altered)
+                replay = validate_crust_overlap_transport(altered)
+                self.assertFalse(replay["passed"], replay)
+                # Each tamper must produce exactly one verdict from this
+                # module.  Some of them also break the process-reason replay,
+                # whose failures this entry point forwards verbatim behind a
+                # prefix; those belong to another module's wording and are
+                # counted rather than pinned here.
+                own_failures = [
+                    failure
+                    for failure in replay["failures"]
+                    if not failure.startswith("crust process replay: ")
+                ]
+                self.assertEqual(own_failures, [expected])
+
+    def test_malformed_ledger_columns_are_rejected_per_step(self) -> None:
+        control = validate_crust_overlap_transport(self.world)
+        self.assertTrue(control["passed"], control["failures"])
+
+        def ledger(world: dict, step_index: int) -> dict:
+            return world["plate_motion_history"][step_index][
+                "crust_overlap_ledger"
+            ]
+
+        def float_arrangement_total(world: dict) -> None:
+            step_ledger = ledger(world, 0)
+            _replaced(
+                step_ledger,
+                "total_coverage_arrangement_line_count",
+                float(step_ledger["total_coverage_arrangement_line_count"]),
+            )
+
+        def float_class_total(world: dict) -> None:
+            step_ledger = ledger(world, 0)
+            _replaced(
+                step_ledger,
+                "total_coverage_membership_area_class_count",
+                float(
+                    step_ledger["total_coverage_membership_area_class_count"]
+                ),
+            )
+
+        def float_arrangement_maximum(world: dict) -> None:
+            step_ledger = ledger(world, 0)
+            _replaced(
+                step_ledger,
+                "maximum_coverage_arrangement_line_count",
+                float(step_ledger["maximum_coverage_arrangement_line_count"]),
+            )
+
+        def plate_snapshots_not_an_array(world: dict) -> None:
+            _replaced(world["plate_motion_history"][0], "plates", {})
+
+        def string_plate_snapshot_id(world: dict) -> None:
+            snapshot = world["plate_motion_history"][0]["plates"][0]
+            _replaced(snapshot, "plate_id", str(snapshot["plate_id"]))
+
+        def non_canonical_csr_row(world: dict) -> None:
+            step_ledger = ledger(world, 1)
+            offsets = step_ledger["destination_offsets"]
+            source_ids = step_ledger["source_cell_ids"]
+            for destination in range(len(world["cells"])):
+                begin, end = offsets[destination], offsets[destination + 1]
+                if end - begin >= 2:
+                    self.assertLess(source_ids[begin], source_ids[begin + 1])
+                    source_ids[begin], source_ids[begin + 1] = (
+                        source_ids[begin + 1],
+                        source_ids[begin],
+                    )
+                    return
+            raise AssertionError("fixture has no multi-source destination row")
+
+        def missing_source_inventory(world: dict) -> None:
+            del ledger(world, 0)["source_inventory"]
+
+        def unusable_destination_closure(world: dict) -> None:
+            _replaced(
+                ledger(world, 1),
+                "maximum_destination_partition_closure_error_km2",
+                None,
+            )
+
+        # The five type guards below share the per-step
+        # `crust overlap ledger <step> has invalid fields` verdict; the tamper
+        # name records which malformed column produced it.
+        cases = (
+            (
+                "float_arrangement_total",
+                float_arrangement_total,
+                "crust overlap ledger 0 has invalid fields",
+            ),
+            (
+                "float_membership_class_total",
+                float_class_total,
+                "crust overlap ledger 0 has invalid fields",
+            ),
+            (
+                "float_arrangement_maximum",
+                float_arrangement_maximum,
+                "crust overlap ledger 0 has invalid fields",
+            ),
+            (
+                "plate_snapshots_not_an_array",
+                plate_snapshots_not_an_array,
+                "crust overlap ledger 0 has invalid fields",
+            ),
+            (
+                "string_plate_snapshot_id",
+                string_plate_snapshot_id,
+                "crust overlap ledger 0 has invalid fields",
+            ),
+            (
+                "non_canonical_csr_row",
+                non_canonical_csr_row,
+                "crust overlap ledger 1 CSR is not canonical",
+            ),
+            (
+                "missing_source_inventory",
+                missing_source_inventory,
+                "crust overlap inventory 0 is invalid",
+            ),
+            (
+                "unusable_destination_closure",
+                unusable_destination_closure,
+                "crust overlap inventory 1 is invalid",
+            ),
+        )
+        for name, mutate, expected in cases:
+            with self.subTest(mutation=name):
+                altered = deepcopy(self.world)
+                mutate(altered)
+                replay = validate_crust_overlap_transport(altered)
+                self.assertFalse(replay["passed"], replay)
+                self.assertEqual(replay["failures"], [expected])
+
+    def test_process_inventory_mirrors_fail_their_own_check(self) -> None:
+        control = validate_crust_overlap_transport(self.world)
+        self.assertTrue(control["passed"], control["failures"])
+
+        def ledger(world: dict, step_index: int = 1) -> dict:
+            return world["plate_motion_history"][step_index][
+                "crust_overlap_ledger"
+            ]
+
+        def attribution(world: dict, step_index: int = 1) -> dict:
+            return ledger(world, step_index)["process_inventory_attribution"]
+
+        def transport_split(world: dict) -> None:
+            # Small enough to keep the mean-of-column scalar mirror inside its
+            # display tolerance, large enough to break the per-cell identity
+            # transport_change == remapped - previous.
+            column = world["plate_motion_history"][1][
+                "crust_age_transport_change_ma_by_cell"
+            ]
+            previous = column[0]
+            column[0] = previous + 1.0e-4
+            self.assertNotEqual(column[0], previous)
+
+        def unreconciled_delta(world: dict) -> None:
+            payload = attribution(world)
+            # Shift reconciled and residual together so the record still
+            # satisfies reconciled == attributed + residual and the tamper
+            # reaches the reconciled-versus-process-delta mirror.
+            _bumped(
+                payload["reconciled_inventory_delta"],
+                "crust_volume_km3",
+                1000.0,
+            )
+            _bumped(
+                payload["numerical_closure_residual"],
+                "crust_volume_km3",
+                1000.0,
+            )
+
+        def residual_mirror(world: dict) -> None:
+            payload = attribution(world)
+            delta_by_field = ledger(world)["process_inventory_delta"]
+            field = max(
+                delta_by_field, key=lambda name: abs(delta_by_field[name])
+            )
+            scale = abs(float(delta_by_field[field]))
+            delta = 16.0 * math.ulp(scale)
+            # Above the 1e-8 absolute floor of the residual mirror, and inside
+            # the 64-ULP window of the reconciled-delta comparison.
+            self.assertGreater(delta, 1.0e-8)
+            self.assertLess(delta, 64.0 * math.ulp(scale))
+            _bumped(payload["reconciled_inventory_delta"], field, delta)
+            _bumped(payload["numerical_closure_residual"], field, delta)
+
+        def excessive_residual(world: dict) -> None:
+            step_ledger = ledger(world)
+            payload = attribution(world)
+            delta = 1.0
+            # One coherent shift of the whole post-process branch: the
+            # post-process inventory stays inside its 5e-9 relative tolerance
+            # while the exported closure residual leaves its forward-error
+            # envelope.
+            post_process_scale = abs(
+                float(
+                    step_ledger["post_process_inventory"]["crust_volume_km3"]
+                )
+            )
+            self.assertGreater(post_process_scale * 5.0e-9, delta)
+            for record in (
+                step_ledger["post_process_inventory"],
+                step_ledger["process_inventory_delta"],
+                payload["reconciled_inventory_delta"],
+                payload["numerical_closure_residual"],
+            ):
+                _bumped(record, "crust_volume_km3", delta)
+
+        def nonzero_initial_attribution(world: dict) -> None:
+            payload = attribution(world, 0)
+            self.assertEqual(
+                payload["numerical_closure_residual"]["crust_volume_km3"], 0.0
+            )
+            _replaced(
+                payload["numerical_closure_residual"],
+                "crust_volume_km3",
+                1.0e-30,
+            )
+            _replaced(
+                payload["reconciled_inventory_delta"],
+                "crust_volume_km3",
+                1.0e-30,
+            )
+
+        def non_identity_initial_arrangement(world: dict) -> None:
+            step_ledger = ledger(world, 0)
+            line_counts = step_ledger[
+                "coverage_arrangement_line_count_by_cell"
+            ]
+            self.assertEqual(line_counts[0], 0)
+            line_counts[0] = 1
+            _bumped(step_ledger, "total_coverage_arrangement_line_count", 1)
+            _replaced(
+                step_ledger, "maximum_coverage_arrangement_line_count", 1
+            )
+
+        def missing_summary_scalar(world: dict) -> None:
+            del world["summary"]["total_crust_uncovered_gap_area_km2"]
+
+        # The last five tampers share the aggregated
+        # `post-process crust inventory 1 is invalid` verdict; the guard each
+        # one trips is pinned by message in
+        # test_process_attribution_guards_name_each_malformed_record.
+        def attribution_schema(world: dict) -> None:
+            payload = attribution(world)
+            self.assertNotIn("unexpected", payload)
+            payload["unexpected"] = 1
+
+        def attribution_semantics(world: dict) -> None:
+            _replaced(attribution(world), "format", "unordered_v0")
+
+        def reason_record_schema(world: dict) -> None:
+            record = attribution(world)["reasons"][0]
+            self.assertNotIn("note", record)
+            record["note"] = "annotated"
+
+        def unbalanced_reason_net_delta(world: dict) -> None:
+            _bumped(
+                attribution(world)["reasons"][0]["net_delta"],
+                "crust_volume_km3",
+                1.0e-12,
+            )
+
+        def non_finite_reconciled_delta(world: dict) -> None:
+            _replaced(
+                attribution(world)["reconciled_inventory_delta"],
+                "crust_volume_km3",
+                math.inf,
+            )
+
+        cases = (
+            (
+                "transport_process_split",
+                transport_split,
+                "crust transport/process split failed at step 1",
+            ),
+            (
+                "unreconciled_delta",
+                unreconciled_delta,
+                "crust process reason ledger 1 did not reconcile",
+            ),
+            (
+                "residual_mirror",
+                residual_mirror,
+                "crust process reason ledger 1 residual mirror is invalid",
+            ),
+            (
+                "excessive_residual",
+                excessive_residual,
+                "crust process reason ledger 1 residual is excessive",
+            ),
+            (
+                "nonzero_initial_attribution",
+                nonzero_initial_attribution,
+                "initial crust process reason ledger is not zero",
+            ),
+            (
+                "non_identity_initial_arrangement",
+                non_identity_initial_arrangement,
+                "initial crust overlap ledger is not identity",
+            ),
+            (
+                "missing_summary_scalar",
+                missing_summary_scalar,
+                "conservative crust transport summary mirrors are invalid",
+            ),
+            (
+                "attribution_schema",
+                attribution_schema,
+                "post-process crust inventory 1 is invalid",
+            ),
+            (
+                "attribution_semantics",
+                attribution_semantics,
+                "post-process crust inventory 1 is invalid",
+            ),
+            (
+                "reason_record_schema",
+                reason_record_schema,
+                "post-process crust inventory 1 is invalid",
+            ),
+            (
+                "unbalanced_reason_net_delta",
+                unbalanced_reason_net_delta,
+                "post-process crust inventory 1 is invalid",
+            ),
+            (
+                "non_finite_reconciled_delta",
+                non_finite_reconciled_delta,
+                "post-process crust inventory 1 is invalid",
+            ),
+        )
+        for name, mutate, expected in cases:
+            with self.subTest(mutation=name):
+                altered = deepcopy(self.world)
+                mutate(altered)
+                replay = validate_crust_overlap_transport(altered)
+                self.assertFalse(replay["passed"], replay)
+                self.assertEqual(replay["failures"], [expected])
