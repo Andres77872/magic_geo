@@ -37,7 +37,7 @@
     <div id="app">
       <aside id="sidebar" aria-label="Map layers">
         <header id="world-info">
-          <h1>World explorer</h1>
+          <h1>Layers</h1>
           <div id="world-meta"></div>
         </header>
         <label class="sr-only" for="layer-search">Filter layers</label>
@@ -47,8 +47,8 @@
           <div id="docs-card-head">
             <span id="docs-card-title">Layer docs</span>
             <div id="docs-card-actions">
-              <button type="button" id="docs-help-open" title="Open full help (?)" aria-label="Open full help">?</button>
-              <button type="button" id="docs-card-toggle" title="Collapse layer documentation" aria-expanded="true">▾</button>
+              <button type="button" id="docs-help-open" title="Help (?)" aria-label="Open help">?</button>
+              <button type="button" id="docs-card-toggle" title="Collapse layer documentation" aria-label="Toggle layer documentation" aria-expanded="true">▾</button>
             </div>
           </div>
           <div id="docs-card-body"></div>
@@ -84,7 +84,7 @@
             <button type="button" id="export-image-prompt" title="Export a GPT Image prompt and color codex as Markdown" disabled>Prompt .md</button>
           </div>
           <div class="control-group" id="help-controls">
-            <button type="button" id="toggle-help" title="Help &amp; docs (?)" aria-label="Map help">?</button>
+            <button type="button" id="toggle-help" title="Help (?)" aria-label="Toggle help">?</button>
           </div>
           <div id="topbar-right">
             <div id="legend">
@@ -99,16 +99,19 @@
           </div>
         </div>
         <div id="stagebar" class="hidden">
-          <button type="button" id="stage-back" title="Previous stage (,)">◀</button>
+          <button type="button" id="stage-back" title="Previous stage (,)" aria-label="Previous stage">◀</button>
           <label class="sr-only" for="stage-slider">Stage or month</label>
           <input id="stage-slider" type="range" min="0" max="0" value="0" step="1">
           <label class="sr-only" for="stage-number">Exact stage or month</label>
           <input id="stage-number" type="number" min="0" max="0" value="0">
-          <button type="button" id="stage-fwd" title="Next stage (.)">▶</button>
+          <button type="button" id="stage-fwd" title="Next stage (.)" aria-label="Next stage">▶</button>
           <span id="stage-label"></span>
         </div>
-        <div id="status" role="status" aria-live="polite"></div>
-        <button type="button" id="help-fab" title="Help (?)" aria-label="Open map help">?</button>
+        <div id="map-status-row">
+          <div id="status" role="status" aria-live="polite"></div>
+          <div id="map-hover"></div>
+        </div>
+        <button type="button" id="help-fab" title="Help (?)" aria-label="Open help">?</button>
       </div>
 
       <aside id="inspector" class="hidden" aria-label="Selected cell inspector">
@@ -234,7 +237,7 @@
 <div id="help-overlay" class="hidden" role="dialog" aria-modal="true" aria-labelledby="help-title">
   <div id="help-panel">
     <header id="help-header">
-      <h2 id="help-title">magic-geo map — help</h2>
+      <h2 id="help-title">magic-geo workbench — help</h2>
       <button type="button" id="help-close" title="Close (Esc)" aria-label="Close help">×</button>
     </header>
     <div id="help-body"></div>

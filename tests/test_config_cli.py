@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from contextlib import chdir
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
+import runpy
+import sys
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
@@ -15,6 +19,20 @@ from support.cli import assert_no_cli_crash
 
 
 class ConfigCliTests(TestCase):
+    def test_module_entrypoint_routes_to_the_cli(self) -> None:
+        output = StringIO()
+        with (
+            patch.object(sys, "argv", ["magic_geo", "--help"]),
+            redirect_stdout(output),
+            redirect_stderr(output),
+            self.assertRaises(SystemExit) as exited,
+        ):
+            runpy.run_module("magic_geo", run_name="__main__")
+
+        self.assertEqual(exited.exception.code, 0)
+        self.assertIn("Usage", output.getvalue())
+        self.assertIn("generate", output.getvalue())
+
     def test_init_config_uses_safe_local_target_and_earthlike_profile(self) -> None:
         with TemporaryDirectory() as temp_dir, chdir(temp_dir):
             result = CliRunner().invoke(app, ["init-config"])

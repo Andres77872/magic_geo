@@ -1,4 +1,4 @@
-"""`validate` violation branches for the mesh-index / tectonic / hydrology slice.
+"""Public ``validate`` CLI violations for indexed natural systems.
 
 The ``validate`` command accumulates every complaint into one list and prints it
 at a gate -- an early one after the schema checks, then one final one covering
@@ -79,9 +79,8 @@ from magic_geo.io import write_json
 from support import worlds
 import pytest
 
-# Exhaustive branch coverage of the ``validate`` command: every case invokes the
-# full CLI validation over a generated world, which is ~47% of the suite's runtime
-# for ~23% of its tests. Deselect locally with -m "not slow".
+# Exhaustive branch coverage of ``validate``: every case invokes the full CLI
+# over a generated world. Deselect locally with -m "not slow".
 pytestmark = pytest.mark.slow
 
 WORLD_KEY = "replay_128"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 from typing import Annotated
 
 import typer
@@ -57,6 +58,12 @@ def generate(
         typer.echo("--format must be auto, json, or mgeo", err=True)
         raise typer.Exit(2)
 
+    scope = "geo_only" if geo_only else "full_world"
+    started = time.monotonic()
+    typer.echo(
+        f"Generating world | scope={scope} cells={world_config.mesh.cell_count}",
+        err=True,
+    )
     try:
         world = (
             generate_geo_world(world_config)
@@ -76,7 +83,8 @@ def generate(
 
     s = world["summary"]
     typer.echo(
-        f"Wrote {output} | scope={'geo_only' if geo_only else 'full_world'} "
+        f"Wrote {output} | scope={scope} "
         f"cells={s['cell_count']} plates={s['plate_count']} "
-        f"ocean={s['ocean_fraction']:.3f} rivers={s['river_count']}"
+        f"ocean={s['ocean_fraction']:.3f} rivers={s['river_count']} "
+        f"elapsed={time.monotonic() - started:.1f}s"
     )

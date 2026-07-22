@@ -1,8 +1,8 @@
-"""Violation branches of the ``validate`` CLI command, source lines 16400-19100.
+"""Public ``validate`` CLI violations for resources, culture, and population.
 
-That stretch of :mod:`magic_geo.cli.commands.validate` audits the economic
-geology records (ore genesis systems, sedimentary resource systems, petroleum
-migration systems, commodity occurrences), the land-use zones and natural
+This module audits the economic geology records (ore genesis systems,
+sedimentary resource systems, petroleum migration systems, commodity
+occurrences), the land-use zones and natural
 frontiers, the worldbuilding realism checks, the route corridors, the
 historical-linguistics stack (phonological rules, histories, lexical
 correspondences, lexical diffusion, speaker populations) and the population
@@ -29,13 +29,13 @@ also accept a longer failure message that merely starts with the expected text.
 Every assertion also re-checks an untampered control run of the same world, so a
 failure can never be blamed on a broken fixture.
 
-Branches in this range that no CLI input can pin, and therefore have no test:
+Branches in this module that no CLI input can pin, and therefore have no test:
 
 * the ``except (TypeError, ValueError)`` guard around the route-corridor *cell*
   parse.  The guard itself does run for a non-numeric cell field, but every
-  field it parses is re-read further down by a bare ``float()``/``int()`` over
-  all cells, so the command dies (validate.py:18223) before the reporting gate
-  and no ``FAIL`` line is ever printed.  The sibling guards over the petroleum
+  field it parses is re-read later by a bare ``float()``/``int()`` over all
+  cells, so the command dies before the reporting gate and no ``FAIL`` line is
+  ever printed.  The sibling guards over the petroleum
   cell parse and the route-corridor *record* parse do not have that problem and
   are covered below.
 * the "member id belongs to another language" guards inside the lexical
@@ -65,9 +65,8 @@ from support import worlds
 from support.cli import assert_no_cli_crash
 import pytest
 
-# Exhaustive branch coverage of the ``validate`` command: every case invokes the
-# full CLI validation over a generated world, which is ~47% of the suite's runtime
-# for ~23% of its tests. Deselect locally with -m "not slow".
+# Exhaustive branch coverage of ``validate``: every case invokes the full CLI
+# over a generated world. Deselect locally with -m "not slow".
 pytestmark = pytest.mark.slow
 
 World = dict[str, Any]
@@ -807,13 +806,9 @@ class HistoryCollectionLengthCase(ValidateTamperCase):
 
     def test_history_collections_must_cover_every_region(self) -> None:
         def drop_speaker_history(world: World) -> None:
-            if len(world["speaker_population_histories"]) < 2:
-                self.skipTest("world exports a single speaker population history")
             world["speaker_population_histories"].pop()
 
         def drop_population_history(world: World) -> None:
-            if len(world["population_histories"]) < 2:
-                self.skipTest("world exports a single population history")
             world["population_histories"].pop()
 
         self.assert_each(
@@ -1154,7 +1149,9 @@ class OreGenesisRecordCase(ValidateTamperCase):
                 if offsite:
                     step["linked_resource_deposit_ids"] = offsite
                     return
-            self.skipTest("no ore formation step has an off-site linkable deposit")
+            raise AssertionError(
+                "fixture has no ore formation step with an off-site linkable deposit"
+            )
 
         self.assert_reports([relink_deposit], self.message)
 
@@ -1176,7 +1173,7 @@ class OreGenesisRecordCase(ValidateTamperCase):
                 if int(cell["id"]) == member:
                     cell["ore_genesis_system_id"] = -1
                     return
-            self.skipTest("ore genesis system has no exported member cell")
+            raise AssertionError("ore genesis system has no exported member cell")
 
         self.assert_reports(
             [unassign_cell],
@@ -1253,7 +1250,7 @@ class SedimentaryAndPetroleumRecordCase(ValidateTamperCase):
                     path[1] = candidate
                     step["path_cell_ids"] = path
                     return
-            self.skipTest("no non-adjacent member cell available for the path")
+            raise AssertionError("no non-adjacent member cell available for the path")
 
         self.assert_each(
             [
@@ -1304,7 +1301,7 @@ class SedimentaryAndPetroleumRecordCase(ValidateTamperCase):
             system = world["petroleum_migration_systems"][0]
             migration_ids = [int(cell_id) for cell_id in system["migration_cell_ids"]]
             if len(migration_ids) < 2:
-                self.skipTest("migration fairway is a single cell")
+                raise AssertionError("migration fairway is a single cell")
             system["migration_cell_ids"] = migration_ids[:-1]
             system["migration_cell_count"] = len(migration_ids) - 1
 
@@ -1347,7 +1344,9 @@ class SedimentaryAndPetroleumRecordCase(ValidateTamperCase):
                 if int(cell["id"]) == member:
                     cell["petroleum_system_id"] = -1
                     return
-            self.skipTest("petroleum migration system has no exported member cell")
+            raise AssertionError(
+                "petroleum migration system has no exported member cell"
+            )
 
         self.assert_each(
             [
@@ -1511,7 +1510,9 @@ class RouteCorridorRecordCase(ValidateTamperCase):
                     if int(route["id"]) == route_id:
                         route["type"] = route_type
                         return
-                self.skipTest("route corridor does not reference an exported route")
+                raise AssertionError(
+                    "route corridor does not reference an exported route"
+                )
 
             return tamper
 
@@ -1550,7 +1551,7 @@ class RouteCorridorRecordCase(ValidateTamperCase):
             corridor = world["route_corridors"][0]
             path = [int(cell_id) for cell_id in corridor["cell_ids"]]
             if len(path) < 3:
-                self.skipTest("shortest corridor is too short to divert")
+                raise AssertionError("shortest corridor is too short to divert")
             cells_by_id = {int(cell["id"]): cell for cell in world["cells"]}
             neighbours = {
                 int(neighbour) for neighbour in cells_by_id[path[0]]["neighbors"]
@@ -1560,14 +1561,14 @@ class RouteCorridorRecordCase(ValidateTamperCase):
                     path[1] = candidate
                     break
             else:  # pragma: no cover - a sphere always has non-adjacent cells
-                self.skipTest("no non-adjacent cell available")
+                raise AssertionError("no non-adjacent cell available")
             corridor["cell_ids"] = path
             route_id = int(corridor["route_id"])
             for route in world["routes"]:
                 if int(route["id"]) == route_id:
                     route["path_cell_ids"] = path
                     return
-            self.skipTest("route corridor does not reference an exported route")
+            raise AssertionError("route corridor does not reference an exported route")
 
         self.assert_reports(
             [divert_path],
@@ -1588,8 +1589,7 @@ class PhonologyRecordCase(ValidateTamperCase):
         for rule in world["phonological_rules"]:
             if int(rule["language_region_id"]) != first:
                 return int(rule["id"])
-        self.skipTest("world has only one language with phonological rules")
-        raise AssertionError  # pragma: no cover - skipTest always raises
+        raise AssertionError("world has only one language with phonological rules")
 
     def test_rule_and_correspondence_violations(self) -> None:
         def foreign_applied_rule(world: World) -> None:
@@ -1672,7 +1672,7 @@ class PhonologyRecordCase(ValidateTamperCase):
                     self.assertNotEqual(int(rule["id"]), target)
                     rule["id"] = target
                     return
-            self.skipTest("world has only one language with phonological rules")
+            raise AssertionError("world has only one language with phonological rules")
 
         self.assert_reports([duplicate_rule_id_across_languages], self.message)
 

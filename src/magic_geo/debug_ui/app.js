@@ -227,6 +227,7 @@ const state = {
   helpOpener: null,
   operations: [],
   jobs: [],
+  jobsSignature: null,
   selectedJobId: null,
   selectedJobStatus: null,
   jobListRequest: 0,
@@ -1192,7 +1193,7 @@ Transform Image 1 into ${surface}. Treat the attached diagnostic map as the auth
 
 ## What to remove
 
-- Do not include debugger UI, legends, color chips, tables, labels, captions, coordinates, borders, logos, signatures, or watermarks.
+- Do not include workbench/diagnostic UI, legends, color chips, tables, labels, captions, coordinates, borders, logos, signatures, or watermarks.
 - Do not render the prompt text or any other text inside the image.
 ${overlayPrompt(view)}
 
@@ -1282,8 +1283,10 @@ function updateDocsCard(layer) {
   const card = $('#docs-card');
   card.classList.toggle('hidden', !state.docsVisible);
   card.classList.toggle('collapsed', state.docsCollapsed);
-  $('#docs-card-toggle').textContent = state.docsCollapsed ? '▸' : '▾';
-  $('#docs-card-toggle').setAttribute('aria-expanded', String(!state.docsCollapsed));
+  const toggle = $('#docs-card-toggle');
+  toggle.textContent = state.docsCollapsed ? '▸' : '▾';
+  toggle.setAttribute('aria-expanded', String(!state.docsCollapsed));
+  toggle.title = state.docsCollapsed ? 'Expand layer documentation' : 'Collapse layer documentation';
   if (!state.docsVisible) return;
 
   const doc = describeLayer(layer);
@@ -1421,6 +1424,7 @@ async function activateLayer(layer, { stage = null, month = null } = {}) {
   const requestedMonth = state.month;
   state.layerLoading = true;
   updateExportControls();
+  updateStatus();
   document.querySelectorAll('.layer-item').forEach((item) => {
     item.classList.toggle('active', item.dataset.layerId === layer.id);
   });
@@ -1438,7 +1442,7 @@ async function activateLayer(layer, { stage = null, month = null } = {}) {
       document.querySelectorAll('.layer-item').forEach((item) => {
         item.classList.toggle('active', item.dataset.layerId === previous.layer?.id);
       });
-      $('#status').textContent = `Layer load failed: ${error.message || String(error)}`;
+      setExportMessage(`Layer load failed: ${error.message || String(error)}`, 6000);
       updateLegend(previous.layer);
       updateDocsCard(previous.layer);
       updateStageBar();
@@ -1579,6 +1583,7 @@ function buildLayerList() {
 
 function filterLayerList(query) {
   const needle = query.trim().toLowerCase();
+  let totalMatches = 0;
   document.querySelectorAll('#layer-list > .layer-group-title').forEach((title) => {
     const body = title.nextElementSibling;
     if (needle && title.dataset.preSearchExpanded === undefined) {
@@ -1594,10 +1599,22 @@ function filterLayerList(query) {
       item.hidden = !visible;
       if (visible) matches += 1;
     });
+    totalMatches += matches;
     title.hidden = Boolean(needle) && matches === 0;
     body.hidden = Boolean(needle) ? matches === 0 : title.getAttribute('aria-expanded') === 'false';
     if (needle && matches) title.setAttribute('aria-expanded', 'true');
   });
+  const empty = $('#layer-list > .layer-list-empty');
+  if (needle && totalMatches === 0) {
+    if (!empty) {
+      const row = document.createElement('div');
+      row.className = 'layer-list-empty';
+      row.textContent = 'No layers match this filter.';
+      $('#layer-list').appendChild(row);
+    }
+  } else {
+    empty?.remove();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1650,7 +1667,7 @@ async function openInspector(cellId) {
     );
   } catch (error) {
     if (!cacheContextIsCurrent(context)) return;
-    $('#inspector-body').textContent = String(error);
+    $('#inspector-body').innerHTML = `<div class="notice warning">The cell record could not be loaded. ${escapeHtml(error.message || String(error))}</div>`;
     return;
   }
   if (state.selectedCell !== cellId || !cacheContextIsCurrent(context)) return;
@@ -1729,7 +1746,10 @@ function updateStatus() {
   const status = $('#status');
   if (state.exportMessage) {
     status.textContent = state.exportMessage;
-    return;
+  } else if (state.layerLoading) {
+    status.textContent = 'Loading layer…';
+  } else {
+    status.textContent = '';
   }
   const layer = state.activeLayer;
   const bits = [];
@@ -1747,7 +1767,7 @@ function updateStatus() {
       }
     }
   }
-  status.textContent = bits.join('  ·  ');
+  $('#map-hover').textContent = bits.join('  ·  ');
 }
 
 // ---------------------------------------------------------------------------
@@ -1823,7 +1843,9 @@ function setView(name, { updateHash = true } = {}) {
     button.setAttribute('aria-selected', String(active));
     button.tabIndex = active ? 0 : -1;
   });
-  if (updateHash && window.location.hash !== `#${view}`) history.replaceState(null, '', `#${view}`);
+  // User-initiated switches push a history entry so Back/Forward navigates
+  // views; hashchange-driven sync (initial load, Back/Forward) skips this.
+  if (updateHash && window.location.hash !== `#${view}`) history.pushState(null, '', `#${view}`);
   if (view === 'map' && state.mapReady) requestAnimationFrame(resizeRenderer);
   if (view === 'data' && state.catalog) loadDataSelection(false);
   if (view === 'operations') refreshJobs();
@@ -1900,6 +1922,19 @@ function disposeMapScene() {
   Object.keys(three).forEach((key) => { delete three[key]; });
 }
 
+// The empty-state copy is rewritten when map initialization fails. Capture the
+// default text once so a later no-cache state never shows a stale error.
+let mapEmptyDefaultCopy = null;
+function mapEmptyElements() {
+  const empty = $('#map-empty');
+  const title = empty.querySelector('h2');
+  const detail = empty.querySelector('p');
+  if (!mapEmptyDefaultCopy) {
+    mapEmptyDefaultCopy = { title: title.textContent, detail: detail.textContent };
+  }
+  return { title, detail };
+}
+
 function resetCacheDerivedState() {
   if (!$('#help-overlay').classList.contains('hidden')) setHelpVisible(false);
   state.cacheEpoch += 1;
@@ -1950,10 +1985,14 @@ function resetCacheDerivedState() {
     $(`#${id}`).classList.remove('active');
     $(`#${id}`).setAttribute('aria-pressed', 'false');
   }
+  const mapEmpty = mapEmptyElements();
+  mapEmpty.title.textContent = mapEmptyDefaultCopy.title;
+  mapEmpty.detail.textContent = mapEmptyDefaultCopy.detail;
   updatePager();
   updateLegend(null);
   updateDocsCard(null);
   updateExportControls();
+  updateStatus();
 }
 
 function showStatusRefreshFailure(error) {
@@ -2057,7 +2096,9 @@ async function loadServerStatus() {
   if (state.cacheAvailable) {
     const context = currentCacheContext();
     void Promise.allSettled([
-      loadCatalog(false, context),
+      loadCatalog(false, context).catch((error) => {
+        $('#data-output').innerHTML = `<div class="notice warning">${escapeHtml(error.message || String(error))}</div>`;
+      }),
       initializeMap(context),
     ]);
   }
@@ -2100,8 +2141,9 @@ async function initializeMap(context = currentCacheContext()) {
     if (requestId !== state.mapRequest || !cacheContextIsCurrent(context)) return;
     state.mapReady = false;
     $('#map-empty').classList.remove('hidden');
-    $('#map-empty').querySelector('h2').textContent = 'The debug cache could not be opened';
-    $('#map-empty').querySelector('p').textContent = error.message || String(error);
+    const mapEmpty = mapEmptyElements();
+    mapEmpty.title.textContent = 'The debug cache could not be opened';
+    mapEmpty.detail.textContent = `Repair the cache or select another one, then retry. Details: ${error.message || String(error)}`;
   } finally {
     if (state.mapInitializing === requestId) state.mapInitializing = null;
   }
@@ -2308,14 +2350,8 @@ async function loadDataSelection(resetOffset = true, context = currentCacheConte
 // YAML configuration editor and schema reference
 
 async function fetchTemplate(profile) {
-  const response = await fetch(`/api/config/template?${new URLSearchParams({ profile })}`, { headers: { Accept: 'application/json, text/yaml, text/plain' } });
-  if (!response.ok) throw new Error(`/api/config/template: ${response.status}`);
-  const type = response.headers.get('content-type') || '';
-  if (type.includes('json')) {
-    const payload = await response.json();
-    return typeof payload === 'string' ? payload : payload.yaml ?? payload.template ?? '';
-  }
-  return response.text();
+  const payload = await fetchJson(`/api/config/template?${new URLSearchParams({ profile })}`);
+  return typeof payload === 'string' ? payload : payload.yaml ?? payload.template ?? '';
 }
 
 function normalizeProfiles(payload) {
@@ -2387,6 +2423,8 @@ function renderSchemaDocs(query = '') {
 async function resetConfigTemplate() {
   const profile = $('#config-profile').value;
   if (!profile) return;
+  if (state.configEditRevision > 0
+      && !window.confirm('Replace the current YAML with the profile template?')) return;
   const requestId = ++state.configTemplateRequest;
   const editor = $('#config-yaml');
   const editRevision = state.configEditRevision;
@@ -2401,6 +2439,7 @@ async function resetConfigTemplate() {
       return;
     }
     editor.value = template;
+    state.configEditRevision = 0;
     $('#config-result').textContent = `Loaded the ${profile} template. Validate after making changes.`;
   } catch (error) {
     if (requestId !== state.configTemplateRequest || $('#config-profile').value !== profile) return;
@@ -2428,6 +2467,8 @@ function validationErrorMarkup(payload) {
 
 async function validateConfig() {
   const result = $('#config-result');
+  const button = $('#config-validate');
+  button.disabled = true;
   result.className = 'validation-result';
   result.textContent = 'Validating…';
   try {
@@ -2445,6 +2486,8 @@ async function validateConfig() {
       ? `<strong>Configuration is not valid.</strong><ul>${validationErrorMarkup({ detail })}</ul>`
       : escapeHtml(error.message || String(error));
     return false;
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -2473,6 +2516,10 @@ async function saveConfig() {
     nameInput.reportValidity();
     return;
   }
+  const button = $('#config-save');
+  button.disabled = true;
+  result.className = 'validation-result';
+  result.textContent = 'Saving…';
   const submit = async (force) => fetchJson('/api/config/save', {
     method: 'POST',
     body: {
@@ -2498,6 +2545,8 @@ async function saveConfig() {
     }
     result.className = 'validation-result invalid';
     result.textContent = error.message || String(error);
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -2643,7 +2692,13 @@ function collectOperationArguments() {
     if (type === 'integer') argumentsObject[input.name] = Number.parseInt(raw, 10);
     else if (type === 'number') argumentsObject[input.name] = Number(raw);
     else if (type === 'boolean') argumentsObject[input.name] = raw === 'true';
-    else if (type === 'array' || type === 'object') argumentsObject[input.name] = JSON.parse(raw);
+    else if (type === 'array' || type === 'object') {
+      try {
+        argumentsObject[input.name] = JSON.parse(raw);
+      } catch (error) {
+        throw new Error(`${input.name}: invalid JSON — ${error.message}`);
+      }
+    }
     else if (type === 'path_list') argumentsObject[input.name] = raw.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
     else argumentsObject[input.name] = raw;
   }
@@ -2668,7 +2723,7 @@ async function submitOperation(event) {
     await refreshJobs();
     if (state.selectedJobId) await selectJob(state.selectedJobId);
   } catch (error) {
-    result.textContent = error.message || String(error);
+    result.innerHTML = `<div class="notice warning">The job could not be started. ${escapeHtml(error.message || String(error))}</div>`;
   } finally {
     state.operationSubmitting = false;
     const operation = state.operations.find((entry) => entry.name === $('#operation-select').value);
@@ -2691,6 +2746,12 @@ function jobIsActive(job) {
 
 function renderJobs() {
   const list = $('#jobs-list');
+  // Re-rendering replaces every row node, so skip it while the visible
+  // selection/id/status shape is unchanged: polling must not drop keyboard
+  // focus or swap a node out from under a click.
+  const signature = `${state.selectedJobId}|${state.jobs.map((job) => `${job.id}:${jobStatus(job)}`).join('|')}`;
+  if (signature === state.jobsSignature) return;
+  state.jobsSignature = signature;
   if (!state.jobs.length) {
     list.innerHTML = '<p class="muted">No jobs have been submitted.</p>';
     return;
@@ -2727,15 +2788,21 @@ function renderJobDetail(job) {
   if (!job) return;
   const status = jobStatus(job);
   $('#job-detail-title').textContent = `${job.operation ?? job.name ?? 'Job'} · ${job.id ?? job.job_id}`;
-  const progressRaw = Number(job.progress ?? job.progress_fraction ?? (['succeeded', 'completed'].includes(status) ? 1 : 0));
+  const reportedProgress = job.progress ?? job.progress_fraction ?? undefined;
+  const progressRaw = Number(reportedProgress ?? (['succeeded', 'completed'].includes(status) ? 1 : 0));
   const progress = progressRaw <= 1 ? progressRaw * 100 : progressRaw;
+  // The server reports no progress field for active jobs; a bar pinned at 0%
+  // would imply no work has happened, so render an indeterminate bar instead.
+  const progressMarkup = jobIsActive(job) && reportedProgress === undefined
+    ? '<progress class="job-progress" max="100"></progress>'
+    : `<progress class="job-progress" max="100" value="${Math.max(0, Math.min(100, progress || 0))}">${formatValue(progress)}%</progress>`;
   const logs = Array.isArray(job.logs) ? job.logs.join('\n') : job.logs ?? job.log ?? job.message ?? '';
   const meta = [
     ['Status', status], ['Created', job.created_at], ['Started', job.started_at],
     ['Finished', job.finished_at ?? job.completed_at], ['Error', job.error],
   ].filter(([, value]) => value !== undefined && value !== null && value !== '');
   $('#job-detail').innerHTML = `<span class="state-pill ${escapeHtml(status)}">${escapeHtml(status)}</span>`
-    + `<progress class="job-progress" max="100" value="${Math.max(0, Math.min(100, progress || 0))}">${formatValue(progress)}%</progress>`
+    + progressMarkup
     + `<dl class="job-meta">${meta.map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(displayCell(value))}</dd>`).join('')}</dl>`
     + `<p class="eyebrow">Arguments</p><pre class="json-block">${escapeHtml(jsonText(job.arguments ?? {}))}</pre>`
     + `<p class="eyebrow" style="margin-top:12px">Logs</p><pre class="job-log">${escapeHtml(String(logs || 'No log output.'))}</pre>`
@@ -2794,6 +2861,7 @@ async function refreshJobs() {
 
 async function cancelSelectedJob() {
   if (!state.selectedJobId) return;
+  if (!window.confirm('Cancel this job?')) return;
   try {
     await fetchJson(`/api/jobs/${encodeURIComponent(state.selectedJobId)}/cancel`, { method: 'POST' });
     await refreshJobs();
@@ -2856,6 +2924,26 @@ function wireWorkbenchEvents() {
   window.addEventListener('hashchange', () => setView(window.location.hash.slice(1), { updateHash: false }));
   $('#brand').addEventListener('click', (event) => { event.preventDefault(); setView('map'); });
   $('#world-select').addEventListener('change', switchWorld);
+
+  // Help is reachable without a cache, so it is wired here rather than in
+  // wireMapEvents(), which only runs after a successful map initialization.
+  $('#toggle-help').addEventListener('click', () => setHelpVisible($('#help-overlay').classList.contains('hidden')));
+  $('#docs-help-open').addEventListener('click', () => setHelpVisible(true));
+  $('#help-fab').addEventListener('click', () => setHelpVisible(true));
+  $('#help-close').addEventListener('click', () => setHelpVisible(false));
+  $('#help-overlay').addEventListener('click', (event) => {
+    if (event.target === $('#help-overlay')) setHelpVisible(false);
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !$('#help-overlay').classList.contains('hidden')) {
+      setHelpVisible(false);
+      event.stopPropagation();
+      return;
+    }
+    if (event.key !== '?' || event.target.closest('input, textarea, select')) return;
+    event.preventDefault();
+    setHelpVisible($('#help-overlay').classList.contains('hidden'));
+  });
 
   $('#data-refresh').addEventListener('click', () => loadCatalog(true).catch((error) => {
     $('#data-output').innerHTML = `<div class="notice warning">${escapeHtml(error.message || String(error))}</div>`;
@@ -2985,7 +3073,6 @@ function wireMapEvents() {
 
   bind($('#layer-search'), 'input', (event) => filterLayerList(event.target.value));
 
-  bind($('#toggle-help'), 'click', () => setHelpVisible($('#help-overlay').classList.contains('hidden')));
   bind($('#legend-info'), 'click', () => setDocsVisible(!state.docsVisible));
 
   const slider = $('#stage-slider');
@@ -3016,12 +3103,6 @@ function wireMapEvents() {
     state.docsCollapsed = !state.docsCollapsed;
     updateDocsCard(state.activeLayer);
   });
-  bind($('#docs-help-open'), 'click', () => setHelpVisible(true));
-  bind($('#help-fab'), 'click', () => setHelpVisible(true));
-  bind($('#help-close'), 'click', () => setHelpVisible(false));
-  bind($('#help-overlay'), 'click', (event) => {
-    if (event.target === $('#help-overlay')) setHelpVisible(false);
-  });
 
   const canvas = three.renderer.domElement;
   let lastMove = 0;
@@ -3046,17 +3127,16 @@ function wireMapEvents() {
   three.controls.addEventListener('change', () => { state.pickDirty = true; });
 
   bind(window, 'keydown', (event) => {
-    // Esc closes overlays even from within an input.
+    // Esc closes overlays even from within an input. The help overlay itself
+    // closes through the cache-independent binding in wireWorkbenchEvents().
     if (event.key === 'Escape') {
-      if (!$('#help-overlay').classList.contains('hidden')) { setHelpVisible(false); return; }
       if (!$('#inspector').classList.contains('hidden')) { $('#inspector-close').click(); return; }
-      if (event.target.tagName === 'INPUT') event.target.blur();
+      const field = event.target.closest('input, textarea, select');
+      if (field) field.blur();
       return;
     }
     if (state.activeView !== 'map') return;
-    if (event.target.tagName === 'INPUT') return;
-    // `?` toggles help regardless of the other single-key bindings.
-    if (event.key === '?') { event.preventDefault(); setHelpVisible($('#help-overlay').classList.contains('hidden')); return; }
+    if (event.target.closest('input, textarea, select')) return;
     if (!$('#help-overlay').classList.contains('hidden')) return;   // help open: swallow shortcuts
     switch (event.key) {
       case ',': stepStage(-1); break;

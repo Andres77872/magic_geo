@@ -177,7 +177,7 @@ def export_debug(
         typer.Option("--elevation-exaggeration", min=1.0, help="Radial elevation exaggeration for .vtu geometry."),
     ] = 30.0,
 ) -> None:
-    """Export a columnar debug cache (Parquet/JSONL/mesh/VTU) for the GUI debugger."""
+    """Export a columnar debug cache (Parquet/JSONL/mesh/VTU) for the web workbench."""
     try:
         from ...debug_export import export_debug_cache
     except ImportError as exc:

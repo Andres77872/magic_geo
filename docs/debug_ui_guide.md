@@ -21,7 +21,8 @@ Config, Operations, and API tabs remain fully usable. See
 
 The header has five semantic tabs. Click one, use Left/Right/Home/End while a tab
 has focus, or use the URL hashes `#map`, `#data`, `#config`, `#operations`, and
-`#api`.
+`#api`. View switches push history entries, so browser Back/Forward moves
+between visited views.
 
 | View | What it covers | Needs a cache? |
 |---|---|---|
@@ -146,7 +147,8 @@ Only one heavy job runs at a time; additional work is queued. The UI polls every
 - exit code and immutable downloadable file snapshots;
 - the cache directory selected by successful generation.
 
-Cancel marks queued work cancelled without starting it. For running work it
+Cancel asks for confirmation first. Cancel marks queued work cancelled without
+starting it. For running work it
 terminates the child process group on POSIX (the child process elsewhere) and
 escalates to a kill after five seconds. Closing the server cancels queued work,
 terminates the active child, and waits for it to reach a terminal state before
@@ -423,7 +425,8 @@ node scripts/gen_layers_reference.mjs
 ## Troubleshooting
 
 - **No cache** — normal on first start. Create/save YAML and run Generate with
-  browser-cache preparation.
+  browser-cache preparation. Help (`?` or the floating `?` button) works
+  without a cache.
 - **Config save fails** — use a simple filename, not a path; server saves below
   workspace `configs/`.
 - **Operation rejected** — check required inputs, project/workspace path policy,

@@ -280,6 +280,23 @@ JavaScript syntax checks pass for the workbench and layer-doc modules. The
 wheel build and asset listing pass. The broader project test/build gates remain
 the final authority for native/model changes outside this refactor.
 
+A follow-up UX review (2026-07-22) fixed 18 verified findings without changing
+the contracts above: the map empty state restores its default copy after an
+initialization error, catalog load failures surface in the Data view, hover
+readouts no longer stream through the `aria-live` status region, help remains
+reachable without a cache, job cancellation and profile-template reset ask for
+confirmation, layer loads show a transient loading message and durable failure
+notices, map shortcuts ignore form fields, job polling no longer rebuilds
+unchanged rows, template/inspector/operation errors render as styled notices,
+terminology and help-button labels were unified on “workbench” (including the
+exported GPT-image prompt, kept identical to the CLI), glyph buttons carry
+accessible names, dim text meets WCAG AA contrast, saving/validation disable
+their buttons in flight, invalid operation JSON names its field, empty layer
+filters show a placeholder, active jobs render an indeterminate progress bar,
+and view switches push history entries so Back/Forward navigates views. The
+focused UI/server/jobs/documentation/map-export test modules and a JavaScript
+syntax check pass after the change.
+
 ## Remaining limitations (explicit, not hidden)
 
 1. **Generic access is not bespoke geometry.** Every family is usable in Data,
@@ -297,7 +314,9 @@ the final authority for native/model changes outside this refactor.
    authenticating proxy.
 4. **Progress is log/status polling.** The CLI does not publish a universal
    structured progress protocol; suites print member progress, while generation
-   can remain at “running” until completion.
+   can remain at “running” until completion. The workbench therefore renders an
+   indeterminate progress indicator for active jobs rather than a percentage
+   that would sit pinned at 0%.
 5. **Cancellation is process termination.** Web cache exports are staged and
    downloadable links are immutable snapshots, but non-cache commands still
    control their requested output paths and may leave partial files when

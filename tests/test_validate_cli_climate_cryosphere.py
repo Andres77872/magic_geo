@@ -1,4 +1,4 @@
-"""Violation branches of the `validate` command: climate, ocean and cryosphere.
+"""Public ``validate`` CLI violations for climate, ocean, and cryosphere.
 
 ``magic-geo validate`` accumulates every complaint into one list and prints it
 as ``FAIL <message>`` lines before exiting 1, so a healthy generated world never
@@ -45,9 +45,8 @@ from support import worlds
 from support.cli import assert_no_cli_crash
 import pytest
 
-# Exhaustive branch coverage of the ``validate`` command: every case invokes the
-# full CLI validation over a generated world, which is ~47% of the suite's runtime
-# for ~23% of its tests. Deselect locally with -m "not slow".
+# Exhaustive branch coverage of ``validate``: every case invokes the full CLI
+# over a generated world. Deselect locally with -m "not slow".
 pytestmark = pytest.mark.slow
 
 WORLD_KEY = "replay_128"

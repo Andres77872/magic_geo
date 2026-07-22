@@ -1,4 +1,4 @@
-"""Violation branches of ``validate`` for the history, genealogy and graph gate.
+"""Public ``validate`` CLI violations for history, economy, and graphs.
 
 The ``validate`` command accumulates every complaint into one list and flushes it
 through a single gate at the end of the command, emitting one ``FAIL <message>``
@@ -40,9 +40,8 @@ from support import worlds
 from support.cli import assert_no_cli_crash
 import pytest
 
-# Exhaustive branch coverage of the ``validate`` command: every case invokes the
-# full CLI validation over a generated world, which is ~47% of the suite's runtime
-# for ~23% of its tests. Deselect locally with -m "not slow".
+# Exhaustive branch coverage of ``validate``: every case invokes the full CLI
+# over a generated world. Deselect locally with -m "not slow".
 pytestmark = pytest.mark.slow
 
 #: The cheapest canonical world holding every record family exercised here.

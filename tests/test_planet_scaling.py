@@ -16,6 +16,7 @@ from magic_geo.config import WorldConfig, load_config
 from magic_geo.logistics_history import enrich_world_with_logistics_history
 from magic_geo.planet_parameters import (
     EARTH_STANDARD_GRAVITY_M_S2,
+    PLANET_PARAMETER_DEFAULTS,
     planet_gravity_g,
     planet_parameter_snapshot,
     planet_radius_km,
@@ -26,6 +27,21 @@ from magic_geo.route_corridors import enrich_world_with_route_corridors
 
 
 class PlanetScalingTests(TestCase):
+    def test_planet_snapshot_uses_defaults_and_sanitizes_mapping_values(self) -> None:
+        self.assertEqual(planet_parameter_snapshot(), PLANET_PARAMETER_DEFAULTS)
+
+        snapshot = planet_parameter_snapshot(
+            {
+                "radius_km": "not-a-number",
+                "gravity_g": math.inf,
+                "day_length_hours": 30,
+            }
+        )
+
+        self.assertEqual(snapshot["radius_km"], PLANET_PARAMETER_DEFAULTS["radius_km"])
+        self.assertEqual(snapshot["gravity_g"], PLANET_PARAMETER_DEFAULTS["gravity_g"])
+        self.assertEqual(snapshot["day_length_hours"], 30.0)
+
     def test_api_exposes_configured_planet_before_first_enricher(self) -> None:
         config = WorldConfig.model_validate(
             {"planet": {"radius_km": 4200.0, "gravity_g": 0.55}}
@@ -95,6 +111,9 @@ class PlanetScalingTests(TestCase):
         first_enricher.assert_not_called()
 
     def test_planet_scale_accessors_reject_invalid_world_parameters(self) -> None:
+        with self.assertRaisesRegex(ValueError, "world must be an object"):
+            planet_radius_km([])  # type: ignore[arg-type]
+
         for accessor, key in (
             (planet_radius_km, "radius_km"),
             (planet_gravity_g, "gravity_g"),
@@ -132,6 +151,10 @@ class PlanetScalingTests(TestCase):
                 ),
                 (
                     {"planet_parameters": {key: -1.0}},
+                    rf"planet_parameters\.{key} must be finite and positive",
+                ),
+                (
+                    {"planet_parameters": {key: 10**10000}},
                     rf"planet_parameters\.{key} must be finite and positive",
                 ),
             )

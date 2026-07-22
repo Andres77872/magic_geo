@@ -55,6 +55,7 @@ markers = [
 # Import name rather than a path so the editable install resolves to src/magic_geo
 # and stale worktree copies are never measured.
 source = ["magic_geo"]
+branch = true
 omit = [
   "*/magic_geo/debug_ui/*",
   "*.egg-info/*",

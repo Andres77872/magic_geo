@@ -92,7 +92,7 @@ from ..validators import (
 def validate(
     world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated .json or .mgeo world.")]
 ) -> None:
-    """Run basic output validation on a generated world file."""
+    """Run the full world-consistency gate on a generated world file."""
     payload = _load_world_for_cli(world)
     summary = payload.get("summary", {})
     failures: list[str] = []
@@ -118,7 +118,7 @@ def validate(
         failures.append(f"planet parameters invalid: {exc}")
     if failures:
         for failure in failures:
-            typer.echo(f"FAIL {failure}")
+            typer.echo(f"FAIL {failure}", err=True)
         raise typer.Exit(1)
 
     mesh_backend = payload.get("mesh_backend")

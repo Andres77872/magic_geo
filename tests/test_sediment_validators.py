@@ -1,28 +1,21 @@
-"""Violation branches of :mod:`magic_geo.cli.validators.sediment`.
+"""Focused tests for the pure sediment replay validators.
 
-A generated world takes the passing path through every fluvial, hillslope,
-glacial and sediment-inventory replay check, so the code that *reports* a
-problem is never exercised by a healthy payload. Each test here tampers with
-exactly one sediment quantity in the 128-cell replay world, writes the payload
-to a temporary file and runs the public ``validate`` command over it, then pins
-the specific ``FAIL`` line the tampered quantity must produce.
-
-Every class also asserts that the untampered world validates cleanly, so the
-tampers cannot pass vacuously.
+The public ``validate`` command has its own integration and exhaustive tiers.
+These branch cases call the extracted validators directly so 123 mutations do
+not repeatedly serialize a generated world and rerun every unrelated domain.
 """
 
 from __future__ import annotations
 
-import copy
-import json
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Any, Callable
 from unittest import TestCase
 
-from typer.testing import CliRunner
-
-from magic_geo.cli import app
+from magic_geo.cli.validators import (
+    _validate_fluvial_sediment_routing,
+    _validate_glacial_sediment_transport,
+    _validate_hillslope_sediment_transport,
+    _validate_sediment_inventory,
+)
 from support import worlds
 
 WORLD_KEY = "replay_128"
@@ -38,6 +31,7 @@ FEEDBACK_HISTORY = "earth_system_feedback_history"
 NUMERIC_HISTORY = "numeric_depression_correction_history"
 
 Tamper = Callable[[dict[str, Any]], None]
+Validator = Callable[..., tuple[Any, ...]]
 
 
 def _numeric_breach_event(**overrides: Any) -> dict[str, Any]:
@@ -208,33 +202,24 @@ def _put_ice_on_water_cell(world: dict[str, Any]) -> None:
     raise AssertionError("no water cell in the glacial input snapshot")
 
 
-class _SedimentValidateCase(TestCase):
-    """Shared plumbing: run ``validate`` over a tampered replay world."""
+class _SedimentValidatorCase(TestCase):
+    """Shared plumbing for one pure sediment validator."""
+
+    validator: Validator
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.runner = CliRunner()
         cls.pristine = worlds.cached_world_readonly(WORLD_KEY)
 
-    def run_validate(self, world: dict[str, Any]):
-        with TemporaryDirectory() as directory:
-            world_path = Path(directory) / "world.json"
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            return self.runner.invoke(
-                app, ["validate", "--world", str(world_path)]
-            )
-
-    def assert_untampered_world_passes(self) -> None:
-        result = self.run_validate(copy.deepcopy(self.pristine))
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(result.output.strip(), "OK")
+    def failures(self, world: dict[str, Any]) -> list[str]:
+        cells_by_id = {int(cell["id"]): cell for cell in world["cells"]}
+        result = self.validator(world, world["summary"], cells_by_id)
+        return result[0]
 
     def assert_tamper_reports(self, tamper: Tamper, message: str) -> None:
         world = worlds.cached_world(WORLD_KEY)
         tamper(world)
-        result = self.run_validate(world)
-        self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn(f"FAIL {message}", result.output)
+        self.assertIn(message, self.failures(world))
 
     def assert_table(self, cases: tuple[tuple[str, Tamper, str], ...]) -> None:
         for name, tamper, message in cases:
@@ -246,9 +231,24 @@ def _bump(container: Any, key: Any, delta: float) -> None:
     container[key] = container[key] + delta
 
 
-class FluvialSedimentRoutingValidationTests(_SedimentValidateCase):
-    def test_untampered_replay_world_passes(self) -> None:
-        self.assert_untampered_world_passes()
+class SedimentValidatorControlTests(TestCase):
+    def test_untampered_world_passes_every_sediment_validator(self) -> None:
+        world = worlds.cached_world_readonly(WORLD_KEY)
+        cells_by_id = {int(cell["id"]): cell for cell in world["cells"]}
+        for name, validator in (
+            ("fluvial", _validate_fluvial_sediment_routing),
+            ("hillslope", _validate_hillslope_sediment_transport),
+            ("glacial", _validate_glacial_sediment_transport),
+            ("inventory", _validate_sediment_inventory),
+        ):
+            with self.subTest(validator=name):
+                self.assertEqual(
+                    validator(world, world["summary"], cells_by_id)[0], []
+                )
+
+
+class FluvialSedimentRoutingValidationTests(_SedimentValidatorCase):
+    validator = staticmethod(_validate_fluvial_sediment_routing)
 
     def test_model_metadata_violations_are_reported(self) -> None:
         self.assert_table(
@@ -492,9 +492,8 @@ class FluvialSedimentRoutingValidationTests(_SedimentValidateCase):
         )
 
 
-class HillslopeSedimentTransportValidationTests(_SedimentValidateCase):
-    def test_untampered_replay_world_passes(self) -> None:
-        self.assert_untampered_world_passes()
+class HillslopeSedimentTransportValidationTests(_SedimentValidatorCase):
+    validator = staticmethod(_validate_hillslope_sediment_transport)
 
     def test_model_metadata_and_topology_violations_are_reported(self) -> None:
         self.assert_table(
@@ -698,9 +697,8 @@ class HillslopeSedimentTransportValidationTests(_SedimentValidateCase):
         )
 
 
-class GlacialSedimentTransportValidationTests(_SedimentValidateCase):
-    def test_untampered_replay_world_passes(self) -> None:
-        self.assert_untampered_world_passes()
+class GlacialSedimentTransportValidationTests(_SedimentValidatorCase):
+    validator = staticmethod(_validate_glacial_sediment_transport)
 
     def test_model_metadata_violations_are_reported(self) -> None:
         self.assert_table(
@@ -935,9 +933,8 @@ class GlacialSedimentTransportValidationTests(_SedimentValidateCase):
         )
 
 
-class SedimentInventoryValidationTests(_SedimentValidateCase):
-    def test_untampered_replay_world_passes(self) -> None:
-        self.assert_untampered_world_passes()
+class SedimentInventoryValidationTests(_SedimentValidatorCase):
+    validator = staticmethod(_validate_sediment_inventory)
 
     def test_model_metadata_violations_are_reported(self) -> None:
         self.assert_table(

@@ -1,8 +1,7 @@
-"""Violation branches of the ``validate`` command's opening gates.
+"""Public ``validate`` CLI violations for core schema and hydrology gates.
 
-Covers the first stretch of :mod:`magic_geo.cli.commands.validate` -- the
-schema/planet gate, the mesh and summary headline checks, the crust-age replay,
-the sea-level model reconstruction, hydrologic flow routing, depression
+Covers the schema/planet gate, mesh and summary headline checks, crust-age
+replay, sea-level model reconstruction, hydrologic flow routing, depression
 components and lake basins, and numeric depression-correction provenance.
 
 Every case drives the public CLI over a temporary world file: one tamper on a
@@ -51,9 +50,8 @@ from magic_geo.io import write_json
 from support import worlds
 import pytest
 
-# Exhaustive branch coverage of the ``validate`` command: every case invokes the
-# full CLI validation over a generated world, which is ~47% of the suite's runtime
-# for ~23% of its tests. Deselect locally with -m "not slow".
+# Exhaustive branch coverage of ``validate``: every case invokes the full CLI
+# over a generated world. Deselect locally with -m "not slow".
 pytestmark = pytest.mark.slow
 
 World = dict[str, Any]

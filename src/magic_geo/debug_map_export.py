@@ -640,7 +640,7 @@ Transform Image 1 into {surface}. Treat the attached diagnostic map as the autho
 
 ## What to remove
 
-- Do not include debugger UI, legends, color chips, tables, labels, captions, coordinates, borders, logos, signatures, or watermarks.
+- Do not include workbench/diagnostic UI, legends, color chips, tables, labels, captions, coordinates, borders, logos, signatures, or watermarks.
 - Do not render the prompt text or any other text inside the image.
 {_overlay_prompt(wireframe=wireframe, plates=plates, graticule=graticule)}
 

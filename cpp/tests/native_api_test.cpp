@@ -1149,9 +1149,6 @@ bool geodesic_physics_uses_actual_mesh_size() {
 }
 
 bool reference_scale_membership_area_classes_close() {
-    if (std::getenv("MAGIC_GEO_VALIDATE_FIBONACCI_KNN") == nullptr) {
-        return true;
-    }
     magic_geo::CConfig cfg = test_config();
     cfg.seed = 424242ULL;
     cfg.name = "reference_scale_membership_area_classes";
@@ -1565,10 +1562,16 @@ bool half_turn_crust_shadow_accepts_fully_uncovered_destinations() {
 }  // namespace
 
 int main() {
+    // CTest invokes this binary twice: once for the regular API suite and once
+    // for the intentionally expensive 4,096-cell reference check. Keep those
+    // as separate test responsibilities instead of rerunning the complete API
+    // suite in the reference process.
+    if (std::getenv("MAGIC_GEO_VALIDATE_FIBONACCI_KNN") != nullptr) {
+        return reference_scale_membership_area_classes_close() ? 0 : 1;
+    }
     if (!thread_configuration_is_generation_scoped() ||
         !conversion_preserves_every_field() || !public_api_is_usable() ||
         !geodesic_physics_uses_actual_mesh_size() ||
-        !reference_scale_membership_area_classes_close() ||
         !half_turn_crust_shadow_accepts_fully_uncovered_destinations() ||
         !concurrent_generation_sessions_are_isolated() ||
         !backend_selection_fallback_and_opencl_parity() ||

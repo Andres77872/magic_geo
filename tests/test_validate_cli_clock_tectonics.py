@@ -1,4 +1,4 @@
-"""Violation branches of the ``validate`` command, lines 2800-5500 of its source.
+"""Public ``validate`` CLI violations for clocks, cells, and plate motion.
 
 Every case here drives the public Typer application through ``CliRunner`` on a
 world that differs from a healthy generated world by exactly one tampered
@@ -35,9 +35,8 @@ from support import worlds
 from support.cli import assert_no_cli_crash
 import pytest
 
-# Exhaustive branch coverage of the ``validate`` command: every case invokes the
-# full CLI validation over a generated world, which is ~47% of the suite's runtime
-# for ~23% of its tests. Deselect locally with -m "not slow".
+# Exhaustive branch coverage of ``validate``: every case invokes the full CLI
+# over a generated world. Deselect locally with -m "not slow".
 pytestmark = pytest.mark.slow
 
 #: The smallest canonical world that carries a full simulation clock, feedback

@@ -233,25 +233,28 @@ The checked-in matrix runs the unmodified 4,096-cell Earth configuration, a repe
 
 ```bash
 pip install -e ".[test]"          # add ",debug" to also run the workbench/server tests
-python -m pytest                  # full suite (~33 min)
-python -m pytest -m "not slow"    # ~17 min: skips the exhaustive validate-command tier
-python -m pytest --cov --cov-report=term-missing   # with coverage (slower)
-python -m pytest --cov --cov-report=html           # browsable report in htmlcov/
+python -m pytest                  # full suite (~29 min)
+python -m pytest -m "not slow"    # ~13 min: skips the exhaustive validate-command tier
+python -m pytest -m "slow"        # ~16 min: exhaustive validate-command tier only
+python -m pytest --cov --cov-report=term-missing   # full branch coverage (~2 h)
+python -m pytest --cov --cov-report=html           # same report, browsable in htmlcov/
 ```
 
-The `slow` marker covers `tests/test_cli_validate_s*.py`, which drive every
-violation branch of the `validate` command through the CLI. They are 23% of the
-tests but 47% of the runtime, because each case runs a full validation over a
+The `slow` marker covers `tests/test_validate_cli_*.py`, which drive every
+violation branch of the `validate` command through the CLI. They are 21% of the
+tests but 54% of the runtime, because each case runs a full validation over a
 generated world. Deselect them for a tight local loop; run everything before
 pushing.
 
-Coverage is opt-in rather than wired into `addopts`, because measuring the
-generation-heavy tests roughly doubles their runtime. Two caveats when reading a
-report: coverage measures only the Python layer, so the C++ simulation core in
-`libmagic_geo_native.so` never appears; and generated worlds are cached per
-process by `tests/support/worlds.py`, so parallel runners pay one generation per
-worker. Without the `debug` extra the FastAPI workbench tests skip themselves,
-and `tests/test_debug_rerun.py` skips unless `rerun-sdk` is installed.
+Coverage is opt-in rather than wired into `addopts`; it includes branch
+coverage because a validator's rejection path matters as much as its happy
+path. Instrumenting the generation-heavy suite takes roughly four times its
+normal runtime. Two caveats when reading a report: only Python is measured, so
+the C++ simulation core in `libmagic_geo_native.so` never appears; and generated
+worlds are cached per process by `tests/support/worlds.py`, so parallel runners
+pay one generation per worker. Without the `debug` extra the FastAPI workbench
+tests skip themselves, and `tests/test_debug_rerun.py` skips unless `rerun-sdk`
+is installed.
 
 ## Architecture
 

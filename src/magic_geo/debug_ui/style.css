@@ -3,7 +3,7 @@
   --panel: #171d26;
   --panel-edge: #232c3a;
   --text: #cdd6e4;
-  --text-dim: #78849a;
+  --text-dim: #7d89a0;
   --accent: #4da3ff;
   --accent-dim: #274a6e;
   font-size: 14px;
@@ -208,6 +208,7 @@ body {
   border-radius: 3px;
   padding: 0 3px;
 }
+.layer-list-empty { padding: 8px 14px; font-size: 12px; color: var(--text-dim); }
 
 /* ------- viewport ------- */
 #viewport { flex: 1; position: relative; }
@@ -295,16 +296,22 @@ body {
 }
 #stage-label { font-size: 11px; color: var(--text-dim); min-width: 130px; }
 
-#status {
+#map-status-row {
   position: absolute;
   bottom: 8px; left: 12px;
+  display: flex;
+  gap: 6px;
+  max-width: calc(100% - 64px);
+  pointer-events: none;
+}
+#status, #map-hover {
   font-size: 11.5px;
   color: var(--text-dim);
   background: rgba(23, 29, 38, 0.85);
   padding: 3px 9px;
   border-radius: 5px;
-  pointer-events: none;
 }
+#status:empty, #map-hover:empty { display: none; }
 
 /* ------- inspector ------- */
 #inspector {
@@ -474,8 +481,7 @@ label { color: var(--text-dim); font-size: 11px; font-weight: 600; }
 #app.cacheless #sidebar,
 #app.cacheless #topbar,
 #app.cacheless #stagebar,
-#app.cacheless #status,
-#app.cacheless #help-fab,
+#app.cacheless #map-status-row,
 #app.cacheless #inspector { display: none !important; }
 #app.cacheless #viewport { width: 100%; }
 
@@ -542,7 +548,7 @@ label { color: var(--text-dim); font-size: 11px; font-weight: 600; }
 .operation-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .operation-field.full { grid-column: 1 / -1; }
 .operation-field label small { color: var(--warning); }
-.operation-field .field-help { color: #69778c; font-size: 9.5px; line-height: 1.35; }
+.operation-field .field-help { color: #7d8aa0; font-size: 9.5px; line-height: 1.35; }
 .operation-field textarea { min-height: 80px; resize: vertical; font: 11px/1.45 ui-monospace, monospace; }
 #operation-form > button { width: 100%; }
 #operation-result { margin-top: 9px; color: var(--text-dim); font-size: 11px; }

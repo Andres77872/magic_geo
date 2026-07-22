@@ -1,16 +1,13 @@
-"""Violation and subsystem-absent branches of the water replay validators.
+"""Focused branch coverage for the water replay validators.
 
 Covers ``magic_geo.cli.validators.hydrology`` (water budget, groundwater
 recharge, aquifer resources, groundwater flow), ``...validators.rivers``
 (channel morphology and hydraulics) and ``...validators.navigability``.
 
-Every check is driven through the public ``validate`` CLI on a temporary world
-file: one tamper per branch, asserting the exact failure text plus a clean
-``typer.Exit(1)`` from the validation gate, against an untampered control run
-that passes.  A small number of ``except (TypeError, ValueError)`` guards cannot
-be reached that way because the ``validate`` command itself parses the same
-field with a bare ``float()`` and dies before the validator is consulted; those
-call the validator directly and assert its exact return value.
+Branch cases call the pure validator that owns the behavior. A small integration
+set still drives the public CLI for cross-validator aggregation and subsystem-
+absent behavior, without rerunning every unrelated validator for all 52 table
+mutations.
 
 Exit code alone never decides a case: ``CliRunner`` reports ``exit_code == 1``
 both for a clean ``FAIL``/``Exit(1)`` and for an uncaught ``ValueError``, so
@@ -113,10 +110,11 @@ def _force_froude(world: World, target: float) -> None:
     cell["bankfull_discharge_m3_s"] = 1.0e9
 
 
-class WaterValidatorCliCase(TestCase):
-    """Shared tamper-then-validate driver for the CLI-reachable branches."""
+class WaterValidatorCase(TestCase):
+    """Shared direct branch driver plus CLI integration assertions."""
 
     world_key = "replay_128"
+    validator: Callable[..., list[str]]
 
     def assert_clean_validation_failure(self, result: Any) -> None:
         """The command must have reached the ``FAIL`` gate, not crashed.
@@ -134,16 +132,11 @@ class WaterValidatorCliCase(TestCase):
         self,
         tamper: Tamper,
         message: str,
-        *,
-        absent: str | None = None,
     ) -> None:
         world = worlds.cached_world(self.world_key)
         tamper(world)
-        result = _run_validate(world)
-        self.assert_clean_validation_failure(result)
-        self.assertIn(f"FAIL {message}", _fail_lines(result))
-        if absent is not None:
-            self.assertNotIn(f"FAIL {absent}", _fail_lines(result))
+        failures = _direct_failures(self.validator, world)
+        self.assertIn(message, failures)
 
     def assert_all_tampers_reported(
         self,
@@ -259,7 +252,9 @@ class WaterValidatorControlTests(TestCase):
         self.assertTrue(_marine_cell(world)["is_water"])
 
 
-class HydrologicWaterBudgetValidatorTests(WaterValidatorCliCase):
+class HydrologicWaterBudgetValidatorTests(WaterValidatorCase):
+    validator = staticmethod(_validate_hydrologic_water_budget)
+
     def test_water_budget_replay_violations_are_reported(self) -> None:
         def model_domain(world: World) -> None:
             world["hydrologic_water_budget_model"]["domain"] = "tampered_domain"
@@ -335,7 +330,9 @@ class HydrologicWaterBudgetValidatorTests(WaterValidatorCliCase):
         )
 
 
-class GroundwaterRechargeValidatorTests(WaterValidatorCliCase):
+class GroundwaterRechargeValidatorTests(WaterValidatorCase):
+    validator = staticmethod(_validate_groundwater_recharge)
+
     def test_recharge_partition_violations_are_reported(self) -> None:
         def model_domain(world: World) -> None:
             world["groundwater_recharge_model"]["domain"] = "tampered_domain"
@@ -383,7 +380,9 @@ class GroundwaterRechargeValidatorTests(WaterValidatorCliCase):
         self.assertIn(f"FAIL {GROUNDWATER_FLOW_FAILURE}", _fail_lines(result))
 
 
-class AquiferResourceValidatorTests(WaterValidatorCliCase):
+class AquiferResourceValidatorTests(WaterValidatorCase):
+    validator = staticmethod(_validate_aquifer_resources)
+
     def test_aquifer_replay_violations_are_reported(self) -> None:
         def model_minimum_productivity_not_numeric(world: World) -> None:
             world["aquifer_resource_model"][
@@ -422,7 +421,9 @@ class AquiferResourceValidatorTests(WaterValidatorCliCase):
         )
 
 
-class GroundwaterFlowValidatorTests(WaterValidatorCliCase):
+class GroundwaterFlowValidatorTests(WaterValidatorCase):
+    validator = staticmethod(_validate_groundwater_flow)
+
     def test_groundwater_flow_replay_violations_are_reported(self) -> None:
         def model_domain(world: World) -> None:
             world["groundwater_flow_model"]["domain"] = "tampered_domain"
@@ -458,7 +459,9 @@ class GroundwaterFlowValidatorTests(WaterValidatorCliCase):
         )
 
 
-class RiverChannelMorphologyValidatorTests(WaterValidatorCliCase):
+class RiverChannelMorphologyValidatorTests(WaterValidatorCase):
+    validator = staticmethod(_validate_river_channel_morphology)
+
     def test_channel_morphology_violations_are_reported(self) -> None:
         def model_slope_normalization_not_numeric(world: World) -> None:
             world["river_channel_morphology_model"]["slope_normalization"] = "steep"
@@ -531,7 +534,9 @@ class RiverChannelMorphologyValidatorTests(WaterValidatorCliCase):
         )
 
 
-class RiverHydraulicsValidatorTests(WaterValidatorCliCase):
+class RiverHydraulicsValidatorTests(WaterValidatorCase):
+    validator = staticmethod(_validate_river_hydraulics)
+
     def test_hydraulics_violations_are_reported(self) -> None:
         def model_water_density_not_numeric(world: World) -> None:
             world["river_hydraulics_model"]["water_density_kg_m3"] = "dense"
@@ -580,16 +585,24 @@ class RiverHydraulicsValidatorTests(WaterValidatorCliCase):
             empty["cell_ids"] = []
             systems.append(empty)
 
+        world = worlds.cached_world(self.world_key)
+        channel_system_without_cells(world)
+
         # The extra system has no channel cells, so the reach model skips it and
         # only the morphology replay notices the surplus record.
-        self.assert_tamper_reported(
-            channel_system_without_cells,
+        self.assertIn(
             CHANNEL_FAILURE,
-            absent=HYDRAULICS_FAILURE,
+            _direct_failures(_validate_river_channel_morphology, world),
+        )
+        self.assertNotIn(
+            HYDRAULICS_FAILURE,
+            _direct_failures(_validate_river_hydraulics, world),
         )
 
 
-class NavigabilityValidatorTests(WaterValidatorCliCase):
+class NavigabilityValidatorTests(WaterValidatorCase):
+    validator = staticmethod(_validate_navigability)
+
     def test_navigability_violations_are_reported(self) -> None:
         def model_threshold_not_numeric(world: World) -> None:
             world["navigability_model"]["navigable_threshold"] = "high"
@@ -619,7 +632,7 @@ class NavigabilityValidatorTests(WaterValidatorCliCase):
         )
 
 
-class ChokepointFreeNavigabilityTests(WaterValidatorCliCase):
+class ChokepointFreeNavigabilityTests(WaterValidatorCase):
     """Waterway typing when the marine chokepoint subsystem is absent.
 
     With no chokepoint records at all every component falls through to the
@@ -632,6 +645,7 @@ class ChokepointFreeNavigabilityTests(WaterValidatorCliCase):
     #: ``FAIL``/``Exit(1)`` gate, which is what makes the *absence* of the
     #: navigability line below evidence of anything at all.
     CHOKEPOINT_FAILURE = "marine_chokepoint_count does not match marine_chokepoints length"
+    validator = staticmethod(_validate_navigability)
 
     def build_world(self) -> World:
         world = worlds.cached_world("routed_512")
@@ -687,6 +701,43 @@ class ChokepointFreeNavigabilityTests(WaterValidatorCliCase):
         self.assertIn(f"FAIL {NAVIGABILITY_FAILURE}", _fail_lines(result))
 
 
+class NominalTimeRecordTests(TestCase):
+    """The shared nominal-interval helper through the water-budget replay."""
+
+    def test_nominal_interval_record_violations(self) -> None:
+        def drop_nominal_field(world: World) -> None:
+            world["hydrologic_water_budget_history"][0].pop(
+                "nominal_elapsed_time_ma"
+            )
+
+        def wrong_nominal_unit(world: World) -> None:
+            world["hydrologic_water_budget_history"][0]["nominal_time_unit"] = "Myr"
+
+        def non_numeric_interval_start(world: World) -> None:
+            world["hydrologic_water_budget_history"][0][
+                "nominal_interval_start_ma"
+            ] = "early"
+
+        def shifted_interval_start(world: World) -> None:
+            world["hydrologic_water_budget_history"][0][
+                "nominal_interval_start_ma"
+            ] = 5.0
+
+        for name, tamper in (
+            ("missing nominal interval field", drop_nominal_field),
+            ("nominal time unit is not Ma", wrong_nominal_unit),
+            ("non numeric nominal interval start", non_numeric_interval_start),
+            ("shifted nominal interval start", shifted_interval_start),
+        ):
+            with self.subTest(name):
+                world = worlds.cached_world("replay_128")
+                tamper(world)
+                self.assertEqual(
+                    _direct_failures(_validate_hydrologic_water_budget, world),
+                    [WATER_BUDGET_FAILURE],
+                )
+
+
 class WaterValidatorDirectGuardTests(TestCase):
     """Guards the ``validate`` command cannot reach.
 
@@ -698,8 +749,7 @@ class WaterValidatorDirectGuardTests(TestCase):
 
     Every tamper here was checked against the CLI first: each one makes
     ``validate`` raise ``ValueError``/``AttributeError``/``KeyError`` and print
-    no ``FAIL`` line at all.  ``WaterValidatorCliCase`` owns anything the CLI
-    can actually report.
+    no ``FAIL`` line at all. ``WaterValidatorCase`` covers reportable branches.
     """
 
     def assert_guard(

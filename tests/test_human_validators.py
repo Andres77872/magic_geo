@@ -1,22 +1,15 @@
-"""Human-geography validator coverage driven through the `validate` CLI.
+"""Focused human-geography validator coverage.
 
-Every check tampers with exactly one derived quantity of an otherwise valid
-generated world, writes it to a temporary file, and asserts that
-``magic-geo validate`` rejects it with the specific replay failure text of the
-validator under test. Untampered control runs keep the tampered assertions from
-passing vacuously.
-
-The validators live in ``magic_geo.cli.validators`` (political, settlement,
-ports, corridors) and the CLI is their stable surface. The final test class is
-the exception: it calls the validators directly because the branches it covers
-guard payload shapes that make the CLI's own accessors raise, so through
-``validate`` they are indistinguishable from a crash.
+Branch cases call the extracted political, settlement, port, and corridor
+validators directly. A single combined public-CLI check proves those validators
+remain wired into ``validate`` without rerunning the entire command for every
+mutation.
 
 A tamper that only one validator can notice asserts the *complete* failure list;
 a tamper that necessarily disturbs neighbouring domains (a cell field feeds many
 replays) asserts that the validator under test is among the objectors. Where the
-CLI cannot observe which branch a replay took, the check says so rather than
-implying more than it proves.
+validator reports one domain-level verdict for several branches, the check says
+so rather than implying more than it proves.
 """
 
 from __future__ import annotations
@@ -37,6 +30,7 @@ from magic_geo.cli.validators import (
     _validate_route_corridors,
     _validate_route_network,
     _validate_settlement_selection,
+    _validate_trade_flows,
 )
 from magic_geo.io import write_json
 
@@ -49,7 +43,15 @@ SETTLEMENT_FAILURE = "settlement selection model or causal replay invalid"
 ROUTE_FAILURE = "route network model or causal replay invalid"
 PORT_FAILURE = "port site model or causal replay invalid"
 CORRIDOR_FAILURE = "route corridor model or causal replay invalid"
-HYDROLOGY_FAILURE = "hydrologic water budget model or replay invalid"
+HUMAN_VALIDATORS = (
+    _validate_port_sites,
+    _validate_route_corridors,
+    _validate_settlement_selection,
+    _validate_route_network,
+    _validate_political_regions,
+    _validate_political_borders,
+    _validate_trade_flows,
+)
 
 MARINE_WATER_TYPES = {"ocean", "continental_shelf", "inland_sea"}
 MOUNTAIN_BORDER_LANDFORMS = {"mountain_belt", "glacial_valley"}
@@ -159,8 +161,8 @@ def lowland_pair_cell(
     raise LookupError("no same-region lowland adjacency")
 
 
-class ValidatorCliTestCase(TestCase):
-    """Write a world payload to a temporary file and run ``validate`` on it."""
+class HumanValidatorTestCase(TestCase):
+    """Run focused validator replays, with an opt-in public CLI helper."""
 
     def run_validate(self, world: dict[str, Any]) -> tuple[int, list[str], str]:
         """The exit code, every replayed ``FAIL`` message, and the raw output.
@@ -182,16 +184,20 @@ class ValidatorCliTestCase(TestCase):
         return result.exit_code, messages, result.output
 
     def assert_world_valid(self, world: dict[str, Any]) -> None:
-        exit_code, messages, output = self.run_validate(world)
-        self.assertEqual(exit_code, 0, output)
-        self.assertEqual(messages, [])
-        self.assertIn("OK", output)
+        self.assertEqual(self.replay_failures(world), [])
+
+    def replay_failures(self, world: dict[str, Any]) -> list[str]:
+        cells = cells_by_id(world)
+        return [
+            failure
+            for validator in HUMAN_VALIDATORS
+            for failure in validator(world, world["summary"], cells)
+        ]
 
     def assert_world_rejected(self, world: dict[str, Any], *messages: str) -> None:
         """The named validators rejected the world; other domains may too."""
 
-        exit_code, failures, output = self.run_validate(world)
-        self.assertEqual(exit_code, 1, output)
+        failures = self.replay_failures(world)
         for message in messages:
             self.assertIn(message, failures)
 
@@ -200,8 +206,7 @@ class ValidatorCliTestCase(TestCase):
     ) -> None:
         """The named validators are the *only* ones that rejected the world."""
 
-        exit_code, failures, output = self.run_validate(world)
-        self.assertEqual(exit_code, 1, output)
+        failures = self.replay_failures(world)
         self.assertEqual(sorted(failures), sorted(messages))
 
     def tampered(self, key: str, mutation: Mutation) -> dict[str, Any]:
@@ -222,7 +227,7 @@ class ValidatorCliTestCase(TestCase):
         self.assert_world_rejected_only(self.tampered(key, mutation), *messages)
 
 
-class ControlWorldTests(ValidatorCliTestCase):
+class ControlWorldTests(HumanValidatorTestCase):
     def test_small_world_passes_validation(self) -> None:
         self.assert_world_valid(worlds.cached_world_readonly("small_smoke"))
 
@@ -249,12 +254,12 @@ class ControlWorldTests(ValidatorCliTestCase):
         self.assert_world_valid(world)
 
 
-class ModelDescriptorTests(ValidatorCliTestCase):
+class ModelDescriptorTests(HumanValidatorTestCase):
     def test_wrong_model_descriptor_rejects_each_replay(self) -> None:
         """One wrong descriptor must reject exactly one replay and nothing else.
 
         These tamper with a documentation string that only its own validator
-        reads, so the whole run must produce that single failure: pinning the
+        reads, so the focused replay must produce that single failure: pinning the
         complete list also catches a replay that starts rejecting worlds it has
         no business inspecting.
         """
@@ -305,8 +310,36 @@ class ModelDescriptorTests(ValidatorCliTestCase):
             with self.subTest(name):
                 self.assert_tamper_is_sole_failure("small_smoke", mutation, message)
 
+    def test_public_validate_wires_every_extracted_human_validator(self) -> None:
+        world = worlds.cached_world("small_smoke")
+        for model_key, field in (
+            ("port_site_model", "domain"),
+            ("settlement_selection_model", "record_order"),
+            ("route_network_model", "record_order"),
+            ("political_region_model", "record_order"),
+            ("political_border_model", "record_order"),
+            ("trade_flow_model", "record_model"),
+            ("route_corridor_model", "record_order"),
+        ):
+            world[model_key][field] = "not_the_documented_model"
 
-class PortSiteValidatorTests(ValidatorCliTestCase):
+        exit_code, failures, output = self.run_validate(world)
+
+        self.assertEqual(exit_code, 1, output)
+        for message in (
+            PORT_FAILURE,
+            SETTLEMENT_FAILURE,
+            ROUTE_FAILURE,
+            REGION_FAILURE,
+            BORDER_FAILURE,
+            TRADE_FAILURE,
+            CORRIDOR_FAILURE,
+        ):
+            with self.subTest(message=message):
+                self.assertIn(message, failures)
+
+
+class PortSiteValidatorTests(HumanValidatorTestCase):
     def test_port_site_model_and_record_violations(self) -> None:
         def non_numeric_threshold(world: dict[str, Any], _cells: Any) -> None:
             world["port_site_model"]["port_site_threshold"] = "high"
@@ -387,7 +420,7 @@ class PortSiteValidatorTests(ValidatorCliTestCase):
         self.assert_tamper_rejected("small_smoke", expose_the_coast, PORT_FAILURE)
 
 
-class SettlementSelectionValidatorTests(ValidatorCliTestCase):
+class SettlementSelectionValidatorTests(HumanValidatorTestCase):
     def test_settlement_model_and_score_violations(self) -> None:
         def non_numeric_threshold(world: dict[str, Any], _cells: Any) -> None:
             world["settlement_selection_model"]["score_threshold"] = "low"
@@ -453,7 +486,7 @@ class SettlementSelectionValidatorTests(ValidatorCliTestCase):
                 )
 
 
-class RouteNetworkValidatorTests(ValidatorCliTestCase):
+class RouteNetworkValidatorTests(HumanValidatorTestCase):
     def test_route_network_model_and_record_violations(self) -> None:
         def non_numeric_links(world: dict[str, Any], _cells: Any) -> None:
             world["route_network_model"]["links_per_settlement"] = "two"
@@ -502,7 +535,7 @@ class RouteNetworkValidatorTests(ValidatorCliTestCase):
         self.assert_tamper_rejected("small_smoke", flatten_endpoints, ROUTE_FAILURE)
 
 
-class PoliticalRegionValidatorTests(ValidatorCliTestCase):
+class PoliticalRegionValidatorTests(HumanValidatorTestCase):
     def test_region_model_and_record_violations(self) -> None:
         def non_numeric_separation(world: dict[str, Any], _cells: Any) -> None:
             world["political_region_model"][
@@ -599,7 +632,7 @@ class PoliticalRegionValidatorTests(ValidatorCliTestCase):
         )
 
 
-class PoliticalBorderValidatorTests(ValidatorCliTestCase):
+class PoliticalBorderValidatorTests(HumanValidatorTestCase):
     def test_border_model_and_record_violations(self) -> None:
         def non_numeric_threshold(world: dict[str, Any], _cells: Any) -> None:
             world["political_border_model"]["mountain_elevation_threshold_m"] = "high"
@@ -631,8 +664,8 @@ class PoliticalBorderValidatorTests(ValidatorCliTestCase):
         the desert, ice, coastal and open-lowland rungs are reached by moving one
         lowland cell into its neighbour's region. The new segment already makes
         the border replay disagree on the segment count, so the assertion pins
-        that the border replay is the objector, not which rung it chose - no CLI
-        output distinguishes the rungs.
+        that the border replay is the objector, not which rung it chose - the
+        domain-level verdict does not distinguish the rungs.
         """
 
         def reassign(
@@ -672,7 +705,7 @@ class PoliticalBorderValidatorTests(ValidatorCliTestCase):
                 self.assert_tamper_rejected("mid_512", reassign(extra), BORDER_FAILURE)
 
 
-class TradeFlowValidatorTests(ValidatorCliTestCase):
+class TradeFlowValidatorTests(HumanValidatorTestCase):
     def test_trade_flow_record_violations(self) -> None:
         def non_numeric_friction(world: dict[str, Any], _cells: Any) -> None:
             world["trade_flows"][0]["friction"] = "slow"
@@ -728,7 +761,7 @@ class TradeFlowValidatorTests(ValidatorCliTestCase):
                 self.assert_tamper_rejected("small_smoke", mutation, TRADE_FAILURE)
 
 
-class RouteCorridorValidatorTests(ValidatorCliTestCase):
+class RouteCorridorValidatorTests(HumanValidatorTestCase):
     def test_corridor_model_and_record_violations(self) -> None:
         def non_numeric_radius(world: dict[str, Any], _cells: Any) -> None:
             world["route_corridor_model"]["planet_radius_km"] = "wide"
@@ -806,7 +839,7 @@ class RouteCorridorValidatorTests(ValidatorCliTestCase):
         )
 
 
-class NeighbourShapeViolationTests(ValidatorCliTestCase):
+class NeighbourShapeViolationTests(HumanValidatorTestCase):
     def test_non_list_land_neighbours_reject_every_human_geography_model(self) -> None:
         def mapping_neighbours(
             world: dict[str, Any], cells: dict[int, dict[str, Any]]
@@ -861,10 +894,8 @@ class NeighbourShapeViolationTests(ValidatorCliTestCase):
     def test_marine_cell_with_only_unknown_neighbours_rejects_ports(self) -> None:
         """Unresolvable neighbour ids leave a marine cell with no land contact.
 
-        ``validate`` walks the same records with its own accessors, but this one
-        survives them: the run reaches the replay gate and prints the port
-        failure, so the guard is reachable from the CLI and does not need the
-        direct-call escape hatch below.
+        The public command can also reach this guard, unlike the malformed
+        payload cases below; the focused replay pins the owning domain directly.
         """
 
         def orphan_marine_cell(
@@ -883,44 +914,6 @@ class NeighbourShapeViolationTests(ValidatorCliTestCase):
             raise LookupError("no marine cell with a land neighbour")
 
         self.assert_tamper_rejected("small_smoke", orphan_marine_cell, PORT_FAILURE)
-
-
-class NominalTimeRecordTests(ValidatorCliTestCase):
-    """The nominal-interval helper shared by the maturation history replays.
-
-    It is reached through the hydrologic water budget history, so these assert
-    that validator's failure text rather than a human-geography one.
-    """
-
-    def test_nominal_interval_record_violations(self) -> None:
-        def drop_nominal_field(world: dict[str, Any], _cells: Any) -> None:
-            world["hydrologic_water_budget_history"][0].pop("nominal_elapsed_time_ma")
-
-        def wrong_nominal_unit(world: dict[str, Any], _cells: Any) -> None:
-            world["hydrologic_water_budget_history"][0]["nominal_time_unit"] = "Myr"
-
-        def non_numeric_interval_start(world: dict[str, Any], _cells: Any) -> None:
-            world["hydrologic_water_budget_history"][0][
-                "nominal_interval_start_ma"
-            ] = "early"
-
-        def shifted_interval_start(world: dict[str, Any], _cells: Any) -> None:
-            world["hydrologic_water_budget_history"][0][
-                "nominal_interval_start_ma"
-            ] = 5.0
-
-        for name, mutation in (
-            ("missing nominal interval field", drop_nominal_field),
-            ("nominal time unit is not Ma", wrong_nominal_unit),
-            ("non numeric nominal interval start", non_numeric_interval_start),
-            ("shifted nominal interval start", shifted_interval_start),
-        ):
-            with self.subTest(name):
-                # One history record is wrong, so the water budget replay must
-                # be the only domain that objects.
-                self.assert_tamper_is_sole_failure(
-                    "small_smoke", mutation, HYDROLOGY_FAILURE
-                )
 
 
 class UnreachableThroughCliGuardTests(TestCase):
