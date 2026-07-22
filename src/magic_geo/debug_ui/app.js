@@ -249,6 +249,7 @@ const state = {
   dataTotal: 0,
   dataRequest: 0,
   worldRequest: 0,
+  worldsSignature: null,  // last-rendered world list; unchanged polls skip the rebuild
   configTemplateRequest: 0,
   configEditRevision: 0,
 };
@@ -576,6 +577,9 @@ function resizeRenderer() {
   const canvas = three.renderer.domElement;
   const width = Math.max(1, canvas.clientWidth || canvas.parentElement.clientWidth || 1);
   const height = Math.max(1, canvas.clientHeight || canvas.parentElement.clientHeight || 1);
+  // devicePixelRatio changes with browser zoom and monitor moves; re-apply it
+  // here so the canvas stays sharp (it is otherwise captured once at startup).
+  three.renderer.setPixelRatio(window.devicePixelRatio);
   three.renderer.setSize(width, height, false);
   three.camera.aspect = width / height;
   three.camera.updateProjectionMatrix();
@@ -666,7 +670,7 @@ function updateLegend(layer) {
     ramp.style.display = 'none';
     $('#legend-min').textContent = '';
     $('#legend-max').textContent = '';
-    layer.categories.forEach((category, index) => {
+    (layer.categories || []).forEach((category, index) => {
       const [r, g, b] = categoryColor(index);
       const chip = document.createElement('div');
       chip.className = 'legend-chip';
@@ -1343,6 +1347,9 @@ function updateDocsCard(layer) {
 function setDocsVisible(visible) {
   state.docsVisible = visible;
   if (visible) state.docsCollapsed = false;
+  const infoButton = $('#legend-info');
+  infoButton.setAttribute('aria-pressed', String(visible));
+  infoButton.classList.toggle('active', visible);
   updateDocsCard(state.activeLayer);
 }
 
@@ -1426,7 +1433,10 @@ async function activateLayer(layer, { stage = null, month = null } = {}) {
   updateExportControls();
   updateStatus();
   document.querySelectorAll('.layer-item').forEach((item) => {
-    item.classList.toggle('active', item.dataset.layerId === layer.id);
+    const active = item.dataset.layerId === layer.id;
+    item.classList.toggle('active', active);
+    if (active) item.setAttribute('aria-current', 'true');
+    else item.removeAttribute('aria-current');
   });
 
   const requestSeq = ++state.fetchSeq;
@@ -1440,7 +1450,10 @@ async function activateLayer(layer, { stage = null, month = null } = {}) {
       state.month = previous.month;
       state.layerLoading = false;
       document.querySelectorAll('.layer-item').forEach((item) => {
-        item.classList.toggle('active', item.dataset.layerId === previous.layer?.id);
+        const active = item.dataset.layerId === previous.layer?.id;
+        item.classList.toggle('active', active);
+        if (active) item.setAttribute('aria-current', 'true');
+        else item.removeAttribute('aria-current');
       });
       setExportMessage(`Layer load failed: ${error.message || String(error)}`, 6000);
       updateLegend(previous.layer);
@@ -1485,13 +1498,13 @@ function stageBarConfig() {
   const layer = state.activeLayer;
   if (!layer) return null;
   if (isStageLayer(layer)) {
-    const history = state.manifest.stage_histories[layer.source] || {};
+    const history = (state.manifest?.stage_histories || {})[layer.source] || {};
     return {
       max: (layer.stage_count || 1) - 1,
       value: state.stage,
-      label: () => {
-        const meta = (history.stages || [])[state.stage] || {};
-        const bits = [`stage_idx ${state.stage}`];
+      label: (value = state.stage) => {
+        const meta = (history.stages || [])[value] || {};
+        const bits = [`stage_idx ${value}`];
         if (meta.stage !== undefined) bits.push(`stage ${meta.stage}`);
         if (meta.erosion_iteration !== undefined) bits.push(`iter ${meta.erosion_iteration}`);
         return bits.join(' · ');
@@ -1503,7 +1516,7 @@ function stageBarConfig() {
     return {
       max: (layer.month_count || 12) - 1,
       value: state.month,
-      label: () => `month ${state.month + 1}`,
+      label: (value = state.month) => `month ${value + 1}`,
       set: (value) => activateLayer(layer, { month: value }),
     };
   }
@@ -1519,8 +1532,10 @@ function updateStageBar() {
   const number = $('#stage-number');
   slider.max = String(config.max);
   number.max = String(config.max);
-  slider.value = String(config.value);
-  number.value = String(config.value);
+  // Don't move the thumb or overwrite the number field while the user is
+  // interacting with it (mid-drag or typing); the debounced fetch lands shortly.
+  if (document.activeElement !== slider) slider.value = String(config.value);
+  if (document.activeElement !== number) number.value = String(config.value);
   $('#stage-label').textContent = config.label();
 }
 
@@ -1543,6 +1558,10 @@ function buildLayerList() {
     groups.get(layer.source).push(layer);
   }
   const kindBadge = { numeric_stage: 'stages', categorical_stage: 'stage cat', numeric_monthly: 'monthly', categorical: 'cat' };
+  const kindBadgeTitle = {
+    numeric_stage: 'varies by stage', categorical_stage: 'categorical, varies by stage',
+    numeric_monthly: 'varies by month', categorical: 'categorical',
+  };
   let groupIndex = 0;
   for (const [source, layers] of groups) {
     const title = document.createElement('button');
@@ -1573,6 +1592,7 @@ function buildLayerList() {
         const badge = document.createElement('span');
         badge.className = 'badge';
         badge.textContent = kindBadge[layer.kind];
+        badge.title = kindBadgeTitle[layer.kind];
         item.appendChild(badge);
       }
       item.addEventListener('click', () => activateLayer(layer));
@@ -1639,7 +1659,7 @@ function sparklineSvg(values, { width = 290, height = 30, marker = -1 } = {}) {
     const my = (height - 3 - ((values[marker] - lo) / span) * (height - 6)).toFixed(1);
     markerCircle = `<circle cx="${mx}" cy="${my}" r="2.5" fill="#ffb454"/>`;
   }
-  return `<svg class="sparkline" width="${width}" height="${height}">`
+  return `<svg class="sparkline" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`
     + `<polyline points="${points}" fill="none" stroke="#4da3ff" stroke-width="1.2"/>`
     + markerCircle
     + `</svg>`;
@@ -1656,6 +1676,10 @@ async function openInspector(cellId) {
   if (!cacheContextIsCurrent(context)) return;
   state.selectedCell = cellId;
   const inspector = $('#inspector');
+  // Remember whether focus lives inside the panel: the innerHTML re-render
+  // below destroys the focused element, and keyboard users would otherwise
+  // be dropped back to <body> on every cell hop.
+  const focusWasInside = inspector.contains(document.activeElement);
   inspector.classList.remove('hidden');
   $('#inspector-title').textContent = `Cell ${cellId}`;
   $('#inspector-body').innerHTML = '<em>loading…</em>';
@@ -1672,9 +1696,9 @@ async function openInspector(cellId) {
   }
   if (state.selectedCell !== cellId || !cacheContextIsCurrent(context)) return;
 
-  const cell = record.cell;
+  const cell = record.cell || {};
   const parts = [];
-  parts.push('<input id="inspector-filter" type="search" placeholder="Filter fields…">');
+  parts.push('<input id="inspector-filter" type="search" placeholder="Filter fields…" aria-label="Filter fields">');
 
   parts.push('<div class="inspector-section"><h3>Ledger slices (per stage)</h3>');
   for (const [historyName, ledger] of Object.entries(record.ledgers || {})) {
@@ -1707,8 +1731,9 @@ async function openInspector(cellId) {
   }
   parts.push('</div></div>');
 
-  parts.push(`<div class="inspector-section"><h3>Adjacency (${record.adjacency_edges.length} edges)</h3>`);
-  for (const edge of record.adjacency_edges) {
+  const edges = record.adjacency_edges || [];
+  parts.push(`<div class="inspector-section"><h3>Adjacency (${edges.length} edges)</h3>`);
+  for (const edge of edges) {
     const other = edge.cell_a_id === cellId ? edge.cell_b_id : edge.cell_a_id;
     const otherNumber = Number(other);
     const validOther = Number.isInteger(otherNumber) && otherNumber >= 0 && otherNumber < state.cellCount;
@@ -1737,6 +1762,11 @@ async function openInspector(cellId) {
       openInspector(Number(anchor.dataset.cell));
     });
   });
+  if (focusWasInside) {
+    const title = $('#inspector-title');
+    title.setAttribute('tabindex', '-1');
+    title.focus({ preventScroll: true });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1760,7 +1790,7 @@ function updateStatus() {
       const value = state.values[state.hoverCell];
       if (value !== undefined && value < 1e37) {
         bits.push(isCategoricalLayer(layer)
-          ? (layer.categories[Math.round(value)] ?? '—')
+          ? (layer.categories?.[Math.round(value)] ?? '—')
           : formatValue(value));
       } else {
         bits.push('—');
@@ -1858,7 +1888,7 @@ function applyServerStatus(status) {
   const badge = $('#cache-state');
   badge.className = `state-pill ${state.cacheAvailable ? 'available' : 'unavailable'}`;
   badge.textContent = state.cacheAvailable ? 'Cache ready' : 'No cache';
-  badge.title = '';
+  badge.removeAttribute('title');
   const context = [status?.cache_dir ? `cache ${status.cache_dir}` : null, status?.workspace ? `workspace ${status.workspace}` : null];
   if (status?.cache_error) context.push(`error: ${status.cache_error}`);
   if (status?.version) context.push(`v${status.version}`);
@@ -1979,7 +2009,9 @@ function resetCacheDerivedState() {
   $('#data-raw-link').removeAttribute('href');
   $('#data-loading').classList.add('hidden');
   document.querySelectorAll('#projection-controls button').forEach((button) => {
-    button.classList.toggle('active', button.dataset.proj === 'globe');
+    const active = button.dataset.proj === 'globe';
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
   });
   for (const id of ['toggle-wireframe', 'toggle-plates', 'toggle-graticule']) {
     $(`#${id}`).classList.remove('active');
@@ -2017,13 +2049,24 @@ function beginCacheTransition(cacheDir) {
   badge.textContent = 'Switching cache…';
 }
 
-async function refreshWorlds() {
+async function refreshWorlds({ force = false } = {}) {
   const requestId = ++state.worldRequest;
   const payload = await optionalJson('/api/worlds');
   if (requestId !== state.worldRequest) return;
   const select = $('#world-select');
+  // A transient poll failure must not wipe a previously good list; only show
+  // the "unavailable" placeholder when no list was ever loaded.
+  if (payload === null && state.worldsSignature !== null) return;
   const worlds = Array.isArray(payload?.worlds) ? payload.worlds : [];
   const current = state.status?.cache_dir ?? '';
+  const signature = JSON.stringify([payload === null, current, worlds.map((world) => [
+    String(world.cache_dir ?? world.id ?? ''), String(world.name ?? ''), world.cell_count ?? null,
+  ])]);
+  // Rebuilding the options closes the native dropdown and resets the pending
+  // selection, so skip while the user is interacting with it or when the list
+  // has not actually changed since the last render.
+  if (!force && (document.activeElement === select || signature === state.worldsSignature)) return;
+  state.worldsSignature = signature;
   select.innerHTML = '';
 
   if (current && !worlds.some((world) => String(world.cache_dir ?? world.id) === current)) {
@@ -2067,9 +2110,14 @@ async function switchWorld() {
     badge.className = 'state-pill failed';
     badge.textContent = 'Switch failed';
     badge.title = error.message || String(error);
-    await refreshWorlds();
+    // Restore the displayed selection to the still-current cache immediately,
+    // then rebuild the list (force bypasses the unchanged-list skip).
+    select.value = state.status?.cache_dir ?? '';
+    await refreshWorlds({ force: true });
   } finally {
-    select.disabled = false;
+    // Mirror refreshWorlds: keep the select disabled when it holds only a
+    // placeholder option (no switchable caches).
+    select.disabled = ![...select.options].some((option) => option.value);
   }
 }
 
@@ -2498,15 +2546,7 @@ function configFilename() {
 }
 
 function downloadConfig() {
-  const blob = new Blob([$('#config-yaml').value], { type: 'text/yaml;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = configFilename();
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
+  downloadBlob(new Blob([$('#config-yaml').value], { type: 'text/yaml;charset=utf-8' }), configFilename());
 }
 
 async function saveConfig() {
@@ -2779,7 +2819,11 @@ function artifactMarkup(artifacts, jobId) {
     const name = artifact.name ?? artifact.label ?? artifact.path ?? 'artifact';
     const url = artifact.url ?? artifact.download_url ?? artifact.href
       ?? (artifact.available && jobId ? `/api/jobs/${encodeURIComponent(jobId)}/artifacts/${index}` : null);
-    if (url) return `<a href="${escapeHtml(url)}" download>${escapeHtml(name)} ↓</a>`;
+    // Only allow same-origin paths and http(s) URLs: escapeHtml neutralizes
+    // markup in the href but not a javascript: scheme from server data.
+    if (url && (/^\//.test(url) || /^https?:\/\//i.test(url))) {
+      return `<a href="${escapeHtml(url)}" download>${escapeHtml(name)} ↓</a>`;
+    }
     return `<div class="catalog-item"><strong>${escapeHtml(name)}</strong><small>${escapeHtml(artifact.path ?? artifact.kind ?? '')}</small></div>`;
   }).join('') + '</div>';
 }
@@ -3010,7 +3054,9 @@ function wireWorkbenchEvents() {
 function setProjection(projection) {
   state.projection = projection;
   document.querySelectorAll('#projection-controls button').forEach((button) => {
-    button.classList.toggle('active', button.dataset.proj === projection);
+    const active = button.dataset.proj === projection;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
   });
   state.morph.target = projection === 'globe' ? 0 : 1;
   if (projection === 'equirect') state.morph.proj2DTarget = 0;
@@ -3027,7 +3073,17 @@ function wireMapEvents() {
   const controller = new AbortController();
   state.mapEventController = controller;
   const bind = (target, type, listener) => target.addEventListener(type, listener, { signal: controller.signal });
-  bind(window, 'resize', resizeRenderer);
+  let resizeFrame = 0;
+  controller.signal.addEventListener('abort', () => cancelAnimationFrame(resizeFrame));
+  bind(window, 'resize', () => {
+    // Drag-resize fires a burst of events and each full resize reallocates the
+    // GPU pick target, so coalesce to one resize per frame.
+    if (resizeFrame) return;
+    resizeFrame = requestAnimationFrame(() => {
+      resizeFrame = 0;
+      resizeRenderer();
+    });
+  });
 
   document.querySelectorAll('#projection-controls button').forEach((button) => {
     bind(button, 'click', () => setProjection(button.dataset.proj));
@@ -3077,9 +3133,20 @@ function wireMapEvents() {
 
   const slider = $('#stage-slider');
   const number = $('#stage-number');
+  let stageFetchTimer = 0;
   bind(slider, 'input', () => {
     const config = stageBarConfig();
-    if (config) config.set(Number(slider.value));
+    if (!config) return;
+    const value = Number(slider.value);
+    // Scrub feedback is immediate; the expensive layer fetch is coalesced so
+    // dragging across N stages issues one request instead of N.
+    number.value = String(value);
+    $('#stage-label').textContent = config.label(value);
+    const layer = state.activeLayer;
+    window.clearTimeout(stageFetchTimer);
+    stageFetchTimer = window.setTimeout(() => {
+      if (state.activeLayer === layer) config.set(value);
+    }, 120);
   });
   bind(number, 'change', () => {
     const config = stageBarConfig();
@@ -3118,10 +3185,17 @@ function wireMapEvents() {
     if (cell >= 0) openInspector(cell);
   });
   bind(canvas, 'pointermove', (event) => {
+    // Touch drags rotate the globe; a hover readout nobody can see is wasted
+    // pick-buffer renders.
+    if (event.pointerType === 'touch') return;
     const now = performance.now();
     if (now - lastMove < 40) return;
     lastMove = now;
     state.hoverCell = pickCell(event.clientX, event.clientY);
+    updateStatus();
+  });
+  bind(canvas, 'pointerleave', () => {
+    state.hoverCell = -1;
     updateStatus();
   });
   three.controls.addEventListener('change', () => { state.pickDirty = true; });
@@ -3163,7 +3237,12 @@ async function main() {
 
   // Jobs and a cache created by a job can change while the page is open.
   window.setInterval(() => {
-    if (!document.hidden) refreshJobs();
+    if (document.hidden) return;
+    // Nothing surfaces job state outside the Operations view, so once no job
+    // is active there is nothing to poll for until the view is opened again
+    // (entering it triggers refreshJobs via setView).
+    if (state.activeView !== 'operations' && !state.jobs.some(jobIsActive)) return;
+    refreshJobs();
   }, 2500);
   window.setInterval(() => {
     if (!document.hidden) loadServerStatus();

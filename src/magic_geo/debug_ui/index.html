@@ -70,9 +70,9 @@
         </div>
         <div id="topbar">
           <div class="control-group" id="projection-controls" aria-label="Projection">
-            <button type="button" data-proj="globe" class="active" title="Globe (1)">Globe</button>
-            <button type="button" data-proj="equirect" title="Equirectangular (2)">Equirect</button>
-            <button type="button" data-proj="mollweide" title="Mollweide (3)">Mollweide</button>
+            <button type="button" data-proj="globe" class="active" title="Globe (1)" aria-pressed="true">Globe</button>
+            <button type="button" data-proj="equirect" title="Equirectangular (2)" aria-pressed="false">Equirect</button>
+            <button type="button" data-proj="mollweide" title="Mollweide (3)" aria-pressed="false">Mollweide</button>
           </div>
           <div class="control-group" id="overlay-controls" aria-label="Map overlays">
             <button type="button" id="toggle-wireframe" title="Mesh wireframe (w)" aria-pressed="false">Wire</button>
@@ -90,9 +90,9 @@
             <div id="legend">
               <div id="legend-head">
                 <div id="legend-title"></div>
-                <button type="button" id="legend-info" title="Layer docs (d)" aria-label="Toggle layer documentation">ⓘ</button>
+                <button type="button" id="legend-info" title="Layer docs (d)" aria-label="Toggle layer documentation" aria-pressed="true">ⓘ</button>
               </div>
-              <canvas id="legend-ramp" width="160" height="10" aria-label="Layer color scale"></canvas>
+              <canvas id="legend-ramp" width="160" height="10" role="img" aria-label="Layer color scale"></canvas>
               <div id="legend-labels"><span id="legend-min"></span><span id="legend-max"></span></div>
               <div id="legend-categories"></div>
             </div>
