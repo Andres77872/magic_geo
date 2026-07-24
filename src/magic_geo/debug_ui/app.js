@@ -386,6 +386,13 @@ async function buildScene(context) {
   geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
   geometry.setAttribute('aPosEq', new THREE.BufferAttribute(new Float32Array(posEq), 2));
   geometry.setAttribute('aPosMo', new THREE.BufferAttribute(new Float32Array(posMo), 2));
+  const meshCellCount = cellIds.byteLength / 4;
+  // The mesh is authoritative: a manifest with a missing/zero cell_count would
+  // size the value texture at 1×1 and render every cell as missing (grey).
+  if (state.cellCount !== meshCellCount) {
+    console.warn(`manifest cell_count (${state.cellCount}) disagrees with mesh (${meshCellCount}); using the mesh count`);
+    state.cellCount = meshCellCount;
+  }
   const idFloats = Float32Array.from(new Uint32Array(cellIds));
   geometry.setAttribute('aCellId', new THREE.BufferAttribute(idFloats, 1));
   geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
@@ -944,6 +951,15 @@ async function captureMapCanvas(snapshot, generation) {
   const source = renderer.domElement;
   if (!source.width || !source.height) throw new Error('The map canvas has no drawable size.');
 
+  // Snap the morph out of any in-flight transition. The OrbitControls camera
+  // pose only matches the projection once the morph reaches its target, so
+  // exporting mid-transition would otherwise bake a globe camera onto the
+  // flat plane and silently produce a clipped/offset PNG.
+  const morph = state.morph;
+  morph.value = morph.target;
+  morph.proj2D = morph.proj2DTarget;
+  state.pickDirty = true;
+
   const priorTarget = renderer.getRenderTarget();
   const priorMorph = sharedUniforms.uMorph.value;
   const priorProjection = sharedUniforms.uProj2D.value;
@@ -1398,7 +1414,12 @@ function buildHelpOverlay() {
 function setHelpVisible(visible) {
   const overlay = $('#help-overlay');
   if (visible) {
-    buildHelpOverlay();
+    try {
+      buildHelpOverlay();
+    } catch (error) {
+      console.error(error);
+      $('#help-body').innerHTML = '<div class="notice warning">The help content could not be built. Keyboard shortcuts: <kbd>?</kbd> toggles this panel, <kbd>Esc</kbd> closes it.</div>';
+    }
     state.helpOpener = document.activeElement;
   }
   overlay.classList.toggle('hidden', !visible);
@@ -1741,8 +1762,8 @@ async function openInspector(cellId) {
     const flags = ['plate_boundary', 'land_water_transition', 'biome_transition']
       .filter((flag) => edge[flag]).join(', ');
     parts.push(
-      `<div class="field-row"><span class="k">→ ${validOther ? `<a href="#" data-cell="${otherNumber}" style="color:#4da3ff">cell ${otherLabel}</a>` : `cell ${otherLabel}`}`
-      + `${flags ? ` <span style="color:#ffb454">${escapeHtml(flags)}</span>` : ''}</span>`
+      `<div class="field-row"><span class="k">→ ${validOther ? `<a href="#" data-cell="${otherNumber}" class="cell-link">cell ${otherLabel}</a>` : `cell ${otherLabel}`}`
+      + `${flags ? ` <span class="edge-flags">${escapeHtml(flags)}</span>` : ''}</span>`
       + `<span class="v">${escapeHtml(formatValue(edge.great_circle_distance_km))} km</span></div>`,
     );
   }
@@ -1790,7 +1811,7 @@ function updateStatus() {
       const value = state.values[state.hoverCell];
       if (value !== undefined && value < 1e37) {
         bits.push(isCategoricalLayer(layer)
-          ? (layer.categories?.[Math.round(value)] ?? '—')
+          ? (layer.categories?.[Math.round(value)] ?? `code ${Math.round(value)}`)
           : formatValue(value));
       } else {
         bits.push('—');
@@ -2047,6 +2068,10 @@ function beginCacheTransition(cacheDir) {
   const badge = $('#cache-state');
   badge.className = 'state-pill pending';
   badge.textContent = 'Switching cache…';
+  // A cache exists — it is loading, not missing. Keep the central CTA honest.
+  const mapEmpty = mapEmptyElements();
+  mapEmpty.title.textContent = 'Switching cache…';
+  mapEmpty.detail.textContent = `Loading the debug cache for ${cacheDir}. The map appears as soon as it is ready.`;
 }
 
 async function refreshWorlds({ force = false } = {}) {
@@ -2110,10 +2135,10 @@ async function switchWorld() {
     badge.className = 'state-pill failed';
     badge.textContent = 'Switch failed';
     badge.title = error.message || String(error);
-    // Restore the displayed selection to the still-current cache immediately,
-    // then rebuild the list (force bypasses the unchanged-list skip).
-    select.value = state.status?.cache_dir ?? '';
+    // Rebuild the option list first, then restore the displayed selection to
+    // the still-current cache; restoring before the rebuild would be wiped.
     await refreshWorlds({ force: true });
+    select.value = state.status?.cache_dir ?? '';
   } finally {
     // Mirror refreshWorlds: keep the select disabled when it holds only a
     // placeholder option (no switchable caches).
@@ -2164,7 +2189,7 @@ async function initializeMap(context = currentCacheContext()) {
     state.manifest = manifest;
     state.cellCount = Number(manifest.world?.cell_count ?? 0);
     const world = manifest.world || {};
-    $('#world-meta').innerHTML = [
+  $('#world-meta').innerHTML = [
       `${escapeHtml(world.name ?? 'world')} · ${state.cellCount} cells`,
       `${escapeHtml(world.mesh_backend ?? '')} · scope ${escapeHtml(world.generation_scope ?? 'full')}`,
       `${(manifest.layers || []).length} layers · ${Object.keys(manifest.stage_histories || {}).length} stage histories`,
@@ -2172,6 +2197,12 @@ async function initializeMap(context = currentCacheContext()) {
 
     if (!await buildScene(context)) return;
     if (requestId !== state.mapRequest || !cacheContextIsCurrent(context)) return;
+    // buildScene may correct cellCount against the mesh; reflect the final value.
+    $('#world-meta').innerHTML = [
+      `${escapeHtml(world.name ?? 'world')} · ${state.cellCount} cells`,
+      `${escapeHtml(world.mesh_backend ?? '')} · scope ${escapeHtml(world.generation_scope ?? 'full')}`,
+      `${(manifest.layers || []).length} layers · ${Object.keys(manifest.stage_histories || {}).length} stage histories`,
+    ].join('<br>');
     buildLayerList();
     wireMapEvents();
     updateDocsCard(null);
@@ -2539,9 +2570,12 @@ async function validateConfig() {
   }
 }
 
+function configNameRaw() {
+  return $('#config-name').value.trim() || 'world';
+}
+
 function configFilename() {
-  const raw = $('#config-name').value.trim() || 'world';
-  const safe = raw.replace(/[^A-Za-z0-9._-]+/g, '-');
+  const safe = configNameRaw().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+/, '') || 'world';
   return safe.endsWith('.yaml') || safe.endsWith('.yml') ? safe : `${safe}.yaml`;
 }
 
@@ -2564,7 +2598,7 @@ async function saveConfig() {
     method: 'POST',
     body: {
       yaml: $('#config-yaml').value,
-      name: nameInput.value.trim() || 'world',
+      name: configNameRaw(),
       force,
     },
   });
@@ -2800,9 +2834,13 @@ function renderJobs() {
   for (const job of state.jobs) {
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = `job-row ${state.selectedJobId === job.id ? 'active' : ''}`;
+    const isSelected = state.selectedJobId === job.id;
+    button.className = `job-row ${isSelected ? 'active' : ''}`;
     const operation = job.operation ?? job.name ?? 'job';
     const status = jobStatus(job);
+    // Concise accessible name; the grid layout stays purely visual.
+    button.setAttribute('aria-label', `${operation}, status ${status}`);
+    if (isSelected) button.setAttribute('aria-current', 'true');
     button.innerHTML = `<strong>${escapeHtml(operation)}</strong><span class="state-pill ${escapeHtml(status)}">${escapeHtml(status)}</span>`
       + `<small>${escapeHtml(job.id)}</small><small>${escapeHtml(job.created_at ?? job.started_at ?? '')}</small>`;
     button.addEventListener('click', () => selectJob(job.id));
@@ -2897,7 +2935,17 @@ async function refreshJobs() {
   renderJobs();
   if (state.selectedJobId) {
     const selected = state.jobs.find((job) => job.id === state.selectedJobId);
-    if (selected && (jobIsActive(selected) || jobStatus(selected) !== state.selectedJobStatus)) {
+    if (!selected) {
+      // The job vanished server-side (restart or pruning); drop the stale
+      // detail view instead of offering a Cancel button that would 404.
+      state.selectedJobId = null;
+      state.selectedJobStatus = null;
+      $('#job-detail-title').textContent = 'No job selected';
+      $('#job-detail').innerHTML = '<div class="notice warning">The selected job is no longer available — it was removed from the server.</div>';
+      $('#job-cancel').classList.add('hidden');
+      state.jobsSignature = null;
+      renderJobs();
+    } else if (jobIsActive(selected) || jobStatus(selected) !== state.selectedJobStatus) {
       await selectJob(selected.id, { preserveScroll: true });
     }
   }
@@ -2973,7 +3021,6 @@ function wireWorkbenchEvents() {
   // wireMapEvents(), which only runs after a successful map initialization.
   $('#toggle-help').addEventListener('click', () => setHelpVisible($('#help-overlay').classList.contains('hidden')));
   $('#docs-help-open').addEventListener('click', () => setHelpVisible(true));
-  $('#help-fab').addEventListener('click', () => setHelpVisible(true));
   $('#help-close').addEventListener('click', () => setHelpVisible(false));
   $('#help-overlay').addEventListener('click', (event) => {
     if (event.target === $('#help-overlay')) setHelpVisible(false);
@@ -3161,11 +3208,6 @@ function wireMapEvents() {
     resizeRenderer();
   });
 
-  bind($('#docs-card-head'), 'click', (event) => {
-    if (event.target.closest('#docs-card-actions')) return;
-    state.docsCollapsed = !state.docsCollapsed;
-    updateDocsCard(state.activeLayer);
-  });
   bind($('#docs-card-toggle'), 'click', () => {
     state.docsCollapsed = !state.docsCollapsed;
     updateDocsCard(state.activeLayer);

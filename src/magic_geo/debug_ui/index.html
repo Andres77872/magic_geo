@@ -84,7 +84,7 @@
             <button type="button" id="export-image-prompt" title="Export a GPT Image prompt and color codex as Markdown" disabled>Prompt .md</button>
           </div>
           <div class="control-group" id="help-controls">
-            <button type="button" id="toggle-help" title="Help (?)" aria-label="Toggle help">?</button>
+            <button type="button" id="toggle-help" title="Help (?)" aria-label="Toggle help" aria-controls="help-overlay" aria-expanded="false">?</button>
           </div>
           <div id="topbar-right">
             <div id="legend">
@@ -111,7 +111,6 @@
           <div id="status" role="status" aria-live="polite"></div>
           <div id="map-hover"></div>
         </div>
-        <button type="button" id="help-fab" title="Help (?)" aria-label="Open help">?</button>
       </div>
 
       <aside id="inspector" class="hidden" aria-label="Selected cell inspector">
@@ -153,15 +152,14 @@
         </div>
         <div id="data-page-controls" class="field-stack hidden">
           <label for="data-limit">Rows per page</label>
-          <select id="data-limit"><option selected>10</option><option>25</option><option>50</option><option>100</option></select>
+          <select id="data-limit"><option value="10" selected>10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select>
           <div class="pager">
             <button type="button" id="data-prev" aria-label="Previous page">←</button>
             <span id="data-page-label">0–0</span>
             <button type="button" id="data-next" aria-label="Next page">→</button>
           </div>
         </div>
-      </aside>
-      <article class="content-panel">
+      </aside><article class="content-panel">
         <div id="data-title-row"><div><p class="eyebrow" id="data-eyebrow">Catalog</p><h2 id="data-title">Overview</h2></div><div class="button-row"><a id="data-raw-link" class="button hidden" target="_blank" rel="noopener">Open raw JSON ↗</a><span id="data-loading" class="state-pill hidden">Loading…</span></div></div>
         <div id="data-output" class="data-output" tabindex="0"></div>
       </article>
@@ -181,7 +179,7 @@
         <div class="form-toolbar">
           <div><label for="config-profile">Profile</label><select id="config-profile"></select></div>
           <button type="button" id="config-reset">Reset from profile</button>
-          <div><label for="config-name">Save as</label><input id="config-name" type="text" value="world" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" autocomplete="off"></div>
+          <div><label for="config-name">Save as</label><input id="config-name" type="text" value="world" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" title="Letters, digits, dot, underscore, or dash; must start with a letter or digit" autocomplete="off"></div>
           <button type="button" id="config-validate" class="primary">Validate YAML</button>
         </div>
         <label class="sr-only" for="config-yaml">World YAML configuration</label>

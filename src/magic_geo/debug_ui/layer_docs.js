@@ -500,7 +500,7 @@ export const UI_GUIDE = [
     title: 'Layers',
     items: [
       ['Pick a layer', 'Click any entry in the left panel. Layers are grouped by source family; click a group title to collapse it.'],
-      ['Search', 'Press <kbd>/</kbd> or click the filter box, then type. Matches any part of the source or field name.'],
+      ['Search', 'Press <kbd>/</kbd> or click the filter box, then type. Matches the layer name, source family, and documentation text (unit, role, description, class names).'],
       ['What am I looking at?', 'The docs card under the layer panel explains the active layer — unit, role, value range, and (for categoricals) the class list. Toggle it with <kbd>d</kbd>.'],
       ['Colour scale', 'Numeric layers use viridis normalised to the 2nd–98th percentile (robust to outliers). The legend shows the scale; <kbd>≥</kbd>/<kbd>≤</kbd> markers mean values beyond the ends are clipped to the end colour. Categorical layers use one colour per class.'],
       ['Missing data', 'Cells with no value render as flat grey — distinct from both ends of the colour ramp.'],
