@@ -98,7 +98,7 @@ documentation at `/api/docs`.
 An all-in-one image builds the native core, CLI, and web workbench together;
 `.env` (copy `.env.example`) holds the deployment configuration, including the
 host directory where worlds are saved (`MAGIC_GEO_WORLDS_DIR`) and the
-container workspace path (`MAGIC_GEO_WORKSPACE`):
+absolute container workspace path (`MAGIC_GEO_CONTAINER_WORKSPACE`):
 
 ```bash
 cp .env.example .env
@@ -246,9 +246,19 @@ python -m pytest --cov --cov-report=html           # same report, browsable in h
 
 The `slow` marker covers `tests/test_validate_cli_*.py`, which drive every
 violation branch of the `validate` command through the CLI. They are 21% of the
-tests but 54% of the runtime, because each case runs a full validation over a
-generated world. Deselect them for a tight local loop; run everything before
-pushing.
+tests but the majority of the runtime, because each case runs a full validation
+over a generated world. Deselect them for a tight local loop; run everything
+before pushing.
+
+That tier is deliberately the *only* place tamper coverage is driven through the
+command. Each replay validator owns a module that calls it directly
+(`tests/test_*_validation.py`, `tests/test_*_validators.py`): those can name the
+field that diverged and assert the undone tamper replays clean again, neither of
+which a shared CLI verdict line can express, and they cost one in-process call
+instead of a world serialization plus a full validation pass. The `test_smoke_*`
+modules therefore assert generated-world invariants plus a single wiring check
+per subsystem — one tamper per verdict, one command pass — rather than repeating
+those tables.
 
 Coverage is opt-in rather than wired into `addopts`; it includes branch
 coverage because a validator's rejection path matters as much as its happy

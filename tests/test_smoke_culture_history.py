@@ -11,11 +11,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 
+from click.testing import Result
 from typer.testing import CliRunner
 
 from magic_geo.cli import app
 
 from support import worlds
+from support.cli import assert_no_cli_crash
 
 
 class SmokeCultureHistoryTests(TestCase):
@@ -419,276 +421,91 @@ class SmokeCultureHistoryTests(TestCase):
         self.assertIn("language_region_id", first_event)
         self.assertIn("pressure_index", first_event)
         self.assertIn("continuity_index", first_event)
-    def test_culture_language_and_site_causal_replay_mutations(self) -> None:
-        world = worlds.cached_world("mid_512")
-        culture_model = world["culture_region_model"]
-        language_model = world["language_region_model"]
-        site_model = world["cultural_site_model"]
+    def test_culture_history_models_declare_their_documented_identities(self) -> None:
+        """Every culture/history replay names its documented model and emits records.
 
-        self.assertEqual(
-            culture_model["model_type"],
-            "causal_political_homeland_barrier_trade_culture_regions_v1",
-        )
-        self.assertEqual(
-            language_model["model_type"],
-            "causal_trade_union_family_lineage_phonology_v1",
-        )
-        self.assertEqual(
-            site_model["model_type"],
-            "causal_terrain_culture_ranked_sacred_ruin_sites_v1",
-        )
-        self.assertTrue(world["cultures"])
-        self.assertTrue(world["language_regions"])
-        self.assertTrue(world["sacred_areas"])
-        self.assertTrue(world["ruins"])
+        Field-by-field tamper coverage for these replays lives in
+        ``test_cultural_geography_validation``, ``test_historical_geography_validation``
+        and ``test_phonology_history_validation``, which call the validators directly
+        against the 128-cell replay world and assert the undone tamper replays clean
+        again -- a claim a CLI verdict line cannot make.
+        """
+
+        world = worlds.cached_world_readonly("mid_512")
+
+        for model_key, model_type in (
+            (
+                "culture_region_model",
+                "causal_political_homeland_barrier_trade_culture_regions_v1",
+            ),
+            ("language_region_model", "causal_trade_union_family_lineage_phonology_v1"),
+            ("cultural_site_model", "causal_terrain_culture_ranked_sacred_ruin_sites_v1"),
+            (
+                "historical_event_model",
+                "causal_region_culture_language_trade_site_timeline_v1",
+            ),
+            (
+                "phonology_history_model",
+                "causal_language_era_sound_rule_lexical_diffusion_speaker_history_v1",
+            ),
+        ):
+            with self.subTest(model=model_key):
+                self.assertEqual(world[model_key]["model_type"], model_type)
+
+        for family in (
+            "cultures",
+            "language_regions",
+            "sacred_areas",
+            "ruins",
+            "historical_events",
+            "phonological_rules",
+            "phonological_histories",
+            "lexical_correspondences",
+            "lexical_diffusion_histories",
+            "speaker_population_histories",
+        ):
+            with self.subTest(family=family):
+                self.assertTrue(world[family], family)
+
+        self.assertEqual(len(world["historical_eras"]), 4)
+
+    def test_validate_reports_every_culture_history_replay_verdict(self) -> None:
+        """``validate`` reaches and reports the culture, history and phonology replays.
+
+        Wiring is the one claim the dedicated validator modules cannot make -- they
+        never go through the public command. One tamper per verdict in a single pass
+        is all that claim needs.
+        """
+
+        world = worlds.cached_world("mid_512")
+        runner = CliRunner()
 
         with TemporaryDirectory() as temporary_directory:
             world_path = Path(temporary_directory) / "world.json"
-            runner = CliRunner()
 
-            def validate_current() -> object:
+            def validate_current() -> Result:
                 world_path.write_text(json.dumps(world), encoding="utf-8")
                 return runner.invoke(app, ["validate", "--world", str(world_path)])
 
-            valid_result = validate_current()
-            self.assertEqual(valid_result.exit_code, 0, valid_result.output)
+            control = validate_current()
+            assert_no_cli_crash(self, control, command="validate")
+            self.assertEqual(control.exit_code, 0, control.output)
 
             culture = world["cultures"][0]
-            original_culture_type = culture["type"]
             culture["type"] = (
-                "agrarian_lowland"
-                if original_culture_type != "agrarian_lowland"
-                else "river_valley"
+                "agrarian_lowland" if culture["type"] != "agrarian_lowland" else "river_valley"
             )
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "cultural geography model or causal replay invalid",
-                invalid_result.output,
-            )
-            culture["type"] = original_culture_type
+            world["historical_events"][0]["year_bp"] += 2.0
+            world["phonological_rules"][0]["probability_index"] += 0.01
 
-            language = world["language_regions"][0]
-            original_inventory = language["phoneme_inventory_size"]
-            language["phoneme_inventory_size"] += 1
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "cultural geography model or causal replay invalid",
-                invalid_result.output,
-            )
-            language["phoneme_inventory_size"] = original_inventory
+            result = validate_current()
 
-            sacred_area = world["sacred_areas"][0]
-            original_sacred_type = sacred_area["type"]
-            sacred_area["type"] = (
-                "sacred_grove"
-                if original_sacred_type != "sacred_grove"
-                else "mountain_shrine"
-            )
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "cultural geography model or causal replay invalid",
-                invalid_result.output,
-            )
-            sacred_area["type"] = original_sacred_type
-
-            ruin = world["ruins"][0]
-            original_abandonment = ruin["abandonment_reason"]
-            ruin["abandonment_reason"] = (
-                "frontier_isolation"
-                if original_abandonment != "frontier_isolation"
-                else "trade_decline"
-            )
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "cultural geography model or causal replay invalid",
-                invalid_result.output,
-            )
-            ruin["abandonment_reason"] = original_abandonment
-
-            original_union_threshold = language_model["union_volume_threshold"]
-            language_model["union_volume_threshold"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "cultural geography model or causal replay invalid",
-                invalid_result.output,
-            )
-            language_model["union_volume_threshold"] = original_union_threshold
-
-            original_site_threshold = site_model["sacred_candidate_threshold"]
-            site_model["sacred_candidate_threshold"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "cultural geography model or causal replay invalid",
-                invalid_result.output,
-            )
-            site_model["sacred_candidate_threshold"] = original_site_threshold
-    def test_historical_geography_causal_replay_mutations(self) -> None:
-        world = worlds.cached_world("mid_512")
-        model = world["historical_event_model"]
-
-        self.assertEqual(
-            model["model_type"],
-            "causal_region_culture_language_trade_site_timeline_v1",
-        )
-        self.assertEqual(len(world["historical_eras"]), 4)
-        self.assertTrue(world["historical_events"])
-
-        with TemporaryDirectory() as temporary_directory:
-            world_path = Path(temporary_directory) / "world.json"
-            runner = CliRunner()
-
-            def validate_current() -> object:
-                world_path.write_text(json.dumps(world), encoding="utf-8")
-                return runner.invoke(app, ["validate", "--world", str(world_path)])
-
-            valid_result = validate_current()
-            self.assertEqual(valid_result.exit_code, 0, valid_result.output)
-
-            event = world["historical_events"][0]
-            original_year = event["year_bp"]
-            event["year_bp"] += 2.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "historical geography model or causal replay invalid",
-                invalid_result.output,
-            )
-            event["year_bp"] = original_year
-
-            original_cell_id = event["cell_id"]
-            event["cell_id"] = original_cell_id + 1
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "historical geography model or causal replay invalid",
-                invalid_result.output,
-            )
-            event["cell_id"] = original_cell_id
-
-            era = world["historical_eras"][0]
-            original_instability = era["mean_instability"]
-            era["mean_instability"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "historical geography model or causal replay invalid",
-                invalid_result.output,
-            )
-            era["mean_instability"] = original_instability
-
-            parameters = model["dynastic_change_parameters"]
-            original_threshold = parameters["pressure_threshold"]
-            parameters["pressure_threshold"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "historical geography model or causal replay invalid",
-                invalid_result.output,
-            )
-            parameters["pressure_threshold"] = original_threshold
-    def test_phonology_history_causal_replay_mutations(self) -> None:
-        world = worlds.cached_world("mid_512")
-        model = world["phonology_history_model"]
-
-        self.assertEqual(
-            model["model_type"],
-            "causal_language_era_sound_rule_lexical_diffusion_speaker_history_v1",
-        )
-        self.assertTrue(world["phonological_rules"])
-        self.assertTrue(world["phonological_histories"])
-        self.assertTrue(world["lexical_correspondences"])
-        self.assertTrue(world["lexical_diffusion_histories"])
-        self.assertTrue(world["speaker_population_histories"])
-
-        with TemporaryDirectory() as temporary_directory:
-            world_path = Path(temporary_directory) / "world.json"
-            runner = CliRunner()
-
-            def validate_current() -> object:
-                world_path.write_text(json.dumps(world), encoding="utf-8")
-                return runner.invoke(app, ["validate", "--world", str(world_path)])
-
-            valid_result = validate_current()
-            self.assertEqual(valid_result.exit_code, 0, valid_result.output)
-
-            rule = world["phonological_rules"][0]
-            original_probability = rule["probability_index"]
-            rule["probability_index"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "phonology history model or causal replay invalid",
-                invalid_result.output,
-            )
-            rule["probability_index"] = original_probability
-
-            history_step = world["phonological_histories"][0]["steps"][0]
-            original_inventory = history_step["inventory_size"]
-            history_step["inventory_size"] += 1
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "phonology history model or causal replay invalid",
-                invalid_result.output,
-            )
-            history_step["inventory_size"] = original_inventory
-
-            correspondence = world["lexical_correspondences"][0]
-            original_form = correspondence["derived_form"]
-            correspondence["derived_form"] = f"{original_form}a"
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "phonology history model or causal replay invalid",
-                invalid_result.output,
-            )
-            correspondence["derived_form"] = original_form
-
-            diffusion_step = world["lexical_diffusion_histories"][0]["steps"][0]
-            original_adoption = diffusion_step["adoption_fraction"]
-            diffusion_step["adoption_fraction"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "phonology history model or causal replay invalid",
-                invalid_result.output,
-            )
-            diffusion_step["adoption_fraction"] = original_adoption
-
-            speaker_step = world["speaker_population_histories"][0]["steps"][0]
-            original_allophony = speaker_step["allophonic_variation_index"]
-            speaker_step["allophonic_variation_index"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "phonology history model or causal replay invalid",
-                invalid_result.output,
-            )
-            speaker_step["allophonic_variation_index"] = original_allophony
-
-            language = world["language_regions"][0]
-            original_history_id = language["phonological_history_id"]
-            language["phonological_history_id"] = original_history_id + 1
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "phonology history model or causal replay invalid",
-                invalid_result.output,
-            )
-            language["phonological_history_id"] = original_history_id
-
-            original_rule_model = model["rule_model"]
-            model["rule_model"] = "unsupported_rule_model"
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "phonology history model or causal replay invalid",
-                invalid_result.output,
-            )
-            model["rule_model"] = original_rule_model
+        assert_no_cli_crash(self, result, command="validate")
+        self.assertEqual(result.exit_code, 1, result.output)
+        for message in (
+            "cultural geography model or causal replay invalid",
+            "historical geography model or causal replay invalid",
+            "phonology history model or causal replay invalid",
+        ):
+            with self.subTest(message=message):
+                self.assertIn(message, result.output)

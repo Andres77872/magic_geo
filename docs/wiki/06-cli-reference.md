@@ -170,7 +170,14 @@ Two further variables affect CLI behavior but back **no** flag:
 | `MAGIC_GEO_NATIVE_LIBRARY` | Overrides the `ctypes` shared-library path; raises `RuntimeError` if it does not name a file. Visible indirectly through `magic-geo backend`. | `src/magic_geo/native.py:111-118` |
 | `PYTHONUNBUFFERED` | Set (not read) to `"1"` on subprocesses the `serve` workbench spawns. | `src/magic_geo/web_jobs.py:1187` |
 
-`.env.example` additionally documents `MAGIC_GEO_WORLDS_DIR`, `MAGIC_GEO_PUBLISH_HOST`, and `MAGIC_GEO_ENABLE_CUDA`; those are consumed by Docker Compose and the CMake build, not by the Python CLI.
+`.env.example` is Docker-oriented. It additionally documents
+`MAGIC_GEO_WORLDS_DIR`, `MAGIC_GEO_CONTAINER_WORKSPACE`,
+`MAGIC_GEO_PUBLISH_HOST`, `MAGIC_GEO_PYTHON_VERSION`,
+`MAGIC_GEO_APP_UID`, `MAGIC_GEO_APP_GID`, and
+`MAGIC_GEO_ENABLE_CUDA`; those are consumed by Docker Compose or the image
+build, not directly by the Python CLI. Compose maps
+`MAGIC_GEO_CONTAINER_WORKSPACE` to the process-facing
+`MAGIC_GEO_WORKSPACE`.
 
 ### Exit-code semantics shared by every command
 

@@ -43,6 +43,23 @@ pytestmark = pytest.mark.slow
 #: history, plate kinematic model, and plate motion history.
 WORLD_KEY = "replay_128"
 
+#: The untampered ``validate`` run, shared by every class below. All twelve
+#: slices tamper copies of the same world, so re-running the control per class
+#: would repeat one identical serialization and one identical full validation
+#: pass twelve times over.
+_CONTROL: tuple[int, str] | None = None
+
+
+def _control_run() -> tuple[int, str]:
+    global _CONTROL
+    if _CONTROL is None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "control.json"
+            write_json(path, worlds.cached_world_readonly(WORLD_KEY))
+            result = CliRunner().invoke(app, ["validate", "--world", str(path)])
+        _CONTROL = (result.exit_code, result.output)
+    return _CONTROL
+
 Tamper = Callable[[dict[str, Any]], None]
 
 
@@ -59,11 +76,7 @@ class _TamperCase:
         cls._root = Path(cls._tempdir.name)
         cls._counter = itertools.count()
         cls.baseline = worlds.cached_world(WORLD_KEY)
-        control_path = cls._root / "control.json"
-        write_json(control_path, cls.baseline)
-        control = CliRunner().invoke(app, ["validate", "--world", str(control_path)])
-        cls.control_exit_code = control.exit_code
-        cls.control_output = control.output
+        cls.control_exit_code, cls.control_output = _control_run()
 
     @classmethod
     def tearDownClass(cls) -> None:

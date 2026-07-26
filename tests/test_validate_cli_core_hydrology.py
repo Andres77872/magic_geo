@@ -57,6 +57,23 @@ pytestmark = pytest.mark.slow
 World = dict[str, Any]
 Tamper = Callable[[World], None]
 
+#: The untampered ``validate`` run, shared by every class below. All eight
+#: slices tamper copies of the same ``replay_128`` world, so re-running the
+#: control per class would repeat one identical serialization and one identical
+#: full validation pass eight times over.
+_CONTROL: Any = None
+
+
+def _control_run() -> Any:
+    global _CONTROL
+    if _CONTROL is None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "control.json"
+            write_json(path, worlds.cached_world_readonly("replay_128"))
+            _CONTROL = CliRunner().invoke(app, ["validate", "--world", str(path)])
+    return _CONTROL
+
+
 SEA_LEVEL_FAILURE = "sea level model metadata or connectivity invalid"
 FLOW_FAILURE = "hydrology flow routing or accumulation invalid"
 DEPRESSION_FAILURE = "hydrology depression components or lake basin aggregation invalid"
@@ -228,9 +245,7 @@ class ValidateWorldTamperTest(TestCase):
         cls.world = worlds.cached_world("replay_128")
         cls._directory = TemporaryDirectory()
         cls.directory = Path(cls._directory.name)
-        control_path = cls.directory / "control.json"
-        write_json(control_path, cls.world)
-        cls.control = CliRunner().invoke(app, ["validate", "--world", str(control_path)])
+        cls.control = _control_run()
 
     @classmethod
     def tearDownClass(cls) -> None:

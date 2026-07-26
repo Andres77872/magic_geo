@@ -14,17 +14,24 @@ services:
     build:
       context: .
       args:
+        PYTHON_VERSION: ${MAGIC_GEO_PYTHON_VERSION:-3.13}
         MAGIC_GEO_ENABLE_CUDA: ${MAGIC_GEO_ENABLE_CUDA:-OFF}
+        APP_UID: ${MAGIC_GEO_APP_UID:-1000}
+        APP_GID: ${MAGIC_GEO_APP_GID:-1000}
     image: magic-geo:latest
     container_name: magic-geo
-    env_file:
-      - path: .env
-        required: false
+    environment:
+      # Only runtime settings are injected. Compose-only host paths and image
+      # build settings do not need to exist in the container environment.
+      MAGIC_GEO_HOST: ${MAGIC_GEO_HOST:-0.0.0.0}
+      MAGIC_GEO_PORT: ${MAGIC_GEO_PORT:-8642}
+      MAGIC_GEO_WORKSPACE: ${MAGIC_GEO_CONTAINER_WORKSPACE:-/app/runs}
+      MAGIC_GEO_NATIVE_LIBRARY: ${MAGIC_GEO_NATIVE_LIBRARY:-}
     ports:
       # The workbench has no authentication; the default publishes only on
       # loopback. Set MAGIC_GEO_PUBLISH_HOST=0.0.0.0 only behind a trusted
       # network boundary or authenticating reverse proxy.
       - "${MAGIC_GEO_PUBLISH_HOST:-127.0.0.1}:${MAGIC_GEO_PORT:-8642}:${MAGIC_GEO_PORT:-8642}"
     volumes:
-      - "${MAGIC_GEO_WORLDS_DIR:-./worlds}:${MAGIC_GEO_WORKSPACE:-/app/runs}"
+      - "${MAGIC_GEO_WORLDS_DIR:-./worlds}:${MAGIC_GEO_CONTAINER_WORKSPACE:-/app/runs}"
     restart: unless-stopped

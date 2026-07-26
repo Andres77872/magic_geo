@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import math
-from collections import Counter
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
@@ -434,375 +433,35 @@ class SmokeCoreMeshTests(TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "nearest-center plate domain became empty"):
             generate_world(underresolved)
-    def test_strict_validation_rejects_coupling_and_climate_mutations(self) -> None:
+    def test_coupled_ocean_fraction_configuration_validates_end_to_end(self) -> None:
+        """A tectonics/climate-coupled seed still passes the whole ``validate`` gate.
+
+        The tampered side of every check this configuration reaches is asserted
+        through the same command by the exhaustive ``validate`` tier
+        (``test_validate_cli_core_hydrology``, ``_clock_tectonics``,
+        ``_climate_cryosphere`` and ``_natural_systems``), which matches whole
+        ``FAIL`` lines and guards against a check raising instead of reporting.
+        What only this configuration proves is that the coupled regime itself --
+        a non-default ocean fraction target with a single erosion iteration --
+        generates a world the command accepts.
+        """
+
         config = load_config(Path("configs/earthlike_seed.yaml"))
         data = config.model_dump(mode="python")
         data["mesh"]["cell_count"] = 128
         data["tectonics"]["plate_count"] = 8
         data["erosion"]["iterations"] = 1
         data["planet"]["ocean_fraction_target"] = 0.33203125
-        coupled_config = type(config).model_validate(data)
-        world = generate_world(coupled_config)
+        world = generate_world(type(config).model_validate(data))
 
         with TemporaryDirectory() as temp_dir:
             world_path = Path(temp_dir) / "world.json"
             world_path.write_text(json.dumps(world), encoding="utf-8")
-            runner = CliRunner()
+            result = CliRunner().invoke(app, ["validate", "--world", str(world_path)])
 
-            valid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertEqual(valid_result.exit_code, 0, valid_result.output)
+        self.assertIsNone(result.exception)
+        self.assertEqual(result.exit_code, 0, result.output)
 
-            original_ocean_count = world["sea_level_model"]["selected_ocean_cell_count"]
-            world["sea_level_model"]["selected_ocean_cell_count"] += 1
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("sea level model metadata or connectivity invalid", invalid_result.output)
-            world["sea_level_model"]["selected_ocean_cell_count"] = original_ocean_count
-
-            original_ocean_area = world["sea_level_model"]["selected_ocean_area_km2"]
-            world["sea_level_model"]["selected_ocean_area_km2"] += 1.0
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("sea level model metadata or connectivity invalid", invalid_result.output)
-            world["sea_level_model"]["selected_ocean_area_km2"] = original_ocean_area
-
-            original_ocean_volume = world["sea_level_model"]["selected_ocean_volume_km3"]
-            world["sea_level_model"]["selected_ocean_volume_km3"] += 1.0
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("sea level model metadata or connectivity invalid", invalid_result.output)
-            world["sea_level_model"]["selected_ocean_volume_km3"] = original_ocean_volume
-
-            original_flow_cycle_count = world["summary"]["flow_cycle_cell_count"]
-            world["summary"]["flow_cycle_cell_count"] += 1
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "hydrology flow routing or accumulation invalid",
-                invalid_result.output,
-            )
-            world["summary"]["flow_cycle_cell_count"] = original_flow_cycle_count
-
-            flow_cell = next(cell for cell in world["cells"] if cell["flow_to"] >= 0)
-            original_filled_elevation = flow_cell["filled_elevation_m"]
-            flow_cell["filled_elevation_m"] += 1.0
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "hydrology flow routing or accumulation invalid",
-                invalid_result.output,
-            )
-            flow_cell["filled_elevation_m"] = original_filled_elevation
-
-            original_hydrologic_surface = flow_cell[
-                "hydrologic_surface_elevation_m"
-            ]
-            flow_cell["hydrologic_surface_elevation_m"] += 0.1
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "hydrology flow routing or accumulation invalid",
-                invalid_result.output,
-            )
-            flow_cell[
-                "hydrologic_surface_elevation_m"
-            ] = original_hydrologic_surface
-
-            flow_cell["is_river"] = not flow_cell["is_river"]
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "hydrology flow routing or accumulation invalid",
-                invalid_result.output,
-            )
-            flow_cell["is_river"] = not flow_cell["is_river"]
-
-            if world["lake_basins"]:
-                original_depression_cell_count = world["lake_basins"][0][
-                    "depression_cell_count"
-                ]
-                world["lake_basins"][0]["depression_cell_count"] += 1
-                world_path.write_text(json.dumps(world), encoding="utf-8")
-                invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-                self.assertNotEqual(invalid_result.exit_code, 0)
-                self.assertIn(
-                    "hydrology depression components or lake basin aggregation invalid",
-                    invalid_result.output,
-                )
-                world["lake_basins"][0][
-                    "depression_cell_count"
-                ] = original_depression_cell_count
-
-                component_counts = Counter(
-                    cell["depression_component_id"]
-                    for cell in world["cells"]
-                    if cell["depression_component_id"] >= 0
-                )
-                multi_cell_component_id = next(
-                    (
-                        component_id
-                        for component_id, count in component_counts.items()
-                        if count > 1
-                    ),
-                    None,
-                )
-                if multi_cell_component_id is not None:
-                    mutated_cell = next(
-                        cell
-                        for cell in world["cells"]
-                        if cell["depression_component_id"] == multi_cell_component_id
-                    )
-                    original_policy = mutated_cell["depression_policy"]
-                    mutated_cell["depression_policy"] = (
-                        "dry_closed"
-                        if original_policy != "dry_closed"
-                        else "corrected_numeric"
-                    )
-                    world_path.write_text(json.dumps(world), encoding="utf-8")
-                    invalid_result = runner.invoke(
-                        app, ["validate", "--world", str(world_path)]
-                    )
-                    self.assertNotEqual(invalid_result.exit_code, 0)
-                    self.assertIn(
-                        "hydrology depression components or lake basin aggregation invalid",
-                        invalid_result.output,
-                    )
-                    mutated_cell["depression_policy"] = original_policy
-
-            original_feedback_ocean_area = world["earth_system_feedback_history"][-1][
-                "ocean_area_km2"
-            ]
-            world["earth_system_feedback_history"][-1]["ocean_area_km2"] += 1.0
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "simulation clock or earth-system feedback history invalid",
-                invalid_result.output,
-            )
-            world["earth_system_feedback_history"][-1][
-                "ocean_area_km2"
-            ] = original_feedback_ocean_area
-
-            original_feedback_ocean_volume = world["earth_system_feedback_history"][-1][
-                "ocean_volume_km3"
-            ]
-            world["earth_system_feedback_history"][-1]["ocean_volume_km3"] += 1.0
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "simulation clock or earth-system feedback history invalid",
-                invalid_result.output,
-            )
-            world["earth_system_feedback_history"][-1][
-                "ocean_volume_km3"
-            ] = original_feedback_ocean_volume
-
-            cells_by_id = {cell["id"]: cell for cell in world["cells"]}
-            coastal_land = next(
-                cell
-                for cell in world["cells"]
-                if not cell["is_water"]
-                and cell["elevation_m"] >= 0.0
-                and any(cells_by_id[neighbor_id]["is_water"] for neighbor_id in cell["neighbors"])
-            )
-            original_coastal_elevation = coastal_land["elevation_m"]
-            coastal_land["elevation_m"] = -0.0001
-            world["sea_level_model"]["below_sea_level_land_cell_count"] += 1
-            world["sea_level_model"]["below_sea_level_land_area_km2"] += coastal_land["area_km2"]
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("sea level model metadata or connectivity invalid", invalid_result.output)
-            coastal_land["elevation_m"] = original_coastal_elevation
-            world["sea_level_model"]["below_sea_level_land_cell_count"] -= 1
-            world["sea_level_model"]["below_sea_level_land_area_km2"] -= coastal_land["area_km2"]
-
-            original_climate_offset = world["climate_model"][
-                "latitude_temperature_area_mean_offset_c"
-            ]
-            world["climate_model"]["latitude_temperature_area_mean_offset_c"] += 1.0
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("climate model metadata invalid", invalid_result.output)
-            world["climate_model"][
-                "latitude_temperature_area_mean_offset_c"
-            ] = original_climate_offset
-
-            world["climate_model"]["marine_annual_temperature_offset_c"] = 1.0
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("climate model metadata invalid", invalid_result.output)
-            world["climate_model"]["marine_annual_temperature_offset_c"] = 0.0
-
-            original_thermal_moisture_factor = world["climate_model"][
-                "thermal_moisture_capacity_factor"
-            ]
-            world["climate_model"]["thermal_moisture_capacity_factor"] += 0.1
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("climate model metadata invalid", invalid_result.output)
-            world["climate_model"][
-                "thermal_moisture_capacity_factor"
-            ] = original_thermal_moisture_factor
-
-            world["climate_model"]["negative_precipitation_behavior"] = "tampered"
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("climate model metadata invalid", invalid_result.output)
-            world["climate_model"]["negative_precipitation_behavior"] = (
-                "clamped_to_zero_before_thermal_moisture_multiplier"
-            )
-
-            original_fitted_hack_exponent = world["summary"]["watershed_hack_fitted_exponent"]
-            world["summary"]["watershed_hack_fitted_exponent"] += 0.1
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("watershed_hack_fitted_exponent does not match watersheds", invalid_result.output)
-            world["summary"]["watershed_hack_fitted_exponent"] = original_fitted_hack_exponent
-
-            original_continental_count = world["plate_kinematic_model"][
-                "initial_continental_crust_cell_count"
-            ]
-            world["plate_kinematic_model"]["initial_continental_crust_cell_count"] += 1
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("plate kinematic model or motion history invalid", invalid_result.output)
-            world["plate_kinematic_model"][
-                "initial_continental_crust_cell_count"
-            ] = original_continental_count
-
-            initial_age_ledger = world["initial_oceanic_crust_age_ledger"]
-            oceanic_initial_age_cell_id = next(
-                cell_id
-                for cell_id, status_id in enumerate(
-                    initial_age_ledger["status_id_by_cell"]
-                )
-                if status_id != 0
-            )
-            original_initial_oceanic_age = initial_age_ledger[
-                "age_ma_by_cell"
-            ][oceanic_initial_age_cell_id]
-            initial_age_ledger["age_ma_by_cell"][
-                oceanic_initial_age_cell_id
-            ] += 0.01
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(
-                app, ["validate", "--world", str(world_path)]
-            )
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "initial oceanic crust age replay invalid:",
-                invalid_result.output,
-            )
-            initial_age_ledger["age_ma_by_cell"][
-                oceanic_initial_age_cell_id
-            ] = original_initial_oceanic_age
-
-            world["plate_kinematic_model"]["continental_orogen_uplift_scale_m"] += 1.0
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("plate kinematic model or motion history invalid", invalid_result.output)
-            world["plate_kinematic_model"]["continental_orogen_uplift_scale_m"] -= 1.0
-
-            original_initial_crust_type = world["plate_motion_history"][0][
-                "crust_type_by_cell"
-            ][0]
-            world["plate_motion_history"][0]["crust_type_by_cell"][0] = "invalid"
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("plate kinematic model or motion history invalid", invalid_result.output)
-            world["plate_motion_history"][0]["crust_type_by_cell"][0] = (
-                original_initial_crust_type
-            )
-
-            world["plate_kinematic_model"]["mass_conserving_crust_transport"] = False
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("plate kinematic model or motion history invalid", invalid_result.output)
-            world["plate_kinematic_model"]["mass_conserving_crust_transport"] = True
-
-            shadow_masses = world["crust_material_shadow_history"][0][
-                "opening_packets"
-            ]["dry_rock_mass_kg"]
-            original_shadow_mass = shadow_masses[0]
-            shadow_masses[0] += max(1.0, abs(original_shadow_mass) * 1.0e-8)
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("crust material shadow:", invalid_result.output)
-            shadow_masses[0] = original_shadow_mass
-
-            dominant_sources = world["plate_motion_history"][1][
-                "crust_overlap_ledger"
-            ]["dominant_source_cell_ids"]
-            original_source = dominant_sources[0]
-            dominant_sources[0] = (
-                original_source + 1
-            ) % len(world["cells"])
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("plate kinematic model or motion history invalid", invalid_result.output)
-            dominant_sources[0] = original_source
-
-            original_distance = world["plate_motion_history"][1][
-                "crust_transport_distance_km_by_cell"
-            ][0]
-            world["plate_motion_history"][1]["crust_transport_distance_km_by_cell"][0] += 1.0
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("plate kinematic model or motion history invalid", invalid_result.output)
-            world["plate_motion_history"][1]["crust_transport_distance_km_by_cell"][
-                0
-            ] = original_distance
-
-            original_center = world["plate_motion_history"][1]["plates"][0]["center"][0]
-            world["plate_motion_history"][1]["plates"][0]["center"][0] += 0.05
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("plate kinematic model or motion history invalid", invalid_result.output)
-            world["plate_motion_history"][1]["plates"][0]["center"][0] = original_center
-
-            original_delta = world["plate_motion_history"][1]["crust_age_change_ma_by_cell"][0]
-            world["plate_motion_history"][1]["crust_age_change_ma_by_cell"][0] += 1.0
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("plate kinematic model or motion history invalid", invalid_result.output)
-            world["plate_motion_history"][1]["crust_age_change_ma_by_cell"][0] = original_delta
-
-            world["earth_system_feedback_history"][1]["climate_recomputed"] = False
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("simulation clock or earth-system feedback history invalid", invalid_result.output)
-
-            world["earth_system_feedback_history"][1]["climate_recomputed"] = True
-            world["cells"][0]["climate_class"] = "invalid"
-            world_path.write_text(json.dumps(world), encoding="utf-8")
-            invalid_result = runner.invoke(app, ["validate", "--world", str(world_path)])
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("climate classification invalid", invalid_result.output)
     def test_geodesic_mesh_backend_smoke(self) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))
         data = config.model_dump(mode="python")

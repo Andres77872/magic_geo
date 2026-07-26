@@ -11,11 +11,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 
+from click.testing import Result
 from typer.testing import CliRunner
 
 from magic_geo.cli import app
 
 from support import worlds
+from support.cli import assert_no_cli_crash
 
 
 class SmokeCryosphereTests(TestCase):
@@ -334,51 +336,31 @@ class SmokeCryosphereTests(TestCase):
             delta=0.000001,
         )
 
+        # Wiring only: ``validate`` has to reach and report the glacial
+        # transport replay at all. Its four verdicts and their tamper tables
+        # live in ``test_sediment_validators``, which calls
+        # ``_validate_glacial_sediment_transport`` directly and can name the
+        # field that diverged; the checks inside that validator break on the
+        # first divergence, so driving all four through the command would cost
+        # four more full passes to prove one wiring fact.
+        runner = CliRunner()
         with TemporaryDirectory() as temporary_directory:
             world_path = Path(temporary_directory) / "world.json"
-            runner = CliRunner()
 
-            def validate_current() -> object:
+            def validate_current() -> Result:
                 world_path.write_text(json.dumps(world), encoding="utf-8")
                 return runner.invoke(app, ["validate", "--world", str(world_path)])
 
-            valid_result = validate_current()
-            self.assertEqual(valid_result.exit_code, 0, valid_result.output)
+            control = validate_current()
+            assert_no_cli_crash(self, control, command="validate")
+            self.assertEqual(control.exit_code, 0, control.output)
 
-            transfer = stage["transfers"][0]
-            transfer["target_deposition_depth_m"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "glacial sediment transport transfer replay invalid",
-                invalid_result.output,
-            )
-            transfer["target_deposition_depth_m"] -= 1.0
+            stage["transfers"][0]["target_deposition_depth_m"] += 1.0
 
-            removed_transfer = stage["transfers"].pop()
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "glacial sediment transport transfer coverage invalid",
-                invalid_result.output,
-            )
-            stage["transfers"].append(removed_transfer)
+            result = validate_current()
 
-            source_id = transfer["source_cell_id"]
-            stage["post_transport_elevation_m_by_cell"][source_id] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "glacial sediment terrain coupling snapshot invalid",
-                invalid_result.output,
-            )
-            stage["post_transport_elevation_m_by_cell"][source_id] -= 1.0
-
-            cells[source_id]["glacial_sediment_production_m"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "glacial sediment transport cumulative cell fields invalid",
-                invalid_result.output,
-            )
-            cells[source_id]["glacial_sediment_production_m"] -= 1.0
+        assert_no_cli_crash(self, result, command="validate")
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn(
+            "glacial sediment transport transfer replay invalid", result.output
+        )

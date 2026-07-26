@@ -87,12 +87,12 @@ None of these is an access-control mechanism. They bound what a *legitimate* loc
 
 ### Exposing it safely if you must
 
-The Docker deployment is the supported pattern for a non-loopback bind, and it deliberately splits the *container* bind address from the *published* host interface (`.env.example`, `docker-compose.yml:27`):
+The Docker deployment is the supported pattern for a non-loopback bind, and it deliberately splits the *container* bind address from the *published* host interface (`.env.example`, `docker-compose.yml:26-34`):
 
 ```bash
 # .env — container binds 0.0.0.0 so the published port can reach it,
 # but Docker publishes only on the loopback interface of the host.
-MAGIC_GEO_WORKSPACE=/app/runs
+MAGIC_GEO_CONTAINER_WORKSPACE=/app/runs
 MAGIC_GEO_HOST=0.0.0.0
 MAGIC_GEO_PORT=8642
 MAGIC_GEO_PUBLISH_HOST=127.0.0.1

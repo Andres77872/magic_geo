@@ -2,7 +2,7 @@
 
 [Wiki home](./README.md) > Operations
 
-magic-geo ships a single all-in-one container image: the C++ native core is compiled inside a builder stage, a platform wheel is produced and ABI-checked, and a slim runtime stage installs that wheel with the `[debug]` extra so the same image serves the web workbench (`ENTRYPOINT ["magic-geo"]`, `CMD ["serve"]`) and every other CLI subcommand. Configuration is a small `.env` file that Compose uses both for `${...}` substitution in `docker-compose.yml` and as the container's `env_file`. This page walks the `Dockerfile` and `docker-compose.yml` line by line, enumerates every environment variable and who actually consumes it, explains the bind-mount persistence model, and records exactly which GPU claims are and are not backed by the repository.
+magic-geo ships a single all-in-one container image: the C++ native core is compiled inside a builder stage, a platform wheel is produced and ABI-checked, and a slim runtime stage installs that wheel with the `[debug]` extra so the same image serves the web workbench (`ENTRYPOINT ["magic-geo"]`, `CMD ["serve"]`) and every other CLI subcommand. Configuration is a small `.env` file that Compose reads for `${...}` substitution in `docker-compose.yml`; the service explicitly injects only the four runtime values it consumes. This page walks the `Dockerfile` and `docker-compose.yml` line by line, enumerates every setting and who actually consumes it, explains the bind-mount persistence model, and records exactly which GPU claims are and are not backed by the repository.
 
 ## On this page
 
@@ -131,7 +131,7 @@ Consequences for the image build: a native build that compiles but exports the w
   endif()
 ```
 
-and `MAGIC_GEO_CUDA_SOURCE` stays `cpp/src/cuda_compute_stub.cpp` (`CMakeLists.txt:19`). This is a **STATUS message, not a warning or an error** — the build succeeds and silently produces a stub. `docs/docker_deployment.md:106-110` states that a real CUDA image requires switching the builder base to a CUDA 12.8+ development image.
+and `MAGIC_GEO_CUDA_SOURCE` stays `cpp/src/cuda_compute_stub.cpp` (`CMakeLists.txt:19`). This is a **STATUS message, not a warning or an error** — the build succeeds and silently produces a stub. The GPU notes in `docs/docker_deployment.md` state that a real CUDA image requires switching the builder base to a CUDA 12.8+ development image.
 
 ---
 
@@ -183,7 +183,7 @@ CMD ["serve"]
 | `Dockerfile:58` | `COPY --chown=magicgeo:magicgeo configs ./configs` | Ships `configs/earthlike_seed.yaml`, `configs/geo_validation_matrix.yaml`, the nine `configs/seeds/*.yaml` presets, the calibration source manifests, and `configs/calibration_fixtures/`. These live *inside* the image, not on the volume. |
 | `Dockerfile:59` | `mkdir -p /app/runs && chown -R magicgeo:magicgeo /app` | Creates the default workspace and hands `/app` to the non-root user. |
 | `Dockerfile:61` | `USER magicgeo` | Everything after this — including the entrypoint — runs unprivileged. |
-| `Dockerfile:63-66` | `ENV PYTHONUNBUFFERED=1`, `MAGIC_GEO_HOST=0.0.0.0`, `MAGIC_GEO_PORT=8642`, `MAGIC_GEO_WORKSPACE=/app/runs` | Baked defaults; `env_file`/`-e` values override them. `PYTHONUNBUFFERED=1` makes `docker logs` show CLI output promptly. |
+| `Dockerfile:63-66` | `ENV PYTHONUNBUFFERED=1`, `MAGIC_GEO_HOST=0.0.0.0`, `MAGIC_GEO_PORT=8642`, `MAGIC_GEO_WORKSPACE=/app/runs` | Baked defaults; Compose's explicit `environment` values or `-e` override them. `PYTHONUNBUFFERED=1` makes `docker logs` show CLI output promptly. |
 | `Dockerfile:68` | `EXPOSE 8642` | Documentation only; Compose does the actual publication. Note this is the literal `8642`, not `${MAGIC_GEO_PORT}` — changing the port does not change the `EXPOSE` metadata. |
 | `Dockerfile:70-71` | `HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3` calling `urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('MAGIC_GEO_PORT', '8642') + '/api/status', timeout=4)` | Probes the workbench's own status route from inside the container. `/api/status` is defined at `debug_server.py:928-938` and is always available, including with no debug cache selected. `urlopen` raises on non-2xx, so any error status marks the container unhealthy. |
 | `Dockerfile:73-74` | `ENTRYPOINT ["magic-geo"]`, `CMD ["serve"]` | The entrypoint is the CLI itself; `serve` is only the default argument, which is what makes `docker compose run --rm magic-geo <subcommand>` work. |
@@ -214,25 +214,30 @@ Note the asymmetry with `MANIFEST.in`, which recursive-includes `docs/*.md`, `sc
 
 ## The Compose service, line by line
 
-`docker-compose.yml` is 30 lines and defines exactly one service.
+`docker-compose.yml` is 37 lines and defines exactly one service.
 
 ```yaml
-# docker-compose.yml:12-30
+# docker-compose.yml:12-37
 services:
   magic-geo:
     build:
       context: .
       args:
+        PYTHON_VERSION: ${MAGIC_GEO_PYTHON_VERSION:-3.13}
         MAGIC_GEO_ENABLE_CUDA: ${MAGIC_GEO_ENABLE_CUDA:-OFF}
+        APP_UID: ${MAGIC_GEO_APP_UID:-1000}
+        APP_GID: ${MAGIC_GEO_APP_GID:-1000}
     image: magic-geo:latest
     container_name: magic-geo
-    env_file:
-      - path: .env
-        required: false
+    environment:
+      MAGIC_GEO_HOST: ${MAGIC_GEO_HOST:-0.0.0.0}
+      MAGIC_GEO_PORT: ${MAGIC_GEO_PORT:-8642}
+      MAGIC_GEO_WORKSPACE: ${MAGIC_GEO_CONTAINER_WORKSPACE:-/app/runs}
+      MAGIC_GEO_NATIVE_LIBRARY: ${MAGIC_GEO_NATIVE_LIBRARY:-}
     ports:
       - "${MAGIC_GEO_PUBLISH_HOST:-127.0.0.1}:${MAGIC_GEO_PORT:-8642}:${MAGIC_GEO_PORT:-8642}"
     volumes:
-      - "${MAGIC_GEO_WORLDS_DIR:-./worlds}:${MAGIC_GEO_WORKSPACE:-/app/runs}"
+      - "${MAGIC_GEO_WORLDS_DIR:-./worlds}:${MAGIC_GEO_CONTAINER_WORKSPACE:-/app/runs}"
     restart: unless-stopped
 ```
 
@@ -240,13 +245,13 @@ services:
 | --- | --- | --- | --- |
 | `:13` | service name `magic-geo` | The name used in every `docker compose run/exec` example. | — |
 | `:14-15` | `build.context: .` | Repository root is the build context; no `dockerfile:` key, so the default `./Dockerfile` is used. | Everything in `.dockerignore` is excluded from the upload. |
-| `:16-17` | `build.args.MAGIC_GEO_ENABLE_CUDA: ${MAGIC_GEO_ENABLE_CUDA:-OFF}` | Forwards the `.env` value (or `OFF`) into `ARG MAGIC_GEO_ENABLE_CUDA` at `Dockerfile:26`. | Build args are **only** consumed at build time. Changing this value requires `--build`; an existing `magic-geo:latest` is not rebuilt implicitly. |
-| `:18` | `image: magic-geo:latest` | Names the built image, and is also the image `docker compose run` reuses. | A fixed tag: rebuilding replaces `latest` in place; there is no versioned tag scheme in the repo. |
-| `:19` | `container_name: magic-geo` | Pins the long-running workbench container's name. | `docs/docker_deployment.md:79` uses it for `docker compose exec magic-geo bash`. |
-| `:20-22` | `env_file: [{path: .env, required: false}]` | Injects `.env` into the container environment; the long form with `required: false` means a missing `.env` is not an error. | This is the *container* environment. Compose separately reads `.env` from the project directory for `${...}` substitution — the same file is used twice for two different purposes (`.env.example:3-5`). The minimum Compose version supporting the `path`/`required` long form is not stated in the repository. |
-| `:23-27` | `ports: "${MAGIC_GEO_PUBLISH_HOST:-127.0.0.1}:${MAGIC_GEO_PORT:-8642}:${MAGIC_GEO_PORT:-8642}"` | Host-interface-qualified publication. Host port and container port are the **same variable**, so changing `MAGIC_GEO_PORT` moves all three consistently: the Compose publication, the server bind (via `env_file` → `serve --port`), and the healthcheck URL. | The inline comment at `:24-26` is the security note: "The workbench has no authentication; the default publishes only on loopback." |
-| `:28-29` | `volumes: "${MAGIC_GEO_WORLDS_DIR:-./worlds}:${MAGIC_GEO_WORKSPACE:-/app/runs}"` | A host bind mount, not a named volume. Source defaults to `./worlds`, target to the container workspace. | If the two variables drift apart — e.g. `MAGIC_GEO_WORKSPACE` changed without adjusting the mount — the workbench writes to an unmounted in-container path and the data is lost on container replacement. |
-| `:30` | `restart: unless-stopped` | Restarts the workbench after a crash or daemon restart, but not after an explicit `docker compose stop`. | It reacts to exit, not to the healthcheck; an unhealthy-but-running container is not restarted. |
+| `:16-20` | `build.args` | Maps the `.env`-facing Python version, CUDA switch and app UID/GID to the Dockerfile's four build args. | Build args are **only** consumed at build time. Changing one requires `docker compose build` or `up --build`. |
+| `:21` | `image: magic-geo:latest` | Names the built image, and is also the image `docker compose run` reuses. | A fixed tag: rebuilding replaces `latest` in place; there is no versioned tag scheme in the repo. |
+| `:22` | `container_name: magic-geo` | Pins the long-running workbench container's name. | `docs/docker_deployment.md` uses it for `docker compose exec magic-geo bash`. |
+| `:23-29` | `environment` | Injects only host, port, container workspace and optional native-library override. Compose assigns `MAGIC_GEO_CONTAINER_WORKSPACE` to the process-facing `MAGIC_GEO_WORKSPACE`. | Build settings and the host bind source are not leaked into the container. Empty `MAGIC_GEO_NATIVE_LIBRARY` selects the bundled library. |
+| `:30-34` | `ports` | Publishes the same configured port on the selected host interface and inside the container. | The server receives the same port at `:27`, and the healthcheck reads it from the environment, so the three values cannot drift. The default host interface is loopback. |
+| `:35-36` | `volumes` | Bind-mounts `MAGIC_GEO_WORLDS_DIR` on the host at `MAGIC_GEO_CONTAINER_WORKSPACE` in the container. | The container target defaults to the absolute path `/app/runs`; bare-metal `MAGIC_GEO_WORKSPACE=runs` cannot accidentally turn it into an invalid relative mount. |
+| `:37` | `restart: unless-stopped` | Restarts the workbench after a crash or daemon restart, but not after an explicit `docker compose stop`. | It reacts to exit, not to the healthcheck; an unhealthy-but-running container is not restarted. |
 
 There is **no** `deploy.resources.reservations.devices`, no `gpus:` key, and no `devices:` key in the compose file. GPU access is not wired up by default — see [GPU passthrough](#gpu-passthrough-what-is-and-is-not-verified).
 
@@ -259,46 +264,48 @@ docker compose up --build -d
 # web workbench: http://127.0.0.1:8642
 ```
 
-(`docs/docker_deployment.md:11-16`.) Create `worlds/` yourself before the first `up`: if Docker auto-creates it, it belongs to root and the non-root container user cannot write into it (`docs/docker_deployment.md:18-20`).
+Create `worlds/` yourself before the first `up`: if Docker auto-creates it, it belongs to root and the non-root container user cannot write into it, as the quick-start guide also warns.
 
 ---
 
 ## `.env` reference
 
-`.env` is gitignored (`.gitignore:13-14`); `.env.example` is the tracked, documented template (`docs/docker_deployment.md:26`). Copy it and edit.
+`.env` is gitignored (`.gitignore:13-14`); `.env.example` is the tracked, documented template. Copy it and edit.
 
 | Variable | Default | Meaning | Consumed by |
 | --- | --- | --- | --- |
-| `MAGIC_GEO_WORLDS_DIR` | `./worlds` (`.env.example:19`) | Host directory that persists generated worlds, configs, reports, and exports. Relative paths resolve against the directory containing the `.env` (`.env.example:16-19`). | **Compose only** — `${...}` substitution for the volume source (`docker-compose.yml:29`). Verified: no source file under `src/` reads this name. |
-| `MAGIC_GEO_WORKSPACE` | `/app/runs` (`.env.example:26`, `Dockerfile:66`) | Workspace used by `magic-geo serve`: where the browser workbench saves worlds and confines browser-created output. Must stay inside the project root, which is `/app` in the image (`.env.example:21-25`). | Both: Compose uses it as the bind-mount target (`docker-compose.yml:29`), and inside the container it backs `serve --workspace` as a typer `envvar` (`cli/commands/serve.py:26-33`). |
-| `MAGIC_GEO_HOST` | `0.0.0.0` (`.env.example:35`, `Dockerfile:64`) | Bind address *inside* the container/process. `0.0.0.0` is required in Docker so the published port can reach the server; use `127.0.0.1` bare metal unless a trusted boundary protects the workbench (`.env.example:32-35`). | `serve --host` envvar (`cli/commands/serve.py:34-37`). Not referenced by `docker-compose.yml`. |
-| `MAGIC_GEO_PORT` | `8642` (`.env.example:38`, `Dockerfile:65`) | Port the workbench listens on, and the port Compose publishes. | Three places: `serve --port` envvar with `min=1, max=65535` (`cli/commands/serve.py:38-47`), the Compose port mapping on both sides (`docker-compose.yml:27`), and the healthcheck URL (`Dockerfile:71`). |
-| `MAGIC_GEO_PUBLISH_HOST` | `127.0.0.1` (`.env.example:43`) | Host interface Docker publishes the workbench on. The workbench has no authentication, so the default only exposes it to the local machine; set `0.0.0.0` only behind a trusted network boundary or authenticating proxy (`.env.example:40-43`). | **Compose only** — the host-interface part of the port mapping (`docker-compose.yml:27`). Verified: not read by any Python source. |
-| `MAGIC_GEO_ENABLE_CUDA` | commented out, documented as `OFF` (`.env.example:52`); Compose falls back to `OFF` (`docker-compose.yml:17`); `Dockerfile:26` also defaults to `OFF` | Build argument selecting the native CUDA backend. `OFF` builds the portable CPU/OpenMP core with a CUDA runtime stub (`.env.example:49-52`). | **Compose build arg only**, forwarded to `ARG MAGIC_GEO_ENABLE_CUDA` and then to `-DMAGIC_GEO_ENABLE_CUDA` (`Dockerfile:26-31`). Nothing reads it at runtime; if set in `.env` it is also injected into the container environment via `env_file`, where it is inert. |
-| `MAGIC_GEO_NATIVE_LIBRARY` | commented out (`.env.example:56`) | Overrides the native shared library the Python layer loads through `ctypes`. Rarely needed; the bundled library is discovered automatically. | `native._library_path()` (`src/magic_geo/native.py:110-118`). If set to a path that is not a file it raises `RuntimeError(f"MAGIC_GEO_NATIVE_LIBRARY does not name a file: {candidate}")`. |
+| `MAGIC_GEO_WORLDS_DIR` | `./worlds` (`.env.example:20`) | Host directory that persists generated worlds, configs, reports, and exports. Relative paths resolve against the Compose project directory. | **Compose only** — volume source (`docker-compose.yml:36`). No Python source reads it. |
+| `MAGIC_GEO_CONTAINER_WORKSPACE` | `/app/runs` (`.env.example:27`) | Absolute bind-mount target inside the container. Must remain under `/app`. Its distinct name prevents a bare-metal relative workspace from becoming a Docker mount target. | Compose uses it twice: as runtime `MAGIC_GEO_WORKSPACE` (`docker-compose.yml:28`) and the volume target (`:36`). |
+| `MAGIC_GEO_HOST` | `0.0.0.0` (`.env.example:36`) | Bind address inside the container. `0.0.0.0` is required so the published port can reach it. | Compose injects it at `docker-compose.yml:26`; `serve --host` reads it (`cli/commands/serve.py:34-37`). |
+| `MAGIC_GEO_PORT` | `8642` (`.env.example:39`) | Port the workbench listens on and Compose publishes. | Runtime environment (`docker-compose.yml:27`), both sides of the port mapping (`:34`), `serve --port` (`cli/commands/serve.py:38-47`) and the image healthcheck (`Dockerfile:71`). |
+| `MAGIC_GEO_PUBLISH_HOST` | `127.0.0.1` (`.env.example:44`) | Host interface Docker publishes. Keep loopback unless an authenticating boundary protects the workbench. | **Compose only** — host-interface part of `docker-compose.yml:34`. |
+| `MAGIC_GEO_PYTHON_VERSION` | `3.13` (`.env.example:52`) | Python slim-image version used by both stages. | Compose maps it to Dockerfile `ARG PYTHON_VERSION` (`docker-compose.yml:17`, `Dockerfile:9`). |
+| `MAGIC_GEO_APP_UID` | `1000` (`.env.example:57`) | UID of the non-root `magicgeo` image user. Match `id -u` when host bind permissions require it. | Compose maps it to Dockerfile `ARG APP_UID` (`docker-compose.yml:19`, `Dockerfile:49`). |
+| `MAGIC_GEO_APP_GID` | `1000` (`.env.example:58`) | GID of the non-root `magicgeo` image group. Match `id -g` when needed. | Compose maps it to Dockerfile `ARG APP_GID` (`docker-compose.yml:20`, `Dockerfile:50`). |
+| `MAGIC_GEO_ENABLE_CUDA` | `OFF` (`.env.example:63`) | CMake switch selecting the portable CPU/OpenMP build or attempting the CUDA backend. The shipped Python builder has no `nvcc`, so `ON` alone still builds the stub. | Compose build arg (`docker-compose.yml:18`) forwarded to CMake (`Dockerfile:26-30`). |
+| `MAGIC_GEO_NATIVE_LIBRARY` | empty (`.env.example:72`) | Optional container path overriding the wheel-bundled library. A non-empty value also needs a bind mount. | Compose injects it at `docker-compose.yml:29`; `native._library_path()` reads it (`src/magic_geo/native.py:110-118`). |
 
-Three of these variables — `MAGIC_GEO_HOST`, `MAGIC_GEO_PORT`, `MAGIC_GEO_WORKSPACE` — are baked into the image as `ENV` defaults alongside `PYTHONUNBUFFERED=1` (`Dockerfile:63-66`), so the container behaves correctly even with no `.env` at all — which is exactly why `required: false` is safe. `MAGIC_GEO_WORLDS_DIR` and `MAGIC_GEO_PUBLISH_HOST` are not baked in because they are Compose-side only; Compose supplies its own `:-` fallbacks (`docker-compose.yml:27`, `:29`).
+The template therefore covers every Compose substitution and every runtime override that the service injects. Build settings are not present in the runtime environment. The image also retains safe `ENV` defaults for host, port and workspace (`Dockerfile:63-66`), while Compose repeats them explicitly to keep port, mount and process configuration coupled even when `.env` is absent.
 
 ### The same variables outside Docker
 
-`--workspace`, `--host` and `--port` are typer options with `envvar=` bindings, so **explicit flags win over the environment** (`cli/commands/serve.py:30`, `:36`, `:42`). `docs/docker_deployment.md:38-45`:
+`--workspace`, `--host` and `--port` are typer options with `envvar=` bindings, so **explicit flags win over the environment** (`cli/commands/serve.py:30`, `:36`, `:42`). `.env.example` is Docker-oriented; for a local process set the CLI variables directly:
 
 ```bash
-set -a; source .env; set +a
 MAGIC_GEO_WORKSPACE=runs MAGIC_GEO_HOST=127.0.0.1 magic-geo serve
 ```
 
-Bare metal, `MAGIC_GEO_WORKSPACE=/app/runs` would be wrong — the workspace must resolve inside the process's cwd (`cli/commands/serve.py:50-63`), so use an in-repo path such as `runs` (`.env.example:21-25`).
+`MAGIC_GEO_CONTAINER_WORKSPACE` is Compose-only and is not read by the Python CLI. Bare metal, `MAGIC_GEO_WORKSPACE=/app/runs` would usually be wrong because the workspace must resolve inside the process's cwd (`cli/commands/serve.py:50-63`); use an in-repo path such as `runs`.
 
 ---
 
 ## Persistence model
 
-Inside the container the project root is `/app` (`Dockerfile:57`) and the workspace is `/app/runs` (`Dockerfile:66`). Compose bind-mounts `${MAGIC_GEO_WORLDS_DIR}` over `${MAGIC_GEO_WORKSPACE}` (`docker-compose.yml:29`), so everything the workbench or CLI writes under the workspace lands in the host directory and survives container replacement (`docs/docker_deployment.md:49-54`).
+Inside the container the project root is `/app` (`Dockerfile:57`) and the workspace defaults to `/app/runs` (`Dockerfile:66`). Compose bind-mounts `${MAGIC_GEO_WORLDS_DIR}` at `${MAGIC_GEO_CONTAINER_WORKSPACE}` and passes that same target to the process as `MAGIC_GEO_WORKSPACE` (`docker-compose.yml:28,36`), so everything written under the workspace lands in the host directory and survives container replacement.
 
 | Container path | Persisted? | What lives there | Source |
 | --- | --- | --- | --- |
-| `/app/runs` (= `${MAGIC_GEO_WORKSPACE}`) | **Yes** — bind-mounted from `${MAGIC_GEO_WORLDS_DIR}` | Generated worlds, browser-created configs, validation/calibration reports, renders, debug caches | `docker-compose.yml:29`, `Dockerfile:59,66` |
+| `/app/runs` (= default `${MAGIC_GEO_CONTAINER_WORKSPACE}`) | **Yes** — bind-mounted from `${MAGIC_GEO_WORLDS_DIR}` | Generated worlds, browser-created configs, validation/calibration reports, renders, debug caches | `docker-compose.yml:28,36`, `Dockerfile:59,66` |
 | `/app/runs/configs` | Yes (inside the mount) | Workbench "Save config" target — `target_dir = jobs.workspace / "configs"` (`debug_server.py:1020`) | `debug_server.py:1020` |
 | `/app/runs/debug` | Yes (inside the mount) | Default debug-cache location auto-selected by `serve` when it contains `manifest.json` | `cli/commands/serve.py:64-69` |
 | `/app/runs/.magic-geo-web/artifacts/<job_id>/…` | Yes (inside the mount) | Reserved job-manager directory holding immutable per-job artifact snapshots | `web_jobs.py:429-441` |
@@ -326,25 +333,24 @@ The things that do **not** survive a rebuild are the image-resident paths: an ed
 
 ### Ownership
 
-The bind mount masks the image's `/app/runs` (created and chowned at `Dockerfile:59`) with the host directory's ownership. The container runs as UID/GID 1000 by default (`Dockerfile:49-52`), matching the typical first-created Linux user. If your host user is not 1000:1000, rebuild with matching build args:
+The bind mount masks the image's `/app/runs` (created and chowned at `Dockerfile:59`) with the host directory's ownership. The container runs as UID/GID 1000 by default (`Dockerfile:49-52`), matching the typical first-created Linux user. If your host user differs, set the documented Compose values before rebuilding:
 
 ```bash
-docker compose build \
-  --build-arg APP_UID="$(id -u)" \
-  --build-arg APP_GID="$(id -g)"
+MAGIC_GEO_APP_UID="$(id -u)" MAGIC_GEO_APP_GID="$(id -g)" \
+  docker compose build
 ```
 
-`docs/docker_deployment.md:93-96` confirms both args are the supported override point.
+The equivalent raw Docker build args remain `APP_UID` and `APP_GID`.
 
 ### Workspace confinement still applies inside the container
 
-The workbench's filesystem policy is unchanged by Docker (`docs/docker_deployment.md:56-59`): job **inputs** are confined to the project root `/app` — which includes the shipped `configs/` seeds — and job **outputs** to the workspace. `JobManager.__init__` re-applies the rule independently of the CLI, raising `ValueError("web workspace must be inside the project directory")` when it is violated (`web_jobs.py:421-427`), and reserves `<workspace>/.magic-geo-web/` (`web_jobs.py:429-441`). Pointing `MAGIC_GEO_WORKSPACE` elsewhere is only valid if it remains inside `/app`, and the volume target must be changed to match.
+The workbench's filesystem policy is unchanged by Docker: job **inputs** are confined to the project root `/app` — which includes the shipped `configs/` seeds — and job **outputs** to the workspace. `JobManager.__init__` re-applies the rule independently of the CLI, raising `ValueError("web workspace must be inside the project directory")` when it is violated (`web_jobs.py:421-427`), and reserves `<workspace>/.magic-geo-web/` (`web_jobs.py:429-441`). Set `MAGIC_GEO_CONTAINER_WORKSPACE` only to an absolute path under `/app`; Compose automatically keeps the mount target and runtime workspace identical.
 
 ---
 
 ## Running arbitrary CLI subcommands through the same image
 
-`ENTRYPOINT ["magic-geo"]` with `CMD ["serve"]` (`Dockerfile:73-74`) means any argument list you pass to `docker compose run` replaces `serve` and becomes CLI arguments. `docs/docker_deployment.md:63-64`: "The image entrypoint is the `magic-geo` CLI; `serve` is only the default command."
+`ENTRYPOINT ["magic-geo"]` with `CMD ["serve"]` (`Dockerfile:73-74`) means any argument list you pass to `docker compose run` replaces `serve` and becomes CLI arguments. The shorter deployment guide states the same contract: the image entrypoint is the CLI and `serve` is only its default command.
 
 ```bash
 # one-off generation into the persistent worlds directory
@@ -362,7 +368,7 @@ docker compose run --rm magic-geo validate-geo \
 docker compose exec magic-geo bash   # (entrypoint bypass: docker compose exec is not affected)
 ```
 
-(`docs/docker_deployment.md:66-80`, verbatim.) `docker compose run` starts a **new** container that shares the worlds volume with the workbench service, so generated files land in the same workspace; run `export-debug` on a world to make it selectable in the workbench's debug-cache picker (`docs/docker_deployment.md:82-85`).
+`docker compose run` starts a **new** container that shares the worlds volume with the workbench service, so generated files land in the same workspace; run `export-debug` on a world to make it selectable in the workbench's debug-cache picker.
 
 Every registered subcommand is reachable this way. The complete set, as registered by `@app.command(...)`:
 
@@ -393,7 +399,7 @@ To run the workbench with a non-default subcommand *and* published ports you mus
 The compose port mapping is host-interface-qualified:
 
 ```yaml
-# docker-compose.yml:23-27
+# docker-compose.yml:30-34
     ports:
       # The workbench has no authentication; the default publishes only on
       # loopback. Set MAGIC_GEO_PUBLISH_HOST=0.0.0.0 only behind a trusted
@@ -408,7 +414,7 @@ Two different bind addresses are in play and they are not interchangeable:
 | `MAGIC_GEO_HOST` | Inside the container's network namespace, passed to uvicorn via `serve --host` (`cli/commands/serve.py:109-114`) | `0.0.0.0` | Setting `127.0.0.1` inside Docker makes the server unreachable from the published port; the healthcheck (which also uses loopback) would still pass. |
 | `MAGIC_GEO_PUBLISH_HOST` | The **host** interface Docker publishes on | `127.0.0.1` | Setting `0.0.0.0` exposes an unauthenticated application to every network the host is on. |
 
-`docs/docker_deployment.md:114-119` states the model plainly:
+`docs/docker_deployment.md` states the model plainly:
 
 > The web workbench is a trusted-local, single-user tool with no authentication or user isolation. The compose file therefore publishes the port on `127.0.0.1` by default even though the server binds `0.0.0.0` inside the container's network namespace. To serve it beyond the local machine, front it with an authenticating reverse proxy and set `MAGIC_GEO_PUBLISH_HOST` deliberately.
 
@@ -434,7 +440,7 @@ If you must reach it from elsewhere, keep `MAGIC_GEO_PUBLISH_HOST=127.0.0.1` and
 
 ### What the default image does
 
-`docs/docker_deployment.md:101-104`:
+`docs/docker_deployment.md`:
 
 > The default image builds the CPU/OpenMP core with the CUDA runtime stub. The OpenCL backend is loaded through `dlopen` at runtime, so it activates when the container has an OpenCL ICD and a device (e.g. `--device` / `--gpus` plus the vendor runtime image or host libraries mounted in).
 
@@ -442,18 +448,18 @@ The `dlopen` claim is verifiable in the native source — `cpp/src/opencl_comput
 
 ### What a CUDA image would require
 
-`docs/docker_deployment.md:106-110`:
+`docs/docker_deployment.md`:
 
 > For the native CUDA backend, switch the builder stage's base image to a CUDA 12.8+ development image (e.g. `nvidia/cuda:12.8.0-devel-ubuntu24.04` with Python installed), pass `MAGIC_GEO_ENABLE_CUDA=ON` (build arg, also read from `.env` by Compose), and run the container with `--gpus all` / `gpus: all`.
 
 | Step | Status in this repository |
 | --- | --- |
-| Set `MAGIC_GEO_ENABLE_CUDA=ON` in `.env` | Supported and wired end-to-end (`.env.example:52` → `docker-compose.yml:17` → `Dockerfile:26` → `-DMAGIC_GEO_ENABLE_CUDA`). |
+| Set `MAGIC_GEO_ENABLE_CUDA=ON` in `.env` | Supported and wired end-to-end (`.env.example:63` → `docker-compose.yml:18` → `Dockerfile:26` → `-DMAGIC_GEO_ENABLE_CUDA`). |
 | Builder base image swap to a CUDA devel image | **Not implemented.** `Dockerfile:12` is hard-coded to `python:${PYTHON_VERSION}-slim`; the change is described in prose only. There is no build arg for the base image. |
 | Runtime stage CUDA driver/runtime | Not needed for `libcudart` (CUDA targets set `CUDA_RUNTIME_LIBRARY Static`), but a compatible NVIDIA kernel driver is still required — `docs/cuda_rtx5090_optimization.md:62-66` is explicit that "static `cudart` does not bundle the driver". |
 | `gpus: all` in the compose file | **Absent.** `docker-compose.yml` has no GPU reservation of any kind; you must add it yourself or use `docker run --gpus all`. |
 | OpenCL ICD in the runtime image | **Absent** (`Dockerfile:41-43` installs `libgomp1` only). |
-| Any verification that a GPU-enabled image builds or runs | **None.** No test in `tests/` references Docker (verified by search), and `docs/docker_deployment.md` records no GPU container run. |
+| Any verification that a GPU-enabled image builds or runs | **None.** The Docker contract test is static and CPU-oriented; `docs/docker_deployment.md` records no GPU container run. |
 
 Treat the entire GPU-container path as documented intent that is **not verified in source**.
 
@@ -508,21 +514,21 @@ What the source *does* determine about build cost:
 
 | Symptom | Likely cause | Where to look | Fix |
 | --- | --- | --- | --- |
-| Container starts, but the workbench cannot write worlds; permission errors in `docker compose logs` | `worlds/` was auto-created by Docker and is owned by root, while the container runs as UID 1000 | `docs/docker_deployment.md:18-20`, `Dockerfile:49-52` | `mkdir -p worlds` as your user *before* the first `up`; or rebuild with `--build-arg APP_UID="$(id -u)" --build-arg APP_GID="$(id -g)"`. |
-| `Web workspace must stay inside /app: <path>` and exit code 2 | `MAGIC_GEO_WORKSPACE` points outside the container project root | `cli/commands/serve.py:50-63` | Keep the workspace under `/app` (default `/app/runs`) and update the volume target to match. |
-| Worlds vanish after `docker compose up --build` | `MAGIC_GEO_WORKSPACE` was changed without changing the mount target, so output went to an unmounted container path | `docker-compose.yml:29` | Keep the volume target equal to `MAGIC_GEO_WORKSPACE`; both sides come from the same variable by default. |
-| Port 8642 unreachable from the host even though the container is up | `MAGIC_GEO_HOST` was set to `127.0.0.1` inside the container | `.env.example:32-35`, `cli/commands/serve.py:34-37` | Keep `MAGIC_GEO_HOST=0.0.0.0` in Docker; restrict exposure with `MAGIC_GEO_PUBLISH_HOST` instead. |
-| Changed `MAGIC_GEO_PORT`, but the healthcheck still probes 8642 | Healthcheck reads `MAGIC_GEO_PORT` from the container environment; it falls back to `8642` only when unset | `Dockerfile:70-71` | Ensure `.env` is present so `env_file` injects the value; recreate the container (`docker compose up -d`). |
+| Container starts, but the workbench cannot write worlds; permission errors in `docker compose logs` | `worlds/` was auto-created by Docker and is owned by root, while the container runs as UID 1000 | `docs/docker_deployment.md`, `Dockerfile:49-52` | Create `worlds/` as your user before the first `up`; or set `MAGIC_GEO_APP_UID="$(id -u)"` and `MAGIC_GEO_APP_GID="$(id -g)"`, then rebuild. |
+| `Web workspace must stay inside /app: <path>` and exit code 2 | `MAGIC_GEO_CONTAINER_WORKSPACE` points outside the container project root | `docker-compose.yml:28,36`, `cli/commands/serve.py:50-63` | Keep the setting at an absolute path under `/app` (default `/app/runs`). Compose keeps the mount and runtime workspace coupled. |
+| Docker rejects the volume target as relative | `MAGIC_GEO_CONTAINER_WORKSPACE` was set to a host-style value such as `runs` | `.env.example:22-27`, `docker-compose.yml:36` | Use an absolute container path under `/app`. For bare metal, set the separate `MAGIC_GEO_WORKSPACE=runs` variable directly on the local process. |
+| Port 8642 unreachable from the host even though the container is up | `MAGIC_GEO_HOST` was set to `127.0.0.1` inside the container | `.env.example:33-36`, `cli/commands/serve.py:34-37` | Keep `MAGIC_GEO_HOST=0.0.0.0` in Docker; restrict exposure with `MAGIC_GEO_PUBLISH_HOST` instead. |
+| Changed `MAGIC_GEO_PORT`, but the old port is still active | The existing container has not been recreated with the new Compose environment and mapping | `docker-compose.yml:27,34`, `Dockerfile:70-71` | Run `docker compose up -d` to recreate it. The runtime port, published target and healthcheck then use the same value. |
 | Container reports `unhealthy` | `/api/status` unreachable within the 4 s `urlopen` timeout, or an error status; server not yet up within the 15 s start period | `Dockerfile:70-71`, `debug_server.py:928-938` | `docker compose logs magic-geo`; check the uvicorn startup line `Serving web workbench … at http://<host>:<port>` (`cli/commands/serve.py:108`). |
 | `Serving requires the optional debug dependencies: pip install 'magic-geo[debug]'` and exit 2 | The wheel was installed without the `[debug]` extra | `cli/commands/serve.py:76-82`, `Dockerfile:46` | Rebuild the image; the shipped `Dockerfile` already installs `[debug]`. |
 | `Ignoring invalid automatic cache <dir>: <error>` at startup | `<workspace>/debug` exists but its manifest or a referenced file is invalid | `cli/commands/serve.py:83-99` | Non-fatal — the server restarts cacheless and Config/Operations/Backend/jobs stay usable. Re-run `export-debug`. |
 | `No manifest.json in <dir>; choose an export-debug cache or omit -d` and exit 2 | Explicit `-d` pointed at a directory without a cache manifest | `cli/commands/serve.py:70-75` | Point `-d` at a real `export-debug` output, or omit it for auto-discovery. |
-| `MAGIC_GEO_ENABLE_CUDA=ON` in `.env`, but `backend` still reports `cuda_compiled: false` | The shipped builder base has no `nvcc`, so CMake logs `compiler not found; building runtime stub` and the build still succeeds | `CMakeLists.txt:64-66`, `:19`, `Dockerfile:12` | Switch the builder stage to a CUDA 12.8+ devel base image (`docs/docker_deployment.md:106-110`) — the `.env` flag alone is not sufficient. |
-| Changed `MAGIC_GEO_ENABLE_CUDA` but nothing changed | Build args are only applied at build time | `docker-compose.yml:16-17` | Re-run with `docker compose up --build` (or `docker compose build --no-cache`). |
+| `MAGIC_GEO_ENABLE_CUDA=ON` in `.env`, but `backend` still reports `cuda_compiled: false` | The shipped builder base has no `nvcc`, so CMake logs `compiler not found; building runtime stub` and the build still succeeds | `CMakeLists.txt:64-66`, `:19`, `Dockerfile:12` | Switch the builder stage to a CUDA 12.8+ devel base image as described in the deployment guide — the `.env` flag alone is not sufficient. |
+| Changed `MAGIC_GEO_ENABLE_CUDA` but nothing changed | Build args are only applied at build time | `docker-compose.yml:16-20` | Re-run with `docker compose up --build` (or `docker compose build --no-cache`). |
 | `magic-geo backend` reports `opencl_available: false` inside the container | The runtime image installs `libgomp1` only, so `dlopen("libOpenCL.so.1")` / `dlopen("libOpenCL.so")` finds nothing | `Dockerfile:41-43`, `cpp/src/opencl_compute.cpp:162-164` | Install or mount a vendor ICD and expose a device; not configured by the shipped compose file. |
 | `docker compose run --rm magic-geo generate` fails immediately with a missing-file error on `--config` | `--config` defaults to `magic-geo.yaml` with `exists=True`, and that file is not in the image | `cli/commands/generate.py:20-22` | Always pass `--config configs/earthlike_seed.yaml` (or another shipped/`runs/`-resident config). |
 | `export-rerun` exits 2 asking for `pip install rerun-sdk` | `rerun` is an optional dependency and is not part of the `[debug]` extra installed in the image | `pyproject.toml:18-24`, `cli/commands/export.py:208` | Install `rerun-sdk` in a derived image, or run `export-rerun` outside the container. |
-| `RuntimeError: MAGIC_GEO_NATIVE_LIBRARY does not name a file: <path>` | The env override was set (e.g. copied from a bare-metal `.env`) and does not exist inside the container | `src/magic_geo/native.py:110-118` | Leave `MAGIC_GEO_NATIVE_LIBRARY` commented out in Docker; the wheel-bundled library is discovered automatically. |
+| `RuntimeError: MAGIC_GEO_NATIVE_LIBRARY does not name a file: <path>` | The override names a host path that does not exist inside the container | `src/magic_geo/native.py:110-118` | Leave `MAGIC_GEO_NATIVE_LIBRARY=` empty for the bundled library, or add a bind mount for the override path. |
 | Calibration commands fail on missing empirical datasets | `calibration_data/` is `.dockerignore`d and not mounted | `.dockerignore:25-27` | Add an explicit read-only bind mount for `calibration_data/`, or run calibration outside the container. |
 | Config edits under `/app/configs` disappear | `configs/` is an image layer, not the volume | `Dockerfile:58` | Save configs under `runs/` (the workbench's Config view already defaults to `<workspace>/configs`). |
 | Image rebuilt but Python still loads an old native core | The host `src/magic_geo/*.so` cannot leak in — it is `.dockerignore`d — so this indicates a stale image, not a stale library | `.dockerignore:20-22` | `docker compose build --no-cache`; confirm with `docker compose run --rm magic-geo backend`. |
@@ -531,17 +537,16 @@ What the source *does* determine about build cost:
 
 ## Limitations and unresolved claims
 
-- **The Docker deployment has no automated test coverage.** No file under `tests/` references Docker, Compose, or the `Dockerfile` (verified by search). Every behaviour on this page is read from the deployment files and the code they invoke, not from a passing test.
-- **The GPU container path is prose, not implementation.** `Dockerfile:12` hard-codes `python:${PYTHON_VERSION}-slim` for the builder, `docker-compose.yml` declares no GPU reservation or device, and the runtime stage installs no OpenCL ICD. `docs/docker_deployment.md:99-110` describes what you would have to change; nothing in the repository verifies that a CUDA-enabled image builds, runs, or produces correct output. Mark this as not verified in source.
+- **Automated Docker coverage is static, not daemon-backed.** `tests/test_docker_configuration.py` locks the `.env.example`/Compose variable surface, absolute container workspace, coupled workspace/volume and port mapping, explicit runtime environment, non-root image user, and healthcheck route. The suite does not build an image or start a Docker daemon; an actual build and smoke run remain release/integration checks.
+- **The GPU container path is prose, not implementation.** `Dockerfile:12` hard-codes `python:${PYTHON_VERSION}-slim` for the builder, `docker-compose.yml` declares no GPU reservation or device, and the runtime stage installs no OpenCL ICD. The GPU section of `docs/docker_deployment.md` describes what you would have to change; nothing in the repository verifies that a CUDA-enabled image builds, runs, or produces correct output. Mark this as not verified in source.
 - **Acceleration is explicitly not end-to-end and not authoritative.** Backend telemetry hard-codes `backend_scope = "accelerated_native_kernels_not_end_to_end_pipeline"` (`cpp/src/opencl_compute.cpp:2064-2065`) and `crust_transport_execution_backend = "cpu"` (`:2070-2071`), and every accelerator parity flag — geometry, coverage-membership, categorical, and complete — is hard-coded `false` (`:2148`, `:2154`, `:2160`, `:2166`), as is `crust_overlap_accelerator_state_authoritative` (`:2172`). The device-side continuous-moment shadow is diagnostic only: its "device results are reconciled and discarded, never used as state" (`docs/cuda_rtx5090_optimization.md:7-17`). Attaching a GPU to the container does not change any of this.
 - **`MAGIC_GEO_ENABLE_CUDA=ON` fails open, not closed.** With no `nvcc` in the builder, CMake emits a `STATUS` message and builds `cuda_compute_stub.cpp` (`CMakeLists.txt:19`, `:64-66`). The image build succeeds and produces a stub; there is no error to alert you.
 - **No image size or build-duration figures exist in the repository.** None is asserted here.
-- **No authentication, authorization, TLS, or per-user isolation exists at any layer of the deployment.** The loopback publish default (`docker-compose.yml:27`) is the only barrier the repository provides, and it is a network-placement choice, not an access control. `docs/docker_deployment.md:114-119` describes the workbench as "a trusted-local, single-user tool".
+- **No authentication, authorization, TLS, or per-user isolation exists at any layer of the deployment.** The loopback publish default (`docker-compose.yml:34`) is the only barrier the repository provides, and it is a network-placement choice, not an access control. `docs/docker_deployment.md` describes the workbench as "a trusted-local, single-user tool".
 - **The single-wheel glob is unguarded.** `"$(echo /wheels/*.whl)[debug]"` (`Dockerfile:46`) expands to whitespace-separated paths if `/wheels` ever contains more than one wheel. `--no-deps` at `Dockerfile:35` is what keeps that from happening; the `Dockerfile` does not otherwise assert it.
 - **`EXPOSE 8642` is a literal.** It does not track `MAGIC_GEO_PORT` (`Dockerfile:68`). This is metadata only and does not affect the Compose publication, but tooling that reads exposed ports will report `8642` regardless of configuration.
-- **`restart: unless-stopped` does not react to health.** An unhealthy container that has not exited is not restarted (`docker-compose.yml:30`).
-- **Relative-path resolution for `MAGIC_GEO_WORLDS_DIR` is documented, not enforced.** `.env.example:16-19` states that relative paths resolve against the directory containing the `.env`; nothing in the repository validates the resulting host path before the mount is created.
-- **The `env_file` long form's minimum Compose version is not stated.** `docker-compose.yml:20-22` uses the `{path, required}` mapping form; the repository documents no minimum Docker or Compose version anywhere.
+- **`restart: unless-stopped` does not react to health.** An unhealthy container that has not exited is not restarted (`docker-compose.yml:37`).
+- **Relative-path resolution for `MAGIC_GEO_WORLDS_DIR` is delegated to Compose.** `.env.example:16-20` documents resolution against the Compose project directory; the repository does not perform a separate preflight check of the resulting host path.
 - **Multi-architecture images are out of scope.** The wheel is tagged OS/architecture-specific (`setup.py:43-45`), so the image is valid only for the architecture it was built on. No cross-build or `buildx` configuration ships with the repository.
 
 ---

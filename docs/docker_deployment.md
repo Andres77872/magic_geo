@@ -21,26 +21,34 @@ container user cannot write worlds into it.
 
 ## Configuration: `.env`
 
-Docker Compose reads `.env` automatically, both to substitute `${...}`
-variables in `docker-compose.yml` and to inject the values into the container.
-`.env` is gitignored; `.env.example` is the tracked, documented template.
+Docker Compose reads `.env` automatically for `${...}` substitution in
+`docker-compose.yml`. The Compose file explicitly injects only the runtime
+settings consumed by the process; host paths and image build settings remain
+Compose-only. `.env` is gitignored; `.env.example` is the tracked, documented
+template.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `MAGIC_GEO_WORLDS_DIR` | `./worlds` | Host directory where worlds are saved. Bind-mounted into the container workspace, so worlds survive rebuilds. |
-| `MAGIC_GEO_WORKSPACE` | `/app/runs` | Workspace path inside the container — where `magic-geo serve` writes worlds, configs, reports, and exports. Must stay inside the project root (`/app` in the image). |
+| `MAGIC_GEO_CONTAINER_WORKSPACE` | `/app/runs` | Absolute workspace path inside the container. Compose uses it for both the bind-mount target and the process's `MAGIC_GEO_WORKSPACE`. Must stay inside `/app`. |
 | `MAGIC_GEO_HOST` | `0.0.0.0` | Bind address inside the container. Keep `0.0.0.0` in Docker so the published port can reach the server. |
 | `MAGIC_GEO_PORT` | `8642` | Workbench port (bound inside the container and published on the host). |
 | `MAGIC_GEO_PUBLISH_HOST` | `127.0.0.1` | Host interface the port is published on. The workbench has no authentication — keep loopback unless a trusted boundary or authenticating proxy protects it. |
+| `MAGIC_GEO_PYTHON_VERSION` | `3.13` | Python slim-image version for both build stages. Build-time only. |
+| `MAGIC_GEO_APP_UID` | `1000` | UID assigned to the non-root `magicgeo` image user. Build-time only; match `id -u` when needed for bind-mount permissions. |
+| `MAGIC_GEO_APP_GID` | `1000` | GID assigned to the non-root `magicgeo` image group. Build-time only; match `id -g` when needed for bind-mount permissions. |
 | `MAGIC_GEO_ENABLE_CUDA` | `OFF` | Build argument for the native CUDA backend (see below). |
-| `MAGIC_GEO_NATIVE_LIBRARY` | unset | Optional override for the native shared library loaded through `ctypes`. |
+| `MAGIC_GEO_NATIVE_LIBRARY` | empty | Optional container path overriding the native shared library loaded through `ctypes`. A non-empty path also needs a bind mount. |
 
-The same `MAGIC_GEO_WORKSPACE` / `MAGIC_GEO_HOST` / `MAGIC_GEO_PORT` variables
-configure `magic-geo serve` outside Docker too (they back the `--workspace`,
-`--host`, and `--port` options; flags win over environment values):
+Changing a build-time value requires `docker compose build` or
+`docker compose up --build`. `MAGIC_GEO_CONTAINER_WORKSPACE` is intentionally
+different from the CLI's `MAGIC_GEO_WORKSPACE`: a bare-metal value such as
+`runs` must never become a relative Docker mount target.
+
+Outside Docker, `MAGIC_GEO_WORKSPACE`, `MAGIC_GEO_HOST`, and `MAGIC_GEO_PORT`
+back the `--workspace`, `--host`, and `--port` options (flags win):
 
 ```bash
-set -a; source .env; set +a
 MAGIC_GEO_WORKSPACE=runs MAGIC_GEO_HOST=127.0.0.1 magic-geo serve
 ```
 
@@ -48,15 +56,17 @@ MAGIC_GEO_WORKSPACE=runs MAGIC_GEO_HOST=127.0.0.1 magic-geo serve
 
 Inside the container the project root is `/app` and the workspace defaults to
 `/app/runs`. Compose bind-mounts `${MAGIC_GEO_WORLDS_DIR}` (host) onto
-`${MAGIC_GEO_WORKSPACE}` (container), so everything the workbench or CLI
-writes under the workspace — worlds, browser-created configs, validation
-reports, debug caches, renders — lands in the host directory and survives
-container replacement.
+`${MAGIC_GEO_CONTAINER_WORKSPACE}` (container) and passes that target to the
+process as `MAGIC_GEO_WORKSPACE`, so everything the workbench or CLI writes
+under the workspace — worlds, browser-created configs, validation reports,
+debug caches, renders — lands in the host directory and survives container
+replacement.
 
 The workbench's security model is unchanged in Docker: job inputs are confined
 to the project root (`/app`, which includes the shipped `configs/` seeds) and
 job outputs to the workspace. Point `MAGIC_GEO_WORKSPACE` somewhere else only
-if it remains inside `/app`, and adjust the volume target to match.
+by changing `MAGIC_GEO_CONTAINER_WORKSPACE`, and only if the new path remains
+inside `/app`.
 
 ## Running CLI commands in the container
 
@@ -86,15 +96,17 @@ workbench's debug-cache picker.
 
 ## Image layout
 
-- **Builder stage** (`python:3.13-slim` + `build-essential` + `cmake`):
+- **Builder stage** (`python:3.13-slim` by default + `build-essential` +
+  `cmake`):
   compiles `libmagic_geo_native.so` in Release mode with OpenMP, then builds
   the platform wheel. The wheel build loads the staged library and verifies
   its exported ABI symbols, so a broken native build fails the image build.
-- **Runtime stage** (`python:3.13-slim` + `libgomp1`): installs the wheel with
-  the `[debug]` extra (FastAPI, uvicorn, pyarrow, duckdb), runs as the
+- **Runtime stage** (`python:3.13-slim` by default + `libgomp1`): installs the
+  wheel with the `[debug]` extra (FastAPI, uvicorn, pyarrow, duckdb), runs as the
   non-root user `magicgeo` (UID/GID 1000 by default, overridable with the
-  `APP_UID`/`APP_GID` build args), and exposes a `HEALTHCHECK` against
-  `/api/status`.
+  `MAGIC_GEO_APP_UID`/`MAGIC_GEO_APP_GID` Compose settings), and exposes a
+  `HEALTHCHECK` against `/api/status`. `MAGIC_GEO_PYTHON_VERSION` selects the
+  slim-image version for both stages.
 
 ## GPU notes
 

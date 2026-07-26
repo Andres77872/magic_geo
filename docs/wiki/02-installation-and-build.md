@@ -353,7 +353,7 @@ cmake --build build-cuda -j
 ctest --test-dir build-cuda --output-on-failure
 ```
 
-Verbatim from `docs/cuda_rtx5090_optimization.md:76-83`. Omit the architecture override for the portable project default; the `120-real;120-virtual` narrowing is an audit artifact, explicitly *not* the project-wide default (`docs/cuda_rtx5090_optimization.md:59-61`). In Docker, CUDA requires swapping the builder stage's base image for a CUDA 12.8+ devel image and passing `MAGIC_GEO_ENABLE_CUDA=ON` (`Dockerfile:24-31`, `docs/docker_deployment.md:99-110`).
+Verbatim from `docs/cuda_rtx5090_optimization.md:76-83`. Omit the architecture override for the portable project default; the `120-real;120-virtual` narrowing is an audit artifact, explicitly *not* the project-wide default (`docs/cuda_rtx5090_optimization.md:59-61`). In Docker, CUDA requires swapping the builder stage's base image for a CUDA 12.8+ devel image and passing `MAGIC_GEO_ENABLE_CUDA=ON` (`Dockerfile:24-31`; see the GPU section of `docs/docker_deployment.md`).
 
 ## OpenMP detection
 

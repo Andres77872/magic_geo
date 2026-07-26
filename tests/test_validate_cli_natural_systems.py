@@ -232,6 +232,24 @@ def attach_channel_history(payload: Payload) -> dict[str, Any]:
     return history
 
 
+#: The untampered ``validate`` run, shared by every class below. All fourteen
+#: slices tamper copies of the same ``replay_128`` world, so re-running the
+#: control per class would repeat one identical serialization and one identical
+#: full validation pass fourteen times over. The proof each class needs -- that
+#: the fixture its tampers start from is itself clean -- is the same object.
+_CONTROL: Result | None = None
+
+
+def control_run() -> Result:
+    global _CONTROL
+    if _CONTROL is None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "control.json"
+            write_json(path, worlds.cached_world_readonly(WORLD_KEY))
+            _CONTROL = CliRunner().invoke(app, ["validate", "--world", str(path)])
+    return _CONTROL
+
+
 class ValidateSliceCase(TestCase):
     """One on-disk baseline world per class; tampered copies per case."""
 
@@ -241,9 +259,7 @@ class ValidateSliceCase(TestCase):
         cls.root = Path(cls._directory.name)
         cls.world = worlds.cached_world(WORLD_KEY)
         cls.runner = CliRunner()
-        baseline = cls.root / "baseline.json"
-        write_json(baseline, cls.world)
-        cls.control = cls.runner.invoke(app, ["validate", "--world", str(baseline)])
+        cls.control = control_run()
 
     @classmethod
     def tearDownClass(cls) -> None:

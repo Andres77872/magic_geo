@@ -305,9 +305,41 @@ class HydrologicWaterBudgetValidatorTests(WaterValidatorCase):
         def stage_cell_id_not_numeric(world: World) -> None:
             world["hydrologic_water_budget_history"][-1]["cell_ids"][0] = "first"
 
+        def stage_cell_partition_disagrees_with_replay(world: World) -> None:
+            """The per-cell loss partition is recomputed, not read.
+
+            ``actual_evapotranspiration`` is derived from the stage's own
+            precipitation and PET arrays, so raising it on one land cell leaves
+            the stage internally inconsistent and trips the array comparison
+            that guards every recomputed per-cell field at once.
+            """
+
+            stage = world["hydrologic_water_budget_history"][-1]
+            position = next(
+                index
+                for index, is_marine in enumerate(stage["is_marine_by_cell"])
+                if not is_marine
+            )
+            stage["actual_evapotranspiration_mm_y_by_cell"][position] += 1.0
+
+        def feedback_aggregate_disagrees_with_final_stage(world: World) -> None:
+            """The feedback mirror of the final stage's volumes must agree."""
+
+            world["earth_system_feedback_history"][-1][
+                "hydrologic_infiltration_volume_km3_y"
+            ] += 1.0
+
         self.assert_all_tampers_reported(
             (
                 ("model_domain", model_domain),
+                (
+                    "stage_cell_partition_disagrees_with_replay",
+                    stage_cell_partition_disagrees_with_replay,
+                ),
+                (
+                    "feedback_aggregate_disagrees_with_final_stage",
+                    feedback_aggregate_disagrees_with_final_stage,
+                ),
                 ("clock_timestep_not_numeric", clock_timestep_not_numeric),
                 ("clock_timestep_not_positive", clock_timestep_not_positive),
                 ("duplicate_feedback_stage", duplicate_feedback_stage),
@@ -349,6 +381,16 @@ class GroundwaterRechargeValidatorTests(WaterValidatorCase):
                 float(summary["total_infiltration_km3_y"]) * 2.0 + 1.0
             )
 
+        def cell_recharge_fraction_disagrees_with_partition(world: World) -> None:
+            """The recharge/vadose split is recomputed from the stored fraction.
+
+            Moving the fraction without moving the depths and volumes it
+            produces breaks the per-cell partition identity, which is the guard
+            that keeps a recharge number from being asserted rather than derived.
+            """
+
+            _land_cell(world)["groundwater_recharge_fraction"] += 0.1
+
         self.assert_all_tampers_reported(
             (
                 ("model_domain", model_domain),
@@ -358,6 +400,10 @@ class GroundwaterRechargeValidatorTests(WaterValidatorCase):
                 ),
                 ("summary_vadose_total", summary_vadose_total),
                 ("summary_total_infiltration", summary_total_infiltration),
+                (
+                    "cell_recharge_fraction_disagrees_with_partition",
+                    cell_recharge_fraction_disagrees_with_partition,
+                ),
             ),
             RECHARGE_FAILURE,
         )
@@ -443,6 +489,19 @@ class GroundwaterFlowValidatorTests(WaterValidatorCase):
         def summary_retained_storage(world: World) -> None:
             world["summary"]["total_groundwater_retained_storage_km3_y"] += 1.0
 
+        def recharge_model_total_disagrees(world: World) -> None:
+            """The flow replay's own source total is cross-checked upstream.
+
+            The last guard in the validator refuses to let the flow model source
+            a volume the recharge model never published, so this is the one
+            tamper that reaches it: the recharge total moves, the flow replay's
+            recomputed source does not.
+            """
+
+            world["groundwater_recharge_model"][
+                "total_groundwater_recharge_volume_km3_y"
+            ] += 1.0
+
         self.assert_all_tampers_reported(
             (
                 ("model_domain", model_domain),
@@ -454,6 +513,7 @@ class GroundwaterFlowValidatorTests(WaterValidatorCase):
                 ("cell_close_to_marine_water", cell_close_to_marine_water),
                 ("cell_flow_target", cell_flow_target),
                 ("summary_retained_storage", summary_retained_storage),
+                ("recharge_model_total_disagrees", recharge_model_total_disagrees),
             ),
             GROUNDWATER_FLOW_FAILURE,
         )

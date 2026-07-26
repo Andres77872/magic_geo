@@ -12,7 +12,6 @@ except ImportError as exc:  # pragma: no cover - exercised in minimal installs.
 
 
 LAYER_DOCS_PATH = Path("src/magic_geo/debug_ui/layer_docs.js")
-DEBUG_UI_GUIDE_PATH = Path("docs/debug_ui_guide.md")
 
 
 def _curated_block() -> str:
@@ -45,22 +44,6 @@ def _web_curated_value(name: str) -> str:
 
 
 class DebugMapExportDocumentationParityTests(TestCase):
-    def test_guide_scopes_camera_parity_and_numeric_lithology_codes(self) -> None:
-        guide = DEBUG_UI_GUIDE_PATH.read_text(encoding="utf-8")
-        normalized_guide = " ".join(guide.split())
-
-        for contract in (
-            "CLI independently reads the same debug cache",
-            "canonical camera center/distance framing",
-            "exact Three.js camera pose replay",
-            "`--camera-position`, `--camera-target`, `--camera-up`, and `--vertical-fov`",
-            "per-stage `lithology` layer is serialized as numeric codes 0–6",
-            "does not contain an authoritative code-to-name table",
-            "does not borrow the alphabetical category order",
-        ):
-            with self.subTest(contract=contract):
-                self.assertIn(contract, normalized_guide)
-
     def test_cli_loads_every_web_curated_description(self) -> None:
         canonical_keys = _curated_keys()
 

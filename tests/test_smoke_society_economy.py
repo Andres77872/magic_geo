@@ -11,11 +11,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 
+from click.testing import Result
 from typer.testing import CliRunner
 
 from magic_geo.cli import app
 
 from support import worlds
+from support.cli import assert_no_cli_crash
 
 
 class SmokeSocietyEconomyTests(TestCase):
@@ -1635,679 +1637,156 @@ class SmokeSocietyEconomyTests(TestCase):
             for key in ("trigger_pressure_index", "counter_maneuver_priority_index", "supply_risk_index"):
                 self.assertGreaterEqual(first_decision[key], 0.0)
                 self.assertLessEqual(first_decision[key], 1.0)
-    def test_population_and_conflict_causal_replay_mutations(self) -> None:
-        world = worlds.cached_world("mid_512")
-        population_model = world["population_region_model"]
-        conflict_model = world["conflict_model"]
-        dynasty_model = world["dynasty_model"]
+    def test_society_economy_models_declare_their_documented_identities(self) -> None:
+        """Every society/economy replay names its documented model and emits records.
 
-        self.assertEqual(
-            population_model["model_type"],
-            "causal_area_weighted_capacity_occupancy_population_regions_v1",
-        )
-        self.assertEqual(
-            conflict_model["model_type"],
-            "causal_border_pair_pressure_trade_conflict_selection_v1",
-        )
-        self.assertEqual(
-            dynasty_model["model_type"],
-            "causal_foundation_continuity_pressure_dynasty_lineages_v1",
-        )
-        self.assertTrue(world["population_regions"])
-        self.assertTrue(world["conflicts"])
-        self.assertTrue(world["dynasties"])
+        The record-by-record tamper coverage for these replays lives in the
+        module that owns each validator -- ``test_civilization_geography_validation``,
+        ``test_territorial_geography_validation``, ``test_history_economy_validation``,
+        ``test_demographic_agents_validation``, ``test_dynasty_genealogy_validation``,
+        ``test_logistics_exchange_validation``, ``test_logistics_history`` and
+        ``test_market_clearing_validation``. Those call the validators directly, so
+        they can name the field that diverged instead of collapsing to one CLI
+        verdict line, and they assert the undone tamper replays clean again. This
+        test only pins the model identities and the presence of the record families
+        those modules assume.
+        """
 
-        with TemporaryDirectory() as temporary_directory:
-            world_path = Path(temporary_directory) / "world.json"
-            runner = CliRunner()
+        world = worlds.cached_world_readonly("mid_512")
 
-            def validate_current() -> object:
-                world_path.write_text(json.dumps(world), encoding="utf-8")
-                return runner.invoke(app, ["validate", "--world", str(world_path)])
+        for model_key, model_type in (
+            (
+                "population_region_model",
+                "causal_area_weighted_capacity_occupancy_population_regions_v1",
+            ),
+            (
+                "conflict_model",
+                "causal_border_pair_pressure_trade_conflict_selection_v1",
+            ),
+            (
+                "dynasty_model",
+                "causal_foundation_continuity_pressure_dynasty_lineages_v1",
+            ),
+            (
+                "territorial_snapshot_model",
+                "causal_era_scaled_spherical_region_territorial_snapshots_v1",
+            ),
+            (
+                "population_history_model",
+                "causal_era_snapshot_logistic_migration_conflict_population_history_v1",
+            ),
+            (
+                "economy_history_model",
+                "causal_population_trade_conflict_treasury_economy_history_v1",
+            ),
+            (
+                "demographic_agent_model",
+                "causal_population_economy_logistics_household_firm_demographic_history_v1",
+            ),
+            (
+                "individual_life_event_model",
+                "causal_household_firm_era_sampled_individual_life_event_graph_v1",
+            ),
+            (
+                "ruler_genealogy_model",
+                "causal_dynasty_economy_conflict_named_ruler_alliance_cadet_genealogy_v1",
+            ),
+            (
+                "logistics_exchange_model",
+                "causal_region_route_trade_economy_logistics_exchange_v1",
+            ),
+            (
+                "campaign_operations_model",
+                "causal_conflict_cell_path_front_tactical_strategic_campaign_operations_v1",
+            ),
+            (
+                "market_clearing_model",
+                "causal_route_capacity_agent_orders_price_iteration_inventory_learning_market_clearing_v1",
+            ),
+        ):
+            with self.subTest(model=model_key):
+                self.assertEqual(world[model_key]["model_type"], model_type)
 
-            valid_result = validate_current()
-            self.assertEqual(valid_result.exit_code, 0, valid_result.output)
+        for family in (
+            "population_regions",
+            "conflicts",
+            "dynasties",
+            "population_histories",
+            "economy_histories",
+            "household_cohorts",
+            "firm_agents",
+            "demographic_agent_histories",
+            "individual_agents",
+            "individual_life_events",
+            "rulers",
+            "marriage_alliances",
+            "cadet_branches",
+            "logistics_networks",
+            "market_exchanges",
+            "campaign_movements",
+            "campaign_path_segments",
+            "campaign_front_histories",
+            "tactical_engagements",
+            "strategic_campaign_plans",
+            "route_capacity_constraints",
+            "market_clearing_records",
+            "market_agent_orders",
+            "market_price_iterations",
+            "market_inventory_histories",
+        ):
+            with self.subTest(family=family):
+                self.assertTrue(world[family], family)
 
-            population = world["population_regions"][0]
-            original_population = population["estimated_population"]
-            population["estimated_population"] *= 1.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "population, conflict, or dynasty model causal replay invalid",
-                invalid_result.output,
-            )
-            population["estimated_population"] = original_population
-
-            original_water_security = population["water_security_index"]
-            population["water_security_index"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "population, conflict, or dynasty model causal replay invalid",
-                invalid_result.output,
-            )
-            population["water_security_index"] = original_water_security
-
-            conflict = world["conflicts"][0]
-            original_contested_cell = conflict["contested_cell_id"]
-            conflict["contested_cell_id"] = original_contested_cell + 1
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "population, conflict, or dynasty model causal replay invalid",
-                invalid_result.output,
-            )
-            conflict["contested_cell_id"] = original_contested_cell
-
-            original_outcome = conflict["outcome"]
-            conflict["outcome"] = (
-                "stalemate" if original_outcome != "stalemate" else "exhaustion"
-            )
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "population, conflict, or dynasty model causal replay invalid",
-                invalid_result.output,
-            )
-            conflict["outcome"] = original_outcome
-
-            density_parameters = population_model["density_capacity_parameters"]
-            original_density = density_parameters["base_people_per_km2"]
-            density_parameters["base_people_per_km2"] += 0.1
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "population, conflict, or dynasty model causal replay invalid",
-                invalid_result.output,
-            )
-            density_parameters["base_people_per_km2"] = original_density
-
-            original_candidate_threshold = conflict_model["minimum_candidate_score"]
-            conflict_model["minimum_candidate_score"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "population, conflict, or dynasty model causal replay invalid",
-                invalid_result.output,
-            )
-            conflict_model["minimum_candidate_score"] = original_candidate_threshold
-
-            dynasty = world["dynasties"][0]
-            original_succession_pressure = dynasty["succession_pressure"]
-            dynasty["succession_pressure"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "population, conflict, or dynasty model causal replay invalid",
-                invalid_result.output,
-            )
-            dynasty["succession_pressure"] = original_succession_pressure
-
-            original_dynasty_thresholds = dynasty_model["dynasty_count_thresholds"][:]
-            dynasty_model["dynasty_count_thresholds"][0] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "population, conflict, or dynasty model causal replay invalid",
-                invalid_result.output,
-            )
-            dynasty_model["dynasty_count_thresholds"] = original_dynasty_thresholds
-    def test_territorial_snapshot_causal_replay_mutations(self) -> None:
-        world = worlds.cached_world("mid_512")
-        model = world["territorial_snapshot_model"]
-
-        self.assertEqual(
-            model["model_type"],
-            "causal_era_scaled_spherical_region_territorial_snapshots_v1",
-        )
         self.assertEqual(len(world["territorial_snapshots"]), 4)
         self.assertTrue(world["territorial_snapshots"][0]["regions"])
 
-        with TemporaryDirectory() as temporary_directory:
-            world_path = Path(temporary_directory) / "world.json"
-            runner = CliRunner()
+    def test_validate_reports_every_society_economy_replay_verdict(self) -> None:
+        """``validate`` reaches and reports all eight society/economy replays.
 
-            def validate_current() -> object:
-                world_path.write_text(json.dumps(world), encoding="utf-8")
-                return runner.invoke(app, ["validate", "--world", str(world_path)])
+        Wiring is the one claim the dedicated validator modules cannot make: they
+        call the validators directly and never go through the public command. One
+        tamper per verdict, applied to a single payload and reported by a single
+        pass, is all that claim needs -- repeating the tamper tables through the
+        CLI would re-prove, far more slowly and far less precisely, what those
+        modules already prove field by field.
+        """
 
-            valid_result = validate_current()
-            self.assertEqual(valid_result.exit_code, 0, valid_result.output)
-
-            snapshot = world["territorial_snapshots"][0]
-            region = snapshot["regions"][0]
-            original_boundary_cell = region["boundary_cell_ids"][0]
-            region["boundary_cell_ids"][0] = original_boundary_cell + 1
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "territorial snapshot model or causal replay invalid",
-                invalid_result.output,
-            )
-            region["boundary_cell_ids"][0] = original_boundary_cell
-
-            original_ring_latitude = region["boundary_ring"][0][0]
-            region["boundary_ring"][0][0] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "territorial snapshot model or causal replay invalid",
-                invalid_result.output,
-            )
-            region["boundary_ring"][0][0] = original_ring_latitude
-
-            original_dissolved_area = region["dissolved_polygon_area_km2"]
-            region["dissolved_polygon_area_km2"] *= 1.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "territorial snapshot model or causal replay invalid",
-                invalid_result.output,
-            )
-            region["dissolved_polygon_area_km2"] = original_dissolved_area
-
-            original_fragmentation = snapshot["fragmentation_index"]
-            snapshot["fragmentation_index"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "territorial snapshot model or causal replay invalid",
-                invalid_result.output,
-            )
-            snapshot["fragmentation_index"] = original_fragmentation
-
-            original_area_factors = model["era_area_factors"][:]
-            model["era_area_factors"][0] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "territorial snapshot model or causal replay invalid",
-                invalid_result.output,
-            )
-            model["era_area_factors"] = original_area_factors
-    def test_population_and_economy_history_causal_replay_mutations(self) -> None:
         world = worlds.cached_world("mid_512")
-        population_model = world["population_history_model"]
-        economy_model = world["economy_history_model"]
-
-        self.assertEqual(
-            population_model["model_type"],
-            "causal_era_snapshot_logistic_migration_conflict_population_history_v1",
-        )
-        self.assertEqual(
-            economy_model["model_type"],
-            "causal_population_trade_conflict_treasury_economy_history_v1",
-        )
-        self.assertTrue(world["population_histories"])
-        self.assertTrue(world["economy_histories"])
+        runner = CliRunner()
 
         with TemporaryDirectory() as temporary_directory:
             world_path = Path(temporary_directory) / "world.json"
-            runner = CliRunner()
 
-            def validate_current() -> object:
+            def validate_current() -> Result:
                 world_path.write_text(json.dumps(world), encoding="utf-8")
                 return runner.invoke(app, ["validate", "--world", str(world_path)])
 
-            valid_result = validate_current()
-            self.assertEqual(valid_result.exit_code, 0, valid_result.output)
+            control = validate_current()
+            assert_no_cli_crash(self, control, command="validate")
+            self.assertEqual(control.exit_code, 0, control.output)
 
-            population_step = world["population_histories"][0]["steps"][0]
-            original_end_population = population_step["end_population"]
-            population_step["end_population"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "population or economy history model causal replay invalid",
-                invalid_result.output,
-            )
-            population_step["end_population"] = original_end_population
+            world["population_regions"][0]["estimated_population"] *= 1.01
+            world["territorial_snapshots"][0]["regions"][0]["boundary_cell_ids"][0] += 1
+            world["population_histories"][0]["steps"][0]["end_population"] += 1.0
+            world["household_cohorts"][0]["vulnerability_index"] += 0.01
+            world["rulers"][0]["legitimacy_index"] += 0.01
+            world["logistics_networks"][0]["transport_efficiency_index"] += 0.01
+            world["campaign_path_segments"][0]["attrition_index"] += 0.01
+            world["route_capacity_constraints"][0]["capacity_volume_index"] += 0.01
 
-            original_migration_delta = population_step["migration_delta"]
-            population_step["migration_delta"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "population or economy history model causal replay invalid",
-                invalid_result.output,
-            )
-            population_step["migration_delta"] = original_migration_delta
+            result = validate_current()
 
-            economy_step = world["economy_histories"][0]["steps"][0]
-            original_gross_output = economy_step["gross_output_index"]
-            economy_step["gross_output_index"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "population or economy history model causal replay invalid",
-                invalid_result.output,
-            )
-            economy_step["gross_output_index"] = original_gross_output
-
-            original_treasury = economy_step["treasury_end_index"]
-            economy_step["treasury_end_index"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "population or economy history model causal replay invalid",
-                invalid_result.output,
-            )
-            economy_step["treasury_end_index"] = original_treasury
-
-            original_growth_model = population_model["growth_model"]
-            population_model["growth_model"] = "unsupported_growth_model"
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "population or economy history model causal replay invalid",
-                invalid_result.output,
-            )
-            population_model["growth_model"] = original_growth_model
-
-            original_treasury_model = economy_model["treasury_model"]
-            economy_model["treasury_model"] = "unsupported_treasury_model"
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "population or economy history model causal replay invalid",
-                invalid_result.output,
-            )
-            economy_model["treasury_model"] = original_treasury_model
-    def test_demographic_agent_and_life_event_causal_replay_mutations(self) -> None:
-        world = worlds.cached_world("mid_512")
-        demographic_model = world["demographic_agent_model"]
-        life_event_model = world["individual_life_event_model"]
-
-        self.assertEqual(
-            demographic_model["model_type"],
-            "causal_population_economy_logistics_household_firm_demographic_history_v1",
-        )
-        self.assertEqual(
-            life_event_model["model_type"],
-            "causal_household_firm_era_sampled_individual_life_event_graph_v1",
-        )
-        self.assertTrue(world["household_cohorts"])
-        self.assertTrue(world["firm_agents"])
-        self.assertTrue(world["demographic_agent_histories"])
-        self.assertTrue(world["individual_agents"])
-        self.assertTrue(world["individual_life_events"])
-
-        with TemporaryDirectory() as temporary_directory:
-            world_path = Path(temporary_directory) / "world.json"
-            runner = CliRunner()
-
-            def validate_current() -> object:
-                world_path.write_text(json.dumps(world), encoding="utf-8")
-                return runner.invoke(app, ["validate", "--world", str(world_path)])
-
-            valid_result = validate_current()
-            self.assertEqual(valid_result.exit_code, 0, valid_result.output)
-
-            household = world["household_cohorts"][0]
-            original_vulnerability = household["vulnerability_index"]
-            household["vulnerability_index"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "demographic agent or individual life-event causal replay invalid",
-                invalid_result.output,
-            )
-            household["vulnerability_index"] = original_vulnerability
-
-            firm = world["firm_agents"][0]
-            original_employment = firm["employment_capacity"]
-            firm["employment_capacity"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "demographic agent or individual life-event causal replay invalid",
-                invalid_result.output,
-            )
-            firm["employment_capacity"] = original_employment
-
-            demographic_step = world["demographic_agent_histories"][0]["steps"][0]
-            original_working_population = demographic_step["working_population"]
-            demographic_step["working_population"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "demographic agent or individual life-event causal replay invalid",
-                invalid_result.output,
-            )
-            demographic_step["working_population"] = original_working_population
-
-            person = world["individual_agents"][0]
-            original_name = person["name"]
-            person["name"] = f"{original_name}x"
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "demographic agent or individual life-event causal replay invalid",
-                invalid_result.output,
-            )
-            person["name"] = original_name
-
-            event = world["individual_life_events"][0]
-            original_event_year = event["year_bp"]
-            event["year_bp"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "demographic agent or individual life-event causal replay invalid",
-                invalid_result.output,
-            )
-            event["year_bp"] = original_event_year
-
-            original_household_model = demographic_model["household_model"]
-            demographic_model["household_model"] = "unsupported_household_model"
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "demographic agent or individual life-event causal replay invalid",
-                invalid_result.output,
-            )
-            demographic_model["household_model"] = original_household_model
-
-            original_sampling_model = life_event_model["sampling_model"]
-            life_event_model["sampling_model"] = "unsupported_sampling_model"
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "demographic agent or individual life-event causal replay invalid",
-                invalid_result.output,
-            )
-            life_event_model["sampling_model"] = original_sampling_model
-    def test_ruler_genealogy_causal_replay_mutations(self) -> None:
-        world = worlds.cached_world("mid_512")
-        model = world["ruler_genealogy_model"]
-
-        self.assertEqual(
-            model["model_type"],
-            "causal_dynasty_economy_conflict_named_ruler_alliance_cadet_genealogy_v1",
-        )
-        self.assertTrue(world["rulers"])
-        self.assertTrue(world["marriage_alliances"])
-        self.assertTrue(world["cadet_branches"])
-
-        with TemporaryDirectory() as temporary_directory:
-            world_path = Path(temporary_directory) / "world.json"
-            runner = CliRunner()
-
-            def validate_current() -> object:
-                world_path.write_text(json.dumps(world), encoding="utf-8")
-                return runner.invoke(app, ["validate", "--world", str(world_path)])
-
-            valid_result = validate_current()
-            self.assertEqual(valid_result.exit_code, 0, valid_result.output)
-
-            ruler = world["rulers"][0]
-            original_legitimacy = ruler["legitimacy_index"]
-            ruler["legitimacy_index"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "ruler genealogy model or causal replay invalid",
-                invalid_result.output,
-            )
-            ruler["legitimacy_index"] = original_legitimacy
-
-            alliance = world["marriage_alliances"][0]
-            original_alliance_strength = alliance["alliance_strength"]
-            alliance["alliance_strength"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "ruler genealogy model or causal replay invalid",
-                invalid_result.output,
-            )
-            alliance["alliance_strength"] = original_alliance_strength
-
-            branch = world["cadet_branches"][0]
-            original_claim_strength = branch["claim_strength"]
-            branch["claim_strength"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "ruler genealogy model or causal replay invalid",
-                invalid_result.output,
-            )
-            branch["claim_strength"] = original_claim_strength
-
-            dynasty = world["dynasties"][0]
-            original_founder = dynasty["founder_ruler_id"]
-            dynasty["founder_ruler_id"] = original_founder + 1
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "ruler genealogy model or causal replay invalid",
-                invalid_result.output,
-            )
-            dynasty["founder_ruler_id"] = original_founder
-
-            original_reign_model = model["reign_model"]
-            model["reign_model"] = "unsupported_reign_model"
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "ruler genealogy model or causal replay invalid",
-                invalid_result.output,
-            )
-            model["reign_model"] = original_reign_model
-    def test_logistics_exchange_and_campaign_causal_replay_mutations(self) -> None:
-        world = worlds.cached_world("mid_512")
-        logistics_model = world["logistics_exchange_model"]
-        campaign_model = world["campaign_operations_model"]
-
-        self.assertEqual(
-            logistics_model["model_type"],
-            "causal_region_route_trade_economy_logistics_exchange_v1",
-        )
-        self.assertEqual(
-            campaign_model["model_type"],
-            "causal_conflict_cell_path_front_tactical_strategic_campaign_operations_v1",
-        )
-        self.assertTrue(world["logistics_networks"])
-        self.assertTrue(world["market_exchanges"])
-        self.assertTrue(world["campaign_movements"])
-        self.assertTrue(world["campaign_path_segments"])
-        self.assertTrue(world["campaign_front_histories"])
-        self.assertTrue(world["tactical_engagements"])
-        self.assertTrue(world["strategic_campaign_plans"])
-
-        with TemporaryDirectory() as temporary_directory:
-            world_path = Path(temporary_directory) / "world.json"
-            runner = CliRunner()
-
-            def validate_current() -> object:
-                world_path.write_text(json.dumps(world), encoding="utf-8")
-                return runner.invoke(app, ["validate", "--world", str(world_path)])
-
-            valid_result = validate_current()
-            self.assertEqual(valid_result.exit_code, 0, valid_result.output)
-
-            network = world["logistics_networks"][0]
-            original_efficiency = network["transport_efficiency_index"]
-            network["transport_efficiency_index"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "logistics exchange model or causal replay invalid",
-                invalid_result.output,
-            )
-            network["transport_efficiency_index"] = original_efficiency
-
-            exchange = world["market_exchanges"][0]
-            original_market_access = exchange["market_access_index"]
-            exchange["market_access_index"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "logistics exchange model or causal replay invalid",
-                invalid_result.output,
-            )
-            exchange["market_access_index"] = original_market_access
-
-            segment = world["campaign_path_segments"][0]
-            original_segment_attrition = segment["attrition_index"]
-            segment["attrition_index"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "campaign operations model or causal replay invalid",
-                invalid_result.output,
-            )
-            segment["attrition_index"] = original_segment_attrition
-
-            front_step = world["campaign_front_histories"][0]["steps"][0]
-            original_supply_integrity = front_step["supply_integrity_index"]
-            front_step["supply_integrity_index"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "campaign operations model or causal replay invalid",
-                invalid_result.output,
-            )
-            front_step["supply_integrity_index"] = original_supply_integrity
-
-            tactical_step = world["tactical_engagements"][0]["steps"][0]
-            original_counter = tactical_step["counter_maneuver_index"]
-            tactical_step["counter_maneuver_index"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "campaign operations model or causal replay invalid",
-                invalid_result.output,
-            )
-            tactical_step["counter_maneuver_index"] = original_counter
-
-            strategic_plan = world["strategic_campaign_plans"][0]
-            original_reserve = strategic_plan["reserve_fraction"]
-            strategic_plan["reserve_fraction"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "campaign operations model or causal replay invalid",
-                invalid_result.output,
-            )
-            strategic_plan["reserve_fraction"] = original_reserve
-
-            original_network_model = logistics_model["network_model"]
-            logistics_model["network_model"] = "unsupported_network_model"
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "logistics exchange model or causal replay invalid",
-                invalid_result.output,
-            )
-            logistics_model["network_model"] = original_network_model
-
-            original_path_model = campaign_model["path_model"]
-            campaign_model["path_model"] = "unsupported_path_model"
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "campaign operations model or causal replay invalid",
-                invalid_result.output,
-            )
-            campaign_model["path_model"] = original_path_model
-    def test_market_clearing_causal_replay_mutations(self) -> None:
-        world = worlds.cached_world("mid_512")
-        model = world["market_clearing_model"]
-
-        self.assertEqual(
-            model["model_type"],
-            "causal_route_capacity_agent_orders_price_iteration_inventory_learning_market_clearing_v1",
-        )
-        self.assertTrue(world["route_capacity_constraints"])
-        self.assertTrue(world["market_clearing_records"])
-        self.assertTrue(world["market_agent_orders"])
-        self.assertTrue(world["market_price_iterations"])
-        self.assertTrue(world["market_inventory_histories"])
-
-        with TemporaryDirectory() as temporary_directory:
-            world_path = Path(temporary_directory) / "world.json"
-            runner = CliRunner()
-
-            def validate_current() -> object:
-                world_path.write_text(json.dumps(world), encoding="utf-8")
-                return runner.invoke(app, ["validate", "--world", str(world_path)])
-
-            valid_result = validate_current()
-            self.assertEqual(valid_result.exit_code, 0, valid_result.output)
-
-            constraint = world["route_capacity_constraints"][0]
-            original_capacity = constraint["capacity_volume_index"]
-            constraint["capacity_volume_index"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "market clearing model or causal replay invalid",
-                invalid_result.output,
-            )
-            constraint["capacity_volume_index"] = original_capacity
-
-            clearing = world["market_clearing_records"][0]
-            original_price = clearing["equilibrium_price_index"]
-            clearing["equilibrium_price_index"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "market clearing model or causal replay invalid",
-                invalid_result.output,
-            )
-            clearing["equilibrium_price_index"] = original_price
-
-            order = world["market_agent_orders"][0]
-            original_order_volume = order["requested_volume_index"]
-            order["requested_volume_index"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "market clearing model or causal replay invalid",
-                invalid_result.output,
-            )
-            order["requested_volume_index"] = original_order_volume
-
-            iteration = world["market_price_iterations"][0]
-            original_imbalance = iteration["imbalance_index"]
-            iteration["imbalance_index"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "market clearing model or causal replay invalid",
-                invalid_result.output,
-            )
-            iteration["imbalance_index"] = original_imbalance
-
-            inventory_step = world["market_inventory_histories"][0]["steps"][0]
-            original_learning_rate = inventory_step["learning_rate_index"]
-            inventory_step["learning_rate_index"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "market clearing model or causal replay invalid",
-                invalid_result.output,
-            )
-            inventory_step["learning_rate_index"] = original_learning_rate
-
-            route = world["routes"][constraint["route_id"]]
-            original_constraint_id = route["route_capacity_constraint_id"]
-            route["route_capacity_constraint_id"] = original_constraint_id + 1
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "market clearing model or causal replay invalid",
-                invalid_result.output,
-            )
-            route["route_capacity_constraint_id"] = original_constraint_id
-
-            original_inventory_model = model["inventory_model"]
-            model["inventory_model"] = "unsupported_inventory_model"
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "market clearing model or causal replay invalid",
-                invalid_result.output,
-            )
-            model["inventory_model"] = original_inventory_model
+        assert_no_cli_crash(self, result, command="validate")
+        self.assertEqual(result.exit_code, 1, result.output)
+        for message in (
+            "population, conflict, or dynasty model causal replay invalid",
+            "territorial snapshot model or causal replay invalid",
+            "population or economy history model causal replay invalid",
+            "demographic agent or individual life-event causal replay invalid",
+            "ruler genealogy model or causal replay invalid",
+            "logistics exchange model or causal replay invalid",
+            "campaign operations model or causal replay invalid",
+            "market clearing model or causal replay invalid",
+        ):
+            with self.subTest(message=message):
+                self.assertIn(message, result.output)

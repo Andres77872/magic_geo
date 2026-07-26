@@ -11,11 +11,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 
+from click.testing import Result
 from typer.testing import CliRunner
 
 from magic_geo.cli import app
 
 from support import worlds
+from support.cli import assert_no_cli_crash
 
 
 class SmokeResourcesTests(TestCase):
@@ -760,132 +762,67 @@ class SmokeResourcesTests(TestCase):
             {"none", "ice_cap", "mountain_glacier", "fjord", "glacial_valley", "glacial_lake", "moraine"},
         )
         self.assertGreaterEqual(first_cell["glacial_landform_system_id"], -1)
-    def test_land_use_frontier_and_worldbuilding_causal_replay_mutations(
-        self,
-    ) -> None:
-        world = worlds.cached_world("mid_512")
-        land_use_model = world["land_use_zone_model"]
-        frontier_model = world["natural_frontier_model"]
-        realism_model = world["worldbuilding_realism_model"]
+    def test_validate_reports_every_land_use_and_realism_replay_verdict(self) -> None:
+        """``validate`` reaches and reports the land-use, frontier and realism replays.
 
-        self.assertEqual(
-            land_use_model["model_type"],
-            "causal_soil_climate_resource_connected_land_use_zones_v1",
-        )
-        self.assertEqual(
-            frontier_model["model_type"],
-            "causal_border_terrain_connected_natural_frontiers_v1",
-        )
-        self.assertEqual(
-            realism_model["model_type"],
-            "causal_upstream_evidence_worldbuilding_realism_checks_v1",
-        )
-        self.assertTrue(world["agricultural_zones"])
-        self.assertTrue(world["mining_zones"])
-        self.assertTrue(world["natural_frontiers"])
+        The field-by-field tamper coverage for all three lives in
+        ``test_human_geography_validation``, which calls the validators directly
+        against the 128-cell replay world. Wiring into the public command is the
+        one claim that module cannot make, and one tamper per verdict in a single
+        pass is all it needs.
+        """
+
+        world = worlds.cached_world("mid_512")
+
+        for model_key, model_type in (
+            (
+                "land_use_zone_model",
+                "causal_soil_climate_resource_connected_land_use_zones_v1",
+            ),
+            (
+                "natural_frontier_model",
+                "causal_border_terrain_connected_natural_frontiers_v1",
+            ),
+            (
+                "worldbuilding_realism_model",
+                "causal_upstream_evidence_worldbuilding_realism_checks_v1",
+            ),
+        ):
+            with self.subTest(model=model_key):
+                self.assertEqual(world[model_key]["model_type"], model_type)
+        for family in ("agricultural_zones", "mining_zones", "natural_frontiers"):
+            with self.subTest(family=family):
+                self.assertTrue(world[family], family)
         self.assertEqual(len(world["worldbuilding_realism_checks"]), 5)
 
+        runner = CliRunner()
         with TemporaryDirectory() as temporary_directory:
             world_path = Path(temporary_directory) / "world.json"
-            runner = CliRunner()
 
-            def validate_current() -> object:
+            def validate_current() -> Result:
                 world_path.write_text(json.dumps(world), encoding="utf-8")
                 return runner.invoke(app, ["validate", "--world", str(world_path)])
 
-            valid_result = validate_current()
-            self.assertEqual(valid_result.exit_code, 0, valid_result.output)
+            control = validate_current()
+            assert_no_cli_crash(self, control, command="validate")
+            self.assertEqual(control.exit_code, 0, control.output)
 
-            low_potential_cell = next(
-                cell
-                for cell in world["cells"]
-                if not cell["is_water"]
-                and cell["agricultural_potential_index"] < 0.50
-            )
-            original_potential = low_potential_cell["agricultural_potential_index"]
-            original_mean = world["summary"]["mean_agricultural_potential_index"]
-            low_potential_cell["agricultural_potential_index"] += 0.01
-            world["summary"]["mean_agricultural_potential_index"] += 0.01 / len(
-                world["cells"]
-            )
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "land use zone model or causal replay invalid",
-                invalid_result.output,
-            )
-            low_potential_cell["agricultural_potential_index"] = original_potential
-            world["summary"]["mean_agricultural_potential_index"] = original_mean
-
-            agricultural_zone = world["agricultural_zones"][0]
-            original_dominant_biome = agricultural_zone["dominant_biome"]
-            agricultural_zone["dominant_biome"] = "unsupported_biome"
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "land use zone model or causal replay invalid",
-                invalid_result.output,
-            )
-            agricultural_zone["dominant_biome"] = original_dominant_biome
-
-            original_agricultural_threshold = land_use_model[
-                "agricultural_threshold"
-            ]
-            land_use_model["agricultural_threshold"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "land use zone model or causal replay invalid",
-                invalid_result.output,
-            )
-            land_use_model[
-                "agricultural_threshold"
-            ] = original_agricultural_threshold
-
-            frontier = world["natural_frontiers"][0]
-            original_frontier_landform = frontier["dominant_landform"]
-            frontier["dominant_landform"] = "unsupported_landform"
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "natural frontier model or causal replay invalid",
-                invalid_result.output,
-            )
-            frontier["dominant_landform"] = original_frontier_landform
-
-            frontier_parameters = frontier_model["frontier_index_parameters"]
-            original_border_weight = frontier_parameters["border_weight"]
-            frontier_parameters["border_weight"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "natural frontier model or causal replay invalid",
-                invalid_result.output,
-            )
-            frontier_parameters["border_weight"] = original_border_weight
-
-            realism_check = world["worldbuilding_realism_checks"][0]
-            evidence = realism_check["evidence"]
-            original_top_count = evidence["top_settlement_count"]
-            evidence["top_settlement_count"] += 1
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "worldbuilding realism model or causal replay invalid",
-                invalid_result.output,
-            )
-            evidence["top_settlement_count"] = original_top_count
-
-            original_water_threshold = realism_model[
+            world["land_use_zone_model"]["agricultural_threshold"] += 0.01
+            world["natural_frontier_model"]["frontier_index_parameters"][
+                "border_weight"
+            ] += 0.01
+            world["worldbuilding_realism_model"][
                 "water_access_runoff_threshold_mm_y"
-            ]
-            realism_model["water_access_runoff_threshold_mm_y"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "worldbuilding realism model or causal replay invalid",
-                invalid_result.output,
-            )
-            realism_model[
-                "water_access_runoff_threshold_mm_y"
-            ] = original_water_threshold
+            ] += 1.0
+
+            result = validate_current()
+
+        assert_no_cli_crash(self, result, command="validate")
+        self.assertEqual(result.exit_code, 1, result.output)
+        for message in (
+            "land use zone model or causal replay invalid",
+            "natural frontier model or causal replay invalid",
+            "worldbuilding realism model or causal replay invalid",
+        ):
+            with self.subTest(message=message):
+                self.assertIn(message, result.output)

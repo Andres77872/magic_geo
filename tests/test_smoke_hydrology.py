@@ -13,6 +13,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 
+from click.testing import Result
 from typer.testing import CliRunner
 
 from magic_geo.api import generate_world
@@ -29,6 +30,7 @@ from magic_geo.river_hydraulics import enrich_world_with_river_hydraulics
 from magic_geo.route_corridors import enrich_world_with_route_corridors
 
 from support import worlds
+from support.cli import assert_no_cli_crash
 
 
 class SmokeHydrologyTests(TestCase):
@@ -1630,180 +1632,42 @@ class SmokeHydrologyTests(TestCase):
             )
         )
 
+        # Wiring only: ``validate`` has to reach and report all four water
+        # replays. Their tamper tables live in ``test_water_validators``, which
+        # calls ``_validate_hydrologic_water_budget``,
+        # ``_validate_groundwater_recharge``, ``_validate_aquifer_resources`` and
+        # ``_validate_groundwater_flow`` directly, so each case there names the
+        # field that diverged instead of collapsing into one CLI verdict line.
+        runner = CliRunner()
         with TemporaryDirectory() as temporary_directory:
             world_path = Path(temporary_directory) / "world.json"
-            runner = CliRunner()
 
-            def validate_current() -> object:
+            def validate_current() -> Result:
                 world_path.write_text(json.dumps(world), encoding="utf-8")
                 return runner.invoke(app, ["validate", "--world", str(world_path)])
 
-            valid_result = validate_current()
-            self.assertEqual(valid_result.exit_code, 0, valid_result.output)
-
-            final_stage["temperature_c_by_cell"][land_position] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "hydrologic water budget model or replay invalid",
-                invalid_result.output,
-            )
-            final_stage["temperature_c_by_cell"][land_position] -= 1.0
-
-            final_stage[
-                "actual_evapotranspiration_mm_y_by_cell"
-            ][land_position] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "hydrologic water budget model or replay invalid",
-                invalid_result.output,
-            )
-            final_stage[
-                "actual_evapotranspiration_mm_y_by_cell"
-            ][land_position] -= 1.0
-
-            feedback[-1]["hydrologic_infiltration_volume_km3_y"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "hydrologic water budget model or replay invalid",
-                invalid_result.output,
-            )
-            feedback[-1]["hydrologic_infiltration_volume_km3_y"] -= 1.0
-
-            land_cell_id = final_stage["cell_ids"][land_position]
-            land_cell = cells[land_cell_id]
-            land_cell["infiltration_mm_y"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "hydrologic water budget model or replay invalid",
-                invalid_result.output,
-            )
-            land_cell["infiltration_mm_y"] -= 1.0
+            control = validate_current()
+            assert_no_cli_crash(self, control, command="validate")
+            self.assertEqual(control.exit_code, 0, control.output)
 
             model["final_runoff_volume_km3_y"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "hydrologic water budget model or replay invalid",
-                invalid_result.output,
-            )
-            model["final_runoff_volume_km3_y"] -= 1.0
-
-            marine_cell = next(cell for cell in cells if cell["is_water"])
-            marine_cell["infiltration_mm_y"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "hydrologic water budget model or replay invalid",
-                invalid_result.output,
-            )
-            marine_cell["infiltration_mm_y"] -= 1.0
-
-            land_cell["groundwater_recharge_fraction"] += 0.1
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "groundwater recharge model or source partition invalid",
-                invalid_result.output,
-            )
-            land_cell["groundwater_recharge_fraction"] -= 0.1
-
             recharge_model["total_groundwater_recharge_volume_km3_y"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "groundwater recharge model or source partition invalid",
-                invalid_result.output,
-            )
-            recharge_model["total_groundwater_recharge_volume_km3_y"] -= 1.0
-
-            original_storage = land_cell["aquifer_storage_index"]
-            land_cell["aquifer_storage_index"] = original_storage + 0.1
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "aquifer resource model or causal replay invalid",
-                invalid_result.output,
-            )
-            land_cell["aquifer_storage_index"] = original_storage
-
-            original_class = land_cell["aquifer_class"]
-            land_cell["aquifer_class"] = "tampered_aquifer"
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "aquifer resource model or causal replay invalid",
-                invalid_result.output,
-            )
-            land_cell["aquifer_class"] = original_class
-
             aquifer_model["minimum_system_productivity_index"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "aquifer resource model or causal replay invalid",
-                invalid_result.output,
-            )
-            aquifer_model["minimum_system_productivity_index"] -= 0.01
-
-            if world["aquifer_systems"]:
-                first_system = world["aquifer_systems"][0]
-                original_lithology = first_system["primary_lithology"]
-                first_system["primary_lithology"] = "tampered"
-                invalid_result = validate_current()
-                self.assertNotEqual(invalid_result.exit_code, 0)
-                self.assertIn(
-                    "aquifer resource model or causal replay invalid",
-                    invalid_result.output,
-                )
-                first_system["primary_lithology"] = original_lithology
-
-            original_head = land_cell["groundwater_hydraulic_head_m"]
-            land_cell["groundwater_hydraulic_head_m"] = original_head + 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "groundwater flow model or routing replay invalid",
-                invalid_result.output,
-            )
-            land_cell["groundwater_hydraulic_head_m"] = original_head
-
-            original_available = land_cell[
-                "groundwater_available_volume_km3_y"
-            ]
-            original_retained = land_cell[
-                "groundwater_retained_storage_km3_y"
-            ]
-            land_cell["groundwater_available_volume_km3_y"] = (
-                original_available + 1.0
-            )
-            land_cell["groundwater_retained_storage_km3_y"] = (
-                original_retained + 1.0
-            )
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "groundwater flow model or routing replay invalid",
-                invalid_result.output,
-            )
-            land_cell["groundwater_available_volume_km3_y"] = (
-                original_available
-            )
-            land_cell["groundwater_retained_storage_km3_y"] = (
-                original_retained
-            )
-
             flow_model["total_retained_storage_volume_km3_y"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "groundwater flow model or routing replay invalid",
-                invalid_result.output,
-            )
-            flow_model["total_retained_storage_volume_km3_y"] -= 1.0
+
+            result = validate_current()
+
+        assert_no_cli_crash(self, result, command="validate")
+        self.assertEqual(result.exit_code, 1, result.output)
+        for message in (
+            "hydrologic water budget model or replay invalid",
+            "groundwater recharge model or source partition invalid",
+            "aquifer resource model or causal replay invalid",
+            "groundwater flow model or routing replay invalid",
+        ):
+            with self.subTest(message=message):
+                self.assertIn(message, result.output)
+
     def test_downstream_hydrology_diagnostics_are_topologically_ordered(
         self,
     ) -> None:

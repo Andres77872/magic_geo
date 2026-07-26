@@ -11,6 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 
+from click.testing import Result
 from typer.testing import CliRunner
 
 from magic_geo.api import generate_world
@@ -19,6 +20,7 @@ from magic_geo.config import load_config
 from magic_geo.sediment_interface_validation import validate_sediment_interfaces
 
 from support import worlds
+from support.cli import assert_no_cli_crash
 
 
 class SmokeSedimentTests(TestCase):
@@ -338,60 +340,31 @@ class SmokeSedimentTests(TestCase):
             delta=0.001,
         )
 
+        # Wiring only: ``validate`` has to reach and report the fluvial routing
+        # replay. Every verdict it can raise, and the tamper table behind each,
+        # lives in ``test_sediment_validators``, which calls
+        # ``_validate_fluvial_sediment_routing`` directly instead of paying a
+        # world serialization and a full validation pass per mutation.
+        runner = CliRunner()
         with TemporaryDirectory() as temporary_directory:
             world_path = Path(temporary_directory) / "world.json"
-            runner = CliRunner()
 
-            def validate_current() -> object:
+            def validate_current() -> Result:
                 world_path.write_text(json.dumps(world), encoding="utf-8")
                 return runner.invoke(app, ["validate", "--world", str(world_path)])
 
-            valid_result = validate_current()
-            self.assertEqual(valid_result.exit_code, 0, valid_result.output)
+            control = validate_current()
+            assert_no_cli_crash(self, control, command="validate")
+            self.assertEqual(control.exit_code, 0, control.output)
 
             model["maximum_transport_capacity_fraction"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("fluvial sediment routing metadata invalid", invalid_result.output)
-            model["maximum_transport_capacity_fraction"] -= 0.01
 
-            route_step = next(
-                step
-                for stage in history
-                for step in stage["cell_steps"]
-                if step["flow_to_cell_id"] >= 0
-            )
-            route_step["routed_outgoing_volume_km3"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("fluvial sediment routing stage", invalid_result.output)
-            route_step["routed_outgoing_volume_km3"] -= 1.0
+            result = validate_current()
 
-            allocation = next(
-                allocation
-                for stage in history
-                for allocation in stage["terminal_allocations"]
-                if allocation["total_deposition_volume_km3"] > 0.0
-            )
-            allocation["total_deposition_volume_km3"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("fluvial sediment routing stage", invalid_result.output)
-            allocation["total_deposition_volume_km3"] -= 1.0
+        assert_no_cli_crash(self, result, command="validate")
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("fluvial sediment routing metadata invalid", result.output)
 
-            routed_cell = next(
-                cell
-                for cell in cells
-                if cell["fluvial_sediment_routed_outgoing_m"] > 0.0
-            )
-            routed_cell["fluvial_sediment_routed_outgoing_m"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "fluvial sediment routing cumulative cell fields invalid",
-                invalid_result.output,
-            )
-            routed_cell["fluvial_sediment_routed_outgoing_m"] -= 1.0
     def test_hillslope_sediment_transport_provenance(self) -> None:
         routed_config = worlds.canonical_config("routed_512")
         world = worlds.cached_world("routed_512")
@@ -537,58 +510,30 @@ class SmokeSedimentTests(TestCase):
                 delta=0.000001,
             )
 
+        # Wiring only -- see the note in ``test_fluvial_sediment_routing_provenance``.
+        # ``test_sediment_validators`` owns the hillslope tamper table.
+        runner = CliRunner()
         with TemporaryDirectory() as temporary_directory:
             world_path = Path(temporary_directory) / "world.json"
-            runner = CliRunner()
 
-            def validate_current() -> object:
+            def validate_current() -> Result:
                 world_path.write_text(json.dumps(world), encoding="utf-8")
                 return runner.invoke(app, ["validate", "--world", str(world_path)])
 
-            valid_result = validate_current()
-            self.assertEqual(valid_result.exit_code, 0, valid_result.output)
+            control = validate_current()
+            assert_no_cli_crash(self, control, command="validate")
+            self.assertEqual(control.exit_code, 0, control.output)
 
-            edge = history[0]["edges"][0]
-            edge["transfer_volume_km3"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "hillslope sediment transport edge replay invalid",
-                invalid_result.output,
-            )
-            edge["transfer_volume_km3"] -= 1.0
+            history[0]["edges"][0]["transfer_volume_km3"] += 1.0
 
-            edge["effective_diffusivity"] += 0.01
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "hillslope sediment transport edge replay invalid",
-                invalid_result.output,
-            )
-            edge["effective_diffusivity"] -= 0.01
+            result = validate_current()
 
-            removed_edge = history[0]["edges"].pop()
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "hillslope sediment transport edge coverage invalid",
-                invalid_result.output,
-            )
-            history[0]["edges"].append(removed_edge)
+        assert_no_cli_crash(self, result, command="validate")
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn(
+            "hillslope sediment transport edge replay invalid", result.output
+        )
 
-            source_cell = next(
-                cell
-                for cell in cells
-                if cell["hillslope_sediment_production_m"] > 0.0
-            )
-            source_cell["hillslope_sediment_production_m"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn(
-                "hillslope sediment transport cumulative cell fields invalid",
-                invalid_result.output,
-            )
-            source_cell["hillslope_sediment_production_m"] -= 1.0
     def test_finite_sediment_inventory_replay_and_mutations(self) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))
         data = config.model_dump(mode="python")
@@ -818,68 +763,17 @@ class SmokeSedimentTests(TestCase):
                 allocation["target_cell_id"] = original_target_id
                 allocation["target_area_km2"] = original_target_area_km2
 
-            hillslope_input = world["hillslope_sediment_transport_history"][1][
-                "input_cells"
-            ][0]
-            hillslope_input["sediment_thickness_m"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("inventory snapshot replay invalid", invalid_result.output)
-            hillslope_input["sediment_thickness_m"] -= 1.0
+            # Wiring only: the inventory replay has to be reached and reported by
+            # ``validate``. Its per-verdict tamper table lives in
+            # ``test_sediment_validators`` (direct calls to
+            # ``_validate_sediment_inventory``), and the checks inside that
+            # validator break on the first divergence, so one tamper is all a
+            # wiring claim can carry through the command anyway.
+            world["hillslope_sediment_transport_history"][1]["input_cells"][0][
+                "sediment_thickness_m"
+            ] += 1.0
+            result = validate_current()
 
-            hillslope_stage = world["hillslope_sediment_transport_history"][0]
-            hillslope_stage["alluvium_entrainment_volume_km3"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("hillslope source partition invalid", invalid_result.output)
-            hillslope_stage["alluvium_entrainment_volume_km3"] -= 1.0
-
-            numeric_event = next(
-                event
-                for event in world["numeric_depression_correction_history"]
-                if event["breach_path_cell_ids"]
-            )
-            numeric_event[
-                "breach_alluvium_entrainment_depth_m_by_cell"
-            ][0] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("numeric breach source partition invalid", invalid_result.output)
-            numeric_event[
-                "breach_alluvium_entrainment_depth_m_by_cell"
-            ][0] -= 1.0
-
-            source_cell = next(
-                cell
-                for cell in cells
-                if cell["sediment_alluvium_entrainment_m"] > 0.0
-            )
-            source_cell["sediment_alluvium_entrainment_m"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("cumulative cell fields invalid", invalid_result.output)
-            source_cell["sediment_alluvium_entrainment_m"] -= 1.0
-
-            inventory_cell = next(
-                cell for cell in cells if cell["sediment_thickness_m"] > 0.0
-            )
-            inventory_cell["sediment_thickness_m"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("cumulative cell fields invalid", invalid_result.output)
-            inventory_cell["sediment_thickness_m"] -= 1.0
-
-            interface_cell = cells[0]
-            interface_cell["bedrock_surface_elevation_m"] += 1.0
-            interface_cell["elevation_m"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("sediment interface replay invalid", invalid_result.output)
-            interface_cell["bedrock_surface_elevation_m"] -= 1.0
-            interface_cell["elevation_m"] -= 1.0
-
-            model["inventory_mass_balance_residual_km3"] += 1.0
-            invalid_result = validate_current()
-            self.assertNotEqual(invalid_result.exit_code, 0)
-            self.assertIn("model aggregates invalid", invalid_result.output)
-            model["inventory_mass_balance_residual_km3"] -= 1.0
+        assert_no_cli_crash(self, result, command="validate")
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("inventory snapshot replay invalid", result.output)
