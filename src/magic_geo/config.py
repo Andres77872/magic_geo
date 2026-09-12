@@ -9,31 +9,29 @@ from uuid import uuid4
 
 import yaml
 from pydantic import (
-    BaseModel,
-    ConfigDict,
     Field,
     ValidationError,
-    field_validator,
-    model_validator,
 )
 from yaml.constructor import ConstructorError
 from yaml.events import AliasEvent, CollectionEndEvent, CollectionStartEvent
 from yaml.nodes import MappingNode
 
+from ._config_models import (
+    LegacyWorldConfig, LegacyClimateConfig,
+    MAX_SEED, MAX_PLANET_RADIUS_KM, MAX_DAY_LENGTH_HOURS, MAX_STELLAR_LUMINOSITY,
+    MAX_ATMOSPHERE_PRESSURE_BAR, MAX_GREENHOUSE_FACTOR, MAX_INTERNAL_HEAT,
+    MAX_GEOLOGICAL_AGE_GA, MAX_ANGULAR_SPEED, MAX_COMPUTE_THREADS,
+    MAX_YAML_NESTING_DEPTH, MAX_YAML_EVENTS, MAX_YAML_ALIASES,
+)
+from .seasonal_config import (
+    SeasonalWorldConfig,
+    SeasonalRunConfig as RunConfig, SeasonalPlanetConfig as PlanetConfig,
+    SeasonalMeshConfig as MeshConfig, SeasonalTectonicsConfig as TectonicsConfig,
+    SeasonalClimateConfig as ClimateConfig, SeasonalHydrologyConfig as HydrologyConfig,
+    SeasonalErosionConfig as ErosionConfig, SeasonalComputeConfig as ComputeConfig,
+    SeasonalOutputConfig as OutputConfig,
+)
 
-MAX_SEED = (1 << 64) - 1
-MAX_PLANET_RADIUS_KM = 100_000.0
-MAX_DAY_LENGTH_HOURS = 10_000.0
-MAX_STELLAR_LUMINOSITY = 100.0
-MAX_ATMOSPHERE_PRESSURE_BAR = 1_000.0
-MAX_GREENHOUSE_FACTOR = 100.0
-MAX_INTERNAL_HEAT = 100.0
-MAX_GEOLOGICAL_AGE_GA = 100.0
-MAX_ANGULAR_SPEED = 100.0
-MAX_COMPUTE_THREADS = 1_024
-MAX_YAML_NESTING_DEPTH = 64
-MAX_YAML_EVENTS = 20_000
-MAX_YAML_ALIASES = 64
 
 ConfigProfile: TypeAlias = Literal["default", "earthlike", "smoke"]
 
@@ -121,393 +119,21 @@ _UniqueKeySafeLoader.add_constructor(
 )
 
 
-class RunConfig(BaseModel):
-    """Deterministic run identity and human-readable world metadata."""
+class WorldConfig(SeasonalWorldConfig):
+    """Current seasonal configuration for a deliberately new generation run.
 
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    YAML documents must still carry their own explicit version discriminator.
+    """
 
-    seed: int = Field(
-        424242,
-        ge=0,
-        le=MAX_SEED,
-        description="Unsigned 64-bit master seed used by every deterministic random process.",
+    config_version: Literal[2] = Field(
+        2, description="Configuration document version; required in serialized YAML, independent of world schema and C ABI versions."
     )
-    name: str = Field(
-        "earthlike_mvp",
-        min_length=1,
-        max_length=256,
-        description="Human-readable world name recorded in generated payload metadata.",
-    )
-
-    @field_validator("name")
-    @classmethod
-    def validate_name_for_native_boundary(cls, value: str) -> str:
-        if "\x00" in value:
-            raise ValueError("name must not contain NUL characters")
-        try:
-            encoded = value.encode("utf-8")
-        except UnicodeEncodeError as exc:
-            raise ValueError("name must be well-formed Unicode encodable as UTF-8") from exc
-        if len(encoded) > 1024:
-            raise ValueError("name must be at most 1024 UTF-8 bytes")
-        return value
-
-
-class PlanetConfig(BaseModel):
-    """Bulk planetary properties that set geometry, forcing, water, and age."""
-
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-
-    radius_km: float = Field(
-        6371.0,
-        gt=100.0,
-        le=MAX_PLANET_RADIUS_KM,
-        description="Mean planetary radius in kilometres; scales all surface areas and distances.",
-    )
-    gravity_g: float = Field(
-        1.0,
-        gt=0.05,
-        lt=5.0,
-        description="Surface gravity relative to Earth gravity; affects ice, fluids, and isostasy.",
-    )
-    day_length_hours: float = Field(
-        24.0,
-        gt=1.0,
-        le=MAX_DAY_LENGTH_HOURS,
-        description="Rotation period in hours; controls Coriolis forcing and circulation structure.",
-    )
-    axial_tilt_deg: float = Field(
-        23.5,
-        ge=0.0,
-        le=90.0,
-        description="Axial obliquity in degrees; controls the strength of seasonal insolation.",
-    )
-    orbital_eccentricity: float = Field(
-        0.016,
-        ge=0.0,
-        lt=1.0,
-        description="Orbital eccentricity; modulates seasonal star-distance asymmetry.",
-    )
-    stellar_luminosity: float = Field(
-        1.0,
-        gt=0.01,
-        le=MAX_STELLAR_LUMINOSITY,
-        description="Incident stellar luminosity relative to the Sun; sets global climate forcing.",
-    )
-    atmosphere_pressure_bar: float = Field(
-        1.0,
-        ge=0.0,
-        le=MAX_ATMOSPHERE_PRESSURE_BAR,
-        description="Mean surface atmospheric pressure in bar; affects the climate energy balance.",
-    )
-    greenhouse_factor: float = Field(
-        1.0,
-        ge=0.0,
-        le=MAX_GREENHOUSE_FACTOR,
-        description="Dimensionless greenhouse trapping multiplier used by the climate model.",
-    )
-    ocean_fraction_target: float = Field(
-        0.70,
-        ge=0.0,
-        le=0.95,
-        description="Diagnostic target fraction of surface area covered by ocean.",
-    )
-    ocean_water_inventory_km3: float = Field(
-        1_338_000_000.0,
-        ge=0.0,
-        le=10_000_000_000.0,
-        description="Connected-ocean water inventory in cubic kilometres used by sea-level solving.",
-    )
-    internal_heat: float = Field(
-        1.0,
-        ge=0.0,
-        le=MAX_INTERNAL_HEAT,
-        description="Internal heat flow relative to Earth; scales tectonic and geothermal activity.",
-    )
-    geological_age_ga: float = Field(
-        4.5,
-        ge=0.01,
-        le=MAX_GEOLOGICAL_AGE_GA,
-        description="Planet age in billions of years; bounds crust age and geologic maturity.",
-    )
-
-
-class MeshConfig(BaseModel):
-    """Spherical discretisation and process-neighbour topology."""
-
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-
-    backend: Literal["fibonacci_sphere", "geodesic_icosahedron"] = Field(
-        "fibonacci_sphere",
-        description="Spherical mesh construction algorithm used for world control volumes.",
-    )
-    cell_count: int = Field(
-        4096,
-        ge=128,
-        le=200_000,
-        description="Requested number of spherical cells; controls spatial resolution and cost.",
-    )
-    neighbor_count: int = Field(
-        7,
-        ge=4,
-        le=16,
-        description="Target process-stencil neighbour count for the Fibonacci mesh backend.",
-    )
-
-
-class TectonicsConfig(BaseModel):
-    """Tectonic plate layout, motion, crust allocation, and smoothing controls."""
-
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-
-    plate_count: int = Field(
-        14,
-        ge=2,
-        le=256,
-        description="Number of tectonic plates; must remain smaller than mesh.cell_count.",
-    )
-    continental_plate_fraction: float = Field(
-        0.38,
-        ge=0.0,
-        le=1.0,
-        description="Fraction of plate seeds assigned a continental bias.",
-    )
-    continental_crust_fraction_target: float = Field(
-        0.34,
-        ge=0.0,
-        le=0.95,
-        description="Target fraction of surface control-volume area assigned continental crust.",
-    )
-    min_angular_speed: float = Field(
-        0.03,
-        ge=0.0,
-        le=MAX_ANGULAR_SPEED,
-        description="Minimum procedural plate angular-speed index; must not exceed the maximum.",
-    )
-    max_angular_speed: float = Field(
-        0.95,
-        ge=0.0,
-        le=MAX_ANGULAR_SPEED,
-        description="Maximum procedural plate angular-speed index used for boundary activity.",
-    )
-    boundary_smoothing_steps: int = Field(
-        5,
-        ge=0,
-        le=32,
-        description="Number of deterministic plate-boundary label smoothing iterations.",
-    )
-    plate_motion_scale_deg_per_step: float = Field(
-        2.0,
-        ge=0.0,
-        le=10.0,
-        description="Plate displacement scale in degrees per five-million-year reference step.",
-    )
-    oceanic_crust_aging_ma_per_step: float = Field(
-        5.0,
-        ge=0.0,
-        le=50.0,
-        description="Quiet oceanic-crust ageing in Ma per five-million-year reference step.",
-    )
-
-    @model_validator(mode="after")
-    def validate_speeds(self) -> "TectonicsConfig":
-        if self.max_angular_speed < self.min_angular_speed:
-            raise ValueError("max_angular_speed must be >= min_angular_speed")
-        return self
-
-
-class ClimateConfig(BaseModel):
-    """Annual and seasonal temperature and precipitation controls."""
-
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-
-    months: Literal[12] = Field(
-        12,
-        description="Fixed number of monthly climate samples in one generated year.",
-    )
-    lapse_rate_c_per_km: float = Field(
-        6.5,
-        ge=0.0,
-        le=15.0,
-        description="Atmospheric temperature lapse rate in degrees Celsius per kilometre.",
-    )
-    base_temperature_c: float = Field(
-        15.0,
-        ge=-100.0,
-        le=100.0,
-        description="Global mean sea-level temperature anchor in degrees Celsius.",
-    )
-    precipitation_scale: float = Field(
-        1.0,
-        ge=0.0,
-        le=10.0,
-        description="Dimensionless global precipitation multiplier; zero creates a dry boundary.",
-    )
-    subtropical_drying_strength: float = Field(
-        0.65,
-        ge=0.0,
-        le=0.9,
-        description="Dimensionless strength of subtropical descending-air dry belts.",
-    )
-
-
-class HydrologyConfig(BaseModel):
-    """Surface-water routing and river classification policy."""
-
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-
-    river_percentile: float = Field(
-        0.92,
-        ge=0.50,
-        le=0.995,
-        description="Flow-accumulation percentile threshold used to classify river cells.",
-    )
-    preserve_geologic_depressions: bool = Field(
-        True,
-        description="Keep geologic closed basins instead of filling every depression to an outlet.",
-    )
-
-
-class ErosionConfig(BaseModel):
-    """Coupled landscape-maturation, incision, diffusion, and uplift controls."""
-
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-
-    iterations: int = Field(
-        6,
-        ge=0,
-        le=250,
-        description="Number of coupled tectonic, climate, hydrology, and erosion transitions.",
-    )
-    maturation_timestep_ma: float = Field(
-        5.0,
-        gt=0.0,
-        le=5.0,
-        description="Nominal millions of years represented by each maturation transition.",
-    )
-    stream_power_coefficient: float = Field(
-        7.5,
-        ge=0.0,
-        le=1000.0,
-        description="Reference-step stream-power incision coefficient.",
-    )
-    drainage_exponent: float = Field(
-        0.5,
-        ge=0.0,
-        le=2.0,
-        description="Drainage-area exponent in the stream-power erosion relation.",
-    )
-    slope_exponent: float = Field(
-        1.0,
-        ge=0.0,
-        le=3.0,
-        description="Terrain-slope exponent in the stream-power erosion relation.",
-    )
-    hillslope_diffusion: float = Field(
-        0.055,
-        ge=0.0,
-        le=1.0,
-        description="Reference hillslope sediment-diffusion coefficient.",
-    )
-    tectonic_uplift_scale: float = Field(
-        0.85,
-        ge=0.0,
-        le=10.0,
-        description="Dimensionless multiplier on tectonic uplift supplied to landscape maturation.",
-    )
-
-
-class ComputeConfig(BaseModel):
-    """Execution backend and CPU/OpenCL scheduling preferences."""
-
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-
-    backend: Literal["auto", "cpu", "opencl", "cuda"] = Field(
-        "auto",
-        description="Requested compute backend; explicit accelerator choices fail if unavailable.",
-    )
-    threads: int = Field(
-        0,
-        ge=0,
-        le=MAX_COMPUTE_THREADS,
-        description="CPU worker-thread count; zero asks the runtime to select automatically.",
-    )
-    opencl_prefer_gpu: bool = Field(
-        True,
-        description="Prefer a qualifying GPU when selecting among available OpenCL devices.",
-    )
-
-
-class OutputConfig(BaseModel):
-    """Generated payload detail and general numeric formatting controls."""
-
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-
-    include_cells: bool = Field(
-        True,
-        description="Include per-cell state required by enrichers, validation, and the debugger.",
-    )
-    float_precision: int = Field(
-        4,
-        ge=0,
-        le=8,
-        description="General JSON decimal precision; replay-critical fields use higher fixed floors.",
-    )
-
-
-class WorldConfig(BaseModel):
-    """Complete validated configuration for one deterministic magic-geo generation run."""
-
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-
-    run: RunConfig = Field(
-        default_factory=RunConfig,
-        description="Run identity and deterministic seed settings.",
-    )
-    planet: PlanetConfig = Field(
-        default_factory=PlanetConfig,
-        description="Planet size, gravity, orbit, atmosphere, water, heat, and age.",
-    )
-    mesh: MeshConfig = Field(
-        default_factory=MeshConfig,
-        description="Spherical mesh backend, resolution, and process-neighbour settings.",
-    )
-    tectonics: TectonicsConfig = Field(
-        default_factory=TectonicsConfig,
-        description="Plate count, crust allocation, motion, and boundary smoothing.",
-    )
-    climate: ClimateConfig = Field(
-        default_factory=ClimateConfig,
-        description="Temperature, precipitation, seasonality, and subtropical drying controls.",
-    )
-    hydrology: HydrologyConfig = Field(
-        default_factory=HydrologyConfig,
-        description="River classification and closed-basin routing policy.",
-    )
-    erosion: ErosionConfig = Field(
-        default_factory=ErosionConfig,
-        description="Landscape maturation timestep, incision, diffusion, and uplift settings.",
-    )
-    compute: ComputeConfig = Field(
-        default_factory=ComputeConfig,
-        description="Native execution backend and worker scheduling preferences.",
-    )
-    output: OutputConfig = Field(
-        default_factory=OutputConfig,
-        description="Payload detail and general floating-point output formatting.",
-    )
-
-    @model_validator(mode="after")
-    def validate_plate_density(self) -> "WorldConfig":
-        if self.tectonics.plate_count >= self.mesh.cell_count:
-            raise ValueError("plate_count must be smaller than mesh.cell_count")
-        return self
 
 
 _PROFILE_DESCRIPTIONS: dict[str, str] = {
-    "default": "Schema defaults suitable as a neutral editable starting point.",
-    "earthlike": "Calibrated 4,096-cell Earth-like reference configuration.",
-    "smoke": "Small deterministic CPU configuration for fast integration checks.",
+    "default": "Prescribed seasonal energy model with neutral physical inputs.",
+    "earthlike": "4,096-cell Earth reference inputs for the seasonal model; new climate calibration is not established.",
+    "smoke": "Small deterministic CPU seasonal configuration for integration checks.",
 }
 
 _PROFILE_OVERRIDES: dict[str, dict[str, Any]] = {
@@ -603,8 +229,20 @@ def _check_yaml_complexity(text: str, *, source: str) -> None:
 
 
 def _validate_config_data(data: Mapping[str, Any], *, source: str) -> WorldConfig:
+    if "config_version" not in data:
+        message = (
+            "config_version is required. Start from a current profile or migrate the document "
+            "to config_version: 2, remove climate.base_temperature_c and climate.lapse_rate_c_per_km, "
+            "and choose climate.reference_infrared_optical_depth explicitly. "
+            "There is no equivalent automatic temperature-to-opacity conversion."
+        )
+        raise ConfigError(
+            message, source=source,
+            issues=({"path": "config_version", "location": ["config_version"],
+                     "message": message, "type": "missing"},),
+        )
     try:
-        return WorldConfig.model_validate(dict(data))
+        return WorldConfig.model_validate(dict(data), strict=True)
     except ValidationError as exc:
         raise _config_validation_error(exc, source=source) from exc
 
@@ -612,7 +250,9 @@ def _validate_config_data(data: Mapping[str, Any], *, source: str) -> WorldConfi
 def parse_config_yaml(text: str, *, source: str = "<string>") -> WorldConfig:
     """Parse and validate YAML text, rejecting duplicate keys.
 
-    Empty YAML is intentionally equivalent to the ``default`` profile. Errors
+    The exact integer config_version 2 is required in every document, including
+    otherwise empty mappings. New profiles deliberately supply this version;
+    an old or empty file cannot silently acquire new physical semantics. Errors
     include the supplied source label; YAML syntax errors also include one-based
     line and column numbers.
     """
@@ -650,9 +290,23 @@ def parse_config_yaml(text: str, *, source: str = "<string>") -> WorldConfig:
     return _validate_config_data(data, source=source)
 
 
+def _require_supported_config_model(config: WorldConfig) -> None:
+    if hasattr(config, "config_version"):
+        from .seasonal_config import SeasonalWorldConfig
+
+        if not isinstance(config, SeasonalWorldConfig):
+            raise ConfigError(
+                "a config_version marker requires a validated SeasonalWorldConfig; "
+                "parse explicit version-2 YAML or construct SeasonalWorldConfig(config_version=2). "
+                "An unvalidated version marker on a legacy model cannot select new climate semantics.",
+                source="<model>",
+            )
+
+
 def dump_config_yaml(config: WorldConfig) -> str:
     """Serialize a validated config as stable, human-editable YAML."""
 
+    _require_supported_config_model(config)
     return yaml.safe_dump(
         config.model_dump(mode="python"),
         allow_unicode=True,
@@ -719,10 +373,18 @@ def apply_config_overrides(
     paths and attempts to replace a whole section fail with ``ConfigError``.
     """
 
+    _require_supported_config_model(config)
     data = config.model_dump(mode="python")
     for dotted_path, value in overrides.items():
         if not isinstance(dotted_path, str):
             raise ConfigError("override paths must be strings", source=source)
+        if data.get("config_version") == 2 and dotted_path in {
+            "climate.base_temperature_c", "climate.lapse_rate_c_per_km",
+        }:
+            # Preserve the same field-specific migration message used by YAML,
+            # even though obsolete fields are absent from the new schema.
+            data["climate"][dotted_path.split(".")[1]] = value
+            return _validate_config_data(data, source=source)
         parts = dotted_path.split(".")
         if len(parts) < 2 or any(not part for part in parts):
             raise ConfigError(
@@ -748,6 +410,13 @@ def apply_config_overrides(
             )
         target[leaf] = deepcopy(value)
 
+    if isinstance(config, LegacyWorldConfig) and not isinstance(config, SeasonalWorldConfig):
+        # Only explicit legacy model instances may retain old ABI semantics.
+        # Document parsing and current profiles never select this path.
+        try:
+            return LegacyWorldConfig.model_validate(data)
+        except ValidationError as exc:
+            raise _config_validation_error(exc, source=source) from exc
     return _validate_config_data(data, source=source)
 
 
@@ -777,13 +446,49 @@ def create_config(
     return config
 
 
+def _add_exact_integer_schema_display(node: dict[str, Any]) -> None:
+    """Keep unsafe binary64 integers readable without changing JSON Schema.
+
+    Browsers parse JSON numbers as binary64. These strings are presentation
+    metadata only; the original numeric validation keywords remain intact.
+    Traverse schema children, never values inside defaults/consts/examples.
+    """
+    exact = {
+        key: str(node[key])
+        for key in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "default", "const")
+        if type(node.get(key)) is int and abs(node[key]) > 2**53 - 1
+    }
+    if exact:
+        node["x-magic-geo-integer-display"] = exact
+    for key in ("$defs", "definitions", "properties", "patternProperties", "dependentSchemas"):
+        children = node.get(key)
+        if isinstance(children, dict):
+            for child in children.values():
+                if isinstance(child, dict):
+                    _add_exact_integer_schema_display(child)
+    for key in ("items", "additionalProperties", "unevaluatedProperties", "propertyNames", "contains", "not", "if", "then", "else"):
+        child = node.get(key)
+        if isinstance(child, dict):
+            _add_exact_integer_schema_display(child)
+    for key in ("allOf", "anyOf", "oneOf", "prefixItems"):
+        children = node.get(key)
+        if isinstance(children, list):
+            for child in children:
+                if isinstance(child, dict):
+                    _add_exact_integer_schema_display(child)
+
+
 def config_schema() -> dict[str, Any]:
     """Return JSON Schema plus web-form metadata and built-in profile values."""
 
     schema = WorldConfig.model_json_schema()
-    schema["$id"] = "urn:magic-geo:schema:world-config:v1"
+    _add_exact_integer_schema_display(schema)
+    schema["$id"] = "urn:magic-geo:schema:world-config:v2"
+    # Constructors intentionally create new configurations with version 2;
+    # serialized documents must explicitly identify their physical semantics.
+    schema["required"] = list(dict.fromkeys([*schema.get("required", []), "config_version"]))
     schema["x-magic-geo"] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "section_order": list(WorldConfig.model_fields),
         "profiles": [
             {
@@ -840,4 +545,5 @@ def load_config(path: str | PathLike[str]) -> WorldConfig:
 def config_to_native(config: WorldConfig) -> dict[str, Any]:
     """Return the validated JSON-compatible mapping consumed by native.py."""
 
+    _require_supported_config_model(config)
     return config.model_dump(mode="json")

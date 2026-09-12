@@ -2,7 +2,9 @@
 
 [Wiki home](../README.md) > Features
 
-This page documents the temporal social layer of magic-geo: the fixed four-era historical partition and its seven-type event vocabulary, the native population-region capacity model, the border-pair conflict model, the dynastic lineage chain, and the Python enrichers that project those static records forward into population, economy, agent, logistics, campaign and market-clearing trajectories. The native half lives entirely in `cpp/src/engine/history.cpp` (1090 lines) and runs only inside the `include_society` branch of the pipeline; the Python half is six enrichers called in a fixed order at the tail of `generate_world`. Every model in this layer declares its own `model_limitation` string in the serialized document, and none of them claims empirical calibration, physical time, or observed-history validation — this page carries those declarations forward verbatim and never upgrades them.
+**Current seasonal scope.** The [settlement and social availability contract](../../settlement_social_availability.md) governs current native social2 and Python social-tail2 output. The detailed equations below describe available inputs; explicitly labelled legacy branches retain the historical fallback behavior. Current records preserve IDs, era slots and independent descriptors, publish unavailable dependent estimates as null with typed flags, and distinguish recorded counts from complete inferred counts. Existing subequation labels ending in `_v1` do not by themselves make a whole model legacy. Original source-line references describe the earlier implementation layout rather than current line numbers.
+
+This page documents the temporal social layer of magic-geo: the fixed four-era historical partition and its seven-type event vocabulary, the native population-region capacity model, the border-pair conflict model, the dynastic lineage chain, and the Python enrichers that project those static records forward into population, economy, agent, logistics, campaign and market-clearing trajectories. The native half lives entirely in `cpp/src/engine/history.cpp` and runs only inside the `include_society` branch of the pipeline; the Python consumers follow the audited source order linked above. Every model in this layer declares its own `model_limitation` string in the serialized document, and none of them claims empirical calibration, physical time, or observed-history validation — this page carries those declarations forward verbatim and never upgrades them.
 
 ## On this page
 
@@ -130,6 +132,8 @@ If `political_regions` is empty **or** `cultural_layers.cultures` is empty, `gen
 
 ### `historical_eras[]` record fields
 
+The aggregate formulas below describe complete available event scopes. Current era flags and recorded counts distinguish an unavailable full count or mean from the number of events actually emitted; incomplete families cannot use the zero-event formula to claim a known-zero mean. Era IDs and fixed times remain present.
+
 | Field | Type | Source | Meaning |
 | --- | --- | --- | --- |
 | `id` | int | `history.cpp:20`,`24`,`28`,`32` | 0–3 |
@@ -147,11 +151,11 @@ Serialized by `historical_eras_json` (`entity_serialization.cpp:761`) at `params
 
 ### The event vocabulary
 
-`HISTORY_EVENT_TYPE_NAMES` (`schema_names.hpp:83`) declares seven types. Every generator calls `add_historical_event` (`history.cpp:39`), which clamps `pressure_index` and `continuity_index` to `[0, 1]` and assigns a provisional `era_id` from the raw year.
+`HISTORY_EVENT_TYPE_NAMES` (`schema_names.hpp:83`) declares seven types. The numerical path clamps available `pressure_index` and `continuity_index` to `[0, 1]` and assigns an `era_id` from the raw year. Current family coverage is field-granular: language and trade events retain their independent inputs; migration and sacred events retain identity, time and pressure with nullable dependent continuity. Foundation/dynastic chronology requiring unavailable culture age is suppressed, as is ruin-history inference when its selection is unavailable. Per-family and per-era coverage distinguishes emitted event counts from unavailable full counts and means; a recorded zero does not certify a complete empty family.
 
 | # | `type` string | Generated once per | Trigger condition | `year_bp` formula | `pressure_index` | `continuity_index` | Source |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 0 | `state_foundation` | political region | unconditional | `clamp(380 + 0.72·culture.estimated_age_years, 260, 3800)`; `estimated_age_years` defaults to 1800 when the region has no culture | region pressure (below) | `culture.continuity_index`, else 0.5 | `:123`–`:137` |
+| 0 | `state_foundation` | eligible political region | requires available culture age on the current path | `clamp(380 + 0.72·culture.estimated_age_years, 260, 3800)`; missing-culture age 1800 is a legacy default | region pressure (below) | `culture.continuity_index`; missing-culture 0.5 is a legacy default | `:123`–`:137` |
 | 1 | `dynastic_change` | political region | `pressure > 0.34` **or** `trade_contact > 0.55` **or** `region.route_count == 0` | `clamp(foundation_year·0.48 + 180·(region.id + 1), 180, 2100)` | `clamp(pressure + 0.18·trade_contact, 0, 1)` | same as type 0 | `:139`–`:154` |
 | 2 | `migration` | culture region | `culture.migration_pressure ≥ 0.42` **or** `culture.trade_contact_index ≥ 0.28` | `clamp(260 + 2100·migration_pressure + 220·culture.id, 120, 2600)` | `culture.migration_pressure` | `culture.continuity_index` | `:157`–`:194` |
 | 3 | `language_split` | child language region | `language.parent_language_region_id ≥ 0` | `clamp(language.divergence_age_years, 80, 3400)` | `language.change_rate` | `clamp(1 − change_rate, 0, 1)` | `:196`–`:227` |
@@ -196,7 +200,7 @@ The declaration enricher records the same contract as `"event_order": "descendin
 | `cell_id` | int | −1 | capital / first settlement / site cell |
 | `year_bp` | double | 0.0 | raw generator year, not re-clamped to the era |
 | `pressure_index` | double | 0.0 | clamped `[0,1]` in `add_historical_event` |
-| `continuity_index` | double | 0.0 | clamped `[0,1]` |
+| `continuity_index` | double or null | legacy default 0.0 | available value clamped `[0,1]`; current flag distinguishes unavailable continuity |
 
 Serialized by `historical_events_json` (`entity_serialization.cpp:784`).
 
@@ -206,7 +210,7 @@ Serialized by `historical_events_json` (`entity_serialization.cpp:784`).
 
 | Declaration key | Value | Line |
 | --- | --- | --- |
-| `model_type` | `causal_region_culture_language_trade_site_timeline_v1` | `:6`,`:16` |
+| `model_type` | `causal_region_culture_language_trade_site_timeline_v2` | `:6`,`:16` |
 | `era_model` | `fixed_four_era_strict_year_bp_partition_v1` | `:18` |
 | `eras` | the four `{id, dominant_process, start_year_bp, end_year_bp}` objects | `:19`–`:24` |
 | `state_foundation_model` | `region_barrier_pressure_and_culture_age_v1` | `:25` |
@@ -264,9 +268,11 @@ growth_rate_per_year        = clamp(0.0015 + 0.0065·agricultural_capacity_index
 migration_balance           = clamp(0.5 − culture.migration_pressure, −1, 1)   (0 when the region has no culture)
 ```
 
-Because `estimated_population` is defined as `carrying_capacity · occupancy` and occupancy is already clamped to `[0.05, 0.93]`, the serialized `population_pressure` is **numerically identical to `occupancy`** — the `[0, 1.4]` clamp can never bind. A region with zero land area or zero member cells short-circuits at `:420`–`:423` and is pushed with all-default (zero) fields.
+On the available branch, `estimated_population` is defined as `carrying_capacity · occupancy` and occupancy is already clamped to `[0.05, 0.93]`, so the `[0, 1.4]` pressure clamp cannot bind. The original all-default zero record for zero land area or zero member cells (`:420`–`:423`) is a legacy branch. Current records preserve identity and coverage while marking estimates that lack a positive physical denominator unavailable; independent migration and physical descriptors are not masked by an unrelated settlement-input failure.
 
 ### `population_regions[]` record fields
+
+The table gives numerical values and historical defaults, not a current missing-input policy. Current carrying capacity, total population and other dependent fields have separate availability flags and are null when unavailable. In particular `site_input_complete` and `population_estimate_available` describe different scopes. Supported zero contributions and structural water zeros remain known zero; unavailable dry-cell settlement inputs are not zeros, and physical territory denominators are retained.
 
 | Field | Type | Default | Source |
 | --- | --- | --- | --- |
@@ -293,7 +299,7 @@ Emission order and precision: `population_regions_json` (`entity_serialization.c
 
 | Key | Value |
 | --- | --- |
-| `model_type` | `causal_area_weighted_capacity_occupancy_population_regions_v1` |
+| `model_type` | `causal_area_weighted_capacity_occupancy_population_regions_v2` |
 | `membership_model` | `nonwater_political_region_cells_v1` |
 | `water_security_model` | `runoff_river_lake_water_neighbor_saline_penalty_v1` |
 | `climate_suitability_model` | `temperature_precipitation_ice_bounded_index_v1` |
@@ -312,6 +318,8 @@ Emission order and precision: `population_regions_json` (`entity_serialization.c
 
 ### Preconditions and empty branches
 
+The following table and original line references document **retained v1 branches**. Current history2 first validates its complete native sources, retains valid region/era slots with field availability maps, and does not replace unknown state with a zero summary or omit a required era trajectory.
+
 | Condition | Behaviour | Line |
 | --- | --- | --- |
 | `population_regions` is not a list | return unchanged, no keys written | `:110`–`:111` |
@@ -324,7 +332,7 @@ Eras are sorted by `-start_year_bp` (`_era_sort_key`, `:34`), i.e. oldest first.
 
 ### The step recurrence
 
-For each region, the loop state is `previous_population`, seeded from the **first era's territorial snapshot** for that region, falling back to `max(1.0, estimated_population · 0.22)` (`:144`–`:149`).
+For each region, current history2 uses the **first era's territorial snapshot** and propagates unavailable state without resetting it. The original fallback `max(1.0, estimated_population · 0.22)` (`:144`–`:149`) is legacy behavior. The following original recurrence preserves the numerical derivation for comparison; its `else projected` missing-snapshot branch and positive-input floors must not be read as current permission to repair unavailable inputs.
 
 ```
 duration_years   = max(1, |start_year_bp − end_year_bp|)
@@ -346,13 +354,15 @@ conflict_loss    = min(Σ ½·estimated_casualties over conflicts of (era, regio
 end_population   = max(0, snapshot_pop + migration_delta − conflict_loss)
 ```
 
-The territorial-snapshot override at `:166` is the dominant term: whenever the era has a snapshot record for the region, `snapshot_pop` **replaces** the logistic projection entirely, and the logistic result survives only as an unrecorded intermediate. The declaration names this `"snapshot_model": "era_region_territorial_population_override_v1"` (`:18`).
+For an available era snapshot, `snapshot_pop` **replaces** the logistic projection entirely, and the logistic result survives only as an unrecorded intermediate. The declaration retains `"snapshot_model": "era_region_territorial_population_override_v1"` (`:18`). A current null snapshot estimate remains unavailable rather than selecting the historical projection fallback.
 
 `population_pressure` used in the drag term is clamped to `[0, 2.5]` on read (`:141`), so the `pressure − 0.85` term only contributes above 0.85. For native input it is inert, but not because of the `[0.05, 0.93]` occupancy clamp: the unclamped occupancy expression is bounded above by `0.22 + 0.30·continuity + 0.26·urbanization + 0.18·route_factor`, and `continuity_index` is itself capped at 0.90 by its own generator (`cpp/src/engine/civilization.cpp:767`), `urbanization_fraction` at 0.62 and `route_factor` at 1.0, giving `≤ 0.8312`. That is a derived bound on the current generator, not an invariant the code enforces — a hand-edited or third-party `population_regions` record can supply a higher pressure and activate the drag.
 
-`carrying_capacity` is floored at 1.0 on read (`:136`), so `_logistic_projection` never takes the `K ≤ 0` branch for native input.
+The original v1 read floored `carrying_capacity` at 1.0 (`:136`), preventing its `K ≤ 0` branch. That historical floor is not a current missing-value or known-zero conversion rule.
 
 ### `population_histories[].steps[]` fields
+
+Current steps keep era identity and publish per-field availability; the numerical entries below can be null when their actual dependency chain is unavailable. A known zero remains zero. History and summary availability is separate from the number of retained slots.
 
 | Field | Type | Rounding | Meaning |
 | --- | --- | --- | --- |
@@ -373,7 +383,7 @@ The territorial-snapshot override at `:166` is the dominant term: whenever the e
 | `instability_index` | float | 6 dp | era `mean_instability` |
 | `hazard_mortality_index` | float | 6 dp | region hazard, constant |
 
-`carrying_capacity_used_fraction` and `pressure_index` are computed from the same expression at `:174`–`:175`; they are always equal.
+For available inputs, `carrying_capacity_used_fraction` and `pressure_index` are computed from the same expression at `:174`–`:175` and are equal.
 
 ### `population_histories[]` record fields
 
@@ -401,7 +411,7 @@ The territorial-snapshot override at `:166` is the dominant term: whenever the e
 | `historical_final_population` | Σ final population | `:231` |
 | `historical_peak_population_pressure` | max step `pressure_index` worldwide | `:232` |
 | `max_population_decline_fraction` | max `max(0, −Δpop) / max(1, start_pop)` | `:233` |
-| `population_history_model` | `causal_era_snapshot_logistic_migration_conflict_population_history_v1` | `:27` |
+| `population_history_model` | `causal_era_snapshot_logistic_migration_conflict_population_history_v2` | `:27` |
 
 ### `population_history_model` declaration (`:10`–`:22`)
 
@@ -470,7 +480,7 @@ economic_disruption_index = clamp(0.18·intensity + 0.18·logistics_strain + 0.1
                                  + 0.16·(war_duration_years / 160), 0, 1)
 ```
 
-`urban_x` defaults to 0.05 and `route_factor_x` to 0.0 when the corresponding population/political record is missing.
+The missing-record defaults `urban_x = 0.05` and `route_factor_x = 0.0` are legacy branches. Current conflict inference requires complete inputs over the actual global border-pair candidate ranking; incomplete selection emits no partial ranked list and cannot claim a known-zero conflict total.
 
 The `start_year_bp` term `17 · (best_by_pair.size() + 1)` depends on how many *distinct region pairs* have already been inserted into the candidate map at that moment, i.e. it is insertion-order dependent within the border loop.
 
@@ -524,7 +534,7 @@ Emission order: `conflicts_json` (`entity_serialization.cpp:837`), all doubles a
 
 | Key | Value |
 | --- | --- |
-| `model_type` | `causal_border_pair_pressure_trade_conflict_selection_v1` |
+| `model_type` | `causal_border_pair_pressure_trade_conflict_selection_v2` |
 | `candidate_model` | `highest_score_border_per_sorted_region_pair_v1` |
 | `minimum_candidate_score` | `0.24` |
 | `maximum_conflicts_per_region` | `2` |
@@ -575,7 +585,7 @@ base_succession_pressure = clamp(0.18 + 0.34·population_pressure + 0.36·confli
 dynasty_count            = 1 + (bsp > 0.36) + (bsp > 0.66)          →  1, 2 or 3
 ```
 
-`population_pressure` defaults to 0.4 and `continuity` to 0.5 when the corresponding record is absent (`:678`–`:680`).
+The absent-record defaults `population_pressure = 0.4`, `continuity = 0.5` (`:678`–`:680`) and synthetic missing-foundation date above are legacy branches. Current dynasty inference reports per-region lineage coverage and does not manufacture chronology from unavailable age or pressure.
 
 For dynasty index `i ∈ [0, n)` with `n = dynasty_count` and `F = founding_year`:
 
@@ -635,7 +645,7 @@ Summary rollups (`summary.cpp:729`–`:739`, emitted `:1858`–`:1864`): `dynast
 
 | Key | Value |
 | --- | --- |
-| `model_type` | `causal_foundation_continuity_pressure_dynasty_lineages_v1` |
+| `model_type` | `causal_foundation_continuity_pressure_dynasty_lineages_v2` |
 | `foundation_model` | `oldest_state_foundation_event_per_region_v1` |
 | `succession_pressure_model` | `population_conflict_route_and_culture_continuity_v1` |
 | `dynasty_count_thresholds` | `[0.36, 0.66]` |
@@ -713,7 +723,7 @@ Succession links (`:191`–`:198`): `predecessor_ruler_id` is the immediately pr
 | `trade_pact_index` | `clamp(0.65·alliance_strength + 0.18)` |
 | `succession_dispute_risk` | `clamp(0.45·(risk_a + risk_b))` |
 
-Genealogy summary keys (`:288`–`:307`): `ruler_count`, `named_ruler_dynasty_count`, `ruler_marriage_alliance_count`, `cadet_branch_count`, `married_ruler_count`, `max_ruler_lineage_depth`, `mean_ruler_legitimacy_index`, `mean_succession_crisis_risk`, `mean_marriage_alliance_strength`, `mean_cadet_branch_claim_strength`, plus `ruler_genealogy_model`.
+Genealogy summary keys (`:288`–`:307`): `ruler_count`, `named_ruler_dynasty_count`, `ruler_marriage_alliance_count`, `cadet_branch_count`, `married_ruler_count`, `max_ruler_lineage_depth`, `mean_ruler_legitimacy_index`, `mean_succession_crisis_risk`, `mean_marriage_alliance_strength`, `mean_cadet_branch_claim_strength`, plus `ruler_genealogy_model`. Current genealogy2 separates regional lineage coverage from complete global alliance selection. Unavailable dependent estimates, spouse/alliance inferences and inferred counts are null with typed coverage; emitted record counts do not certify complete selection. Independent identity and lineage structure are retained where their own inputs are available.
 
 Declaration (`:39`–`:51`): `ruler_count_model = dynasty_duration_pressure_bounded_two_to_six_rulers_v1`, `reign_model = equal_dynasty_duration_partition_v1`, `succession_model = ordered_predecessor_successor_and_parent_links_v1`, `cadet_branch_model = second_ruler_founder_with_next_three_heirs_v1`, `marriage_model = sorted_dynasty_first_available_cross_region_second_ruler_pair_v1`, `name_model = deterministic_root_and_regnal_number_v1`, `model_limitation = synthetic_regnal_genealogy_without_age_consistent_reproduction_competing_heirs_gender_demography_or_observed_calibration`.
 
@@ -723,7 +733,7 @@ Declaration (`:39`–`:51`): `ruler_count_model = dynasty_duration_pressure_boun
 
 Base regions are built once from the non-water cells of each political region (`:810`–`:840`): `cell_count`, `area_km2`, area-weighted `centroid_lat_deg` / `centroid_lon_deg`, a Cartesian area-weighted centre used for ring construction, and `boundary_cell_ids` for cells with a water or foreign-region neighbour. Geometry is derived with `watershed_boundary_ring(cells, boundary_cell_ids, weighted_center, 64)` (tangent-plane angle sort, capped at 64 ring points), `ring_perimeter_km` and `ring_projected_area_km2` (centred orthographic shoelace), and `boundary_cell_ids` is finally down-sampled by `sampled_ids(..., 64)` (uniform floor stride, `:760`–`:771`).
 
-Per era, each base region is copied and scaled (`:887`–`:942`):
+Per era, each base region is copied and scaled on the available branch (`:887`–`:942`). Current snapshots preserve `base_area_km2`, `base_dissolved_polygon_area_km2` and `base_boundary_perimeter_km` independently. Scaled geometry/stability and population use separate availability flags; unavailable scaled fields and dependent aggregates are null, while membership, era identity and base geometry remain:
 
 ```
 era_area_factors       = {0.48, 0.78, 0.64, 1.0}    (index = era.id)
@@ -793,6 +803,8 @@ The declaration is `territorial_snapshot_model` (`src/magic_geo/territorial_geog
 
 ### Preconditions
 
+This table records the **legacy economy1 branches**. Current economy2 validates its declared parents, retains valid region/era slots, and propagates unavailable sequential state instead of silently resetting treasury or publishing a known-zero aggregate. Its record, step and summary availability maps identify the actual dependent fields.
+
 | Condition | Behaviour | Line |
 | --- | --- | --- |
 | `population_histories` / `historical_eras` not lists | return unchanged | `:122`–`:123` |
@@ -816,7 +828,7 @@ The declaration is `territorial_snapshot_model` (`src/magic_geo/territorial_geog
 
 ### Per-step state variables (`:187`–`:267`)
 
-Let `pm = end_population / 1 000 000`, `stability = snapshot_region.stability_index` (fallback `1 − era_instability`), `fragmentation = 1 − stability`.
+For available inputs, let `pm = end_population / 1 000 000`, `stability = snapshot_region.stability_index`, `fragmentation = 1 − stability`. The missing-snapshot fallback `1 − era_instability` is legacy behavior, not a replacement for a current null stability estimate.
 
 | Variable | Formula |
 | --- | --- |
@@ -842,7 +854,7 @@ Let `pm = end_population / 1 000 000`, `stability = snapshot_region.stability_in
 
 Initial treasury (`:183`): `max(0, initial_population / 1 000 000 · 0.08)`.
 
-`balance_residual_index` is **identically zero by construction** — it is a closure witness, not an independent quantity: substituting `treasury_end = max(0, raw)` and `insolvency = max(0, −raw)` gives `raw + max(0,−raw) − max(0,raw) = 0` in both branches. It is emitted so a consumer can verify the treasury identity survived serialization rounding.
+For available treasury inputs, `balance_residual_index` is **zero by the algebraic identity** — it is a closure witness, not an independent quantity: substituting `treasury_end = max(0, raw)` and `insolvency = max(0, −raw)` gives `raw + max(0,−raw) − max(0,raw) = 0` in both branches. Its published residual checks serialization closure. An unavailable current step publishes null rather than a zero closure claim.
 
 The `max(1.0, …)` denominators in `prosperity_index`, `food_security_index`, `trade_dependency_index` and `military_burden_index` are unit floors, not economics: for a region below one million people, or with gross output below 1.0 index unit, the ratio degenerates to the numerator. These are index quantities with no currency, no price level and no deflator.
 
@@ -893,13 +905,13 @@ The `max(1.0, …)` denominators in `prosperity_index`, `food_security_index`, `
 | `mean_historical_trade_dependency_index` | mean over steps |
 | `mean_historical_military_burden_index` | mean over steps |
 | `high_military_burden_economy_step_count` | steps with `military_burden_index ≥ 0.65` |
-| `economy_history_model` | `causal_population_trade_conflict_treasury_economy_history_v1` |
+| `economy_history_model` | `causal_population_trade_conflict_treasury_economy_history_v2` |
 
 Declaration (`:9`–`:22`): `trade_model = incident_friction_discounted_trade_volume_v1`, `conflict_model = era_region_force_casualty_logistics_disruption_aggregate_v1`, `output_model = agriculture_resource_trade_and_urban_services_sum_v1`, `revenue_model = stability_urbanization_tax_and_interregional_trade_v1`, `cost_model = administration_army_maintenance_and_conflict_war_cost_v1`, `treasury_model = nonnegative_balance_with_explicit_insolvency_adjustment_v1`, `army_model = population_pressure_stability_resource_capacity_v1`, `diagnostic_model = prosperity_food_trade_dependency_and_military_burden_v1`, `model_limitation = aggregate_index_economy_without_prices_inventory_production_functions_agent_equilibrium_or_empirical_calibration`.
 
 ## Demographic agents
 
-`enrich_world_with_demographic_agents` (`src/magic_geo/demographic_agents.py:152`) downscales the aggregate trajectories into four record families plus a life-event ledger. An "agent" here is a **representative record**, not a simulated individual with autonomous behaviour: household cohorts and firms are deterministic index bundles derived from region-level aggregates, and individuals are a fixed six-per-region sample.
+`enrich_world_with_demographic_agents` (`src/magic_geo/demographic_agents.py:152`) downscales the aggregate trajectories into four record families plus a life-event ledger. An "agent" here is a **representative record**, not a simulated individual with autonomous behaviour. Current demographic2 retains fixed household/era slots with nullable dependent estimates. Person sampling uses six records only for known positive population; known zero gives a complete empty sample, while unknown population gives an unavailable empty sample. Firm selection separately reports whether all five actual sector predicates are known.
 
 ### Household cohorts
 
@@ -933,7 +945,7 @@ Other fields: `id`, `population_region_id`, `region_id`, `culture_region_id`, `l
 
 ### Firm agents
 
-Firms are created per economy history, iterating regions sorted by `region_id` (`:270`–`:329`), one per sector with strictly positive final-step output:
+Firms are selected per economy history, iterating regions sorted by `region_id` (`:270`–`:329`). A known strictly positive final-sector output contributes a firm; known nonpositive output does not, while an unknown sector predicate is reported as unavailable selection rather than false:
 
 | Sector | Output driver (final economy step) | `base_dependency` |
 | --- | --- | --- |
@@ -943,7 +955,7 @@ Firms are created per economy history, iterating regions sorted by `region_id` (
 | `urban_services` | `urban_services_index` | 0.56 |
 | `administration` | `administration_cost_index` | 0.24 |
 
-The `administration` firm's `output_index` is the region's administration **cost** line reused as an output quantity (`:291`); that is what the source does and the resulting "firm" is a bookkeeping artifact, not a producing entity.
+The `administration` firm's `output_index` is the region's administration **cost** line reused as an output quantity (`:291`); that is what the source does and the resulting "firm" is a bookkeeping artifact, not a producing entity. The original `or history.final_gross_output_index` expression below is a historical fallback; current missing-value handling is determined by the exact field availability contract, not Python truthiness.
 
 ```
 gross_output      = max(1, final_step.gross_output_index or history.final_gross_output_index)
@@ -980,7 +992,7 @@ Record fields: `id`, `population_region_id`, `region_id`, `household_cohort_ids`
 
 ### Individual agents and life events
 
-`sample_count = min(6, max(2, len(cohort_ids)·2))` per population region (`:411`); with the standard three cohorts this is always **6**. Cohorts are cycled `cohort_ids[index mod 3]`; eras are cycled `eras[index mod len(eras)]` for the birth era, and the **last** sorted era is always the death era (`:422`–`:423`).
+In the known-positive population branch, `sample_count = min(6, max(2, len(cohort_ids)·2))` (`:411`), giving **6** with the standard three cohorts. Cohorts are cycled `cohort_ids[index mod 3]`; eras are cycled for the birth era, and the last sorted era supplies the death-era slot. Current identities and birth scheduling can remain available while dependent death, lifespan or property estimates are null. A dominant-firm role substitution requires its own complete selection inputs; unrelated roles are retained. The numerical formulas below apply only where those inputs are available.
 
 ```
 life_expectancy = max(18, 78 − mortality_risk·26 − vulnerability·18 + income·10)
@@ -1054,7 +1066,7 @@ Fields: `id`, `trade_flow_id`, `route_id`, `from_settlement_id`, `to_settlement_
 
 ### Logistics/exchange summary keys
 
-`logistics_network_count`, `logistics_route_link_count`, `market_exchange_count`, `interregional_market_exchange_count`, `total_market_exchange_volume_index`, `mean_logistics_transport_efficiency_index`, `mean_logistics_resilience_index`, `mean_market_access_index`, `mean_market_disruption_risk_index` (`:1304`–`:1322`), plus `logistics_exchange_model` = `causal_region_route_trade_economy_logistics_exchange_v1` with `model_limitation = aggregate_static_logistics_and_exchange_indices_without_inventory_vehicle_fleet_or_dynamic_congestion` (`:16`–`:26`).
+`logistics_network_count`, `logistics_route_link_count`, `market_exchange_count`, `interregional_market_exchange_count`, `total_market_exchange_volume_index`, `mean_logistics_transport_efficiency_index`, `mean_logistics_resilience_index`, `mean_market_access_index`, `mean_market_disruption_risk_index` (`:1304`–`:1322`), plus `logistics_exchange_model` = `causal_region_route_trade_economy_logistics_exchange_v2` with `model_limitation = aggregate_static_logistics_and_exchange_indices_without_inventory_vehicle_fleet_or_dynamic_congestion` (`:16`–`:26`).
 
 ## Campaign operations
 
@@ -1181,7 +1193,7 @@ Note the `max(1.0, requested)` denominators: an exchange with `volume_index < 1`
 
 ### Agent orders
 
-Up to seven orders per exchange (`:265`–`:370`):
+Up to seven orders per exchange on the available branch (`:265`–`:370`). Current market2 uses the first-firm/fallback selection below only when its actual candidate scope is complete. Unknown firm selection or a state-demand predicate with unavailable inputs cannot be interpreted as a known empty order set. Recorded orders and full selection coverage are separate:
 
 | Order group | Agents | Volume | Limit price | Fulfilment |
 | --- | --- | --- | --- | --- |
@@ -1195,7 +1207,7 @@ Order fields: `id`, `market_exchange_id`, `market_clearing_record_id`, `agent_ty
 
 ### Price iterations
 
-Exactly **three** iterations per exchange (`:380`–`:403`), with
+Exactly **three** iteration slots per exchange (`:380`–`:403`). Current clearing, price and inventory slots retain identity when dependent numerical fields are unavailable; their availability maps accompany null estimates. With available inputs,
 
 ```
 equilibrium_price = clamp(mean(firm limit prices)·0.36 + mean(demand limit prices)·0.38 + price_adjustment·0.26)
@@ -1285,7 +1297,7 @@ Several enrichers mutate records that were emitted by earlier stages. Consumers 
 
 ## Validation and replay
 
-Every model family on this page has an **independent second implementation** used as a replay validator. Each validator recomputes the whole family from the raw upstream records and compares structurally with a `_contains_expected`-style predicate, returning either `[]` or a single fixed failure string. They are all invoked from the `validate` CLI command.
+Every model family on this page has an **independent second implementation** used as a replay validator. Current dispatch audits declared sources and availability before replaying available formulas; an invalid native parent can stop dependent tail validation. The table records the original public entry points and legacy failure messages, not an exhaustive current error vocabulary. Current strict owned-field and coverage checks supplement the historical containment replay.
 
 | Validator module | Public function | Failure string | Replays |
 | --- | --- | --- | --- |
@@ -1303,7 +1315,7 @@ CLI wiring: `validate_historical_geography_replay` runs at `src/magic_geo/cli/co
 
 ### Campaign operations validation in detail
 
-`validate_campaign_operations_replay` (`src/magic_geo/campaign_operations_validation.py:1421`–`:1485`) is the most self-contained of the set and is a useful template for the others.
+The following sequence describes the **retained v1 campaign replay** (`src/magic_geo/campaign_operations_validation.py:1421`–`:1485`). Current campaign2 dispatch additionally requires audited logistics sources, exact model/coverage and owned nullable outputs; the legacy containment rule below is not its complete publication contract.
 
 1. `planet_radius_km(payload)` is called first (`:1423`). A missing or non-positive radius returns `["campaign operations replay rejected: <reason>"]` — a *different*, more specific message than the generic replay failure.
 2. Thirteen payload keys must all be lists (`:1428`–`:1445`): `political_regions`, `routes`, `trade_flows`, `conflicts`, `cells`, `borders`, `settlements`, `economy_histories`, `campaign_movements`, `campaign_path_segments`, `campaign_front_histories`, `tactical_engagements`, `strategic_campaign_plans`.
@@ -1342,15 +1354,19 @@ for era in world["historical_eras"]:
 from collections import Counter
 print(Counter(event["type"] for event in world["historical_events"]))
 
-# Population trajectory of one region.
-history = world["population_histories"][0]
-for step in history["steps"]:
-    print(step["era_id"], step["start_population"], "->", step["end_population"],
-          "migration", step["migration_delta"], "conflict", step["conflict_loss"])
+# Retained population trajectories; an empty modeled-region scope has no rows.
+for history in world["population_histories"]:
+    for step in history["steps"]:
+        print(history["region_id"], step["era_id"], step["start_population"], "->", step["end_population"],
+              "migration", step["migration_delta"], "conflict", step["conflict_loss"])
 
-# Treasury closure witness: every step's residual must be ~0.
-economy = world["economy_histories"][0]
-print(max(abs(step["balance_residual_index"]) for step in economy["steps"]))
+# Treasury closure is meaningful only for available steps.
+for economy in world["economy_histories"]:
+    for step in economy["steps"]:
+        if step["estimate_availability"]["balance_residual_index"] is True:
+            print(economy["region_id"], step["era_id"], abs(step["balance_residual_index"]))
+        else:
+            print(economy["region_id"], step["era_id"], "treasury closure unavailable")
 ```
 
 ### Regenerate and re-validate one family in memory
@@ -1431,13 +1447,13 @@ Additional unresolved and structural points established by reading the source:
 - **The economic models are uncalibrated index systems.** `gross_output_index`, `treasury_end_index`, `tax_revenue_index`, `supply_index`, `price_index`, `inventory_index` and every other `*_index` on this page are dimensionless constructs with no currency, no price level, no deflator and no unit of account. Several are made non-degenerate by hard `max(1.0, …)` denominators (`prosperity_index`, `trade_dependency_index`, `military_burden_index`, `food_security_index`, market `clearance_fraction`), which are unit floors, not economics. No number on this page has been compared against any observed economy.
 - **Market clearing does not converge to anything.** The three price iterations are a fixed-length interpolation whose terminal value is the closed-form `equilibrium_price_index`; `imbalance_index` never feeds back into the price; `price_residual_index` is computed once before the loop; `learning_rate_index` is constant across steps. Reading the sequence as evidence of an equilibrium search would be incorrect.
 - **The temporal coordinate is a nominal `year_bp` axis with no physical or calibrated basis.** The four-era partition (4200 → 0 BP) is hardcoded; event years are analytic functions of pressure/significance/friction indices with hardcoded coefficients and clamps; conflict start years even depend on candidate-map insertion order. The nominal-time contract that the geological ledgers carry (`nominal_time_calibrated: false`, `physical_time_resolved: false`) has no counterpart here — these records carry no nominal-time block at all.
-- **The population history's logistic projection is usually overridden.** Whenever a territorial snapshot exists for `(era, region)`, `snapshot_population` replaces the projected value entirely; the growth model then affects only the seeding of eras with no snapshot record. The declaration names this (`era_region_territorial_population_override_v1`) but a reader skimming the step fields could mistake `end_population` for a growth-model output.
+- **Available territorial snapshots override the population projection.** The available snapshot value replaces the projected value entirely (`era_region_territorial_population_override_v1`). Missing-snapshot projection fallback is historical; a current unavailable snapshot does not reset the trajectory to a numerical projection.
 - **The three-index chain population → economy → agents → markets is strictly one-directional.** There is no feedback from prices to consumption, from markets to firms, from economy to population, or from campaigns to territory. Demographic agents are built before market clearing and therefore read pre-clearing exchange indices by construction (`preclearing_market_exchange_pressure_v1`).
 - **Three lookup entries are unreachable from the generators.** `CONFLICT_CAUSE_NAMES[5]` (`sacred_site`) exists in the schema enum but is never assigned by `generate_conflicts`; the `river` and `desert_track` keys of `ROUTE_CAPACITY_MULTIPLIER` cannot match any member of `ROUTE_TYPE_NAMES`. Separately, fourteen of the seventeen keys in `_resource_value` never match a native `dominant_resource` string, so six of the nine `RESOURCE_NAMES` values silently take the `0.16` default. None of these is a bug the schema declares; they are unused capacity in the tables.
-- **Two derived quantities are definitionally redundant.** `population_pressure` on a `PopulationRegion` equals the occupancy fraction it was multiplied by; `carrying_capacity_used_fraction` and `pressure_index` on a population-history step are the same expression. `balance_residual_index` on an economy step is identically zero by construction and is a serialization-closure witness, not a state variable.
+- **Available derived quantities include redundant diagnostics.** Population pressure derives from the occupancy fraction; `carrying_capacity_used_fraction` and `pressure_index` on an available history step use the same expression. Treasury `balance_residual_index` is an algebraic closure witness rather than a state variable. None of these identities turns an unavailable estimate into zero.
 - **A cost line is modelled as a firm output.** The `administration` firm's `output_index` is the region's `administration_cost_index`, and its `order_kind` is `state_demand` while its `order_side` is `supply`. Both are what the source does; neither should be read as an economic claim.
-- **Empty-input branches differ between enrichers, and the difference is not observable in a normal run.** Called directly with non-empty upstream records but an empty `historical_eras` array, both `enrich_world_with_population_history` and `enrich_world_with_economy_history` return **without writing their output array or their model declaration**, whereas their empty-upstream branches do write zeroed summaries. In a real `generate_world` sequence the economy enricher can never reach that branch: empty eras make the population enricher skip `population_histories` entirely, so the economy enricher sees no histories and takes the zeroed-summary path instead. A downstream consumer reading an arbitrary payload must still treat absence of `population_histories` / `economy_histories` as distinct from an empty list.
-- **Replay validation proves determinism and provenance, not realism.** All nine replay validators compare with exact scalar equality and no floating-point tolerance, but by containment: every expected key must be present and equal, while extra keys pass unexamined. Passing therefore means "every value this model computes is present, unaltered, in these records" — not that the record set is exactly what the model would emit. It says nothing at all about whether the model resembles any real demographic, economic, military or dynastic process. The declared limitation strings above are the authoritative statement of what is *not* claimed.
+- **Legacy empty-input branches are not current availability rules.** The original enrichers could omit outputs for missing eras or emit zero summaries for empty upstream arrays. Current dispatch requires exact declared sources and coverage; it retains valid region/era slots and does not turn unknown inputs into known zero. An empty selected family needs its coverage declaration before a consumer can interpret it as complete.
+- **Replay validation checks declared provenance and equations, not realism.** Current validators check exact model/source contracts, record identities, coverage and owned nullable maps before replaying available equations. Legitimate unowned descendant annotations are preserved; that does not permit malformed or extra owned availability fields. Historical containment-only replay remains specific to explicit legacy paths. Neither path establishes empirical demographic, economic, military or dynastic realism.
 - **The twelve built-in `calibration_checks` are hardcoded plausibility bands, not measured targets.** The dataset labels (`ETOPO_reference_range`, `WorldClim_reference_range`, `HydroSHEDS_reference_range`, `NaturalEarth_reference_range`) name the intended reference family; no external file is read by `generate_calibration_checks`. External, SHA-256-pinned empirical calibration is a separate subsystem.
 - **Ruler parent links lag the succession chain.** `parent_ruler_id` is assigned at the end of each ruler iteration and read at the start of the next (`dynasty_genealogy.py:197`), so ruler 0 has no parent, ruler 1's parent is ruler 0, and ruler `i ≥ 2` points at ruler `i − 2` while its `predecessor_ruler_id` points at ruler `i − 1`. The two link families therefore describe different graphs. This is the observed behaviour of the code, not a documented intent; the declaration only says `ordered_predecessor_successor_and_parent_links_v1`.
 

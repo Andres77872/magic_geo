@@ -157,7 +157,7 @@ def _sample_ids(values: list[int]) -> list[int]:
     return [values[math.floor(stride * index)] for index in range(64)]
 
 
-def _base_regions(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], float]:
+def _base_regions(payload: dict[str, Any], *, radius_km: float | None = None) -> tuple[list[dict[str, Any]], float]:
     cells = payload["cells"]
     regions = payload["political_regions"]
     settlements = payload["settlements"]
@@ -225,7 +225,8 @@ def _base_regions(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], float]
         ):
             base["boundary_cell_ids"].append(int(cell["id"]))
 
-    radius_km = math.sqrt(float(payload["summary"].get("surface_area_km2", 0.0)) / (4.0 * math.pi))
+    if radius_km is None:
+        radius_km = math.sqrt(float(payload["summary"].get("surface_area_km2", 0.0)) / (4.0 * math.pi))
     for base in bases:
         region_id = int(base["region_id"])
         if area_weights[region_id] > 0.0:
@@ -499,6 +500,10 @@ def _replay_valid(payload: dict[str, Any]) -> bool:
 
 def validate_territorial_geography_replay(payload: dict[str, Any]) -> list[str]:
     try:
+        from .native_social_availability import uses_native_social_availability
+        if uses_native_social_availability(payload):
+            from .native_territorial_availability_validation import validate_native_territorial_availability
+            return validate_native_territorial_availability(payload)
         valid = _replay_valid(payload)
     except (IndexError, KeyError, TypeError, ValueError, ZeroDivisionError):
         valid = False

@@ -1419,6 +1419,13 @@ def _contains_expected(actual: Any, expected: Any) -> bool:
 
 
 def validate_campaign_operations_replay(payload: dict[str, Any]) -> list[str]:
+    from .logistics_availability_validation import uses_logistics_availability
+    try:
+        if uses_logistics_availability(payload):
+            from .campaign_availability_validation import validate_campaign_availability
+            return validate_campaign_availability(payload)
+    except (TypeError, ValueError, KeyError, OverflowError):
+        return ["campaign operations model or causal replay invalid"]
     try:
         planet_radius_km(payload)
     except ValueError as exc:

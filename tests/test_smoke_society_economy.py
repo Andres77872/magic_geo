@@ -7,6 +7,7 @@ what it needs from the shared world, so they no longer depend on order.
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
@@ -21,8 +22,51 @@ from support.cli import assert_no_cli_crash
 
 
 class SmokeSocietyEconomyTests(TestCase):
+    def _healthy_social_world(self, key: str):
+        """Keep the numeric smoke assertions on an explicitly complete witness.
+
+        Mixed and unavailable branches have dedicated availability tests; this
+        configured current world must continue exercising nonempty estimates.
+        """
+        world = worlds.cached_world_readonly(key)
+        self.assertEqual(
+            world["native_social_availability_model"]["model_type"],
+            "native_settlement_source_complete_social_estimates_v1",
+        )
+        for cell in world["cells"]:
+            if not cell["is_water"] and not cell["is_lake"]:
+                self.assertIs(cell["settlement_climate_supported"], True)
+        for field in (
+            "ruin_inference_available", "conflict_inference_available",
+            "dynasty_inference_available", "historical_event_inference_available",
+            "territorial_snapshot_inference_available",
+        ):
+            self.assertIs(world["native_social_availability"][field], True, field)
+        for population in world["population_regions"]:
+            self.assertIs(population["site_input_complete"], True)
+            self.assertIs(population["capacity_estimate_available"], True)
+            self.assertIs(population["population_estimate_available"], True)
+        for field in (
+            "firm_selection_complete", "individual_sampling_complete",
+            "market_order_selection_complete",
+        ):
+            self.assertIs(world["summary"][field], True, field)
+        for family in (
+            "native_social_summary_availability", "speaker_history_summary_availability",
+            "population_history_summary_availability", "economy_history_summary_availability",
+            "demographic_summary_estimate_availability", "individual_summary_estimate_availability",
+            "genealogy_summary_availability", "logistics_summary_availability",
+            "campaign_summary_availability", "market_summary_estimate_availability",
+        ):
+            flags = world["summary"][family]
+            self.assertIsInstance(flags, dict)
+            self.assertTrue(flags, family)
+            for field, available in flags.items():
+                self.assertIs(available, True, f"{family}.{field}")
+        return world
+
     def test_speaker_population_histories(self) -> None:
-        world = worlds.cached_world_readonly("small_smoke")
+        world = self._healthy_social_world("small_smoke")
         summary = world["summary"]
         self.assertAlmostEqual(
             summary["mean_speaker_allophonic_variation_index"],
@@ -96,7 +140,7 @@ class SmokeSocietyEconomyTests(TestCase):
         self.assertEqual(summary["firm_agent_count"], len(world["firm_agents"]))
         self.assertEqual(summary["firm_agent_count"], sum(region["firm_agent_count"] for region in world["political_regions"]))
     def test_demographic_agent_histories(self) -> None:
-        world = worlds.cached_world_readonly("small_smoke")
+        world = self._healthy_social_world("small_smoke")
         summary = world["summary"]
         self.assertEqual(summary["demographic_agent_history_count"], len(world["demographic_agent_histories"]))
         self.assertEqual(summary["demographic_agent_history_count"], len(world["population_regions"]))
@@ -206,7 +250,7 @@ class SmokeSocietyEconomyTests(TestCase):
         )
         self.assertEqual(summary["route_capacity_constraint_count"], len(world["route_capacity_constraints"]))
     def test_market_exchanges(self) -> None:
-        world = worlds.cached_world_readonly("small_smoke")
+        world = self._healthy_social_world("small_smoke")
         summary = world["summary"]
         self.assertEqual(
             summary["route_capacity_constraint_count"],
@@ -296,7 +340,7 @@ class SmokeSocietyEconomyTests(TestCase):
             delta=max(0.001, summary["total_market_unmet_demand_index"] * 0.0001),
         )
     def test_market_clearing_records(self) -> None:
-        world = worlds.cached_world_readonly("small_smoke")
+        world = self._healthy_social_world("small_smoke")
         summary = world["summary"]
         self.assertAlmostEqual(
             summary["total_endogenous_market_supply_index"],
@@ -529,7 +573,7 @@ class SmokeSocietyEconomyTests(TestCase):
         self.assertGreaterEqual(summary["mean_snapshot_cell_edge_boundary_quality"], 0.0)
         self.assertLessEqual(summary["mean_snapshot_cell_edge_boundary_quality"], 1.0)
     def test_speaker_population_histories_2(self) -> None:
-        world = worlds.cached_world_readonly("small_smoke")
+        world = self._healthy_social_world("small_smoke")
         first_language = world["language_regions"][0]
         first_speaker_history = world["speaker_population_histories"][0]
         self.assertIn("language_region_id", first_speaker_history)
@@ -608,7 +652,7 @@ class SmokeSocietyEconomyTests(TestCase):
             delta=max(0.001, first_speaker_history["final_speaker_population"] * 0.000001),
         )
     def test_population_regions(self) -> None:
-        world = worlds.cached_world_readonly("small_smoke")
+        world = self._healthy_social_world("small_smoke")
         first_population = world["population_regions"][0]
         self.assertIn("region_id", first_population)
         self.assertIn("estimated_population", first_population)
@@ -659,7 +703,7 @@ class SmokeSocietyEconomyTests(TestCase):
             delta=max(1.0, first_population_history["final_population"] * 0.0001),
         )
     def test_household_cohorts(self) -> None:
-        world = worlds.cached_world_readonly("small_smoke")
+        world = self._healthy_social_world("small_smoke")
         first_household = world["household_cohorts"][0]
         self.assertIn("population_region_id", first_household)
         self.assertIn("region_id", first_household)
@@ -754,7 +798,7 @@ class SmokeSocietyEconomyTests(TestCase):
             delta=max(0.001, first_economy_history["final_gross_output_index"] * 0.0001),
         )
     def test_firm_agents(self) -> None:
-        world = worlds.cached_world_readonly("small_smoke")
+        world = self._healthy_social_world("small_smoke")
         first_firm = world["firm_agents"][0]
         self.assertIn("region_id", first_firm)
         self.assertIn("population_region_id", first_firm)
@@ -1121,7 +1165,7 @@ class SmokeSocietyEconomyTests(TestCase):
             self.assertIn("border_ids", first_political_graph_edge)
             self.assertIn("trade_flow_ids", first_political_graph_edge)
     def test_logistics_networks(self) -> None:
-        world = worlds.cached_world_readonly("small_smoke")
+        world = self._healthy_social_world("small_smoke")
         first_logistics = world["logistics_networks"][0]
         self.assertIn("region_id", first_logistics)
         self.assertIn("route_ids", first_logistics)
@@ -1652,56 +1696,56 @@ class SmokeSocietyEconomyTests(TestCase):
         those modules assume.
         """
 
-        world = worlds.cached_world_readonly("mid_512")
+        world = self._healthy_social_world("mid_512")
 
         for model_key, model_type in (
             (
                 "population_region_model",
-                "causal_area_weighted_capacity_occupancy_population_regions_v1",
+                "causal_area_weighted_capacity_occupancy_population_regions_v2",
             ),
             (
                 "conflict_model",
-                "causal_border_pair_pressure_trade_conflict_selection_v1",
+                "causal_border_pair_pressure_trade_conflict_selection_v2",
             ),
             (
                 "dynasty_model",
-                "causal_foundation_continuity_pressure_dynasty_lineages_v1",
+                "causal_foundation_continuity_pressure_dynasty_lineages_v2",
             ),
             (
                 "territorial_snapshot_model",
-                "causal_era_scaled_spherical_region_territorial_snapshots_v1",
+                "causal_era_scaled_spherical_region_territorial_snapshots_v2",
             ),
             (
                 "population_history_model",
-                "causal_era_snapshot_logistic_migration_conflict_population_history_v1",
+                "causal_era_snapshot_logistic_migration_conflict_population_history_v2",
             ),
             (
                 "economy_history_model",
-                "causal_population_trade_conflict_treasury_economy_history_v1",
+                "causal_population_trade_conflict_treasury_economy_history_v2",
             ),
             (
                 "demographic_agent_model",
-                "causal_population_economy_logistics_household_firm_demographic_history_v1",
+                "causal_population_economy_logistics_household_firm_demographic_history_v2",
             ),
             (
                 "individual_life_event_model",
-                "causal_household_firm_era_sampled_individual_life_event_graph_v1",
+                "causal_household_firm_era_sampled_individual_life_event_graph_v2",
             ),
             (
                 "ruler_genealogy_model",
-                "causal_dynasty_economy_conflict_named_ruler_alliance_cadet_genealogy_v1",
+                "causal_dynasty_economy_conflict_named_ruler_alliance_cadet_genealogy_v2",
             ),
             (
                 "logistics_exchange_model",
-                "causal_region_route_trade_economy_logistics_exchange_v1",
+                "causal_region_route_trade_economy_logistics_exchange_v2",
             ),
             (
                 "campaign_operations_model",
-                "causal_conflict_cell_path_front_tactical_strategic_campaign_operations_v1",
+                "causal_conflict_cell_path_front_tactical_strategic_campaign_operations_v2",
             ),
             (
                 "market_clearing_model",
-                "causal_route_capacity_agent_orders_price_iteration_inventory_learning_market_clearing_v1",
+                "causal_route_capacity_agent_orders_price_iteration_inventory_learning_market_clearing_v2",
             ),
         ):
             with self.subTest(model=model_key):
@@ -1741,17 +1785,15 @@ class SmokeSocietyEconomyTests(TestCase):
         self.assertTrue(world["territorial_snapshots"][0]["regions"])
 
     def test_validate_reports_every_society_economy_replay_verdict(self) -> None:
-        """``validate`` reaches and reports all eight society/economy replays.
+        """Each current replay is reached from its own pristine healthy world.
 
-        Wiring is the one claim the dedicated validator modules cannot make: they
-        call the validators directly and never go through the public command. One
-        tamper per verdict, applied to a single payload and reported by a single
-        pass, is all that claim needs -- repeating the tamper tables through the
-        CLI would re-prove, far more slowly and far less precisely, what those
-        modules already prove field by field.
+        Native source failures deliberately stop the public command before its
+        social tail. Isolated tampers exercise each boundary without asking a
+        descendant to consume an already rejected native parent.
         """
 
-        world = worlds.cached_world("mid_512")
+        pristine = self._healthy_social_world("mid_512")
+        world = deepcopy(pristine)
         runner = CliRunner()
 
         with TemporaryDirectory() as temporary_directory:
@@ -1765,28 +1807,33 @@ class SmokeSocietyEconomyTests(TestCase):
             assert_no_cli_crash(self, control, command="validate")
             self.assertEqual(control.exit_code, 0, control.output)
 
-            world["population_regions"][0]["estimated_population"] *= 1.01
-            world["territorial_snapshots"][0]["regions"][0]["boundary_cell_ids"][0] += 1
-            world["population_histories"][0]["steps"][0]["end_population"] += 1.0
-            world["household_cohorts"][0]["vulnerability_index"] += 0.01
-            world["rulers"][0]["legitimacy_index"] += 0.01
-            world["logistics_networks"][0]["transport_efficiency_index"] += 0.01
-            world["campaign_path_segments"][0]["attrition_index"] += 0.01
-            world["route_capacity_constraints"][0]["capacity_volume_index"] += 0.01
-
-            result = validate_current()
-
-        assert_no_cli_crash(self, result, command="validate")
-        self.assertEqual(result.exit_code, 1, result.output)
-        for message in (
-            "population, conflict, or dynasty model causal replay invalid",
-            "territorial snapshot model or causal replay invalid",
-            "population or economy history model causal replay invalid",
-            "demographic agent or individual life-event causal replay invalid",
-            "ruler genealogy model or causal replay invalid",
-            "logistics exchange model or causal replay invalid",
-            "campaign operations model or causal replay invalid",
-            "market clearing model or causal replay invalid",
-        ):
-            with self.subTest(message=message):
-                self.assertIn(message, result.output)
+            for path, increment, relative, message in (
+                (("population_regions", 0, "estimated_population"), 0.01, True,
+                 "native population, conflict, or dynasty availability causal replay invalid"),
+                (("territorial_snapshots", 0, "regions", 0, "boundary_cell_ids", 0), 1, False,
+                 "native territorial availability causal replay invalid"),
+                (("population_histories", 0, "steps", 0, "end_population"), 1.0, False,
+                 "population or economy history model causal replay invalid"),
+                (("household_cohorts", 0, "vulnerability_index"), 0.01, False,
+                 "demographic availability or independent life-event replay invalid"),
+                (("rulers", 0, "legitimacy_index"), 0.01, False,
+                 "ruler genealogy model or causal replay invalid"),
+                (("logistics_networks", 0, "transport_efficiency_index"), 0.01, False,
+                 "logistics exchange availability or causal replay invalid"),
+                (("campaign_path_segments", 0, "attrition_index"), 0.01, False,
+                 "campaign operations availability or causal replay invalid"),
+                (("route_capacity_constraints", 0, "capacity_volume_index"), 0.01, False,
+                 "market-clearing availability or independent replay invalid"),
+            ):
+                with self.subTest(message=message):
+                    world = deepcopy(pristine)
+                    target = world
+                    for component in path[:-1]:
+                        target = target[component]
+                    value = target[path[-1]]
+                    self.assertIn(type(value), (int, float))
+                    target[path[-1]] = value * (1.0 + increment) if relative else value + increment
+                    result = validate_current()
+                    assert_no_cli_crash(self, result, command="validate")
+                    self.assertEqual(result.exit_code, 1, result.output)
+                    self.assertIn(message, result.output)

@@ -377,7 +377,7 @@ def _route_record(
     }
 
 
-def enrich_world_with_route_corridors(world: dict[str, Any]) -> dict[str, Any]:
+def _enrich_legacy_equations(world: dict[str, Any]) -> dict[str, Any]:
     cells = world.get("cells", [])
     routes = world.get("routes", [])
     settlements = world.get("settlements", [])
@@ -516,3 +516,28 @@ def enrich_world_with_route_corridors(world: dict[str, Any]) -> dict[str, Any]:
     )
     world["route_corridors"] = records
     return world
+
+
+NATURAL_MODEL = {'model_type': 'causal_feature_weighted_dijkstra_route_corridors_v2',
+ 'source_navigability_model': 'causal_channel_hydraulic_coastal_navigability_v2',
+ 'source_port_model': 'causal_navigability_coastal_port_site_selection_v2',
+ 'source_aquifer_model': 'natural_recharge_causal_aquifer_resources_v2',
+ 'domain': 'all_cells_with_one_path_per_valid_route',
+ 'mountain_pass_model': 'neighbor_saddle_convergence_landform_relief_elevation_ice_v1',
+ 'river_valley_model': 'flow_runoff_river_landform_relief_navigability_ice_v1',
+ 'coastal_model': 'marine_or_coastal_contact_navigability_harbor_port_depth_relief_v1',
+ 'oasis_model': 'aridity_water_recharge_aquifer_soil_fertility_settlement_ice_v1',
+ 'movement_cost_model': 'directed_distance_terrain_water_route_type_feature_support_v1',
+ 'path_model': 'strict_improvement_dijkstra_cost_then_cell_id_heap_v1',
+ 'corridor_classification_model': 'route_type_preference_then_feature_count_lexical_tie_v1',
+ 'cell_assignment_model': 'maximum_membership_with_later_route_winning_equal_ties_v1',
+ 'record_order': 'ascending_route_id_for_valid_endpoints_and_paths',
+ 'feature_threshold': 0.45,
+ 'threshold_semantics': 'serialized_feature_indices',
+ 'deterministic': True,
+ 'model_limitation': 'diagnostic_static_corridors_without_capacity_congestion_seasonality_construction_cost_network_equilibrium_or_multimodal_scheduling'}
+
+def enrich_world_with_route_corridors(world: dict[str, Any]) -> dict[str, Any]:
+    """Publish exact v1/v2 or settlement-available v3 after independent audit."""
+    from ._human_water_publication import publish_human_water_stage
+    return publish_human_water_stage(world, 'corridors', _enrich_legacy_equations, NATURAL_MODEL)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from collections import Counter
 from typing import Any
+from .settlement_climate import replay_settlement_climate
 
 from .._constants import (
     POLITICAL_BIOME_ORDER,
@@ -132,6 +133,7 @@ def _validate_political_regions(
     regions = payload.get("political_regions", [])
     planet = payload.get("planet_parameters", {})
     try:
+        selection_model, _ = replay_settlement_climate(payload)
         metadata_invalid = (
             not isinstance(model, dict)
             or not isinstance(settlements, list)
@@ -140,7 +142,7 @@ def _validate_political_regions(
             or not isinstance(planet, dict)
             or model.get("model_type") != POLITICAL_REGION_MODEL
             or model.get("source_settlement_model")
-            != SETTLEMENT_SELECTION_MODEL
+            != selection_model
             or model.get("source_route_network_model") != ROUTE_NETWORK_MODEL
             or model.get("target_model")
             != "clamp_floor_settlement_count_div_5_plus_1_1_min_10_count_v1"
@@ -515,6 +517,7 @@ def _validate_political_borders(
     borders = payload.get("borders", [])
     planet = payload.get("planet_parameters", {})
     try:
+        selection_model, _ = replay_settlement_climate(payload)
         metadata_invalid = (
             not isinstance(model, dict)
             or not isinstance(borders, list)

@@ -1,5 +1,10 @@
 # Natural geo generation and maturation: deep scientific audit
 
+For the subsequent review of lake/soil/settlement precedence, Python enrichment
+dependencies, astronomical insolation, and browser/API coherence, see the
+[simulation coherence research](simulation_coherence_research.md). It records
+newly reproduced defects that qualify this audit's earlier ordering verdict.
+
 Audit date: 2026-07-11
 
 Scope: natural planet generation and maturation only; settlement and civilization layers are excluded.

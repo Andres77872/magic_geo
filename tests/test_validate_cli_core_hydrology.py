@@ -4,9 +4,13 @@ Covers the schema/planet gate, mesh and summary headline checks, crust-age
 replay, sea-level model reconstruction, hydrologic flow routing, depression
 components and lake basins, and numeric depression-correction provenance.
 
-Every case drives the public CLI over a temporary world file: one tamper on a
-private deep copy of the shared 128-cell world, asserting the exact ``FAIL``
-lines the command prints.
+Cases drive the public CLI over a temporary world file: one tamper on a
+private deep copy of the shared current seasonal 128-cell world, asserting the
+exact ``FAIL`` lines the command prints. Explicitly paired historical cases retain old numerical cascades on complete
+original land-use/water archives; current counterparts pin earlier dependency
+rejections. Two intentionally isolated historical tests retain their existing
+native-energy-only mock for inline hydrology coverage. Their unpatched current
+public counterparts prove rejection of the same tamper; no new audit is bypassed.
 
 Three properties keep the cases honest:
 
@@ -37,17 +41,24 @@ from __future__ import annotations
 
 import copy
 import traceback
+from contextlib import contextmanager
+from functools import wraps
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Callable
 from unittest import TestCase
+from unittest.mock import patch
 
 from typer.testing import CliRunner
 
 from magic_geo.cli import app
+from magic_geo.cli.validators import _validate_river_channel_morphology
 from magic_geo.io import write_json
+from magic_geo.natural_water_validation_dispatch import validate_public_natural_water_chain
+from magic_geo.species_habitat_validation import validate_species_habitat_support
 
 from support import worlds
+from support.legacy_land_use_worlds import legacy_land_use_world
 import pytest
 
 # Exhaustive branch coverage of ``validate``: every case invokes the full CLI
@@ -62,16 +73,32 @@ Tamper = Callable[[World], None]
 #: control per class would repeat one identical serialization and one identical
 #: full validation pass eight times over.
 _CONTROL: Any = None
+_HISTORICAL_CONTROL: dict[str, Any] = {}
 
 
-def _control_run() -> Any:
-    global _CONTROL
-    if _CONTROL is None:
+def _control_run(historical: bool = False, *, world_key: str = "replay_128") -> Any:
+    global _CONTROL, _HISTORICAL_CONTROL
+    cached = _HISTORICAL_CONTROL.get(world_key) if historical else _CONTROL
+    if cached is None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "control.json"
-            write_json(path, worlds.cached_world_readonly("replay_128"))
-            _CONTROL = CliRunner().invoke(app, ["validate", "--world", str(path)])
-    return _CONTROL
+            world = legacy_land_use_world(world_key) if historical else worlds.cached_world_readonly(world_key)
+            write_json(path, world)
+            cached = CliRunner().invoke(app, ["validate", "--world", str(path)])
+        if historical:
+            _HISTORICAL_CONTROL[world_key] = cached
+        else:
+            _CONTROL = cached
+    return cached
+
+
+def historical_land_use_case(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Scope existing historical equation/isolation tests to a real old world."""
+    @wraps(method)
+    def run(self: Any) -> Any:
+        with self.historical_world():
+            return method(self)
+    return run
 
 
 SEA_LEVEL_FAILURE = "sea level model metadata or connectivity invalid"
@@ -237,6 +264,20 @@ def depression_sink_id(world: World) -> int:
     return int(depression_cells(world)[0]["depression_sink_cell_id"])
 
 
+def drain_the_ocean(world: World) -> None:
+    set_on_all(world["cells"], "is_water", False)
+
+
+def drain_and_strip_elevations(world: World) -> None:
+    drain_the_ocean(world)
+    stripped = sum(
+        cell.pop("elevation_m", _MISSING) is not _MISSING
+        for cell in world["cells"]
+    )
+    if not stripped:
+        raise AssertionError("no cell carried an elevation to strip")
+
+
 class ValidateWorldTamperTest(TestCase):
     """Shared 128-cell world plus a one-tamper-per-case CLI harness."""
 
@@ -250,6 +291,17 @@ class ValidateWorldTamperTest(TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         cls._directory.cleanup()
+
+    @contextmanager
+    def historical_world(self, key: str = "replay_128"):
+        """Temporarily select a complete original archive, without relabelling."""
+        world, control = self.world, self.control
+        self.world = legacy_land_use_world(key)
+        self.control = _control_run(historical=True, world_key=key)
+        try:
+            yield
+        finally:
+            self.world, self.control = world, control
 
     @staticmethod
     def failure_lines(result: Any) -> list[str]:
@@ -328,12 +380,62 @@ class ValidateWorldTamperTest(TestCase):
             with self.subTest(name):
                 self.assert_exact_failures(tamper, *expected)
 
+    def assert_migrated_table(
+        self, cases: dict[str, tuple[Tamper, tuple[str, ...]]], *,
+        current_messages: dict[str, tuple[str, ...]],
+    ) -> None:
+        """Retain old exact numerical cascades and current independent gates."""
+        self.assertLessEqual(set(current_messages), set(cases))
+        for name, (tamper, expected) in cases.items():
+            if name in current_messages:
+                with self.subTest(name, scope="historical_land_use_v1_numeric"):
+                    with self.historical_world():
+                        self.assert_exact_failures(tamper, *expected)
+                with self.subTest(name, scope="current_parent_preflight"):
+                    self.assert_exact_failures(tamper, *current_messages[name])
+            else:
+                with self.subTest(name):
+                    self.assert_exact_failures(tamper, *expected)
+
+    def retained_marine_classification_failure(self) -> str:
+        position = next(
+            index for index, record in enumerate(self.world["climate_energy_balance_records"])
+            if record["prescribed_marine_surface"]
+        )
+        return (
+            f"native climate energy: cell[{position}]: "
+            "retained marine cell lost marine classification"
+        )
+
+    def assert_isolated_downstream_failures_start_with(
+        self, tamper: Tamper, *expected: str
+    ) -> Any:
+        """Exercise inline downstream gates, never a full validation acceptance.
+
+        The CLI has no callable sea-level/flow/depression helper. Public tests
+        separately pin the real preflight rejection; this isolation keeps the
+        same invalid world and bypasses only that already-tested early audit.
+        """
+        self.assert_control_clean()
+        with patch(
+            "magic_geo.cli.commands.validate.validate_native_climate_energy_output",
+            return_value=([], None),
+        ) as native_preflight:
+            result = self.run_tampered(tamper)
+        native_preflight.assert_called_once()
+        self.assert_no_crash(result)
+        self.assertEqual(result.exit_code, 1, result.output)
+        observed = self.failure_lines(result)
+        self.assertEqual(observed[: len(expected)], list(expected))
+        self.assertGreater(len(observed), len(expected))
+        return result
+
 
 class SchemaGateTest(ValidateWorldTamperTest):
     """The opening gate: schema version, retired fields, planet parameters.
 
-    This gate exits before any other check runs, so its three failures are the
-    only lines the command prints.
+    The opening gate collects schema, planet and native climate certificate
+    failures before any downstream check runs.
     """
 
     def test_untampered_world_validates(self) -> None:
@@ -371,6 +473,11 @@ class SchemaGateTest(ValidateWorldTamperTest):
                     non_positive_radius,
                     (
                         "planet parameters invalid: "
+                        "planet_parameters.radius_km must be finite and positive",
+                        "native climate energy: planet_parameters.radius_km: "
+                        "6371000.0 differs from -1000.0 by 6372000 "
+                        "(roundoff allowance 1.1920929e-07)",
+                        "natural channels: hydraulics requires independently valid parent: "
                         "planet_parameters.radius_km must be finite and positive",
                     ),
                 ),
@@ -457,7 +564,7 @@ class CrustAgeReplayTest(ValidateWorldTamperTest):
             set_field(world["cells"][0], "crust_age_ma", -5.0)
 
         prefix = "plate_motion_history[0].crust_overlap_ledger"
-        self.assert_table(
+        self.assert_migrated_table(
             {
                 "missing_overlap_ledger": (
                     missing_ledger,
@@ -505,7 +612,11 @@ class CrustAgeReplayTest(ValidateWorldTamperTest):
                         "land use zone model or causal replay invalid",
                     ),
                 ),
-            }
+            },
+            current_messages={'missing_cell_crust_age': ('resource deposit 0 cell 0: missing or mismatched formation '
+                                        'evidence',),
+             'negative_cell_crust_age': ('resource deposit 0 cell 0: missing or mismatched formation '
+                                         'evidence',)},
         )
 
 
@@ -547,11 +658,17 @@ class SeaLevelModelTest(ValidateWorldTamperTest):
             }
         )
 
-    def test_ocean_free_world_reports_sea_level_and_flow_failures(self) -> None:
-        def drain_the_ocean(world: World) -> None:
-            set_on_all(world["cells"], "is_water", False)
+    def test_ocean_free_tamper_fails_native_climate_preflight(self) -> None:
+        self.assert_exact_failures(
+            drain_the_ocean, self.retained_marine_classification_failure(),
+            "natural channels: hydraulics requires independently valid parent: "
+            "natural channels: channel requires independently valid parent: "
+            "natural groundwater: groundwater flow model or routing replay invalid",
+        )
 
-        result = self.assert_failures_start_with(
+    @historical_land_use_case
+    def test_isolated_ocean_free_tamper_reports_sea_level_and_flow_failures(self) -> None:
+        result = self.assert_isolated_downstream_failures_start_with(
             drain_the_ocean,
             SEA_LEVEL_FAILURE,
             FLOW_FAILURE,
@@ -597,7 +714,7 @@ class FlowRoutingTest(ValidateWorldTamperTest):
             set_field(world["cells"][-1], "flow_accumulation", 1.0e18)
 
         depression_cascade = (FLOW_FAILURE, DEPRESSION_FAILURE) + LAKE_AGGREGATION_CASCADE
-        self.assert_table(
+        self.assert_migrated_table(
             {
                 "flat_gradient_step": (wrong_flat_gradient_step, depression_cascade),
                 "unbounded_neighbour_elevation": (
@@ -637,9 +754,33 @@ class FlowRoutingTest(ValidateWorldTamperTest):
                         "route corridor model or causal replay invalid",
                     ),
                 ),
-            }
+            },
+            current_messages={'unbounded_neighbour_elevation': ('species parent cell 0: alpine_tundra_specialist score '
+                                               'mismatch',
+                                               'species parent cell 0: '
+                                               'species_habitat_suitability_index mismatch',
+                                               'species parent cell 0: species_endemism_index mismatch',
+                                               'species parent range 0: endemism_index mismatch',
+                                               'species parent range 0: conservation_stress_index '
+                                               'mismatch',
+                                               'species parent range 0: mean_habitat_suitability_index '
+                                               'mismatch',
+                                               'species parent summary: '
+                                               'mean_species_habitat_suitability_index mismatch',
+                                               'species parent summary: mean_species_endemism_index '
+                                               'mismatch',
+                                               'natural channels: hydraulics requires independently '
+                                               'valid parent: natural channels: channel requires '
+                                               'independently valid parent: natural groundwater: cell '
+                                               '0: elevation_m must be finite numeric'),
+             'inflated_flow_accumulation': ('resource all-cell p95 normalization: numerical replay '
+                                            'mismatch',
+                                            'natural channels: hydraulics requires independently valid '
+                                            'parent: natural channels: river channel morphology model '
+                                            'or causal replay invalid')},
         )
 
+    @historical_land_use_case
     def test_neighbour_id_outside_the_mesh_is_reported_with_its_position(self) -> None:
         """The rejected neighbour is named by the position the tamper wrote it to."""
 
@@ -682,20 +823,56 @@ class FlowRoutingTest(ValidateWorldTamperTest):
             ],
         )
 
-    def test_ocean_free_world_without_elevations_seeds_from_no_finite_low(
+    def test_current_unknown_neighbour_rejects_source_graph_parents(self) -> None:
+        """The rejected neighbour is named by the position the tamper wrote it to."""
+
+        seeded: dict[str, int] = {}
+
+        def neighbour_outside_the_mesh(world: World) -> None:
+            for position, cell in enumerate(world["cells"]):
+                if not cell.get("is_water"):
+                    continue
+                # The reports index ``cells`` positionally; the mesh numbers its
+                # cells the same way, so the two agree.
+                if position != int(cell["id"]):
+                    raise AssertionError("cell ids are no longer positional")
+                seeded["cell"] = position
+                seeded["slot"] = len(cell["neighbors"])
+                set_field(cell, "neighbors", list(cell["neighbors"]) + [9999])
+                return
+            raise AssertionError("the world has no water cell to seed the flood")
+
+        result = self.run_reporting(neighbour_outside_the_mesh)
+        self.assertEqual(self.failure_lines(result), [
+            f"species parent cell {seeded['cell']}: invalid neighbor IDs",
+            f"wildfire availability: cell {seeded['cell']}: complete neighbor list",
+            "natural channels: hydraulics requires independently valid parent: "
+            "natural channels: channel requires independently valid parent: "
+            f"natural groundwater: cell {seeded['cell']}: unknown neighbor",
+        ])
+
+    def test_ocean_free_tamper_without_elevations_fails_native_climate_preflight(
         self,
     ) -> None:
-        def drain_and_strip(world: World) -> None:
-            set_on_all(world["cells"], "is_water", False)
-            stripped = sum(
-                cell.pop("elevation_m", _MISSING) is not _MISSING
-                for cell in world["cells"]
-            )
-            if not stripped:
-                raise AssertionError("no cell carried an elevation to strip")
-
         result = self.assert_failures_start_with(
-            drain_and_strip,
+            drain_and_strip_elevations, self.retained_marine_classification_failure(),
+            "species parent cell 0: alpine_tundra_specialist score mismatch",
+            "species parent cell 0: species_habitat_suitability_index mismatch",
+            "species parent cell 0: species_endemism_index mismatch",
+        )
+        self.assertIn(
+            "natural channels: hydraulics requires independently valid parent: "
+            "natural channels: channel requires independently valid parent: "
+            "natural groundwater: cell 0: elevation_m must be finite numeric",
+            self.failure_lines(result),
+        )
+
+    @historical_land_use_case
+    def test_isolated_ocean_free_tamper_without_elevations_seeds_from_no_finite_low(
+        self,
+    ) -> None:
+        result = self.assert_isolated_downstream_failures_start_with(
+            drain_and_strip_elevations,
             SEA_LEVEL_FAILURE,
             FLOW_FAILURE,
             DEPRESSION_FAILURE,
@@ -744,6 +921,41 @@ class FlowRoutingTest(ValidateWorldTamperTest):
         )
 
     def test_river_flag_on_a_sub_threshold_cell_breaks_extraction(self) -> None:
+        # The complete historical small_smoke archive contains a real lake
+        # below the extraction threshold. River coexistence leaves its existing
+        # standing-water species inputs valid, so no early biology guard masks
+        # this historical numerical hydrology branch. The separate current dry
+        # source test keeps its stronger preflight rejection below.
+        with self.historical_world("small_smoke"):
+            def flag_a_non_river(world: World) -> None:
+                threshold = float(world["summary"]["river_flow_accumulation_threshold"])
+                self.assertEqual(validate_species_habitat_support(world), [])
+                for cell in world["cells"]:
+                    if (cell.get("is_lake") and not cell.get("is_water")
+                            and not cell.get("is_river")
+                            and float(cell["flow_accumulation"]) < threshold):
+                        self.assertEqual(cell["water_body_type"], "fresh_lake")
+                        self.assertEqual(cell["species_freshwater_fishery_input_mode"], "standing_water_required")
+                        self.assertGreater(float(cell["runoff_mm_y"]), 10.0)
+                        set_field(cell, "is_river", True)
+                        self.assertEqual(validate_species_habitat_support(world), [])
+                        return
+                raise AssertionError("no standing freshwater cell below the river threshold")
+
+            result = self.assert_failures_start_with(
+                flag_a_non_river,
+                FLOW_FAILURE,
+                CLOCK_FAILURE,
+                "hydrologic budget region records invalid",
+                "runoff_surplus_region_count does not match records",
+                "water_deficit_region_count does not match records",
+                "wetland system records invalid",
+                "river channel morphology model or causal replay invalid",
+            )
+            # River extraction changes, while depression aggregation remains intact.
+            self.assertNotIn(DEPRESSION_FAILURE, self.failure_lines(result))
+
+    def test_current_dry_river_flag_rejects_stale_species_and_water_parents(self) -> None:
         def flag_a_non_river(world: World) -> None:
             for cell in world["cells"]:
                 if not cell.get("is_water") and not cell.get("is_river"):
@@ -751,14 +963,16 @@ class FlowRoutingTest(ValidateWorldTamperTest):
                     return
             raise AssertionError("every land cell is already a river")
 
-        result = self.assert_failures_start_with(
+        result = self.assert_exact_failures(
             flag_a_non_river,
-            FLOW_FAILURE,
-            CLOCK_FAILURE,
-            "hydrologic budget region records invalid",
-            "runoff_surplus_region_count does not match records",
-            "water_deficit_region_count does not match records",
-            "river channel morphology model or causal replay invalid",
+            "species parent cell 0: species_freshwater_habitat_eligible mismatch",
+            "species parent cell 0: species_freshwater_fishery_input_mode mismatch",
+            "species parent cell 0: species_applicable_guild_count mismatch",
+            "species parent range 0: consumed habitat evidence mismatch",
+            "wildfire availability: cell 0: wildfire_ignition_potential_index",
+            "natural channels: hydraulics requires independently valid parent: "
+            "natural channels: channel requires independently valid parent: "
+            "natural groundwater: groundwater flow model or routing replay invalid",
         )
         # River extraction is downstream of the depression aggregation, which
         # this tamper leaves intact.
@@ -908,13 +1122,29 @@ class DepressionRoutingTest(ValidateWorldTamperTest):
                 cell = by_id[identifier]
                 for raw_neighbour in cell.get("neighbors", []):
                     other = int(raw_neighbour)
-                    if other in member_ids and other not in {sink_id, identifier}:
+                    if (
+                        other in member_ids
+                        and other not in {sink_id, identifier}
+                        and (cell["is_river"] or by_id[other]["is_river"])
+                    ):
+                        # Current seasonal runoff makes one member a channel.
+                        # Its tiny old conditioned drop can affect rounded
+                        # geometry even when the displayed slope index is zero.
+                        self.assertEqual(float(cell["channel_slope_index"]), 0.0)
+                        self.assertEqual(float(by_id[other]["channel_slope_index"]), 0.0)
                         cell["flow_to"] = other
                         by_id[other]["flow_to"] = identifier
+                        if world["river_channel_morphology_model"]["model_type"] == "causal_flow_sediment_wetland_baseflow_channel_morphology_v2":
+                            self.assertEqual(validate_public_natural_water_chain(world), (True, []))
+                        else:
+                            self.assertEqual(
+                                _validate_river_channel_morphology(world, world["summary"], by_id),
+                                ["river channel morphology model or causal replay invalid"],
+                            )
                         return
-            raise AssertionError("no adjacent non-sink member pair")
+            raise AssertionError("no adjacent non-sink member pair containing a channel")
 
-        self.assert_table(
+        self.assert_migrated_table(
             {
                 "sink_is_not_terminal": (
                     sink_is_not_terminal,
@@ -946,7 +1176,82 @@ class DepressionRoutingTest(ValidateWorldTamperTest):
                         "river_graph_total_channel_length_km does not match graph edges",
                     ),
                 ),
-            }
+            },
+            current_messages={
+                "sink_is_not_terminal": ("human water transport: cell 0: basin_id must reference its native terminal outlet cell",),
+                "members_flow_into_each_other": (FLOW_FAILURE, DEPRESSION_FAILURE, 'river reorganization history records invalid', 'river reorganization history ids are not unique', 'river reorganization histories do not match events', 'mean_river_reorganization_risk_index does not match river reorganization histories', 'total_river_divide_lowering_m does not match river reorganization histories', 'total_river_sediment_reworked_m does not match river reorganization histories', 'high_river_reorganization_pressure_count does not match river reorganization histories', 'river_graph records invalid', 'river_graph_edge_count does not match river flow links', 'river_graph_total_channel_length_km does not match graph edges'),
+            },
+        )
+
+    @historical_land_use_case
+    def test_non_channel_depression_cycle_preserves_channel_morphology(self) -> None:
+        def make_non_channel_cycle(world: World) -> None:
+            by_id = cells_by_id(world)
+            sink_id = depression_sink_id(world)
+            member_ids = {int(cell["id"]) for cell in depression_cells(world)}
+            for identifier in sorted(member_ids - {sink_id}):
+                cell = by_id[identifier]
+                if cell["is_river"]:
+                    continue
+                for raw_neighbour in cell["neighbors"]:
+                    other = int(raw_neighbour)
+                    if (
+                        other in member_ids - {sink_id, identifier}
+                        and not by_id[other]["is_river"]
+                    ):
+                        cell["flow_to"] = other
+                        by_id[other]["flow_to"] = identifier
+                        self.assertEqual(
+                            _validate_river_channel_morphology(world, world["summary"], by_id),
+                            [],
+                        )
+                        return
+            raise AssertionError("no adjacent non-channel non-sink member pair")
+
+        result = self.assert_failures_start_with(
+            make_non_channel_cycle,
+            FLOW_FAILURE,
+            DEPRESSION_FAILURE,
+        )
+        self.assertIn("watershed network diagnostics invalid", self.failure_lines(result))
+        self.assertNotIn(
+            "river channel morphology model or causal replay invalid",
+            self.failure_lines(result),
+        )
+
+    def test_current_non_channel_depression_cycle_preserves_natural_channels(self) -> None:
+        def make_non_channel_cycle(world: World) -> None:
+            by_id = cells_by_id(world)
+            sink_id = depression_sink_id(world)
+            member_ids = {int(cell["id"]) for cell in depression_cells(world)}
+            for identifier in sorted(member_ids - {sink_id}):
+                cell = by_id[identifier]
+                if cell["is_river"]:
+                    continue
+                for raw_neighbour in cell["neighbors"]:
+                    other = int(raw_neighbour)
+                    if (
+                        other in member_ids - {sink_id, identifier}
+                        and not by_id[other]["is_river"]
+                    ):
+                        cell["flow_to"] = other
+                        by_id[other]["flow_to"] = identifier
+                        self.assertEqual(
+                            validate_public_natural_water_chain(world),
+                            (True, []),
+                        )
+                        return
+            raise AssertionError("no adjacent non-channel non-sink member pair")
+
+        result = self.assert_failures_start_with(
+            make_non_channel_cycle,
+            FLOW_FAILURE,
+            DEPRESSION_FAILURE,
+        )
+        self.assertIn("watershed network diagnostics invalid", self.failure_lines(result))
+        self.assertNotIn(
+            "river channel morphology model or causal replay invalid",
+            self.failure_lines(result),
         )
 
     def test_open_depression_policy_violations(self) -> None:
@@ -971,6 +1276,7 @@ class DepressionRoutingTest(ValidateWorldTamperTest):
             }
         )
 
+    @historical_land_use_case
     def test_corrected_numeric_policy_also_invalidates_correction_provenance(
         self,
     ) -> None:
@@ -985,6 +1291,20 @@ class DepressionRoutingTest(ValidateWorldTamperTest):
             FLOW_FAILURE,
             DEPRESSION_FAILURE,
             NUMERIC_FAILURE,
+        )
+
+    def test_current_corrected_numeric_policy_rejects_stale_terminal_reference(
+        self,
+    ) -> None:
+        def corrected_numeric_policy(world: World) -> None:
+            by_id = cells_by_id(world)
+            set_on_all(depression_cells(world), "depression_policy", "corrected_numeric")
+            sink = by_id[depression_sink_id(world)]
+            set_field(sink, "flow_to", int(sink.get("spill_to", -1)))
+
+        self.assert_exact_failures(
+            corrected_numeric_policy,
+            "human water transport: cell 0: basin_id must reference its native terminal outlet cell",
         )
 
 

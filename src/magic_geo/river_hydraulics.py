@@ -108,9 +108,9 @@ def _reach_record(system: dict[str, Any], cells: list[dict[str, Any]]) -> dict[s
     }
 
 
-def enrich_world_with_river_hydraulics(world: dict[str, Any]) -> dict[str, Any]:
+def _build_hydraulics(world: dict[str, Any], *, natural: bool = False) -> dict[str, Any]:
     cells = world.get("cells", [])
-    if not isinstance(cells, list) or not cells:
+    if not isinstance(cells, list) or (not cells and not natural):
         return world
 
     gravity_m_s2 = surface_gravity_m_s2(world)
@@ -236,4 +236,60 @@ def enrich_world_with_river_hydraulics(world: dict[str, Any]) -> dict[str, Any]:
     summary["high_shear_stress_cell_count"] = high_shear_count
     summary["hydraulic_flow_regime_counts"] = dict(sorted(regime_counts.items()))
     world["river_hydraulic_reaches"] = reaches
+    return world
+
+
+NATURAL_MODEL = {'model_type': 'manning_blended_diagnostic_river_hydraulics_v2',
+ 'source_channel_model': 'causal_flow_sediment_wetland_baseflow_channel_morphology_v2',
+ 'domain': 'is_river_and_not_is_water_cells',
+ 'cross_section_model': 'rectangular_area_and_wetted_perimeter_v1',
+ 'slope_model': 'channel_slope_index_times_0_028_with_1e_5_floor_v1',
+ 'roughness_model': 'morphology_sediment_wetland_ice_bounded_manning_n_v1',
+ 'velocity_model': '55_percent_discharge_plus_45_percent_manning_bounded_v1',
+ 'froude_model': 'velocity_over_sqrt_gravity_times_depth_v1',
+ 'shear_model': 'density_gravity_hydraulic_radius_slope_v1',
+ 'capacity_model': 'cross_section_discharge_radius_velocity_index_v1',
+ 'navigability_model': 'depth_width_velocity_froude_slope_ice_index_v1',
+ 'regime_model': 'froude_velocity_shear_threshold_tree_v1',
+ 'reach_model': 'one_reach_per_river_channel_system_v1',
+ 'water_density_kg_m3': 1000.0,
+ 'maximum_velocity_m_s': 12.0,
+ 'hydraulic_navigability_threshold': 0.55,
+ 'high_shear_stress_pa': 120.0,
+ 'deterministic': True,
+ 'model_limitation': 'steady_diagnostic_rectangular_hydraulics_without_solved_continuity_backwater_flood_frequency_or_transient_flow'}
+
+
+def enrich_world_with_river_hydraulics(world: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild only owned diagnostics after exact independently audited ancestry.
+
+    Explicit historical parents/own declarations keep the original output.
+    Natural v2 stages all output and replays it before touching the caller.
+    """
+    from .natural_channel_validation import validate_natural_downstream_inputs
+    from .natural_channel_validation import validate_natural_river_hydraulics
+
+    version = validate_natural_downstream_inputs(world, 'hydraulics')
+    if version == 1:
+        return _build_hydraulics(world)
+    staged = dict(world)
+    staged['cells'] = [dict(cell) for cell in world['cells']]
+    staged['summary'] = dict(world.get('summary', {}))
+    try:
+        _build_hydraulics(staged, natural=True)
+        staged['river_hydraulics_model'].update(NATURAL_MODEL)
+        staged['summary']['river_hydraulics_model'] = NATURAL_MODEL['model_type']
+        errors = validate_natural_river_hydraulics(staged)
+        if errors:
+            raise ValueError(errors[0])
+    except (TypeError, KeyError, OverflowError, ArithmeticError) as exc:
+        raise ValueError('natural hydraulics: unrepresentable or malformed computed output') from exc
+    for cell, result in zip(world['cells'], staged['cells']):
+        for key in ('bed_shear_stress_pa', 'channel_capacity_index', 'flow_velocity_m_s', 'froude_number', 'hydraulic_flow_regime', 'hydraulic_navigability_index', 'hydraulic_radius_m', 'manning_roughness_n', 'river_hydraulic_reach_id'):
+            cell[key] = result[key]
+    for key in ('river_hydraulic_reaches', 'river_hydraulics_model'):
+        world[key] = staged[key]
+    summary = world.setdefault('summary', {})
+    for key in ('high_shear_stress_cell_count', 'hydraulic_flow_regime_counts', 'hydraulically_navigable_cell_count', 'mean_bed_shear_stress_pa', 'mean_channel_capacity_index', 'mean_flow_velocity_m_s', 'mean_froude_number', 'mean_hydraulic_navigability_index', 'mean_hydraulic_radius_m', 'mean_manning_roughness_n', 'river_hydraulic_cell_count', 'river_hydraulic_reach_count', 'river_hydraulics_model', 'supercritical_flow_cell_count'):
+        summary[key] = staged['summary'][key]
     return world

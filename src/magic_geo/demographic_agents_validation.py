@@ -822,7 +822,7 @@ def _contains_expected(actual: Any, expected: Any) -> bool:
     return actual == expected
 
 
-def validate_demographic_agents_replay(payload: dict[str, Any]) -> list[str]:
+def _validate_demographic_agents_legacy(payload: dict[str, Any]) -> list[str]:
     try:
         summary = payload.get("summary", {})
         required_lists = (
@@ -899,3 +899,14 @@ def validate_demographic_agents_replay(payload: dict[str, Any]) -> list[str]:
     ):
         valid = False
     return [] if valid else ["demographic agent or individual life-event causal replay invalid"]
+
+
+
+def validate_demographic_agents_replay(payload: dict[str, Any]) -> list[str]:
+    from .demographic_availability_validation import demographic_version,validate_demographic_availability
+    try:
+        if demographic_version(payload)==1:
+            return _validate_demographic_agents_legacy(payload)
+        return validate_demographic_availability(payload)
+    except (ValueError,TypeError,KeyError,IndexError,OverflowError,AttributeError):
+        return ["demographic agent or individual life-event causal replay invalid"]

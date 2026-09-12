@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from collections import Counter
+import math
 from typing import Any
 
 
@@ -44,7 +46,13 @@ def _water_surface_head(cell: dict[str, Any]) -> float:
     return elevation
 
 
-def _hydraulic_head(cell: dict[str, Any]) -> float:
+def _surface_water(cell: dict[str, Any], *, natural: bool) -> bool:
+    if natural:
+        return cell["is_water"] or cell["is_lake"] or cell["water_body_type"] == "fresh_lake"
+    return bool(cell.get("is_lake", False)) or str(cell.get("water_body_type", "land")) in SURFACE_WATER_TYPES
+
+
+def _hydraulic_head(cell: dict[str, Any], *, natural: bool = False) -> float:
     if not _is_aquifer_cell(cell):
         return _water_surface_head(cell)
 
@@ -55,8 +63,8 @@ def _hydraulic_head(cell: dict[str, Any]) -> float:
     moisture = _clamp(float(cell.get("soil_moisture_index", 0.0)))
     aridity = _clamp(float(cell.get("seasonal_aridity_index", 0.0)))
     salinity = _clamp(float(cell.get("soil_salinity_index", 0.0)))
-    extraction_risk = _clamp(float(cell.get("aquifer_extraction_risk_index", 0.0)))
-    water_bonus = 0.18 if bool(cell.get("is_lake", False)) or str(cell.get("water_body_type", "land")) in SURFACE_WATER_TYPES else 0.0
+    extraction_risk = _clamp(float(cell.get(("aquifer_natural_limitation_index" if natural else "aquifer_extraction_risk_index"), 0.0)))
+    water_bonus = 0.18 if _surface_water(cell, natural=natural) else 0.0
     river_bonus = 0.10 if bool(cell.get("is_river", False)) else 0.0
     saturation = _clamp(
         recharge * 0.28
@@ -73,18 +81,18 @@ def _hydraulic_head(cell: dict[str, Any]) -> float:
     return elevation - depth_to_water_m
 
 
-def _surface_connection_index(cell: dict[str, Any]) -> float:
+def _surface_connection_index(cell: dict[str, Any], *, natural: bool = False) -> float:
     water_body = str(cell.get("water_body_type", "land"))
     connection = 0.0
     if bool(cell.get("is_river", False)):
         connection = max(connection, 0.62)
-    if bool(cell.get("is_lake", False)) or water_body in SURFACE_WATER_TYPES:
+    if _surface_water(cell, natural=natural):
         connection = max(connection, 0.56)
     if float(cell.get("wetland_extent_index", 0.0)) >= 0.35:
         connection = max(connection, 0.42)
     if bool(cell.get("is_closed_basin", False)):
         connection = max(connection, 0.24)
-    if float(cell.get("distance_to_marine_water_km", 9999.0)) <= 160.0:
+    if cell.get("marine_distance_status") != "no_marine_source" and float(cell.get("distance_to_marine_water_km", 9999.0)) <= 160.0:
         connection = max(connection, 0.28)
     return _clamp(connection)
 
@@ -112,14 +120,14 @@ def _primary_key(counter: Counter[str], fallback: str) -> str:
     return sorted(counter.items(), key=lambda item: (-item[1], item[0]))[0][0]
 
 
-def enrich_world_with_groundwater_flow(world: dict[str, Any]) -> dict[str, Any]:
+def _build_groundwater(world: dict[str, Any], *, natural: bool = False) -> dict[str, Any]:
     cells = world.get("cells", [])
-    if not isinstance(cells, list) or not cells:
+    if not isinstance(cells, list) or (not cells and not natural):
         return world
 
     cells_by_id = {_cell_id(cell): cell for cell in cells}
     candidate_ids = {_cell_id(cell) for cell in cells if _is_aquifer_cell(cell)}
-    heads = {_cell_id(cell): _hydraulic_head(cell) for cell in cells}
+    heads = {_cell_id(cell): _hydraulic_head(cell, natural=natural) for cell in cells}
 
     flow_to_by_id: dict[int, int] = {}
     gradient_by_id: dict[int, float] = {}
@@ -174,6 +182,8 @@ def enrich_world_with_groundwater_flow(world: dict[str, Any]) -> dict[str, Any]:
             if not same_system and not surface_sink:
                 continue
             drop = head - heads.get(neighbor_id, _water_surface_head(neighbor))
+            if natural and not math.isfinite(drop):
+                raise ValueError("unrepresentable natural groundwater head difference")
             if drop > best_drop:
                 best_drop = drop
                 best_neighbor_id = neighbor_id
@@ -190,7 +200,7 @@ def enrich_world_with_groundwater_flow(world: dict[str, Any]) -> dict[str, Any]:
         gradient = gradient_by_id.get(cell_id, 0.0)
         storage = _clamp(float(cell.get("aquifer_storage_index", 0.0)))
         productivity = _clamp(float(cell.get("aquifer_productivity_index", 0.0)))
-        extraction_risk = _clamp(float(cell.get("aquifer_extraction_risk_index", 0.0)))
+        extraction_risk = _clamp(float(cell.get(("aquifer_natural_limitation_index" if natural else "aquifer_extraction_risk_index"), 0.0)))
         export_fraction = _clamp(
             0.12
             + gradient * 0.56
@@ -216,12 +226,12 @@ def enrich_world_with_groundwater_flow(world: dict[str, Any]) -> dict[str, Any]:
         flow_to = flow_to_by_id.get(cell_id, -1)
         flow_to_candidate = flow_to in candidate_ids
         internal_lateral_outflow = max(0.0, internal_lateral_outflow_by_id.get(cell_id, 0.0))
-        surface_connection = _surface_connection_index(cell)
+        surface_connection = _surface_connection_index(cell, natural=natural)
         gradient = gradient_by_id.get(cell_id, 0.0)
         productivity = _clamp(float(cell.get("aquifer_productivity_index", 0.0)))
         storage = _clamp(float(cell.get("aquifer_storage_index", 0.0)))
         quality = _clamp(float(cell.get("aquifer_quality_index", 0.0)))
-        extraction_risk = _clamp(float(cell.get("aquifer_extraction_risk_index", 0.0)))
+        extraction_risk = _clamp(float(cell.get(("aquifer_natural_limitation_index" if natural else "aquifer_extraction_risk_index"), 0.0)))
         local_available = max(0.0, available - (export if flow_to >= 0 else 0.0))
         surface_fraction = _clamp(surface_connection * 0.58 + (1.0 - gradient) * 0.10 + productivity * 0.08 - extraction_risk * 0.12)
         if flow_to >= 0 and not flow_to_candidate:
@@ -365,8 +375,8 @@ def enrich_world_with_groundwater_flow(world: dict[str, Any]) -> dict[str, Any]:
                 "mean_groundwater_discharge_mm_y": round(sum(float(cell.get("groundwater_discharge_mm_y", 0.0)) for cell in group) / divisor, 6),
                 "mean_spring_discharge_index": round(sum(float(cell.get("spring_discharge_index", 0.0)) for cell in group) / divisor, 6),
                 "mean_baseflow_support_index": round(sum(float(cell.get("baseflow_support_index", 0.0)) for cell in group) / divisor, 6),
-                "mean_aquifer_extraction_risk_index": round(
-                    sum(float(cell.get("aquifer_extraction_risk_index", 0.0)) for cell in group) / divisor,
+                ("mean_aquifer_natural_limitation_index" if natural else "mean_aquifer_extraction_risk_index"): round(
+                    sum(float(cell.get(("aquifer_natural_limitation_index" if natural else "aquifer_extraction_risk_index"), 0.0)) for cell in group) / divisor,
                     6,
                 ),
                 "river_cell_count": sum(1 for cell in group if bool(cell.get("is_river", False))),
@@ -457,4 +467,75 @@ def enrich_world_with_groundwater_flow(world: dict[str, Any]) -> dict[str, Any]:
     summary["mean_spring_discharge_index"] = round(sum(float(cell.get("spring_discharge_index", 0.0)) for cell in aquifer_cells) / divisor, 6) if aquifer_cells else 0.0
     summary["mean_baseflow_support_index"] = round(sum(float(cell.get("baseflow_support_index", 0.0)) for cell in aquifer_cells) / divisor, 6) if aquifer_cells else 0.0
     summary["groundwater_flow_regime_counts"] = dict(sorted(regime_counts.items()))
+    return world
+
+
+NATURAL_GROUNDWATER_POLICY = {'model_type': 'descending_head_natural_recharge_partition_v2',
+ 'source_aquifer_model': 'natural_recharge_causal_aquifer_resources_v2',
+ 'hydraulic_head_model': 'terrain_minus_natural_diagnostic_depth_to_water_v2',
+ 'lateral_export_model': 'bounded_gradient_productivity_storage_natural_limitation_fraction_v2',
+ 'surface_discharge_model': 'surface_target_export_plus_natural_fraction_of_remaining_volume_v2',
+ 'natural_limitation_field': 'aquifer_natural_limitation_index',
+ 'surface_water_selector': 'is_water_or_is_lake_or_fresh_lake_water_body_type',
+ 'natural_input_policy': 'independent_of_settlement_suitability_population_and_human_records',
+ 'human_withdrawals_modelled': False,
+ 'transient_storage_modelled': False,
+ 'darcy_flow_modelled': False,
+ 'retained_storage_semantics': 'unadvanced_annual_recharge_partition_remainder_not_stored_water_stock',
+ 'model_limitation': 'heuristic_annual_natural_head_and_recharge_partition_without_pumping_transient_storage_or_groundwater_surface_water_feedback'}
+
+
+def enrich_world_with_groundwater_flow(world: dict[str, Any]) -> dict[str, Any]:
+    """Publish an independently audited natural v2 stage; declared v1 stays v1."""
+    from .natural_groundwater_validation import (
+        NaturalGroundwaterError, natural_groundwater_model_version,
+        validate_natural_groundwater_inputs, validate_natural_groundwater_flow,
+    )
+    version = natural_groundwater_model_version(world, "groundwater")
+    if version == 1:
+        return _build_groundwater(world)
+    validate_natural_groundwater_inputs(world, "groundwater")
+    staged = {**world, "cells": [dict(c) for c in world["cells"]], "summary": dict(world.get("summary", {}))}
+    for c in staged["cells"]:
+        c.pop("aquifer_extraction_risk_index", None)
+    staged["summary"].pop("mean_aquifer_extraction_risk_index", None)
+    staged["summary"].pop("groundwater_stressed_cell_count", None)
+    try:
+        _build_groundwater(staged, natural=True)
+        staged["groundwater_flow_model"].update(deepcopy(NATURAL_GROUNDWATER_POLICY))
+        staged["summary"]["groundwater_flow_model"] = NATURAL_GROUNDWATER_POLICY["model_type"]
+        errors = validate_natural_groundwater_flow(staged)
+        if errors:
+            raise NaturalGroundwaterError(errors[0])
+    except (TypeError, KeyError, ValueError, OverflowError, ArithmeticError) as exc:
+        if isinstance(exc, NaturalGroundwaterError):
+            raise
+        raise NaturalGroundwaterError("natural groundwater: malformed or unrepresentable groundwater result") from exc
+    cell_fields = ('baseflow_support_index',
+ 'groundwater_available_volume_km3_y',
+ 'groundwater_discharge_km3_y',
+ 'groundwater_discharge_mm_y',
+ 'groundwater_flow_mass_balance_residual_km3_y',
+ 'groundwater_flow_regime',
+ 'groundwater_flow_system_id',
+ 'groundwater_flow_to_cell_id',
+ 'groundwater_gradient_index',
+ 'groundwater_hydraulic_head_m',
+ 'groundwater_internal_lateral_outflow_km3_y',
+ 'groundwater_lateral_flow_km3_y',
+ 'groundwater_lateral_inflow_km3_y',
+ 'groundwater_retained_storage_km3_y',
+ 'spring_discharge_index')
+    for original, result in zip(world["cells"], staged["cells"]):
+        for key in cell_fields:
+            if key in result:
+                original[key] = result[key]
+            else:
+                original.pop(key, None)
+    for key in ('groundwater_flow_model', 'groundwater_flow_systems'):
+        world[key] = staged[key]
+    summary = world.setdefault("summary", {})
+    summary.pop("mean_aquifer_extraction_risk_index", None)
+    summary.pop("groundwater_stressed_cell_count", None)
+    summary.update(staged["summary"])
     return world

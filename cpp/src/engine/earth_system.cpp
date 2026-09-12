@@ -922,7 +922,8 @@ void erode(
     std::vector<NumericDepressionCorrectionEvent>& numeric_depression_correction_history,
     std::vector<HydrologicWaterBudgetStage>& hydrologic_water_budget_history,
     std::vector<FluvialSedimentRoutingStage>& sediment_routing_history,
-    std::vector<HillslopeSedimentTransportStage>& hillslope_transport_history
+    std::vector<HillslopeSedimentTransportStage>& hillslope_transport_history,
+    PrescribedSeasonalClimateCache* climate_cache
 ) {
     const int n = static_cast<int>(cells.size());
     for (int iter = 0; iter < params.erosion_iterations; ++iter) {
@@ -1126,7 +1127,8 @@ void erode(
             "erosion_iteration",
             iter + 1,
             numeric_depression_correction_history,
-            hydrologic_water_budget_history
+            hydrologic_water_budget_history,
+            climate_cache
         );
         feedback_history.push_back(summarize_feedback_step(
             cells,

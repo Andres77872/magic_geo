@@ -112,6 +112,10 @@ CIVILIZATION_TOP_LEVEL_FIELDS = {
 
 
 CIVILIZATION_NESTED_FIELDS = {
+    "agricultural_habitat_applicable",
+    "agricultural_climate_supported",
+    "agricultural_potential_supported",
+    "mining_surface_applicable",
     "agricultural_potential_index",
     "agricultural_zone_id",
     "coastal_navigability_index",

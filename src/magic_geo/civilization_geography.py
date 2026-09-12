@@ -8,7 +8,7 @@ CONFLICT_MODEL = "causal_border_pair_pressure_trade_conflict_selection_v1"
 DYNASTY_MODEL = "causal_foundation_continuity_pressure_dynasty_lineages_v1"
 
 
-def enrich_world_with_civilization_geography_models(world: dict[str, Any]) -> dict[str, Any]:
+def _legacy_enrich_world_with_civilization_geography_models(world: dict[str, Any]) -> dict[str, Any]:
     populations = world.get("population_regions", [])
     conflicts = world.get("conflicts", [])
     if not isinstance(populations, list) or not isinstance(conflicts, list):
@@ -72,3 +72,11 @@ def enrich_world_with_civilization_geography_models(world: dict[str, Any]) -> di
     summary["conflict_model"] = CONFLICT_MODEL
     summary["dynasty_model"] = DYNASTY_MODEL
     return world
+
+
+def enrich_world_with_civilization_geography_models(world: dict[str, Any]) -> dict[str, Any]:
+    from .native_social_models import annotate_native_social_models
+
+    return annotate_native_social_models(
+        world, _legacy_enrich_world_with_civilization_geography_models, ('population_region_model', 'conflict_model', 'dynasty_model'),
+    )

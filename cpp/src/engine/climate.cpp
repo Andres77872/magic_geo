@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "seasonal_climate_cache.hpp"
 
 namespace magic_geo::detail {
 
@@ -248,26 +249,102 @@ std::pair<double, double> ocean_current_components(double lat, double lon, doubl
     return {east / len, north / len};
 }
 
-void compute_climate(const Params& params, std::vector<Cell>& cells) {
+PrescribedSeasonalClimateOptions make_prescribed_seasonal_climate_options(const Params& params) {
+    PrescribedSeasonalClimateOptions options;
+    options.radius_m = params.radius_km * 1000.0;
+    options.atmosphere.gravity_m_s2 = params.gravity_g * CLIMATE_REFERENCE_GRAVITY_M_S2;
+    options.atmosphere.mean_surface_pressure_pa = params.atmosphere_pressure_bar * CLIMATE_REFERENCE_PRESSURE_PA;
+    options.atmosphere.reference_infrared_optical_depth = params.reference_infrared_optical_depth;
+    options.atmosphere.greenhouse_factor = params.greenhouse_factor;
+    options.axial_tilt_deg = params.axial_tilt_deg;
+    options.orbital_eccentricity = params.orbital_eccentricity;
+    options.stellar_luminosity = params.stellar_luminosity;
+    return options;
+}
+
+double prescribed_climate_annual_temperature_c(
+    const PrescribedSeasonalClimate& climate,
+    std::size_t cell
+) {
+    long double temperature_integral = 0.0L;
+    for (const SurfaceEnergyMonth& month : climate.solution.year.months) {
+        temperature_integral += static_cast<long double>(month.duration_seconds) *
+            month.mean_temperature_k.at(cell);
+    }
+    return static_cast<double>(temperature_integral / climate.solution.year.duration_seconds - 273.15L);
+}
+
+double prescribed_climate_global_mean_temperature_c(const PrescribedSeasonalClimate& climate) {
+    long double temperature_integral = 0.0L;
+    long double area_sum = 0.0L;
+    for (std::size_t i = 0; i < climate.surfaces.size(); ++i) {
+        const long double area = climate.surfaces[i].area_m2;
+        area_sum += area;
+        for (const SurfaceEnergyMonth& month : climate.solution.year.months) {
+            temperature_integral += area * month.duration_seconds * month.mean_temperature_k.at(i);
+        }
+    }
+    return static_cast<double>(temperature_integral / (area_sum * climate.solution.year.duration_seconds) - 273.15L);
+}
+
+double prescribed_climate_thermal_moisture_factor(const PrescribedSeasonalClimate& climate) {
+    // Retain the empirical rain response, with its anomaly derived from the
+    // solved area/time mean. The reference is a fixed calibration constant;
+    // the obsolete user-supplied Celsius mean does not enter this model.
+    const double anomaly = prescribed_climate_global_mean_temperature_c(climate) -
+        CLIMATE_THERMAL_MOISTURE_REFERENCE_BASE_TEMPERATURE_C;
+    const double exponent = clamp(
+        CLIMATE_THERMAL_MOISTURE_RESPONSE_PER_C * anomaly,
+        std::log(CLIMATE_THERMAL_MOISTURE_MIN_FACTOR),
+        std::log(CLIMATE_THERMAL_MOISTURE_MAX_FACTOR)
+    );
+    return clamp(std::exp(exponent), CLIMATE_THERMAL_MOISTURE_MIN_FACTOR,
+        CLIMATE_THERMAL_MOISTURE_MAX_FACTOR);
+}
+
+void compute_climate(
+    const Params& params,
+    std::vector<Cell>& cells,
+    PrescribedSeasonalClimateCache* climate_cache
+) {
+    const PrescribedSeasonalClimate* seasonal = nullptr;
+    switch (params.temperature_model) {
+    case ClimateTemperatureModel::legacy_empirical:
+        break;
+    case ClimateTemperatureModel::prescribed_seasonal:
+        if (climate_cache == nullptr) {
+            throw std::runtime_error("prescribed seasonal climate requires an owning climate cache");
+        }
+        if (params.months != 12) {
+            throw std::runtime_error("prescribed seasonal climate requires twelve export months");
+        }
+        seasonal = &climate_cache->solve(params.mesh_backend, cells,
+            make_prescribed_seasonal_climate_options(params));
+        break;
+    default:
+        throw std::runtime_error("unsupported climate temperature model");
+    }
     const std::vector<int> dist = ocean_distance(cells);
     const int n = static_cast<int>(cells.size());
     const PrevailingWindUpwindCache prevailing_wind_cache =
         build_prevailing_wind_upwind_cache(params, cells);
     const double pressure = std::max(0.01, params.atmosphere_pressure_bar);
-    const double pressure_temp_adj = 4.5 * std::log(pressure);
-    const double pressure_precip_factor = clamp(std::pow(pressure, 0.35), 0.35, 1.85);
+    const double pressure_temp_adj = seasonal ? 0.0 : 4.5 * std::log(pressure);
+    const double pressure_precip_factor = seasonal && params.atmosphere_pressure_bar == 0.0
+        ? 0.0 : clamp(std::pow(pressure, 0.35), 0.35, 1.85);
     const double gravity_precip_factor = clamp(1.08 - 0.10 * (params.gravity_g - 1.0), 0.65, 1.35);
     const double stellar_temperature_forcing_c =
-        climate_stellar_temperature_forcing_c(params);
+        seasonal ? 0.0 : climate_stellar_temperature_forcing_c(params);
     const double greenhouse_temperature_forcing_c =
-        climate_greenhouse_temperature_forcing_c(params);
+        seasonal ? 0.0 : climate_greenhouse_temperature_forcing_c(params);
     const double thermal_moisture_capacity_factor =
-        climate_thermal_moisture_capacity_factor(params);
+        seasonal ? prescribed_climate_thermal_moisture_factor(*seasonal)
+                 : climate_thermal_moisture_capacity_factor(params);
     const double rotation_band_shift = clamp((params.day_length_hours - 24.0) / 24.0 * 5.0, -7.0, 9.0);
     const double eccentricity_season_factor = 1.0 + 1.8 * clamp(params.orbital_eccentricity, 0.0, 0.8);
     double local_temperature_adjustment_area_sum = 0.0;
     double total_cell_area_km2 = 0.0;
-    for (int i = 0; i < n; ++i) {
+    for (int i = 0; !seasonal && i < n; ++i) {
         const Cell& cell = cells[static_cast<std::size_t>(i)];
         const double oceanity = std::exp(-static_cast<double>(dist[static_cast<std::size_t>(i)]) / 7.5);
         const auto current = ocean_current_components(cell.lat, cell.lon, params.day_length_hours);
@@ -382,12 +459,12 @@ void compute_climate(const Params& params, std::vector<Cell>& cells) {
         const double latitude_temperature_area_mean_offset_c =
             CLIMATE_LATITUDE_TEMPERATURE_GRADIENT_C /
             (CLIMATE_LATITUDE_TEMPERATURE_EXPONENT + 1.0);
-        const double latitude_temp = params.base_temperature_c +
+        const double latitude_temp = seasonal ? 0.0 : params.base_temperature_c +
             latitude_temperature_area_mean_offset_c -
             CLIMATE_LATITUDE_TEMPERATURE_GRADIENT_C * std::pow(
                 std::sin(std::abs(cell.lat)), CLIMATE_LATITUDE_TEMPERATURE_EXPONENT
             );
-        const double lapse = std::max(0.0, cell.elevation_m) * params.lapse_rate_c_per_km / 1000.0;
+        const double lapse = seasonal ? 0.0 : std::max(0.0, cell.elevation_m) * params.lapse_rate_c_per_km / 1000.0;
         double annual_temp = 0.0;
         double annual_precip = 0.0;
         double seasonal_wind_speed_sum = 0.0;
@@ -400,9 +477,11 @@ void compute_climate(const Params& params, std::vector<Cell>& cells) {
         );
         for (int month = 0; month < params.months; ++month) {
             const double season = std::cos(2.0 * PI * (static_cast<double>(month) - 6.0) / static_cast<double>(params.months));
-            const double seasonal_amp = (9.0 + 16.0 * continentality) * (params.axial_tilt_deg / 23.5) *
+            const double seasonal_amp = seasonal ? 0.0 : (9.0 + 16.0 * continentality) * (params.axial_tilt_deg / 23.5) *
                 eccentricity_season_factor * std::sin(cell.lat);
-            const double temp = latitude_temp + lum_adj + greenhouse_adj + pressure_temp_adj +
+            const double temp = seasonal
+                ? seasonal->solution.year.months[static_cast<std::size_t>(month)].mean_temperature_k[static_cast<std::size_t>(i)] - 273.15
+                : latitude_temp + lum_adj + greenhouse_adj + pressure_temp_adj +
                 seasonal_amp * season - lapse +
                 (cell.is_water ? CLIMATE_MARINE_ANNUAL_TEMPERATURE_OFFSET_C : 0.0) + current_temp -
                 local_temperature_adjustment_area_mean;
@@ -466,7 +545,7 @@ void compute_climate(const Params& params, std::vector<Cell>& cells) {
             // discontinuous minimum-rainfall branch.
             double monthly_precip =
                 std::max(0.0, annual) / static_cast<double>(params.months);
-            // Apply configured moisture capacity to every monthly value.
+            // Apply the selected model's empirical thermal rain response.
             if (thermal_moisture_capacity_factor != 1.0) {
                 monthly_precip *= thermal_moisture_capacity_factor;
             }
@@ -474,7 +553,9 @@ void compute_climate(const Params& params, std::vector<Cell>& cells) {
             cell.precipitation_monthly_mm[static_cast<std::size_t>(month)] = monthly_precip;
             annual_precip += monthly_precip;
         }
-        cell.temperature_c = annual_temp / static_cast<double>(params.months);
+        cell.temperature_c = seasonal
+            ? prescribed_climate_annual_temperature_c(*seasonal, static_cast<std::size_t>(i))
+            : annual_temp / static_cast<double>(params.months);
         cell.precipitation_mm_y = annual_precip;
         cell.mean_seasonal_wind_speed = seasonal_wind_speed_sum / static_cast<double>(params.months);
         cell.seasonal_wind_reversal_index = clamp(

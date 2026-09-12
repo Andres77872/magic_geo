@@ -1,3 +1,5 @@
+config_version: 2
+
 # Original high-gravity super-Earth campaign world. Radius, gravity, ocean
 # inventory, and atmospheric pressure are scaled together; exotic planets are
 # supported by the schema but are less calibrated than the Earth reference.
@@ -38,8 +40,7 @@ tectonics:
 
 climate:
   months: 12
-  lapse_rate_c_per_km: 6.0
-  base_temperature_c: 14.0
+  reference_infrared_optical_depth: 1.0
   precipitation_scale: 1.10
   subtropical_drying_strength: 0.60
 

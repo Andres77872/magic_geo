@@ -271,6 +271,10 @@ def _population_weighted_mean(populations: list[dict[str, Any]], field: str) -> 
 
 
 def enrich_world_with_phonology_history(world: dict[str, Any]) -> dict[str, Any]:
+    from .native_phonology_history_validation import phonology_version
+    if phonology_version(world) == 2:
+        from .phonology_history_availability import enrich_native_phonology_history
+        return enrich_native_phonology_history(world)
     _set_phonology_history_model(world)
     languages = world.get("language_regions", [])
     if not isinstance(languages, list):

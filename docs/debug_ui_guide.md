@@ -48,8 +48,9 @@ over the viewport instead of permanently consuming horizontal space.
 2. Edit YAML. Search the schema reference for a field, then validate.
 3. Save it; the status reports a workspace path such as
    `runs/configs/world.yaml`.
-4. Open **Operations**, select **Generate world**, set the saved config path and
-   desired world output, and leave **Prepare browser cache** enabled.
+4. Click **Use saved config for generation** to open **Operations** with the
+   exact saved path. Review the world output and leave **Prepare browser cache**
+   enabled.
 5. Watch the queued/running job, streamed command log, and resulting artifacts.
 6. When it succeeds, open **Map** for layers/cells or **Data** for generic
    families, sections, stages, and diagnostics.
@@ -68,8 +69,14 @@ responses cannot overwrite newer edits. The editor supports Tab indentation
 Profiles are starting points:
 
 - `default` — exact neutral schema defaults;
-- `earthlike` — calibrated Earth starter;
+- `earthlike` — Earth reference inputs; seasonal climate calibration is not established;
 - `smoke` — 128-cell deterministic CPU integration run.
+
+All profiles use the seasonal model and include `config_version: 2`. Empty or
+unversioned YAML receives migration guidance. The current temperature control is
+`climate.reference_infrared_optical_depth`; retired mean/lapse fields produce
+individual errors. The browser loads matching version-2 schema and templates
+and preserves editor text if a request fails or returns a mismatched version.
 
 The editor remains raw YAML so every current/future field is usable without a
 frontend release. **Validate YAML** sends it through the same duplicate-key-safe
@@ -80,15 +87,15 @@ over 1,000,000 UTF-8 bytes are rejected before model construction.
 ### Schema reference
 
 The right panel resolves `$ref` entries from `/api/config/schema` and flattens
-all nine sections/all 44 properties. Each card shows:
+the nine sections plus the scalar root version, for 44 properties. Each card shows:
 
 - dotted path;
 - type and required status;
 - authoritative description;
-- default and enum choices when applicable.
+- default, enum/const choices and numeric bounds when applicable.
 
-The filter matches path, type, and description. Numeric bounds remain available
-in Swagger/JSON Schema even if the compact card does not repeat every keyword.
+The filter matches path, type and description, including opacity/optical-depth
+guidance. Schema bounds and referenced section descriptions are preserved.
 
 ### Save versus download
 
@@ -98,6 +105,12 @@ filesystem. **Save configuration** validates and atomically writes below
 `.yaml` is added when missing. Existing names return a conflict and the UI asks
 for explicit replacement confirmation. Arbitrary host paths and symlink escapes
 are never accepted.
+
+Validation applies to the submitted YAML: editing while a request is in flight
+clears its validation state. Saving captures the submitted name and YAML for any
+overwrite retry. The saved-path status separately identifies remaining edits,
+and **Use saved config for generation** is available once the current text and
+name match the saved configuration.
 
 ## Operations view
 
@@ -360,6 +373,30 @@ contains:
 - adjacency rows with transition/boundary flags and click-through neighbors.
 
 Old caches without the sidecar still work and report `complete: false`.
+
+For worlds with aquatic support flags, the inspector annotates an unsupported
+primary-productivity or fishery estimate beside its stored numeric value.
+It distinguishes an unavailable primary input from the fishery's own climate
+support. A supported zero remains an ordinary zero. These are empirical model
+applicability flags, not measurements of water temperature or absence of life.
+The scalar map and hover still show the stored values; use the companion support
+layers or cell inspector when interpreting their zeros.
+
+Species layers separately expose terrestrial/freshwater/marine habitat eligibility
+and the availability of freshwater/marine fish scores. A recognized freshwater
+habitat can still have an unavailable fish score. The freshwater input-mode layer
+distinguishes standing-water estimates from river scores, whose resource-fishery
+term is omitted because it is not modeled. The cell CSV preserves these six
+fields and the four aquatic support flags; missing older declarations remain blank.
+
+Explicit version-2 seasonal worlds expose `annual_*_w_m2` energy layers and
+retained effective albedo/emissivity. These come from the native monthly budget;
+the layer descriptions distinguish radiation, horizontal transport, storage,
+residual and numerical allowance. The allowance is not a heat source or an
+absolute climate-accuracy guarantee. The 418-column CSV includes all eleven
+native mirrors. Retired legacy energy-stress and reef-bleaching fields remain
+blank; native reef metadata and the Markdown summary explain that bleaching is
+not estimated without an independent reference climatology and time history.
 
 ### Projection and overlays
 

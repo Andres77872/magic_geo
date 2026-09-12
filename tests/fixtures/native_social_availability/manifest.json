@@ -1,0 +1,9 @@
+{
+  "bytes": 2263806,
+  "fixture": "native-social-units.json.gz",
+  "gzip_bytes": 119567,
+  "gzip_sha256": "020a2352309b503ed8a280bd780eea1514c0fe7c28314a4f7b752c0bc69d0bd1",
+  "scope": "Ten native social-stage unit fixtures. First six prescribe cells/sites; selection_stage prescribes scores then runs selection; environment_stage computes native environment/landforms/finalization before selection and society. No physical climate integration, full world generation, or energy-certificate qualification.",
+  "sha256": "7d786f4672b2b02c5981dc409bc0ab96f6a0145d65bc6b8661655915ab109a82",
+  "source_freeze_sha256": "c0c9324652739586fb2b4b8d2909f57c5ca2c3710a2fbf93a9888c1f06cd43d2"
+}

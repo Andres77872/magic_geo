@@ -4,21 +4,27 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal
 from unittest.mock import patch
 
 from magic_geo import native as native_module
 
 
 @contextmanager
-def patch_generation_payload(library: Any, payload: Any) -> Iterator[None]:
+def patch_generation_payload(
+    library: Any, payload: Any, *, model: Literal["legacy", "seasonal"] = "legacy",
+) -> Iterator[None]:
     """Make both transports return ``payload`` from ``library`` without the C++ core.
 
     Used to drive the schema-gating branches that a healthy native library can
-    never produce.
+    never produce. The explicit ``model="seasonal"`` selector patches only the
+    V4 loader; the default preserves existing V1–V3 compatibility controls.
     """
+    if model not in {"legacy", "seasonal"}:
+        raise ValueError("native stub model must be legacy or seasonal")
+    loader = "_load_seasonal_library" if model == "seasonal" else "_load_library"
     with (
-        patch.object(native_module, "_load_library", return_value=library),
+        patch.object(native_module, loader, return_value=library),
         patch.object(native_module, "_consume_json_pointer", return_value=payload),
         patch.object(native_module, "_consume_msgpack_pointer", return_value=payload),
     ):

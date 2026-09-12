@@ -14,7 +14,14 @@ from collections import Counter
 import math
 from typing import Any, Callable
 
+from .aquatic_climate_validation import validate_aquatic_climate_support
+from .marine_distance_validation import validate_marine_distance
+from .biological_resource_validation import validate_biological_resources
+from .ore_resource_availability_validation import validate_ore_resource_availability
 from .ore_genesis import _cell_indices as _replay_ore_cell_indices
+from .reef_thermal_validation import validate_reef_thermal_habitat
+from .species_habitat_validation import validate_species_habitat_support
+from .wildfire_aquatic_validation import validate_wildfire_aquatic_exclusion
 from .resource_dynamics import (
     AGRICULTURAL_RESOURCES,
     _accessibility as _replay_resource_accessibility,
@@ -563,35 +570,38 @@ def _validate_seasonal_climate(
     if summary.get("climate_class_counts") != class_counts or not _summary_matches(summary, "climate_class_count", len(class_counts)):
         class_errors.append("classification summary mirrors")
 
-    regions, regions_shape = _records(world, "climate_continentality_regions")
-    region_errors: list[str] = []
-    if not regions_shape or not _sequential_ids(regions):
-        region_errors.append("continentality region structure/IDs")
-    assigned: set[int] = set()
-    for region in regions:
-        region_id = _int(region.get("id"))
-        cell_ids, unique = _id_list(region.get("cell_ids"))
-        if not unique or not cell_ids or any(cell_id not in cells_by_id for cell_id in cell_ids):
-            region_errors.append(f"region {region_id}: cells")
-            continue
-        if assigned.intersection(cell_ids):
-            region_errors.append(f"region {region_id}: overlap")
-        assigned.update(cell_ids)
-        if _int(region.get("cell_count")) != len(cell_ids) or not _close(region.get("area_km2"), _record_area(region, cells_by_id)):
-            region_errors.append(f"region {region_id}: count/area")
-        for cell_id in cell_ids:
-            if _int(cells_by_id[cell_id].get("climate_continentality_region_id")) != region_id:
-                region_errors.append(f"region {region_id}: cell mirror {cell_id}")
-        for field in ("mean_continentality_index", "mean_oceanic_humidity_availability_index"):
-            if not _bounded(region.get(field)):
-                region_errors.append(f"region {region_id}: {field}")
-        for field in ("mean_distance_to_marine_water_km", "mean_precipitation_mm_y", "mean_temperature_range_c"):
-            if not _nonnegative(region.get(field)):
-                region_errors.append(f"region {region_id}: {field}")
-    if assigned != {_int(cell.get("id")) for cell in cells if _int(cell.get("climate_continentality_region_id")) >= 0}:
-        region_errors.append("continentality assignment inverse")
-    if not _summary_matches(summary, "climate_continentality_region_count", len(regions)):
-        region_errors.append("continentality summary count")
+    if "climate_continentality_model" in world or validate_marine_distance(world):
+        region_errors = validate_marine_distance(world)
+    else:
+        regions, regions_shape = _records(world, "climate_continentality_regions")
+        region_errors: list[str] = []
+        if not regions_shape or not _sequential_ids(regions):
+            region_errors.append("continentality region structure/IDs")
+        assigned: set[int] = set()
+        for region in regions:
+            region_id = _int(region.get("id"))
+            cell_ids, unique = _id_list(region.get("cell_ids"))
+            if not unique or not cell_ids or any(cell_id not in cells_by_id for cell_id in cell_ids):
+                region_errors.append(f"region {region_id}: cells")
+                continue
+            if assigned.intersection(cell_ids):
+                region_errors.append(f"region {region_id}: overlap")
+            assigned.update(cell_ids)
+            if _int(region.get("cell_count")) != len(cell_ids) or not _close(region.get("area_km2"), _record_area(region, cells_by_id)):
+                region_errors.append(f"region {region_id}: count/area")
+            for cell_id in cell_ids:
+                if _int(cells_by_id[cell_id].get("climate_continentality_region_id")) != region_id:
+                    region_errors.append(f"region {region_id}: cell mirror {cell_id}")
+            for field in ("mean_continentality_index", "mean_oceanic_humidity_availability_index"):
+                if not _bounded(region.get(field)):
+                    region_errors.append(f"region {region_id}: {field}")
+            for field in ("mean_distance_to_marine_water_km", "mean_precipitation_mm_y", "mean_temperature_range_c"):
+                if not _nonnegative(region.get(field)):
+                    region_errors.append(f"region {region_id}: {field}")
+        if assigned != {_int(cell.get("id")) for cell in cells if _int(cell.get("climate_continentality_region_id")) >= 0}:
+            region_errors.append("continentality assignment inverse")
+        if not _summary_matches(summary, "climate_continentality_region_count", len(regions)):
+            region_errors.append("continentality summary count")
     _add(
         checks,
         domain=domain,
@@ -1311,6 +1321,30 @@ def _validate_lakes_watersheds(
     basin_ids = {_int(basin.get("id")) for basin in basins}
     if not basins_shape or not _sequential_ids(basins):
         basin_errors.append("lake basin structure or IDs")
+    basins_by_id = {_int(basin.get("id")): basin for basin in basins}
+    for cell in cells:
+        if cell.get("is_lake") is not True:
+            continue
+        cell_id = _int(cell.get("id"))
+        basin = basins_by_id.get(_int(cell.get("lake_basin_id")))
+        water_body = cell.get("water_body_type")
+        if (
+            cell.get("is_water") is not False
+            or water_body not in {"fresh_lake", "saline_basin"}
+            or basin is None
+            or basin.get("water_body_type") != water_body
+            or (basin.get("overflows") is True and water_body != "fresh_lake")
+        ):
+            basin_errors.append(f"cell {cell_id}: lake water-body classification")
+        if (
+            cell.get("biome") != "lake"
+            or cell.get("soil_type") != ("saline" if water_body == "saline_basin" else "wetland")
+            or cell.get("landform") not in {"lacustrine_basin", "glacial_lake"}
+            or not _close(cell.get("soil_depth_m"), 0.0)
+            or not _close(cell.get("fertility"), 0.0)
+            or ("settlement_score" in cell and not _close(cell["settlement_score"], 0.0))
+        ):
+            basin_errors.append(f"cell {cell_id}: standing lake surface coherence")
     for basin in basins:
         basin_id = _int(basin.get("id"))
         linked_cells = [cell for cell in cells if _int(cell.get("lake_basin_id")) == basin_id]
@@ -1906,6 +1940,23 @@ def _validate_cryosphere(
             assigned.update(cell_ids)
             if _int(record.get("cell_count")) != len(cell_ids) or not _close(record.get("area_km2"), _record_area(record, cells_by_id)):
                 landform_errors.append(f"{key} {record_id}: count/area")
+            if key == "permafrost":
+                for field in (
+                    "permafrost_extent_index",
+                    "active_layer_depth_m",
+                    "ground_ice_content_index",
+                    "frost_months",
+                ):
+                    expected_mean = sum(
+                        _number(cells_by_id[cell_id].get(field))
+                        for cell_id in cell_ids
+                    ) / len(cell_ids)
+                    if not _tight_close(
+                        record.get(f"mean_{field}"), expected_mean, absolute=2.0e-6
+                    ):
+                        landform_errors.append(
+                            f"permafrost {record_id}: mean_{field}"
+                        )
             for cell_id in cell_ids:
                 cell = cells_by_id[cell_id]
                 if _int(cell.get(cell_field)) != record_id or not eligibility(cell):
@@ -1945,6 +1996,8 @@ def _validate_subsurface_water(
     domain = "aquifers_wetlands_karst"
     aquifer_model, aquifer_model_ok = _dict_payload(world, "aquifer_resource_model")
     recharge_model, recharge_model_ok = _dict_payload(world, "groundwater_recharge_model")
+    natural_aquifer = aquifer_model.get("model_type") == "natural_recharge_causal_aquifer_resources_v2"
+    limitation_field = "aquifer_natural_limitation_index" if natural_aquifer else "aquifer_extraction_risk_index"
     aquifers, aquifer_shape = _records(world, "aquifer_systems")
     errors: list[str] = []
     if not aquifer_model_ok or not recharge_model_ok or not aquifer_shape or not _sequential_ids(aquifers):
@@ -1966,7 +2019,7 @@ def _validate_subsurface_water(
         for cell_id in cell_ids:
             if _int(cells_by_id[cell_id].get("aquifer_system_id")) != system_id:
                 errors.append(f"aquifer {system_id}: cell mirror {cell_id}")
-        for field in ("mean_aquifer_storage_index", "mean_aquifer_quality_index", "mean_aquifer_productivity_index", "mean_aquifer_extraction_risk_index", "closed_basin_fraction"):
+        for field in ("mean_aquifer_storage_index", "mean_aquifer_quality_index", "mean_aquifer_productivity_index", "mean_" + limitation_field, "closed_basin_fraction"):
             if not _bounded(system.get(field)):
                 errors.append(f"aquifer {system_id}: {field}")
         for field in ("mean_groundwater_recharge_mm_y", "total_groundwater_recharge_km3_y"):
@@ -1975,7 +2028,7 @@ def _validate_subsurface_water(
     if assigned != {_int(cell.get("id")) for cell in cells if _int(cell.get("aquifer_system_id")) >= 0}:
         errors.append("aquifer assignment inverse")
     for cell in cells:
-        for field in ("aquifer_storage_index", "aquifer_quality_index", "aquifer_productivity_index", "aquifer_extraction_risk_index", "groundwater_recharge_fraction"):
+        for field in ("aquifer_storage_index", "aquifer_quality_index", "aquifer_productivity_index", limitation_field, "groundwater_recharge_fraction"):
             if not _bounded(cell.get(field)):
                 errors.append(f"cell {_int(cell.get('id'))}: {field}")
         for field in ("groundwater_recharge_mm_y", "groundwater_recharge_km3_y", "vadose_zone_retention_km3_y"):
@@ -2066,9 +2119,11 @@ def _validate_ecosystems(
     checks: list[Check], world: dict[str, Any], cells: list[Record], cells_by_id: dict[int, Record], summary: Record
 ) -> None:
     domain = "ecosystems_reefs_species_wildfire"
+    parent_model = world.get("ecosystem_dynamics_model")
+    parent_name = parent_model.get("model") if isinstance(parent_model, dict) else None
     succession, succession_shape = _records(world, "vegetation_succession_histories")
     renewables, renewable_shape = _records(world, "renewable_resource_records")
-    errors: list[str] = []
+    errors: list[str] = validate_aquatic_climate_support(world)
     if not succession_shape or not renewable_shape or not _sequential_ids(succession) or not _sequential_ids(renewables):
         errors.append("succession/resource structure or IDs")
     seen_cells: set[int] = set()
@@ -2114,13 +2169,23 @@ def _validate_ecosystems(
         domain=domain,
         name="succession_and_renewable_sources",
         passed=not errors and ecosystem_mirror_ok,
-        message="Succession and renewable-resource records link valid cells with bounded trajectories." if not errors and ecosystem_mirror_ok else "Ecosystem succession, renewable sources, values, or summary mirrors are inconsistent.",
+        message="Succession and renewable records link bounded cells and satisfy their declared climate and parent availability." if not errors and ecosystem_mirror_ok else "Climate or parent availability, ecosystem metadata, succession, renewable sources, values, or summary mirrors are inconsistent.",
         observed={"errors": errors[:18], "summary_mismatches": ecosystem_mirror_errors},
         expected="unique cell-linked succession histories and bounded resource records",
     )
 
     reefs, reef_shape = _records(world, "reef_systems")
-    reef_errors: list[str] = []
+    reef_errors: list[str] = validate_reef_thermal_habitat(world)
+    reef_model = world.get("reef_diagnostics_model")
+    native_reef = (
+        isinstance(reef_model, dict)
+        and reef_model.get("model") == "heuristic_coastal_reef_native_seasonal_v3"
+    )
+    # The independent thermal helper validates this version and forbids its
+    # unavailable bleaching aliases. Preserve all remaining range checks.
+    reef_cell_fields = ("reef_growth_index", "reef_sediment_stress_index", "reef_wave_exposure_index", "reef_island_support_index")
+    if not native_reef:
+        reef_cell_fields += ("reef_bleaching_risk_index",)
     if not reef_shape or not _sequential_ids(reefs):
         reef_errors.append("reef structure/IDs")
     assigned: set[int] = set()
@@ -2143,13 +2208,13 @@ def _validate_ecosystems(
         fishery_ids, linked_unique = _id_list(reef.get("fishery_resource_record_ids"))
         if not linked_unique or any(resource_id not in renewable_ids for resource_id in fishery_ids):
             reef_errors.append(f"reef {reef_id}: fishery sources")
-        for field in ("mean_reef_growth_index", "mean_reef_sediment_stress_index", "mean_reef_wave_exposure_index", "mean_reef_island_support_index", "mean_reef_bleaching_risk_index"):
+        for field in (f"mean_{field}" for field in reef_cell_fields):
             if not _bounded(reef.get(field)):
                 reef_errors.append(f"reef {reef_id}: {field}")
     if assigned != {_int(cell.get("id")) for cell in cells if _int(cell.get("reef_system_id")) >= 0}:
         reef_errors.append("reef assignment inverse")
     for cell in cells:
-        for field in ("reef_growth_index", "reef_sediment_stress_index", "reef_wave_exposure_index", "reef_island_support_index", "reef_bleaching_risk_index"):
+        for field in reef_cell_fields:
             if not _bounded(cell.get(field)):
                 reef_errors.append(f"cell {_int(cell.get('id'))}: {field}")
     reef_mirror_ok, reef_mirror_errors = _all_summary_mirrors(
@@ -2161,13 +2226,18 @@ def _validate_ecosystems(
         domain=domain,
         name="reef_membership_sources_and_ranges",
         passed=not reef_errors and reef_mirror_ok,
-        message="Reef systems (including a valid empty registry) mirror bounded cells and natural resource sources." if not reef_errors and reef_mirror_ok else "Reef membership, source links, ranges, or summary mirrors are inconsistent.",
+        message="Reef systems mirror bounded cells, natural sources, and any declared thermal habitat model." if not reef_errors and reef_mirror_ok else "Reef thermal eligibility, model metadata, membership, source links, ranges, or summary mirrors are inconsistent.",
         observed={"errors": reef_errors[:15], "summary_mismatches": reef_mirror_errors},
         expected="present registry with exact candidate assignment inverse",
     )
 
     species, species_shape = _records(world, "species_range_records")
-    species_errors: list[str] = []
+    species_errors: list[str] = validate_species_habitat_support(world)
+    species_model = world.get("species_ranges_model")
+    if parent_name == "heuristic_ecosystem_climate_support_v4" and (not isinstance(species_model, dict) or species_model.get("model") != "heuristic_species_parent_support_v3"):
+        species_errors.append("ecosystem v4 requires the species parent-support v3 consumer declaration")
+    if parent_name == "heuristic_ecosystem_climate_support_v5" and (not isinstance(species_model, dict) or species_model.get("model") != "heuristic_species_parent_support_v4"):
+        species_errors.append("ecosystem v5 requires the species parent-support v4 consumer declaration")
     if not species_shape or not _sequential_ids(species):
         species_errors.append("species range structure/IDs")
     inverse: dict[int, set[int]] = {cell_id: set() for cell_id in cells_by_id}
@@ -2215,7 +2285,15 @@ def _validate_ecosystems(
     )
 
     wildfires, wildfire_shape = _records(world, "wildfire_spread_histories")
-    wildfire_errors: list[str] = []
+    wildfire_errors: list[str] = validate_wildfire_aquatic_exclusion(world)
+    fire_model = world.get("wildfire_disturbance_model")
+    if parent_name == "heuristic_ecosystem_climate_support_v5" and (
+        not isinstance(fire_model, dict) or fire_model.get("model") not in (
+            "heuristic_wildfire_prescribed_natural_parent_availability_v6",
+            "heuristic_wildfire_native_seasonal_prescribed_natural_parent_availability_v7",
+        )
+    ):
+        wildfire_errors.append("ecosystem v5 requires its prescribed-natural wildfire consumer declaration")
     if not wildfire_shape or not _sequential_ids(wildfires):
         wildfire_errors.append("wildfire structure/IDs")
     fire_inverse: dict[int, set[int]] = {cell_id: set() for cell_id in cells_by_id}
@@ -2269,9 +2347,9 @@ def _validate_ecosystems(
         domain=domain,
         name="wildfire_inverse_links_and_steps",
         passed=not wildfire_errors and wildfire_mirror_ok,
-        message="Wildfire histories invert cell links and retain bounded monotonic spread steps." if not wildfire_errors and wildfire_mirror_ok else "Wildfire cell links, spread steps, ranges, or summary mirrors are inconsistent.",
+        message="Wildfire histories retain valid habitat sources, inverse cell links and bounded monotonic spread steps." if not wildfire_errors and wildfire_mirror_ok else "Wildfire habitat sources, cell links, spread steps, ranges, or summary mirrors are inconsistent.",
         observed={"errors": wildfire_errors[:18], "summary_mismatches": wildfire_mirror_errors},
-        expected="exact cell/history inverse with bounded monotonic steps",
+        expected="versioned habitat and parent availability, explicit examined-front coverage, and exact cell/history inverse with bounded monotonic steps",
     )
 
 
@@ -2294,13 +2372,18 @@ def _validate_resources(
         world, "resource_deposit_model"
     )
     deposits, deposit_shape = _records(world, "resource_deposits")
-    deposit_errors: list[str] = []
+    deposit_errors: list[str] = validate_biological_resources(world, include_commodities=False)
+    available_economics = deposit_model.get("model_type") == "causal_geologic_resource_deposit_diagnostics_v5"
     if not deposit_shape or not _sequential_ids(deposits):
         deposit_errors.append("deposit structure/IDs")
     if (
         not deposit_model_shape
-        or deposit_model.get("model_type")
-        != "causal_geologic_resource_deposit_diagnostics_v2"
+        or deposit_model.get("model_type") not in (
+            "causal_geologic_resource_deposit_diagnostics_v2",
+            "causal_geologic_resource_deposit_diagnostics_v3",
+            "causal_geologic_resource_deposit_diagnostics_v4",
+            "causal_geologic_resource_deposit_diagnostics_v5",
+        )
         or deposit_model.get("flow_accumulation_normalization_model")
         != "positive_cell_p95_v1"
         or not _close(
@@ -2352,8 +2435,8 @@ def _validate_resources(
             )
             replay_fields.update(
                 {
-                    "accessibility_index": expected_accessibility,
-                    "economic_viability_index": expected_viability,
+                    ("geographic_accessibility_baseline_index" if available_economics else "accessibility_index"): expected_accessibility,
+                    ("geographic_economic_viability_baseline_index" if available_economics else "economic_viability_index"): expected_viability,
                     "renewability_index": expected_renewability,
                 }
             )
@@ -2375,7 +2458,7 @@ def _validate_resources(
             if not _bounded(deposit.get(field)):
                 deposit_errors.append(f"deposit {deposit_id}: {field}")
         if geo_only:
-            for field in ("accessibility_index", "economic_viability_index"):
+            for field in (("geographic_accessibility_baseline_index", "geographic_economic_viability_baseline_index") if available_economics else ("accessibility_index", "economic_viability_index")):
                 if not _bounded(deposit.get(field)):
                     deposit_errors.append(f"deposit {deposit_id}: {field}")
         if not isinstance(deposit.get("formation_evidence"), dict) or not str(deposit.get("resource", "")):
@@ -2397,16 +2480,18 @@ def _validate_resources(
                     _number(deposit.get("reserve_potential_index"), 0.0)
                     for deposit in deposits
                 ) / divisor,
-                "mean_resource_economic_viability_index": sum(
-                    _number(deposit.get("economic_viability_index"), 0.0)
-                    for deposit in deposits
-                ) / divisor,
                 "mean_resource_geologic_confidence_index": sum(
                     _number(deposit.get("geologic_confidence_index"), 0.0)
                     for deposit in deposits
                 ) / divisor,
             }
         )
+        if not available_economics:
+            deposit_summary_expected["mean_resource_economic_viability_index"] = sum(
+                _number(deposit.get("economic_viability_index"), 0.0) for deposit in deposits
+            ) / divisor
+        # Current economic and geographic means are checked separately by the
+        # independent access audit. Unavailable economics never enter a sum.
     deposit_mirror_ok, deposit_mirror_errors = _all_summary_mirrors(
         summary, deposit_summary_expected
     )
@@ -2422,13 +2507,13 @@ def _validate_resources(
 
     ore_model, ore_model_shape = _dict_payload(world, "ore_genesis_model")
     ore, ore_shape = _records(world, "ore_genesis_systems")
-    ore_errors: list[str] = []
+    ore_errors: list[str] = validate_ore_resource_availability(world) if available_economics else []
     if not ore_shape or not _sequential_ids(ore):
         ore_errors.append("ore system structure/IDs")
     if (
         not ore_model_shape
         or ore_model.get("model_type")
-        != "causal_tectonic_lithologic_ore_genesis_diagnostics_v2"
+        != ("causal_tectonic_lithologic_ore_genesis_diagnostics_v3" if available_economics else "causal_tectonic_lithologic_ore_genesis_diagnostics_v2")
         or ore_model.get("flow_accumulation_normalization_model")
         != "positive_cell_p95_v1"
         or not _close(
@@ -2494,7 +2579,7 @@ def _validate_resources(
         for field in ("mean_ore_genesis_potential_index", "max_ore_genesis_potential_index", "mean_hydrothermal_alteration_index", "mean_metallogenic_fertility_index", "mean_ore_structural_control_index", "mean_placer_concentration_index", "ore_genesis_confidence_index"):
             if not _bounded(system.get(field)):
                 ore_errors.append(f"ore {system_id}: {field}")
-        if geo_only and not _bounded(system.get("mean_resource_viability_index")):
+        if geo_only and not available_economics and not _bounded(system.get("mean_resource_viability_index")):
             ore_errors.append(
                 f"ore {system_id}: mean_resource_viability_index"
             )
@@ -2542,7 +2627,7 @@ def _validate_resources(
                 * 0.08,
             ),
         )
-        if geo_only:
+        if geo_only and not available_economics:
             expected_system_fields["mean_resource_viability_index"] = (
                 sum(
                     _number(
@@ -2774,7 +2859,7 @@ def _validate_resources(
     )
 
     occurrences, occurrence_shape = _records(world, "commodity_occurrences")
-    occurrence_errors: list[str] = []
+    occurrence_errors: list[str] = validate_biological_resources(world)
     if not occurrence_shape or not _sequential_ids(occurrences):
         occurrence_errors.append("commodity occurrence structure/IDs")
     for occurrence in occurrences:
@@ -2800,7 +2885,7 @@ def _validate_resources(
                 occurrence_errors.append(f"occurrence {occurrence_id}: {field}")
     occurrence_mirror_ok, occurrence_mirror_errors = _all_summary_mirrors(
         summary,
-        {"commodity_occurrence_count": len(occurrences), "commodity_occurrence_total_area_km2": sum(_number(occurrence.get("area_km2"), 0.0) for occurrence in occurrences)},
+        {"commodity_occurrence_count": len(occurrences), "commodity_occurrence_total_area_km2": float(sum(_number(occurrence.get("area_km2"), 0.0) for occurrence in occurrences))},
     )
     _add(
         checks,

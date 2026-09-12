@@ -117,6 +117,7 @@ magic_geo::CConfigV3 test_config_v3() {
 bool conversion_preserves_every_field() {
     const magic_geo::CConfig cfg = test_config();
     const magic_geo::Params params = magic_geo::params_from_c_config(cfg);
+    CHECK(params.temperature_model == magic_geo::ClimateTemperatureModel::legacy_empirical);
     CHECK(params.seed == cfg.seed);
     CHECK(params.name == cfg.name);
     CHECK(params.radius_km == cfg.radius_km);
@@ -164,6 +165,8 @@ bool conversion_preserves_every_field() {
     CHECK(params.maturation_timestep_ma == 5.0);
 
     const magic_geo::CConfigV2 cfg_v2 = test_config_v2();
+    CHECK(magic_geo::params_from_c_config(cfg_v2.base).temperature_model ==
+          magic_geo::ClimateTemperatureModel::legacy_empirical);
     const magic_geo::ComputeOptions compute_options =
         magic_geo::compute_options_from_c_config(cfg_v2);
     CHECK(compute_options.compute_backend == cfg_v2.compute_backend);
@@ -172,6 +175,7 @@ bool conversion_preserves_every_field() {
     const magic_geo::CConfigV3 cfg_v3 = test_config_v3();
     const magic_geo::Params timestep_params =
         magic_geo::params_from_c_config(cfg_v3);
+    CHECK(timestep_params.temperature_model == magic_geo::ClimateTemperatureModel::legacy_empirical);
     CHECK(timestep_params.maturation_timestep_ma == 2.5);
     CHECK(timestep_params.seed == cfg_v3.base.base.seed);
 
@@ -224,6 +228,8 @@ bool public_api_is_usable() {
         magic_geo::params_from_c_config(cfg)
     );
     CHECK(generated.starts_with('{'));
+    CHECK(generated.find("\"model_type\":\"equilibrium_latitude_circulation_climate_v5\"") != std::string::npos);
+    CHECK(generated.find("\"climate_energy_model\"") == std::string::npos);
     CHECK(generated.find("\"schema_version\":2") != std::string::npos);
     CHECK(generated.find("\"name\":\"native_api_test\"") != std::string::npos);
     CHECK(generated.find("\"planet_parameters\":{") != std::string::npos);
@@ -342,6 +348,8 @@ bool public_api_is_usable() {
         magic_geo::compute_options_from_c_config(geo_cfg)
     );
     CHECK(geo_generated.starts_with('{'));
+    CHECK(geo_generated.find("\"model_type\":\"equilibrium_latitude_circulation_climate_v5\"") != std::string::npos);
+    CHECK(geo_generated.find("\"climate_energy_model\"") == std::string::npos);
     CHECK(geo_generated.find("\"settlements\":[]") != std::string::npos);
     CHECK(geo_generated.find("\"routes\":[]") != std::string::npos);
     CHECK(geo_generated.find("\"historical_events\":[]") != std::string::npos);
@@ -356,6 +364,8 @@ bool public_api_is_usable() {
         magic_geo_generate_json_v3(&timestep_cfg)
     );
     CHECK(timestep_generated.starts_with('{'));
+    CHECK(timestep_generated.find("\"model_type\":\"equilibrium_latitude_circulation_climate_v5\"") != std::string::npos);
+    CHECK(timestep_generated.find("\"climate_energy_model\"") == std::string::npos);
     CHECK(timestep_generated.find("\"nominal_timestep_ma\":2.5") !=
           std::string::npos);
     CHECK(timestep_generated.find("\"maturation_timestep_scale\":0.5") !=
@@ -388,6 +398,8 @@ bool public_api_is_usable() {
     CHECK(c_msgpack == direct_msgpack);
     CHECK(contains_ascii(c_msgpack, "schema_version"));
     CHECK(contains_ascii(c_msgpack, "native_api_test"));
+    CHECK(contains_ascii(c_msgpack, "equilibrium_latitude_circulation_climate_v5"));
+    CHECK(!contains_ascii(c_msgpack, "climate_energy_model"));
 
     msgpack_size = 0;
     const std::uint8_t* raw_msgpack_error =
@@ -423,6 +435,11 @@ bool public_api_is_usable() {
     CHECK(!geo_msgpack.empty());
     CHECK(geo_msgpack.front() == 0xdf);
     CHECK(contains_ascii(geo_msgpack, "schema_version"));
+    CHECK(contains_ascii(geo_msgpack, "equilibrium_latitude_circulation_climate_v5"));
+    CHECK(!contains_ascii(geo_msgpack, "climate_energy_model"));
+    const std::string timestep_geo_generated = consume(magic_geo_generate_geo_json_v3(&timestep_cfg));
+    CHECK(timestep_geo_generated.find("\"model_type\":\"equilibrium_latitude_circulation_climate_v5\"") != std::string::npos);
+    CHECK(timestep_geo_generated.find("\"climate_energy_model\"") == std::string::npos);
 
     const std::string c_backend = consume(magic_geo_backend_info_json());
     CHECK(c_backend.starts_with('{'));

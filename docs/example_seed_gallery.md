@@ -2,8 +2,8 @@
 
 The repository ships nine complete, original world seeds in
 [`configs/seeds`](../configs/seeds). They are standalone `WorldConfig` YAML
-files, not fragments: every example explicitly sets all 44 generation
-properties across all nine sections. This makes each premise inspectable and
+files, not fragments: every example declares `config_version: 2` and
+explicitly sets all 43 generation properties across all nine sections. This makes each premise inspectable and
 keeps future schema drift visible in tests.
 
 These are exploratory worldbuilding presets, not calibrated replicas of
@@ -44,46 +44,49 @@ when throughput matters more than exact replay.
 | [`continental_realm.yaml`](../configs/seeds/continental_realm.yaml) | Temperate, land-rich epic-fantasy or campaign world | Lower ocean inventory, high continental-crust target, 12 broad plates, geodesic mesh | Major watersheds, inland basins, mountain passes, long routes, ports, and natural frontiers |
 | [`glasswind_desert.yaml`](../configs/seeds/glasswind_desert.yaml) | Water-scarcity desert planet | Zero ocean inventory, `0.08` precipitation scale, strong subtropical drying, warm climate | Desert coverage, dry basins, rare water nodes, sparse settlement, and route dependence |
 | [`pelagic_archipelago.yaml`](../configs/seeds/pelagic_archipelago.yaml) | Stormy maritime and island world | Large ocean inventory, low continental-crust target, 24 plates, strong rain | Island count, protected bays, straits, reefs, short rivers, ports, and maritime routes |
-| [`cryogenic_slushball.yaml`](../configs/seeds/cryogenic_slushball.yaml) | Ice-dominated survival setting | `0.55` stellar luminosity, weak greenhouse trapping, cold temperature anchor | Ice extent, liquid refugia, tundra, glacial landforms, meltwater, and cold-water ports |
+| [`cryogenic_slushball.yaml`](../configs/seeds/cryogenic_slushball.yaml) | Ice-dominated survival setting | `0.55` stellar luminosity, weak greenhouse trapping, low obliquity | Ice extent, liquid refugia, tundra, glacial landforms, meltwater, and cold-water ports |
 | [`young_volcanic.yaml`](../configs/seeds/young_volcanic.yaml) | Small, hot, geologically active frontier | Young age, high internal heat, 28 plates, rapid motion, strong uplift | Boundary density, relief, volcanic proxies, arc resources, hazards, and constrained routes |
 | [`verdant_hothouse.yaml`](../configs/seeds/verdant_hothouse.yaml) | Hot, wet jungle, wetland, and river world | Dense atmosphere, strong greenhouse forcing, high precipitation, filled depressions | Forest and wetland coverage, connected drainage, large rivers, floodplains, and river ports |
 | [`solstice_extreme.yaml`](../configs/seeds/solstice_extreme.yaml) | Severe but regular seasonal world | `75°` axial tilt, moderate eccentricity, 30-hour day | Monthly temperature range, shifting ice, seasonal water stress, and biome ecotones |
 | [`ironroot_super_earth.yaml`](../configs/seeds/ironroot_super_earth.yaml) | High-gravity large-planet experiment | 9,500 km radius, `1.6 g`, 3.02-billion km³ ocean inventory, dense atmosphere | Area/distance scaling, relief response, transport distances, hydrology, and high-gravity diagnostics |
 | [`oldstone_stagnant.yaml`](../configs/seeds/oldstone_stagnant.yaml) | Ancient, eroded, tectonically quiet world | Zero plate motion, low internal heat, 9.5 Ga age, broad crust, refined erosion steps | Worn relief, mature drainage, closed basins, old interiors, sedimentary resources, and sparse young mountains |
 
-## Declared-resolution audit
+## Seasonal migration evidence
 
-Each exact checked-in seed was generated with `generate_geo_world` at its
-declared resolution and then passed through the `generic` geo validator. All
-nine complete all 14 layer-contract families with zero validation errors.
-Warnings below are nonfatal realism observations that are useful for the stated
-extreme regimes. Values are reference observations, not stable acceptance bands
-for edited parameters or future engine versions.
+All presets now use the native seasonal energy model with a declared reference
+infrared optical depth of 1.0. This is the same baseline coefficient for every
+preset; pressure, greenhouse factor, gravity, luminosity and orbital differences
+are preserved. The previous Celsius mean and lapse controls were removed,
+without fitting opacity to the old means. The [migration report](seasonal_scenario_migration.md)
+records every retired control, paired V3 comparison, numerical gate and runtime.
 
-| Seed | Cells | Ocean | Mean °C | Land precipitation mm/y | Defining generated evidence | Generic result |
-| --- | ---: | ---: | ---: | ---: | --- | --- |
-| `continental_realm` | 2,562 | 0.340 | 14.0 | 932 | 6 landmasses; 33.0% forest land; 19.0°C seasonal land range | 14/14 layers, 0 warnings |
-| `glasswind_desert` | 2,048 | 0.000 | 31.9 | 94 | 87.5% desert land; no rivers; one landmass | 14/14 layers, 2 warnings |
-| `pelagic_archipelago` | 2,048 | 0.916 | 20.1 | 3,317 | 10 landmasses in the remaining 8.4% land area | 14/14 layers, 1 warning |
-| `cryogenic_slushball` | 2,048 | 0.616 | −21.2 | 268 | 24.4% ice cells; no forest/desert land | 14/14 layers, 2 warnings |
-| `young_volcanic` | 2,048 | 0.240 | 42.0 | 1,174 | 326 volcanic-arc cells; 286 high-seismic-hazard cells; 7 landmasses | 14/14 layers, 2 warnings |
-| `verdant_hothouse` | 2,048 | 0.655 | 40.9 | 7,338 | 81.0% forest land; no desert land; 4.9% river cells | 14/14 layers, 0 warnings |
-| `solstice_extreme` | 2,048 | 0.468 | 12.2 | 1,071 | 43.7°C mean seasonal land-temperature range | 14/14 layers, 0 warnings |
-| `ironroot_super_earth` | 2,048 | 0.578 | 17.2 | 1,612 | 10 landmasses; 42.0% forest land | 14/14 layers, 0 warnings |
-| `oldstone_stagnant` | 2,048 | 0.257 | 4.4 | 358 | 40.3% desert land; 10.4% ice cells; zero configured plate motion | 14/14 layers, 2 warnings |
+The current audit requests 128 cells and zero erosion iterations while retaining
+each preset's plate count and mesh backend. Continental realm resolves to 162
+geodesic cells. All nine native energy budgets pass independent replay. Eight
+presets pass generic coherence; the dry desert exposes a terminal/basin
+validation failure documented in the report. These observations supersede the
+old legacy-model declared-resolution table. The migrated full-resolution worlds
+and full erosion histories have not been certified by this bounded audit.
 
-The audit also exposed two important nonlinear boundaries:
+| Seed | Seasonal mean °C | Ocean area fraction | Land precipitation mm/y | Interpretation |
+| --- | ---: | ---: | ---: | --- |
+| `continental_realm` | 18.4 | 0.452 | 1,651 | Land-rich at this mesh; no Earth calibration claim |
+| `glasswind_desert` | 21.0 | 0.000 | 60 | 94.5% desert land; zero runoff; dry-terminal validation issue |
+| `pelagic_archipelago` | 32.7 | 0.742 | 5,077 | Hot and wet; island geometry remains resolution sensitive |
+| `cryogenic_slushball` | −37.7 | 0.648 | 349 | Cold surface; marine labels do not certify liquid refugia |
+| `young_volcanic` | 69.6 | 0.125 | 1,381 | Extreme heat; geological proxies do not establish habitability |
+| `verdant_hothouse` | 76.4 | 0.664 | 9,015 | Original jungle premise is unverified at this temperature |
+| `solstice_extreme` | 19.4 | 0.523 | 2,058 | 44.6°C mean seasonal land range; hottest monthly cell 78.0°C |
+| `ironroot_super_earth` | 22.4 | 0.562 | 3,032 | Pressure/gravity/radius scaling retained |
+| `oldstone_stagnant` | 3.3 | 0.305 | 546 | Cold, quiet initial world; long erosion history not probed here |
 
-- Connected-ocean flooding has topology jumps. The Super-Earth, solstice, and
-  oldstone inventories use nearby round values that reconstruct exactly at the
-  declared mesh; several superficially similar volumes generated a world but
-  failed ocean-inventory closure.
-- Schema validity is weaker than simulation validity. The exact desert preset
-  passes with eight plates, but nearby plate counts and seeds can fail current
-  crust-transport replay. The volcanic preset passes at six refined maturation
-  steps; seven generates but fails a material-shadow replay, and eight exceeds
-  the current accounting envelope. Re-run generic validation after changing
-  these coupled controls.
+The seasonal solve uses prescribed surface coefficients without closed
+lake/ice/cloud feedback. Rain, wind and biomes retain empirical rules. In
+particular, forest labels in the very hot presets are not evidence that
+terrestrial forests can survive there. Review the actual temperature and
+available habitat support before adopting a biological or settlement premise.
+Do not infer full simulation validity from YAML validity or a green energy
+budget alone.
 
 ## Research translated into presets
 
@@ -128,6 +131,10 @@ their names. NASA climate studies describe both partially open-ocean
 
 ## How to interpret the controls
 
+- `climate.reference_infrared_optical_depth` is the gray infrared depth at one
+  bar and Earth gravity before local pressure, gravity and greenhouse-factor
+  scaling. It is not a prescribed mean temperature; all ten shipped complete
+  world files use the declared baseline 1.0.
 - `planet.ocean_water_inventory_km3`, not `ocean_fraction_target`, controls the
   sea-level flood solve. The target is a diagnostic comparison value, so the
   realized fraction will differ and can change with mesh resolution.
@@ -169,7 +176,9 @@ world in a campaign or novel:
 
 ## Schema defaults versus curated seeds
 
-Omitted YAML values use `WorldConfig` defaults. The packaged `init-config`
+Version 2 YAML documents use seasonal `WorldConfig` defaults for omitted
+values. Keep `config_version: 2` explicit; version 1 is the separately selected
+legacy model. The packaged `init-config`
 template and canonical Earth reference are the curated `earthlike` profile,
 not plain serializations of the neutral `default` profile: Earth-like sets
 `tectonics.plate_motion_scale_deg_per_step: 4.0` and

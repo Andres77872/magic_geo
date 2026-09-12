@@ -1,5 +1,7 @@
 #include "internal.hpp"
 
+#include <locale>
+
 namespace magic_geo::detail {
 
 std::string roundtrip_num(double value) {
@@ -9,6 +11,7 @@ std::string roundtrip_num(double value) {
         );
     }
     std::ostringstream out;
+    out.imbue(std::locale::classic());
     out << std::defaultfloat
         << std::setprecision(std::numeric_limits<double>::max_digits10)
         << value;

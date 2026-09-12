@@ -149,7 +149,7 @@ def _person_name(region_id: int, person_index: int, culture_id: int) -> str:
     return f"{prefixes[(region_id + person_index) % len(prefixes)]}{suffixes[(culture_id + person_index * 2) % len(suffixes)]}"
 
 
-def enrich_world_with_demographic_agents(world: dict[str, Any]) -> dict[str, Any]:
+def _enrich_demographic_agents_v1(world: dict[str, Any]) -> dict[str, Any]:
     _set_demographic_agent_models(world)
     population_regions = world.get("population_regions", [])
     if not isinstance(population_regions, list):
@@ -600,3 +600,12 @@ def enrich_world_with_demographic_agents(world: dict[str, Any]) -> dict[str, Any
     summary["mean_individual_lifespan_years"] = round(individual_lifespan_sum / individual_count, 6) if individual_count else 0.0
     summary["high_vulnerability_household_count"] = high_vulnerability_households
     return world
+
+
+
+def enrich_world_with_demographic_agents(world: dict[str, Any]) -> dict[str, Any]:
+    from .demographic_availability_validation import demographic_version
+    if demographic_version(world)==1:
+        return _enrich_demographic_agents_v1(world)
+    from .demographic_availability import enrich_demographic_availability
+    return enrich_demographic_availability(world)

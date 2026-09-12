@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+from copy import deepcopy
 from collections import Counter
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -23,14 +24,17 @@ from magic_geo.navigability_diagnostics import (
     enrich_world_with_navigability_diagnostics,
 )
 from magic_geo.port_sites import enrich_world_with_port_sites
+from magic_geo.reef_thermal_validation import validate_reef_thermal_habitat
 from magic_geo.river_channel_morphology import (
     enrich_world_with_river_channel_morphology,
 )
 from magic_geo.river_hydraulics import enrich_world_with_river_hydraulics
 from magic_geo.route_corridors import enrich_world_with_route_corridors
+from magic_geo.natural_water_validation_dispatch import validate_public_natural_water_chain
 
 from support import worlds
 from support.cli import assert_no_cli_crash
+from support.legacy_human_water_worlds import legacy_human_water_world
 
 
 class SmokeHydrologyTests(TestCase):
@@ -613,7 +617,13 @@ class SmokeHydrologyTests(TestCase):
             )
     def test_aquifer_systems(self) -> None:
         world = worlds.cached_world_readonly("small_smoke")
+        self.assertEqual(validate_public_natural_water_chain(world), (True, []))
         summary = world["summary"]
+        self.assertNotIn("groundwater_stressed_cell_count", summary)
+        self.assertNotIn("mean_aquifer_extraction_risk_index", summary)
+        for cell in world["cells"]:
+            self.assertIn("aquifer_natural_limitation_index", cell)
+            self.assertNotIn("aquifer_extraction_risk_index", cell)
         aquifer_cells = [cell for cell in world["cells"] if cell["aquifer_class"] != "marine_excluded"]
         self.assertEqual(summary["aquifer_system_count"], len(world["aquifer_systems"]))
         self.assertEqual(sum(summary["aquifer_class_counts"].values()), summary["cell_count"])
@@ -626,15 +636,15 @@ class SmokeHydrologyTests(TestCase):
             sum(1 for cell in aquifer_cells if cell["aquifer_productivity_index"] >= 0.65),
         )
         self.assertEqual(
-            summary["groundwater_stressed_cell_count"],
-            sum(1 for cell in aquifer_cells if cell["aquifer_extraction_risk_index"] >= 0.65),
+            summary["high_natural_limitation_aquifer_cell_count"],
+            sum(1 for cell in aquifer_cells if cell["aquifer_natural_limitation_index"] >= 0.65),
         )
         self.assertGreaterEqual(summary["total_groundwater_recharge_km3_y"], 0.0)
         for key in (
             "mean_aquifer_storage_index",
             "mean_aquifer_quality_index",
             "mean_aquifer_productivity_index",
-            "mean_aquifer_extraction_risk_index",
+            "mean_aquifer_natural_limitation_index",
         ):
             self.assertGreaterEqual(summary[key], 0.0)
             self.assertLessEqual(summary[key], 1.0)
@@ -654,7 +664,7 @@ class SmokeHydrologyTests(TestCase):
         self.assertEqual(summary["groundwater_flow_system_count"], len(world["groundwater_flow_systems"]))
         self.assertEqual(
             summary["groundwater_flow_model"],
-            "descending_head_recharge_conserving_groundwater_flow_v1",
+            "descending_head_natural_recharge_partition_v2",
         )
         self.assertEqual(sum(summary["groundwater_flow_regime_counts"].values()), summary["cell_count"])
         self.assertEqual(
@@ -1030,12 +1040,22 @@ class SmokeHydrologyTests(TestCase):
             self.assertIn("migration_rate_m_y", first_coast)
             self.assertIn("longshore_transport_index", first_coast)
 
+        self.assertEqual(
+            world["reef_diagnostics_model"]["model"],
+            "heuristic_coastal_reef_native_seasonal_v3",
+        )
+        self.assertIs(world["reef_diagnostics_model"]["bleaching_estimate_available"], False)
+        self.assertEqual(validate_reef_thermal_habitat(world), [])
+        self.assertNotIn("mean_reef_bleaching_risk_index", world["summary"])
+        for cell in world["cells"]:
+            self.assertNotIn("reef_bleaching_risk_index", cell)
+        for reef in world["reef_systems"]:
+            self.assertNotIn("mean_reef_bleaching_risk_index", reef)
         for key in [
             "reef_growth_index",
             "reef_sediment_stress_index",
             "reef_wave_exposure_index",
             "reef_island_support_index",
-            "reef_bleaching_risk_index",
         ]:
             self.assertIn(key, first_cell)
             self.assertGreaterEqual(first_cell[key], 0.0)
@@ -1067,7 +1087,6 @@ class SmokeHydrologyTests(TestCase):
                 "mean_reef_sediment_stress_index",
                 "mean_reef_wave_exposure_index",
                 "mean_reef_island_support_index",
-                "mean_reef_bleaching_risk_index",
                 "mean_water_depth_m",
                 "mean_temperature_c",
                 "mean_fishery_productivity_index",
@@ -1503,6 +1522,7 @@ class SmokeHydrologyTests(TestCase):
         self.assertIn("area_km2", first_region)
     def test_causal_hydrologic_water_budget_replay_and_mutations(self) -> None:
         world = worlds.cached_world("coupled_128")
+        self.assertEqual(validate_public_natural_water_chain(world), (True, []))
         model = world["hydrologic_water_budget_model"]
         recharge_model = world["groundwater_recharge_model"]
         aquifer_model = world["aquifer_resource_model"]
@@ -1571,7 +1591,7 @@ class SmokeHydrologyTests(TestCase):
         )
         self.assertEqual(
             aquifer_model["model_type"],
-            "finite_recharge_causal_aquifer_resources_v1",
+            "natural_recharge_causal_aquifer_resources_v2",
         )
         self.assertEqual(
             aquifer_model["system_eligible_cell_count"],
@@ -1589,7 +1609,7 @@ class SmokeHydrologyTests(TestCase):
         )
         self.assertEqual(
             flow_model["model_type"],
-            "descending_head_recharge_conserving_groundwater_flow_v1",
+            "descending_head_natural_recharge_partition_v2",
         )
         self.assertAlmostEqual(
             flow_model["total_source_recharge_volume_km3_y"],
@@ -1632,12 +1652,47 @@ class SmokeHydrologyTests(TestCase):
             )
         )
 
-        # Wiring only: ``validate`` has to reach and report all four water
-        # replays. Their tamper tables live in ``test_water_validators``, which
-        # calls ``_validate_hydrologic_water_budget``,
-        # ``_validate_groundwater_recharge``, ``_validate_aquifer_resources`` and
-        # ``_validate_groundwater_flow`` directly, so each case there names the
-        # field that diverged instead of collapsing into one CLI verdict line.
+        # Current public ancestry rejects each malformed stage independently;
+        # one parent failure must not hide the other mutations in a batch.
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory:
+            world_path = Path(temporary_directory) / "world.json"
+
+            def validate_current(payload) -> Result:
+                world_path.write_text(json.dumps(payload), encoding="utf-8")
+                return runner.invoke(app, ["validate", "--world", str(world_path)])
+
+            control = validate_current(world)
+            assert_no_cli_crash(self, control, command="validate")
+            self.assertEqual(control.exit_code, 0, control.output)
+
+            for key, field, replacement, message in (
+                ("hydrologic_water_budget_model", "final_runoff_volume_km3_y",
+                 abs(model["final_runoff_volume_km3_y"]) * 2.0 + 1.0,
+                 "hydrologic water budget model or replay invalid"),
+                ("groundwater_recharge_model", "source_field", "precipitation_mm_y",
+                 "unknown or malformed groundwater_recharge_model"),
+                ("aquifer_resource_model", "minimum_system_productivity_index",
+                 aquifer_model["minimum_system_productivity_index"] + 0.01,
+                 "unknown or malformed aquifer_resource_model"),
+                ("groundwater_flow_model", "total_retained_storage_volume_km3_y",
+                 abs(flow_model["total_retained_storage_volume_km3_y"]) * 2.0 + 1.0,
+                 "groundwater flow model or routing replay invalid"),
+            ):
+                with self.subTest(model=key, field=field):
+                    altered = deepcopy(world)
+                    self.assertNotEqual(altered[key][field], replacement)
+                    altered[key][field] = replacement
+                    result = validate_current(altered)
+                    assert_no_cli_crash(self, result, command="validate")
+                    self.assertEqual(result.exit_code, 1, result.output)
+                    self.assertIn(message, result.output)
+
+    def test_historical_water_cli_reports_all_four_equation_failures(self) -> None:
+        # Exact historical WATER-v1 output retains its actual seasonal climate.
+        # Keep model declarations intact so this tests the preserved numerical
+        # replays, rather than the new early declaration rejection above.
+        world = legacy_human_water_world("replay_128")
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory:
             world_path = Path(temporary_directory) / "world.json"
@@ -1650,11 +1705,13 @@ class SmokeHydrologyTests(TestCase):
             assert_no_cli_crash(self, control, command="validate")
             self.assertEqual(control.exit_code, 0, control.output)
 
-            model["final_runoff_volume_km3_y"] += 1.0
-            recharge_model["total_groundwater_recharge_volume_km3_y"] += 1.0
-            aquifer_model["minimum_system_productivity_index"] += 0.01
-            flow_model["total_retained_storage_volume_km3_y"] += 1.0
-
+            model = world["hydrologic_water_budget_model"]
+            model["final_runoff_volume_km3_y"] = abs(model["final_runoff_volume_km3_y"]) * 2.0 + 1.0
+            cell = next(cell for cell in world["cells"] if not cell["is_water"] and cell["water_body_type"] == "land")
+            cell["groundwater_recharge_source_infiltration_mm_y"] += 1000.0
+            cell["aquifer_storage_index"] = 2.0
+            model = world["groundwater_flow_model"]
+            model["total_retained_storage_volume_km3_y"] = abs(model["total_retained_storage_volume_km3_y"]) * 2.0 + 1.0
             result = validate_current()
 
         assert_no_cli_crash(self, result, command="validate")

@@ -74,10 +74,10 @@ How each planet property enters the climate computation:
 | `radius_km` | `6371.0` | `climate.cpp:199` | converts angular neighbour separation to kilometres in the humidity-transport walk; sets `upwind_ocean_fetch_km` scale and the per-step moisture pickup `clamp(distance_km / 620, 0.10, 0.46)` |
 | `gravity_g` | `1.0` | `climate.cpp:259` | `gravity_precip_factor = clamp(1.08 - 0.10 * (gravity_g - 1.0), 0.65, 1.35)` — a global precipitation multiplier only |
 | `day_length_hours` | `24.0` | `climate.cpp:29`, `:230`, `:266` | wind `rotation = clamp(24 / max(1, day_length), 0.35, 2.6)`; current `rotation = clamp(24 / max(1, day_length), 0.45, 2.4)` applied as `sqrt(rotation)`; `rotation_band_shift = clamp((day_length - 24) / 24 * 5, -7, 9)` moves the subtropical and midlatitude circulation centres |
-| `axial_tilt_deg` | `23.5` | `climate.cpp:395`, `:403` | `seasonal_amp ∝ (axial_tilt_deg / 23.5)`; `axial_wind_factor = clamp(axial_tilt_deg / 23.5, 0.12, 2.4) × eccentricity_season_factor` drives the monsoon wind reversal. Also drives declination and the tilt-contrast latitude weight in the Python insolation series (`climate_energy.py:98-100`) |
-| `orbital_eccentricity` | `0.016` | `climate.cpp:267` | `eccentricity_season_factor = 1.0 + 1.8 * clamp(orbital_eccentricity, 0.0, 0.8)`, a **symmetric amplitude multiplier** on the seasonal cycle. In Python it additionally sets the orbital distance factor `1 / d²` per month (`climate_energy.py:108-110`) |
+| `axial_tilt_deg` | `23.5` | `climate.cpp:395`, `:403` | `seasonal_amp ∝ (axial_tilt_deg / 23.5)`; `axial_wind_factor = clamp(axial_tilt_deg / 23.5, 0.12, 2.4) × eccentricity_season_factor` drives the monsoon wind reversal. Also drives the exact solar declination in the Python daily-mean geometry (`insolation.py`) |
+| `orbital_eccentricity` | `0.016` | `climate.cpp:267` | `eccentricity_season_factor = 1.0 + 1.8 * clamp(orbital_eccentricity, 0.0, 0.8)`, a **symmetric amplitude multiplier** on the seasonal cycle. In Python it sets orbital distance and Keplerian seasonal speed; equal-time daily means are integrated within each month (`insolation.py`) |
 | `stellar_luminosity` | `1.0` | `core.cpp:9-12` | `climate_stellar_temperature_forcing_c = 38.0 × (L^0.25 − 1.0)`, a uniform temperature offset. Also scales `SOLAR_CONSTANT_W_M2 = 1361.0` in the energy records |
-| `atmosphere_pressure_bar` | `1.0` | `climate.cpp:256-258` | `pressure_temp_adj = 4.5 × ln(max(0.01, P))` (uniform temperature offset) and `pressure_precip_factor = clamp(P^0.35, 0.35, 1.85)`. Also `sqrt(P)` scales the Python greenhouse effect (`climate_energy.py:86`) |
+| `atmosphere_pressure_bar` | `1.0` | `climate.cpp:256-258` | `pressure_temp_adj = 4.5 × ln(max(0.01, P))` (uniform temperature offset) and `pressure_precip_factor = clamp(P^0.35, 0.35, 1.85)`. Also `sqrt(P)` scales the Python greenhouse effect (`climate_energy.py`) |
 | `greenhouse_factor` | `1.0` | `core.cpp:14-17` | `climate_greenhouse_temperature_forcing_c = 11.0 × (G − 1.0)`, a uniform temperature offset; multiplies the Python greenhouse term |
 | `ocean_fraction_target` | `0.70` | — | not read by `compute_climate`, and **not** an input to the sea-level solve either — `apply_sea_level` (`cpp/src/engine/ocean.cpp:5`) constrains on `ocean_water_inventory_km3` alone. It is a reported target: echoed into `sea_level_model_json` and `summary.target_ocean_fraction`, and scored by the `surface_water_inventory` planet-realism check |
 | `ocean_water_inventory_km3` | `1338000000.0` | — | not read by `compute_climate`; sets the sea-level solve, which determines the land/sea mask climate then reads |
@@ -101,9 +101,9 @@ The storage layer is the load-bearing reason. `compute_climate` writes `cell.tem
 
 The validators enforce the same literal downstream: `climate.monthly_annual_climate_closure` requires exactly 12 finite values in each of the four monthly arrays and requires the annual scalars to reconstruct from them within `1.0e-3 °C` and `1.0e-2 mm/y` (`src/magic_geo/geo_validation.py:1444-1483`); `seasonal_climate.seasonal_history_grouping_and_aggregates` requires `len(steps) == 12` and `[step["month"] for step in steps] == list(range(1, 13))` (`src/magic_geo/geo_validation_subsystems.py:480-484`).
 
-One exception is worth knowing: `enrich_world_with_climate_energy_balance` reads `month_count = len(cells[0]["temperature_monthly_c"])` and falls back to `12` if that is not a list or is empty (`src/magic_geo/climate_energy.py:126-129`). Its insolation series is written generically over `month_count`. In practice it is always 12.
+`enrich_world_with_climate_energy_balance` reads `month_count = len(cells[0]["temperature_monthly_c"])` and falls back to `12` if that is not a list or is empty (`src/magic_geo/climate_energy.py`). Its insolation series is written generically over `month_count`. In practice it is always 12.
 
-The seasonal phase is `season = cos(2π(month − 6) / months)` in the native temperature loop (`climate.cpp:402`), and `season_angle = 2π(month − 5.5) / month_count` in the Python insolation series (`climate_energy.py:105`). These two phases **differ by half a month** and are not derived from each other; the native cycle peaks exactly at index 6, the Python declination cycle peaks between indices 5 and 6.
+The native temperature cycle peaks at index 6. Python insolation uses a circular-orbit northern solstice at index 5.5, with periapsis at index 0 and a fixed solar longitude of −75° there. On eccentric orbits Kepler's equation determines the changing seasonal speed. The two calendars remain independently specified; the diagnostic does not force native temperature.
 
 ## Base temperature, the latitude gradient and the area-mean normalization
 
@@ -492,7 +492,7 @@ The temperature anomaly is bounded to `±4.5 °C` before the oceanity attenuatio
 
 1. The monthly temperature directly, as `current_temp` (`climate.cpp:407`) — but it is also part of `local_adjustment`, so its **area mean is removed globally** and only the spatial pattern survives.
 2. The subtropical drying factor, through `cold_current_drying_index = clamp(−ct / 4.5, 0, 1)`, so cold currents deepen the subtropical dry belt by up to a further 15 % (`climate.cpp:452-457`).
-3. The Python radiative equilibrium, as `equilibrium_c += ocean_current_temperature_c * 0.35` (`climate_energy.py:170`).
+3. The Python radiative equilibrium, as `equilibrium_c += ocean_current_temperature_c * 0.35` (`climate_energy.py`).
 
 The moisture factor is deliberately asymmetric: warm anomalies add `0.045` per °C, cold anomalies subtract only `0.035` per °C. Both `cold_current_coastal_drying` and `warm_current_climate_moderation` realism checks read this field (see below).
 
@@ -788,7 +788,7 @@ The validator requires every generated `climate_class` to appear in the legend, 
 
 ## Energy-balance records and insolation
 
-`enrich_world_with_climate_energy_balance(world, planet)` (`src/magic_geo/climate_energy.py:116-264`) is one of only two enrichers that receive `config.planet` explicitly (`src/magic_geo/api.py:210`, `:324`); the other is `enrich_world_with_planet_realism`. It needs astrophysical parameters that are not all reachable from the serialized cells. `_planet_value` accepts a dict or an attribute object and falls back to Earth defaults `1.0 / 1.0 / 1.0 bar / 23.5° / 0.016` when `planet is None` (`:17-27`, `:121-125`).
+`enrich_world_with_climate_energy_balance(world, planet)` receives `config.planet` in both generation paths. When called directly without `planet`, it reads `world["planet_parameters"]`; missing individual parameters retain Earth defaults. This diagnostic uses final climate, ice and surface categories and does not mutate native temperature.
 
 Physical constants (`:8-10`):
 
@@ -800,29 +800,25 @@ Physical constants (`:8-10`):
 
 ### The monthly insolation series
 
-`_seasonal_insolation_series` (`:90-113`):
+`insolation.py` now computes monthly means of daily-mean top-of-atmosphere flux. Kepler's equation `E − e sin(E) = M` locates equal-time month boundaries. Midpoint integration in true anomaly uses the exact Jacobian `(a/r)² dM = dν/sqrt(1−e²)` and maximum angular step `2π/768`, avoiding a missed periapsis peak even for accepted eccentricities close to one. Solar declination is `asin(sin(tilt) sin(solar_longitude))`.
 
-```
-tilt_contrast    = 1.0 + (tilt/90 - 23.5/90) * 0.18
-latitude_factor  = 0.46 + 0.72 * max(0, cos(lat)) * tilt_contrast
-season_angle     = 2π (month - 5.5) / month_count
-declination      = radians(tilt) * cos(season_angle)
-seasonal_lat_f   = clamp(1.0 + 0.65 * sin(lat) * sin(declination), 0.08, 1.92)
-true_anomaly     = 2π month / month_count
-orbital_distance = (1 - e²) / max(0.02, 1 + e cos(true_anomaly))
-orbital_factor   = 1 / max(0.02, orbital_distance²)
-monthly[m]       = SOLAR_CONSTANT × L × latitude_factor × seasonal_lat_f × orbital_factor / 4
+For latitude φ, declination δ and sunset hour angle H₀, the complete-rotation mean is:
+
+```text
+Q = S₀ L (a/r)² [H₀ sin(φ) sin(δ) + cos(φ) cos(δ) sin(H₀)] / π
 ```
 
-Eccentricity is clamped to `[0, 0.8]` and tilt to `[0, 90]` (`:97-98`). The `/4` is the sphere-averaging factor, but `latitude_factor` is an **affine approximation** `0.46 + 0.72·cos(lat)` rather than a proper zenith-angle integral, so this is a diagnostic latitude weighting, not a computed daily-mean insolation. `orbital_factor` and `seasonal_lat_f` are the only sources of seasonal variation; the two are phase-offset by construction (`month − 5.5` vs `month`), which is what makes the eccentric and obliquity cycles interfere.
+The polar day/night branches handle the poles without dividing by `tan(φ)`. There is no extra `/4` on this local flux; `S₀ L / (4 sqrt(1 − e²))` is the global annual mean, independently checked by area integration. Polar night is dark and high obliquity can give the poles a larger annual solar input than the equator.
+
+`climate_energy_model` records the algorithm and angular resolution, equal-time calendar, fixed −75° solar longitude at periapsis, implicit 1 AU semimajor axis, and explicit lack of coupling to native temperature. The graybody equilibrium and outgoing radiation both use emissivity 0.96, eliminating a spurious flux residual at zero-greenhouse equilibrium. Albedo and greenhouse diagnostics remain empirical and do not close the coupled climate energy budget. See the [scientific review](../../simulation_coherence_research.md) for sources, analytical benchmarks, and limitations.
 
 ### Surface albedo
 
-`_surface_albedo` (`:30-73`) picks a base value and regime, then adds five brightening terms.
+`_surface_albedo` checks thick ice first, then marine or standing lake water, then land cover. It adds empirical scattering/cloud terms and applicable brightening terms. Open lake water receives no land-only aridity or snow brightening; a dry salt flat has `is_lake = false`.
 
 | Condition (first match) | Base | Regime |
 |---|---|---|
-| `is_water` and `water_body_type ∈ {fresh_lake, saline_basin, inland_sea}` | `0.10` | `lake_water` |
+| `is_lake` (or marine water with an inland-water category), after the thick-ice check | `0.10` | `lake_water` |
 | `is_water` and `water_body_type == "continental_shelf"` | `0.08` | `shallow_ocean` |
 | `is_water` otherwise | `0.065` | `open_ocean` |
 | `ice_thickness_m > 20` or `biome == "ice_cap"` | `0.58 + clamp(ice/2500)·0.12` | `ice_albedo` |
@@ -866,7 +862,7 @@ Each cell receives 15 mirrored fields (`:181-195`) and one record is appended to
 | `outgoing_longwave_w_m2` | `0.96 σ · max(1.0, T_observed + 273.15)⁴` | cell + record |
 | `greenhouse_trapping_w_m2` | `max(0, 0.96 σ (T_eq + 273.15)⁴ − absorbed)` | cell + record |
 | `net_radiative_balance_w_m2` | `absorbed + trapping − outgoing` | cell + record |
-| `no_greenhouse_equilibrium_temperature_c` | `(absorbed/σ)^0.25 − 273.15`; when `absorbed ≤ 0` the producer sets the Kelvin term to `0.0`, so the field becomes `−273.15` (not `0.0`) | cell + record |
+| `no_greenhouse_equilibrium_temperature_c` | `(absorbed/(0.96 σ))^0.25 − 273.15`; when `absorbed ≤ 0` the producer sets the Kelvin term to `0.0`, so the field becomes `−273.15` (not `0.0`) | cell + record |
 | `radiative_equilibrium_temperature_c` | `no_greenhouse_c + greenhouse_c + 0.35·ocean_current_temperature_c` | cell + record |
 | `energy_balance_residual_c` | `T_observed − T_equilibrium` | cell + record |
 | `climate_energy_stress_index` | `clamp(\|residual\|/28 + \|net\|/220)` | cell + record |
@@ -886,22 +882,32 @@ All values are `round(..., 6)`.
 
 **They do not assert energy closure.** `net_radiative_balance_w_m2` is generally non-zero, and it is *supposed* to be: `outgoing_longwave_w_m2` uses the **simulated** `temperature_c` while `greenhouse_trapping_w_m2` is defined from the **diagnosed equilibrium** temperature. The three terms are related by the definitional identity `net = absorbed + trapping − outgoing`, which is a rearrangement, not a conservation law.
 
-What is asserted is **exact algebraic replay**. `climate.climate_energy_balance_replay` (`_validate_climate_energy`, `src/magic_geo/geo_validation_physics.py:1215-1629`) re-derives, for every cell, the entire chain — `_seasonal_insolation_series`, `_surface_albedo`, `_greenhouse_effect_c`, absorbed, no-greenhouse equilibrium, equilibrium, outgoing, trapping, net, residual and stress — from `planet_parameters` and the serialized cell state, and requires agreement to `absolute=1.1e-6, relative=0.0` on:
+What is asserted is **independent numerical and algebraic replay**. `climate.climate_energy_balance_replay` (`_validate_climate_energy`, `src/magic_geo/geo_validation_physics.py`) re-derives, for every cell, the entire chain — `_seasonal_insolation_series`, `_surface_albedo`, `_greenhouse_effect_c`, absorbed, no-greenhouse equilibrium, equilibrium, outgoing, trapping, net, residual and stress — from `planet_parameters` and the serialized cell state, and requires agreement to `absolute=1.1e-6, relative=2e-12` on:
 
 - each of the 12 monthly insolation values;
-- all 21 numeric record fields — every entry of the validator's `expected` map except the monthly list and the `surface_albedo_regime` string (`geo_validation_physics.py:1478-1495`);
+- all 21 numeric record fields — every entry of the validator's `expected` map except the monthly list and the `surface_albedo_regime` string (`geo_validation_physics.py`);
 - 14 **cell mirrors** (the cell copy of each record field);
 - `surface_albedo_regime` on both the record and the cell;
 - exactly one record per cell, with sequential `id` and unique `cell_id`;
 - `biome` and `water_body_type` staleness against the live cell;
 - non-negativity of the 7 flux fields and `[0, 1]` bounds on `surface_albedo_index`, `orbital_insolation_variability_index` and `climate_energy_stress_index`;
-- all 16 summary aggregates plus `surface_albedo_regime_counts`.
+- the original summary aggregates and `surface_albedo_regime_counts`, plus complete-area flux means and area-coverage metadata.
 
-One subtle discrepancy is worth recording: when `absorbed ≤ 0.0`, the producer sets `no_greenhouse_kelvin = 0.0` and hence `no_greenhouse_c = −273.15` (`climate_energy.py:167-168`), while the validator writes `−273.15` directly (`geo_validation_physics.py:1345-1349`). The two agree numerically. `absorbed ≤ 0` requires `top ≤ 0` or `albedo ≥ 1`, neither of which is reachable given `stellar_luminosity > 0.01` and the `0.86` albedo cap.
+Greenhouse trapping is evaluated without subtracting nearly equal large fluxes. With zero-greenhouse Kelvin temperature `N`, known thermal increment `dT`, and `d = max(dT, 1 − N)` for the existing 1 K floor, the producer computes `max(0, εσ d (2N+d) [N²+(N+d)²])`. The independent validator expands `(N+d)⁴−N⁴` binomially. This is algebraically the same graybody difference and gives exactly zero trapping when the thermal increment is zero and the floor is inactive.
+
+There is one magnitude-conditioned replay allowance: net flux may subtract very large parent terms, so its absolute tolerance is `max(1.1e-6, 16 × ulp(max(absorbed, trapping, outgoing)))`, using independently replayed finite values. Stress receives the corresponding allowance divided by 220. Arithmetic and area-weighted summaries use their respective mean allowance. Other tolerances remain unchanged. Near-parabolic, high-luminosity tests require exact/near-equilibrium replay and reject alterations larger than this numerical allowance; this does not change any physical calibration threshold.
+
+At zero absorbed sunlight the no-greenhouse reference is −273.15 °C. Polar night can make individual months dark; zero obliquity at the exact pole also has zero annual geometrical insolation (up to floating-point trigonometric error). This is a local radiative reference without heat transport.
 
 A second, lighter check, `climate.climate_energy_record_coverage` (`src/magic_geo/geo_validation.py:2100-2121`), requires every cell to have exactly one record with six finite required fields whose `temperature_c` matches the cell within `1.0e-3`.
 
-Summary keys written (`climate_energy.py:246-263`): `climate_energy_balance_record_count`, `mean_top_of_atmosphere_insolation_w_m2`, `mean_surface_albedo_index`, `mean_absorbed_shortwave_w_m2`, `mean_outgoing_longwave_w_m2`, `mean_greenhouse_trapping_w_m2`, `mean_net_radiative_balance_w_m2`, `mean_abs_energy_balance_residual_c`, `mean_climate_energy_stress_index`, `mean_seasonal_insolation_range_w_m2`, `mean_orbital_insolation_variability_index`, `mean_peak_seasonal_insolation_w_m2`, `mean_low_seasonal_insolation_w_m2`, `mean_orbital_distance_factor`, `orbital_eccentricity`, `high_climate_energy_stress_cell_count` (`stress ≥ 0.65`), `surface_albedo_regime_counts`.
+Summary keys written (`climate_energy.py`): `climate_energy_balance_record_count`, `mean_top_of_atmosphere_insolation_w_m2`, `mean_surface_albedo_index`, `mean_absorbed_shortwave_w_m2`, `mean_outgoing_longwave_w_m2`, `mean_greenhouse_trapping_w_m2`, `mean_net_radiative_balance_w_m2`, `mean_abs_energy_balance_residual_c`, `mean_climate_energy_stress_index`, `mean_seasonal_insolation_range_w_m2`, `mean_orbital_insolation_variability_index`, `mean_peak_seasonal_insolation_w_m2`, `mean_low_seasonal_insolation_w_m2`, `mean_orbital_distance_factor`, `orbital_eccentricity`, `high_climate_energy_stress_cell_count` (`stress ≥ 0.65`), `surface_albedo_regime_counts`.
+
+The high-stress count uses the published six-decimal stress values. For example, raw stress `0.6499996` exports as `0.650000` and counts as high stress. Independent replay first validates each published stress within its numerical tolerance, then requires an exact integer count from those values.
+
+Those `mean_*` fields retain their arithmetic cell-count weighting. For a spatial flux mean, use the separately named `area_weighted_mean_top_of_atmosphere_insolation_w_m2`, `area_weighted_mean_absorbed_shortwave_w_m2`, `area_weighted_mean_outgoing_longwave_w_m2`, `area_weighted_mean_greenhouse_trapping_w_m2`, and `area_weighted_mean_net_radiative_balance_w_m2`. Each is `sum(flux × area / represented_area)` over all cells. The producer normalizes weights before multiplication to avoid unnecessary overflow; these means use the exported six-decimal flux records.
+
+`climate_energy_valid_area_cell_count` counts finite positive numeric areas, excluding booleans. `climate_energy_represented_area_km2` sums those valid areas and is `null` if their sum overflows. `climate_energy_area_weighted_summary_available` is true only when every cell has a valid area and the sum is finite. Otherwise all five spatial means are `null`; partial coverage never substitutes an unweighted or partial-area mean. The model declaration records both weighting conventions, while `global_energy_conservation_resolved` remains false.
 
 ## Realism checks: climate and planet regimes
 
@@ -965,7 +971,7 @@ Summary keys: `global_liquid_water_temperature_index`, `atmosphere_gravity_stabi
 | `monthly_annual_climate_closure` | `geo_validation.py:1469-1483` | four monthly arrays each have exactly 12 finite values; `\|temperature_c − mean(monthly)\| ≤ 1.0e-3`; `\|precipitation_mm_y − Σ monthly\| ≤ 1.0e-2` |
 | `configured_global_temperature_response` | `geo_validation.py:1496-1504` | area-weighted mean of `temperature_c` matches `base + 38(L^0.25−1) + 11(G−1) + 4.5 ln(P)` within `0.35 °C` |
 | `climate_energy_record_coverage` | `geo_validation.py:2110-2122` | one finite energy record per cell, tied to the cell's `temperature_c` within `1.0e-3` |
-| `climate_energy_balance_replay` | `geo_validation_physics.py:1605-1629` | full producer-equation replay of every insolation, albedo, greenhouse, longwave, net, stress, cell mirror and aggregate at `1.1e-6` absolute |
+| `climate_energy_balance_replay` | `geo_validation_physics.py:1605-1629` | full producer-equation replay of every insolation, albedo, greenhouse, longwave, net, stress, cell mirror and aggregate at `1.1e-6` absolute plus `2e-12` relative |
 
 ### Checks in domain `seasonal_climate`
 
@@ -1101,64 +1107,38 @@ So `thin_atmosphere`'s precipitation reduction comes entirely from `pressure_pre
 
 Take an equatorial open-ocean cell on the default configuration with `precipitation_mm_y = 2000`, `vertical_velocity_index = 0.5`, `humidity_transport_index = 1.0`, `ocean_current_moisture_factor = 1.05`, `vapor_evaporation_mm_y = 1200`, `seasonal_aridity_index = 0.05`, `ocean_current_temperature_c = 1.0`, `temperature_c = 27.0`.
 
-Monthly insolation series at `lat = 0°`, `L = 1`, `tilt = 23.5°`, `e = 0.016`:
+For `lat = 0°`, `L = 1`, `tilt = 23.5°`, and `e = 0.016`, the new astronomical series varies with both declination and orbital distance. The equator receives less daily-mean sunlight at solstice than at equinox; this effect was absent from the old affine approximation.
 
-```
-tilt_contrast   = 1 + (23.5/90 - 23.5/90) * 0.18            = 1.000000
-latitude_factor = 0.46 + 0.72 * cos(0) * 1.0                = 1.180000
-seasonal_lat_f  = 1 + 0.65 * sin(0) * sin(decl)             = 1.000000  (every month)
-```
+| Quantity | Current value |
+|---|---:|
+| Annual TOA insolation | 415.501676 W/m² |
+| Maximum monthly TOA | 437.358494 W/m² |
+| Minimum monthly TOA | 388.091739 W/m² |
+| Monthly range | 49.266755 W/m² |
+| Mean inverse-square distance factor | 1.000128 |
+| Albedo proxy | 0.168286 |
+| Absorbed shortwave | 345.578680 W/m² |
+| No-greenhouse graybody reference | 9.120825 °C |
+| Empirical radiative equilibrium | 30.822858 °C |
+| Outgoing longwave at the supplied 27 °C | 441.810833 W/m² |
+| Greenhouse trapping diagnostic | 119.174316 W/m² |
+| Net radiative balance diagnostic | +22.942163 W/m² |
+| Temperature residual | −3.822858 °C |
+| Stress index | 0.240813 |
 
-so only the orbital factor varies:
-
-| Quantity | Value (W/m²) |
-|---|---|
-| `top_of_atmosphere_insolation_w_m2` | `401.752062` |
-| `peak_seasonal_insolation_w_m2` | `414.657900` |
-| `low_seasonal_insolation_w_m2` | `388.949059` |
-| `seasonal_insolation_range_w_m2` | `25.708841` |
-| `orbital_insolation_variability_index` | `25.708841 / 401.752062 = 0.063992` |
-| `mean_orbital_distance_factor` | `1.000640` |
-
-Albedo:
-
-```
-base (open_ocean)   = 0.065000
-air_scattering      = 0.055000
-cloud_albedo        = clamp(2000/2800)*0.055 + 0.5*0.018 = 0.048286
-dry / snow / elev   = 0 (water cell, warm, sea level)
-surface_albedo_index = 0.168286        regime = "open_ocean"
-```
-
-Radiation:
-
-| Quantity | Computation | Value |
-|---|---|---|
-| `absorbed_shortwave_w_m2` | `401.752062 × (1 − 0.168286)` | `334.142929` |
-| `no_greenhouse_equilibrium_temperature_c` | `(334.142929 / 5.670374419e-8)^0.25 − 273.15` | `3.914022` |
-| greenhouse humidity blend | `0.35·1.0 + 0.25·(1.05−0.72)/0.56 + 0.25·(2000/2600) + 0.15·(1200/1500)` | `0.809629` |
-| greenhouse effect (°C) | `max(0, (13.5 + 8·0.809629 + 1.5 − 2.5·0.05 − 0) × 1.0 × √1.0)` | `21.352033` |
-| `radiative_equilibrium_temperature_c` | `3.914022 + 21.352033 + 0.35 × 1.0` | `25.616055` |
-| `outgoing_longwave_w_m2` | `0.96 σ (27.0 + 273.15)⁴` | `441.810833` |
-| equilibrium longwave | `0.96 σ (25.616055 + 273.15)⁴` | `433.718534` |
-| `greenhouse_trapping_w_m2` | `max(0, 433.718534 − 334.142929)` | `99.575605` |
-| `net_radiative_balance_w_m2` | `334.142929 + 99.575605 − 441.810833` | `−8.092299` |
-| `energy_balance_residual_c` | `27.0 − 25.616055` | `+1.383945` |
-| `climate_energy_stress_index` | `clamp(1.383945/28 + 8.092299/220)` | `0.086210` |
-
-The `−8.09 W/m²` net imbalance is normal and expected: it is the algebraic gap between the longwave that the *simulated* `27.0 °C` surface emits and the longwave the *diagnosed* `25.62 °C` equilibrium would emit. `climate_energy_balance_replay` asserts these numbers reproduce to `1.1e-6`; it does not assert the net is zero.
+These values come from `enrich_world_with_climate_energy_balance` on the stated cell. The flux residual compares the supplied native temperature with the diagnosed equilibrium; replay verifies that comparison, rather than requiring zero for arbitrary supplied temperature. For zero greenhouse and current anomaly, supplying the graybody equilibrium now makes both residuals zero.
 
 ### 3. Obliquity and the seasonal insolation range
 
-The Python insolation series at `lat = 45°` under three obliquities (defaults otherwise):
+The astronomical series at `lat = 45°` with the other default parameters gives:
 
-| `axial_tilt_deg` | mean TOA (W/m²) | seasonal range (W/m²) |
-|---|---|---|
-| `0.0` | `321.806` | `20.593` (orbital only) |
-| `23.5` | `329.012` | `98.766` |
-| `75.0` | `345.218` | `285.571` |
+| `axial_tilt_deg` | Mean TOA (W/m²) | Monthly range (W/m²) |
+|---|---:|---:|
+| `0.0` | 306.372 | 19.391 |
+| `23.5` | 306.948 | 349.884 |
+| `75.0` | 364.691 | 867.702 |
 
-At zero obliquity the declination is identically zero, so `seasonal_lat_f = 1` and the residual `20.6 W/m²` spread is purely the `1/d²` eccentricity cycle — a useful illustration that in the *energy records* eccentricity produces asymmetric seasonality even when tilt does not, whereas in the *native temperature field* it only scales the tilt-driven amplitude.
+At zero obliquity the remaining range comes from orbital distance. Higher tilt changes both the annual latitude distribution and seasonal illumination. Native temperature still uses its separate amplitude model; these numbers should not be read as dynamically coupled seasonal temperature predictions.
 
 ## Running climate-relevant checks
 
@@ -1226,9 +1206,9 @@ for key in ('model_type', 'base_temperature_interpretation',
 - **The atmosphere is not mass-conserving and weather is not resolved.** `climate_model` serializes `mass_conserving_atmosphere: false` and `transient_climate_resolved: false`, with `model_limitation: "equilibrium_diagnostic_climate_without_mass_conserving_three_dimensional_atmosphere"` (`cpp/src/engine/process_serialization.cpp:443-446`). The `climate_atmosphere` layer contract records `temporal_class: "equilibrium_climatology_not_transient_weather"` (`src/magic_geo/geo_layer_contracts.py:147`). This is one of the twelve declared `GEO_MODEL_LIMITATIONS`: "the diagnostic atmosphere is not a three-dimensional mass-conserving circulation solver" (`src/magic_geo/geo_validation.py:30`).
 - **There is no dynamics.** Winds, circulation cells, vertical velocity, divergence, surface pressure and ocean currents are all analytic functions of latitude, longitude and rotation rate. Nothing is advected, no momentum equation is solved, and no field depends on any other field's gradient except through the fixed local relief and upwind-neighbour terms.
 - **The vapour budget residuals are algebraic identities, not conservation tests.** Both `vapor_budget_residual_mm_y` (`climate.cpp:514`) and `humidity_budget_residual_mm` (`climate_dynamics.py:286-294`) are constructed so that they are zero by definition; the reported means measure floating-point closure only. `thermal_moisture_capacity_limitation` states the corresponding scope limit: `"diagnostic_global_scaling_without_explicit_atmospheric_water_mass_or_energy_balance"`.
-- **The energy-balance records assert replay, not energy closure.** `net_radiative_balance_w_m2` is routinely non-zero because `outgoing_longwave_w_m2` uses the simulated temperature while `greenhouse_trapping_w_m2` uses the diagnosed equilibrium temperature. The replay validator (`geo_validation_physics.py:1215-1629`) proves the arithmetic reproduces; it makes no claim that the surface is in radiative balance.
-- **The insolation series is a diagnostic latitude weighting, not a computed daily-mean.** `latitude_factor = 0.46 + 0.72·cos(lat)·tilt_contrast` (`climate_energy.py:100`) is an affine approximation with no zenith-angle integral, no day-length term and no polar-night handling; the `/4` sphere factor is applied uniformly. Values are physically ordered but not calibrated irradiances.
-- **The two seasonal phase conventions are not reconciled.** The native temperature cycle uses `cos(2π(month − 6)/12)` (`climate.cpp:402`) and the Python declination cycle uses `cos(2π(month − 5.5)/12)` (`climate_energy.py:105`). Nothing asserts they refer to the same calendar instant.
+- **The energy-balance records assert replay, not energy closure.** `net_radiative_balance_w_m2` is routinely non-zero because `outgoing_longwave_w_m2` uses the simulated temperature while `greenhouse_trapping_w_m2` uses the diagnosed equilibrium temperature. The replay validator (`geo_validation_physics.py`) proves the arithmetic reproduces; it makes no claim that the surface is in radiative balance.
+- **Astronomical sunlight is calculated, but native climate remains uncoupled.** The daily zenith integral and Kepler-weighted month integration resolve polar night and high-obliquity forcing. They assume rotation averaging, an implicit 1 AU orbit, and fixed periapsis phase; orbital motion during a day and transient heat transport are unresolved. The energy model declares these limitations.
+- **The native seasonal temperature and solar calendar are separate.** The native temperature proxy peaks at month index 6 through `cos(2π(month − 6)/12)` (`climate.cpp:402`). The Python insolation diagnostic integrates equal-duration months using Kepler orbital time, with periapsis at month-zero center and a fixed solar longitude there. Its circular-orbit northern summer solstice is at index 5.5; eccentric orbits change the solstice timing in elapsed time. Native monthly temperatures do not consume this solar forcing, so agreement between those seasonal curves is not guaranteed.
 - **Eccentricity produces no seasonal asymmetry in the native temperature field.** It enters only as the symmetric multiplier `1 + 1.8·clamp(e, 0, 0.8)` (`climate.cpp:267`). A genuine perihelion/aphelion asymmetry exists only in the Python insolation series.
 - **`oceanity` and `continentality` are mesh-resolution dependent.** They derive from `exp(−ocean_distance_hops / 7.5)` where the distance is an unweighted neighbour-hop BFS (`cpp/src/engine/ocean.cpp:323-349`). One hop covers a different physical distance at 512 cells than at 8,192, so seasonal amplitude, the `+560·oceanity` precipitation term, recycling fraction and land evaporation all shift with mesh resolution. The Python `distance_to_marine_water_km` is the great-circle counterpart and is *not* used by the native model.
 - **Two different "continentality" quantities coexist** — the native hop-decay used inside `compute_climate` and the Python `continentality_index` blend (`climate_continentality.py:200`). They are not required to agree and no check compares them.

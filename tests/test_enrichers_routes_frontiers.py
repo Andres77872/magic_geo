@@ -7,7 +7,10 @@ the 128-cell replay world has no political borders at all. The branches that
 report a violation, classify an unusual corridor or frontier, or recover from a
 malformed payload therefore never run there.
 
-Every case below is a hand-built world small enough to reason about exactly, so
+Synthetic corridor cases call the preserved historical equation body directly;
+these fragments do not claim audited parent inputs or public-stage validity.
+The public rejection case and generated current control cover that distinction.
+Other cases use hand-built worlds small enough to reason about exactly, so
 an assertion names the offending record and field rather than a bulk shape. Each
 tampered world is paired with an untampered control asserting the same call is
 clean, which is what proves a failure came from the tamper.
@@ -15,11 +18,15 @@ clean, which is what proves a failure came from the tamper.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 from unittest import TestCase
 
 from magic_geo.natural_frontiers import enrich_world_with_natural_frontiers
-from magic_geo.route_corridors import enrich_world_with_route_corridors
+from magic_geo.route_corridors import (
+    _enrich_legacy_equations as enrich_historical_corridor_equations,
+    enrich_world_with_route_corridors,
+)
 from magic_geo.worldbuilding_realism import enrich_world_with_worldbuilding_realism
 
 from support import worlds
@@ -140,7 +147,7 @@ class RouteCorridorClassificationTests(TestCase):
         for route_type, fields, count, expected_type, count_key, expected_count in cases:
             with self.subTest(route_type=route_type):
                 world = two_settlement_route(corridor_chain(count, **fields), route_type)
-                enrich_world_with_route_corridors(world)
+                enrich_historical_corridor_equations(world)
                 corridors = world["route_corridors"]
                 self.assertEqual(len(corridors), 1, corridors)
                 record = corridors[0]
@@ -185,13 +192,13 @@ class RouteCorridorClassificationTests(TestCase):
                 self.assertLess(preferred_count, majority_count)
 
                 control = two_settlement_route(mixed_chain(fields), "overland")
-                enrich_world_with_route_corridors(control)
+                enrich_historical_corridor_equations(control)
                 control_record = control["route_corridors"][0]
                 self.assertEqual(control_record["cell_ids"], list(range(len(fields))))
                 self.assertEqual(control_record["corridor_type"], majority_type)
 
                 world = two_settlement_route(mixed_chain(fields), route_type)
-                enrich_world_with_route_corridors(world)
+                enrich_historical_corridor_equations(world)
                 record = world["route_corridors"][0]
                 self.assertEqual(record["cell_ids"], list(range(len(fields))))
                 self.assertEqual(record["corridor_type"], preferred_type)
@@ -203,7 +210,7 @@ class RouteCorridorClassificationTests(TestCase):
             [SADDLE_FIELDS, PEAK_FIELDS, SADDLE_FIELDS, PEAK_FIELDS, SADDLE_FIELDS]
         )
         world = two_settlement_route(cells, "mountain_pass")
-        enrich_world_with_route_corridors(world)
+        enrich_historical_corridor_equations(world)
         record = world["route_corridors"][0]
         self.assertEqual(record["corridor_type"], "mountain_pass_corridor")
         # Only the saddles clear the threshold; the two peaks are too high to pass.
@@ -216,11 +223,11 @@ class RouteCorridorClassificationTests(TestCase):
     def test_route_type_without_matching_features_falls_back_to_feature_counts(self) -> None:
         """A coastal_sea route across an inland river chain classifies by count."""
         control = two_settlement_route(corridor_chain(4, **RIVER_FIELDS), "river_corridor")
-        enrich_world_with_route_corridors(control)
+        enrich_historical_corridor_equations(control)
         self.assertEqual(control["route_corridors"][0]["corridor_type"], "river_valley_corridor")
 
         world = two_settlement_route(corridor_chain(4, **RIVER_FIELDS), "coastal_sea")
-        enrich_world_with_route_corridors(world)
+        enrich_historical_corridor_equations(world)
         record = world["route_corridors"][0]
         self.assertEqual(record["route_type"], "coastal_sea")
         self.assertEqual(record["coastal_cell_count"], 0)
@@ -229,7 +236,7 @@ class RouteCorridorClassificationTests(TestCase):
 
     def test_overland_desert_route_classifies_as_oasis_corridor(self) -> None:
         plain = two_settlement_route(corridor_chain(4), "overland")
-        enrich_world_with_route_corridors(plain)
+        enrich_historical_corridor_equations(plain)
         plain_record = plain["route_corridors"][0]
         self.assertEqual(plain_record["corridor_type"], "overland_corridor")
         self.assertEqual(plain_record["named_feature_cell_count"], 0)
@@ -239,7 +246,7 @@ class RouteCorridorClassificationTests(TestCase):
             corridor_chain(4, biome="hot_desert", groundwater_recharge_mm_y=180.0),
             "overland",
         )
-        enrich_world_with_route_corridors(world)
+        enrich_historical_corridor_equations(world)
         record = world["route_corridors"][0]
         self.assertEqual(record["corridor_type"], "oasis_corridor")
         self.assertEqual(record["oasis_cell_count"], 4)
@@ -269,7 +276,7 @@ class RouteCorridorClassificationTests(TestCase):
 
         peak = {"landform": "mountain", "elevation_m": 2400.0}
         control = build(peak)
-        enrich_world_with_route_corridors(control)
+        enrich_historical_corridor_equations(control)
         control_by_id = {cell["id"]: cell for cell in control["cells"]}
         # A 200 m plain beside a 2400 m peak is itself a pass; the peak is not.
         self.assertEqual(control_by_id[0]["mountain_pass_route_index"], 0.602281)
@@ -277,7 +284,7 @@ class RouteCorridorClassificationTests(TestCase):
         self.assertEqual(control_by_id[1]["mountain_pass_route_index"], 0.3784)
 
         world = build(dict(peak, is_water=True, water_body_type="ocean"))
-        enrich_world_with_route_corridors(world)
+        enrich_historical_corridor_equations(world)
         by_id = {cell["id"]: cell for cell in world["cells"]}
         # cell 1 is water, so the water guard fires before any neighbour is read.
         self.assertEqual(by_id[1]["mountain_pass_route_index"], 0.0)
@@ -290,7 +297,7 @@ class RouteCorridorClassificationTests(TestCase):
 
     def test_flat_land_neighbourhood_has_no_mountain_context(self) -> None:
         world = corridor_world(corridor_chain(3), [], [])
-        enrich_world_with_route_corridors(world)
+        enrich_historical_corridor_equations(world)
         for cell in world["cells"]:
             with self.subTest(cell_id=cell["id"]):
                 self.assertEqual(cell["mountain_pass_route_index"], 0.0)
@@ -305,14 +312,14 @@ class RouteCorridorDegenerateTests(TestCase):
 
     def test_missing_or_empty_cells_leaves_world_untouched(self) -> None:
         control = corridor_world(corridor_chain(2), [], [])
-        self.assertIs(enrich_world_with_route_corridors(control), control)
+        self.assertIs(enrich_historical_corridor_equations(control), control)
         self.assertEqual(control["route_corridors"], [])
         self.assertIn("route_corridor_model", control)
 
         for label, cells in (("empty_list", []), ("not_a_list", None), ("mapping", {})):
             with self.subTest(cells=label):
                 world: dict[str, Any] = {"cells": cells, "summary": {}}
-                self.assertIs(enrich_world_with_route_corridors(world), world)
+                self.assertIs(enrich_historical_corridor_equations(world), world)
                 self.assertNotIn("route_corridors", world)
                 self.assertNotIn("route_corridor_model", world)
                 self.assertEqual(world["summary"], {})
@@ -323,12 +330,12 @@ class RouteCorridorDegenerateTests(TestCase):
             [{"id": 0, "cell_id": 0, "region_id": 0}, {"id": 1, "cell_id": 2, "region_id": 1}],
             [{"id": 0, "from": 0, "to": 1, "type": "overland", "distance_km": 222.4}],
         )
-        enrich_world_with_route_corridors(control)
+        enrich_historical_corridor_equations(control)
         self.assertEqual(len(control["route_corridors"]), 1)
         self.assertEqual(control["summary"]["route_feature_coverage_index"], 0.0)
 
         world = corridor_world(corridor_chain(3), None, "not-a-list")
-        enrich_world_with_route_corridors(world)
+        enrich_historical_corridor_equations(world)
         self.assertEqual(world["route_corridors"], [])
         self.assertEqual(world["route_corridor_model"]["route_count"], 0)
         self.assertEqual(world["route_corridor_model"]["corridor_count"], 0)
@@ -362,7 +369,7 @@ class RouteCorridorDegenerateTests(TestCase):
             "not-a-route",
         ]
         world = corridor_world(cells, settlements, routes)
-        enrich_world_with_route_corridors(world)
+        enrich_historical_corridor_equations(world)
 
         by_route_id = {route["id"]: route for route in routes if isinstance(route, dict)}
         for route_id, reason in (
@@ -405,6 +412,13 @@ class RouteCorridorDegenerateTests(TestCase):
         self.assertEqual(by_id[5]["route_corridor_id"], -1)
         self.assertEqual(by_id[5]["route_corridor_type"], "none")
         self.assertEqual(by_id[5]["route_corridor_index"], 0.0)
+
+    def test_public_corridors_reject_incomplete_stage_input_atomically(self) -> None:
+        world = two_settlement_route(corridor_chain(3), "overland")
+        before = deepcopy(world)
+        with self.assertRaisesRegex(ValueError, "port_site_model declaration required"):
+            enrich_world_with_route_corridors(world)
+        self.assertEqual(world, before)
 
     def test_generated_world_control_is_clean(self) -> None:
         world = worlds.cached_world("replay_128")
@@ -709,7 +723,9 @@ class NaturalFrontierDegenerateTests(TestCase):
                 self.assertEqual(world["natural_frontiers"][0]["navigable_waterway_ids"], [])
 
     def test_generated_world_control_is_clean(self) -> None:
-        world = worlds.cached_world("small_smoke")
+        # The smaller fixture has one viable terrestrial settlement after
+        # standing lakes are excluded; this control requires a real border.
+        world = worlds.cached_world("mid_512")
         self.assertTrue(world["borders"])
         before = [dict(record) for record in world["natural_frontiers"]]
         enrich_world_with_natural_frontiers(world)

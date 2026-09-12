@@ -335,12 +335,29 @@ def evaluate_geo_layer_contracts(
     root = world if isinstance(world, dict) else {}
     normalized_checks = [check for check in checks if isinstance(check, dict)]
     geo_only = root.get("generation_scope") == "geo_only"
+    ecosystem = root.get("ecosystem_dynamics_model")
+    parent_availability = isinstance(ecosystem, dict) and ecosystem.get("model") in (
+        "heuristic_ecosystem_climate_support_v4", "heuristic_ecosystem_climate_support_v5",
+    )
+    aquifer = root.get("aquifer_resource_model")
+    natural_water = isinstance(aquifer, dict) and aquifer.get("model_type") == "natural_recharge_causal_aquifer_resources_v2"
     layer_outcomes: dict[str, bool] = {}
     layers: list[dict[str, Any]] = []
     for contract in GEO_LAYER_CONTRACTS:
         required_outputs = dict(contract["required_outputs"])
         validator_domains = list(contract["validator_domains"])
         scope_specific_omissions: list[str] = []
+        if natural_water and contract["id"] == "hydrology":
+            required_outputs.update({name: "dict" for name in (
+                "aquifer_resource_model", "river_channel_morphology_model",
+                "river_hydraulics_model", "karst_diagnostics_model",
+            )})
+        if parent_availability and contract["id"] == "biomes_ecosystems":
+            required_outputs.update({name: "dict" for name in (
+                "ecosystem_dynamics_model", "species_ranges_model", "wildfire_disturbance_model",
+            )})
+        if parent_availability and contract["id"] == "natural_resources":
+            required_outputs["commodity_occurrence_model"] = "dict"
         if contract["id"] == "coupled_maturation" and not geo_only:
             required_outputs.pop("geo_evolution_provenance", None)
             validator_domains = [

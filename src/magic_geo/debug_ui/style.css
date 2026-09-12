@@ -357,6 +357,13 @@ body {
 }
 .field-row .k { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .field-row .v { color: var(--text); text-align: right; white-space: nowrap; }
+#inspector-fields .field-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr);
+  align-items: start;
+}
+#inspector-fields .k, #inspector-fields .v {
+  min-width: 0; white-space: normal; overflow-wrap: anywhere;
+}
 .sparkline { display: block; margin: 2px 0 6px; max-width: 100%; height: auto; }
 .spark-row { margin-bottom: 4px; }
 .spark-row .k { font-size: 11px; color: var(--text-dim); }

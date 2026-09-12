@@ -8,7 +8,7 @@ LANGUAGE_REGION_MODEL = "causal_trade_union_family_lineage_phonology_v1"
 CULTURAL_SITE_MODEL = "causal_terrain_culture_ranked_sacred_ruin_sites_v1"
 
 
-def enrich_world_with_cultural_geography_models(world: dict[str, Any]) -> dict[str, Any]:
+def _legacy_enrich_world_with_cultural_geography_models(world: dict[str, Any]) -> dict[str, Any]:
     cultures = world.get("cultures", [])
     languages = world.get("language_regions", [])
     sacred_areas = world.get("sacred_areas", [])
@@ -111,3 +111,11 @@ def enrich_world_with_cultural_geography_models(world: dict[str, Any]) -> dict[s
     summary["language_region_model"] = LANGUAGE_REGION_MODEL
     summary["cultural_site_model"] = CULTURAL_SITE_MODEL
     return world
+
+
+def enrich_world_with_cultural_geography_models(world: dict[str, Any]) -> dict[str, Any]:
+    from .native_social_models import annotate_native_social_models
+
+    return annotate_native_social_models(
+        world, _legacy_enrich_world_with_cultural_geography_models, ('culture_region_model', 'language_region_model', 'cultural_site_model'),
+    )

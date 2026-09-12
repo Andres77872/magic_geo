@@ -1,0 +1,19 @@
+{
+  "additional_world_fields": [],
+  "cell_count": 12,
+  "cell_fields": [],
+  "certificate_fields": [
+    "climate_energy_model",
+    "climate_energy_forcing_intervals",
+    "climate_energy_transport_edges",
+    "climate_energy_balance_records"
+  ],
+  "gzip_bytes": 60195,
+  "gzip_sha256": "8dc021c15569acad685cc6a572082d349ff265e4b540ac97fe6a58d18fda41e0",
+  "physical_values_recomputed": false,
+  "retained_json_bytes": 295063,
+  "retained_json_sha256": "8aac2360e02cacb6b3ffba339f9d2cb688cdc0084c2298e9719edd22393ab34b",
+  "source_filename": "serialization_12_witness.json",
+  "source_sha256": "e80ffc0c7c20e1e8be3c32ffa8507d755c5efaf8d661324c9a417eb815cfda01",
+  "time_method": "tr_bdf2"
+}

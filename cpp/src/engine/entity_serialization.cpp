@@ -1,6 +1,18 @@
 #include "internal.hpp"
+#include "settlement_climate_support.hpp"
 
 namespace magic_geo::detail {
+namespace {
+void social_double(std::string& out, bool& first, const char* name, double value, int precision, bool available) {
+    if (available) add_double(out, first, name, value, precision);
+    else add_raw(out, first, name, "null");
+}
+void social_int(std::string& out, bool& first, const char* name, int value, bool available) {
+    if (available) add_int(out, first, name, value);
+    else add_raw(out, first, name, "null");
+}
+}  // namespace
+
 
 std::string plates_json(const std::vector<Plate>& plates, int precision) {
     std::string out = "[";
@@ -107,7 +119,8 @@ std::string latlon_ring_json(const std::vector<LatLon>& ring, int precision) {
     return out;
 }
 
-std::string cells_json(const std::vector<Cell>& cells, int precision) {
+std::string cells_json(const std::vector<Cell>& cells, int precision,
+    ClimateTemperatureModel temperature_model) {
     std::string out = "[";
     bool first_cell = true;
     const int geometry_precision = std::max(
@@ -316,6 +329,10 @@ std::string cells_json(const std::vector<Cell>& cells, int precision) {
             std::max(10, precision));
         add_int(out, first, "fluvial_sediment_routing_event_count",
             cell.fluvial_sediment_routing_event_count);
+        add_bool(out, first, "grounded_ice_surface_applicable",
+            cell.grounded_ice_surface_applicable);
+        add_raw(out, first, "grounded_ice_diagnostic_thickness_m",
+            roundtrip_num(cell.ice_thickness_m));
         add_double(out, first, "ice_thickness_m", cell.ice_thickness_m, precision);
         add_int(out, first, "ice_sheet_id", cell.ice_sheet_id);
         add_int(out, first, "glacier_flow_to", cell.glacier_flow_to);
@@ -341,6 +358,14 @@ std::string cells_json(const std::vector<Cell>& cells, int precision) {
         add_double(out, first, "fertility", cell.fertility, std::max(8, precision));
         add_str(out, first, "biome", BIOME_NAMES[cell.biome]);
         add_str(out, first, "resource", RESOURCE_NAMES[cell.resource]);
+        if (temperature_model == ClimateTemperatureModel::prescribed_seasonal) {
+            if (cell.settlement_climate_supported != settlement_annual_climate_supported(cell.temperature_c) ||
+                (!cell.settlement_climate_supported && cell.settlement_score != 0.0)) {
+                throw std::runtime_error("seasonal settlement applicability was not finalized");
+            }
+            add_bool(out, first, "settlement_climate_supported", cell.settlement_climate_supported);
+            add_raw(out, first, "settlement_climate_temperature_c", roundtrip_num(cell.temperature_c));
+        }
         add_double(
             out,
             first,
@@ -652,13 +677,20 @@ std::string political_regions_json(const std::vector<PoliticalRegion>& regions, 
     return out;
 }
 
-std::string cultures_json(const std::vector<CultureRegion>& cultures, int precision) {
+std::string cultures_json(const std::vector<CultureRegion>& cultures, int precision, bool native_social) {
     std::string out = "[";
     bool first_culture = true;
     for (const CultureRegion& culture : cultures) {
         comma(out, first_culture);
         out += "{";
         bool first = true;
+        if (native_social) {
+            add_bool(out, first, "continuity_estimate_available", culture.continuity_estimate_available);
+            add_bool(out, first, "ruin_count_available", culture.ruin_count_available);
+            add_int(out, first, "ruin_candidate_cell_count", culture.ruin_candidate_cell_count);
+            add_int(out, first, "ruin_supported_candidate_cell_count", culture.ruin_supported_candidate_cell_count);
+            add_int(out, first, "recorded_ruin_count", culture.recorded_ruin_count);
+        }
         add_int(out, first, "id", culture.id);
         add_int(out, first, "language_region_id", culture.language_region_id);
         add_int(out, first, "homeland_region_id", culture.homeland_region_id);
@@ -667,7 +699,7 @@ std::string cultures_json(const std::vector<CultureRegion>& cultures, int precis
         add_str(out, first, "dominant_resource", RESOURCE_NAMES[culture.dominant_resource]);
         add_int(out, first, "settlement_count", culture.settlement_count);
         add_int(out, first, "sacred_area_count", culture.sacred_area_count);
-        add_int(out, first, "ruin_count", culture.ruin_count);
+        social_int(out, first, "ruin_count", culture.ruin_count, !native_social || culture.ruin_count_available);
         add_raw(out, first, "settlement_ids", int_array_json(culture.settlement_ids));
         add_double(out, first, "area_km2", culture.area_km2, precision);
         add_double(out, first, "agricultural_area_km2", culture.agricultural_area_km2, precision);
@@ -677,8 +709,8 @@ std::string cultures_json(const std::vector<CultureRegion>& cultures, int precis
         add_double(out, first, "barrier_isolation", culture.barrier_isolation, precision);
         add_double(out, first, "trade_contact_index", culture.trade_contact_index, precision);
         add_double(out, first, "migration_pressure", culture.migration_pressure, precision);
-        add_double(out, first, "continuity_index", culture.continuity_index, precision);
-        add_double(out, first, "estimated_age_years", culture.estimated_age_years, precision);
+        social_double(out, first, "continuity_index", culture.continuity_index, precision, !native_social || culture.continuity_estimate_available);
+        social_double(out, first, "estimated_age_years", culture.estimated_age_years, precision, !native_social || culture.continuity_estimate_available);
         out += "}";
     }
     out += "]";
@@ -758,36 +790,48 @@ std::string ruins_json(const std::vector<Ruin>& ruins, int precision) {
     return out;
 }
 
-std::string historical_eras_json(const std::vector<HistoricalEra>& eras, int precision) {
+std::string historical_eras_json(const std::vector<HistoricalEra>& eras, int precision, bool native_social) {
     std::string out = "[";
     bool first_era = true;
     for (const HistoricalEra& era : eras) {
         comma(out, first_era);
         out += "{";
         bool first = true;
+        if (native_social) {
+            add_bool(out, first, "event_count_available", era.event_count_available);
+            add_bool(out, first, "language_event_count_available", era.language_event_count_available);
+            add_bool(out, first, "mean_connectivity_available", era.mean_connectivity_available);
+            add_bool(out, first, "mean_instability_available", era.mean_instability_available);
+            add_bool(out, first, "migration_event_count_available", era.migration_event_count_available);
+            add_bool(out, first, "state_event_count_available", era.state_event_count_available);
+            add_int(out, first, "recorded_event_count", era.recorded_event_count);
+        }
         add_int(out, first, "id", era.id);
         add_str(out, first, "dominant_process", HISTORICAL_PROCESS_NAMES[era.dominant_process]);
-        add_int(out, first, "event_count", era.event_count);
-        add_int(out, first, "state_event_count", era.state_event_count);
-        add_int(out, first, "migration_event_count", era.migration_event_count);
-        add_int(out, first, "language_event_count", era.language_event_count);
+        social_int(out, first, "event_count", era.event_count, !native_social || era.event_count_available);
+        social_int(out, first, "state_event_count", era.state_event_count, !native_social || era.state_event_count_available);
+        social_int(out, first, "migration_event_count", era.migration_event_count, !native_social || era.migration_event_count_available);
+        social_int(out, first, "language_event_count", era.language_event_count, !native_social || era.language_event_count_available);
         add_double(out, first, "start_year_bp", era.start_year_bp, precision);
         add_double(out, first, "end_year_bp", era.end_year_bp, precision);
-        add_double(out, first, "mean_instability", era.mean_instability, precision);
-        add_double(out, first, "mean_connectivity", era.mean_connectivity, precision);
+        social_double(out, first, "mean_instability", era.mean_instability, precision, !native_social || era.mean_instability_available);
+        social_double(out, first, "mean_connectivity", era.mean_connectivity, precision, !native_social || era.mean_connectivity_available);
         out += "}";
     }
     out += "]";
     return out;
 }
 
-std::string historical_events_json(const std::vector<HistoricalEvent>& events, int precision) {
+std::string historical_events_json(const std::vector<HistoricalEvent>& events, int precision, bool native_social) {
     std::string out = "[";
     bool first_event = true;
     for (const HistoricalEvent& event : events) {
         comma(out, first_event);
         out += "{";
         bool first = true;
+        if (native_social) {
+            add_bool(out, first, "continuity_estimate_available", event.continuity_estimate_available);
+        }
         add_int(out, first, "id", event.id);
         add_int(out, first, "era_id", event.era_id);
         add_str(out, first, "type", HISTORY_EVENT_TYPE_NAMES[event.type]);
@@ -800,34 +844,53 @@ std::string historical_events_json(const std::vector<HistoricalEvent>& events, i
         add_int(out, first, "cell_id", event.cell_id);
         add_double(out, first, "year_bp", event.year_bp, precision);
         add_double(out, first, "pressure_index", event.pressure_index, precision);
-        add_double(out, first, "continuity_index", event.continuity_index, precision);
+        social_double(out, first, "continuity_index", event.continuity_index, precision, !native_social || event.continuity_estimate_available);
         out += "}";
     }
     out += "]";
     return out;
 }
 
-std::string population_regions_json(const std::vector<PopulationRegion>& populations, int precision) {
+std::string population_regions_json(const std::vector<PopulationRegion>& populations, int precision, bool native_social) {
     std::string out = "[";
     bool first_population = true;
     for (const PopulationRegion& population : populations) {
         comma(out, first_population);
         out += "{";
         bool first = true;
+        if (native_social) {
+            add_bool(out, first, "site_input_complete", population.site_input_complete);
+            add_bool(out, first, "capacity_estimate_available", population.capacity_estimate_available);
+            add_bool(out, first, "migration_balance_available", population.migration_balance_available);
+            add_bool(out, first, "physical_means_available", population.physical_means_available);
+            add_bool(out, first, "population_estimate_available", population.population_estimate_available);
+            add_bool(out, first, "site_strength_available", population.site_strength_available);
+            add_int(out, first, "territory_cell_count", population.territory_cell_count);
+            add_int(out, first, "site_input_applicable_cell_count", population.site_input_applicable_cell_count);
+            add_int(out, first, "site_input_supported_cell_count", population.site_input_supported_cell_count);
+            add_int(out, first, "structural_zero_site_cell_count", population.structural_zero_site_cell_count);
+            add_double(out, first, "territory_area_km2", population.territory_area_km2, precision);
+            add_double(out, first, "site_input_applicable_area_km2", population.site_input_applicable_area_km2, precision);
+            add_double(out, first, "site_input_supported_area_km2", population.site_input_supported_area_km2, precision);
+            add_double(out, first, "structural_zero_site_area_km2", population.structural_zero_site_area_km2, precision);
+            const char* statuses[] = {"complete", "unavailable_inputs", "not_applicable_no_positive_territory"};
+            add_str(out, first, "estimate_scope_status", statuses[population.estimate_scope_status]);
+            social_double(out, first, "site_strength_index", population.site_strength_index, precision, population.site_strength_available);
+        }
         add_int(out, first, "id", population.id);
         add_int(out, first, "region_id", population.region_id);
         add_int(out, first, "culture_region_id", population.culture_region_id);
         add_int(out, first, "language_region_id", population.language_region_id);
         add_int(out, first, "settlement_count", population.settlement_count);
-        add_double(out, first, "carrying_capacity", population.carrying_capacity, precision);
-        add_double(out, first, "estimated_population", population.estimated_population, precision);
-        add_double(out, first, "agricultural_capacity_index", population.agricultural_capacity_index, precision);
-        add_double(out, first, "water_security_index", population.water_security_index, precision);
-        add_double(out, first, "urbanization_fraction", population.urbanization_fraction, precision);
-        add_double(out, first, "growth_rate_per_year", population.growth_rate_per_year, precision);
-        add_double(out, first, "population_pressure", population.population_pressure, precision);
-        add_double(out, first, "migration_balance", population.migration_balance, precision);
-        add_double(out, first, "hazard_mortality_index", population.hazard_mortality_index, precision);
+        social_double(out, first, "carrying_capacity", population.carrying_capacity, precision, !native_social || population.capacity_estimate_available);
+        social_double(out, first, "estimated_population", population.estimated_population, precision, !native_social || population.population_estimate_available);
+        social_double(out, first, "agricultural_capacity_index", population.agricultural_capacity_index, precision, !native_social || population.physical_means_available);
+        social_double(out, first, "water_security_index", population.water_security_index, precision, !native_social || population.physical_means_available);
+        social_double(out, first, "urbanization_fraction", population.urbanization_fraction, precision, !native_social || population.capacity_estimate_available);
+        social_double(out, first, "growth_rate_per_year", population.growth_rate_per_year, precision, !native_social || population.population_estimate_available);
+        social_double(out, first, "population_pressure", population.population_pressure, precision, !native_social || population.population_estimate_available);
+        social_double(out, first, "migration_balance", population.migration_balance, precision, !native_social || population.migration_balance_available);
+        social_double(out, first, "hazard_mortality_index", population.hazard_mortality_index, precision, !native_social || population.physical_means_available);
         out += "}";
     }
     out += "]";
@@ -901,13 +964,20 @@ std::string dynasties_json(const std::vector<DynastyRecord>& dynasties, int prec
     return out;
 }
 
-std::string snapshot_regions_json(const std::vector<SnapshotRegion>& regions, int precision) {
+std::string snapshot_regions_json(const std::vector<SnapshotRegion>& regions, int precision, bool native_social) {
     std::string out = "[";
     bool first_region = true;
     for (const SnapshotRegion& region : regions) {
         comma(out, first_region);
         out += "{";
         bool first = true;
+        if (native_social) {
+            add_bool(out, first, "geometry_estimate_available", region.geometry_estimate_available);
+            add_bool(out, first, "population_estimate_available", region.population_estimate_available);
+            add_double(out, first, "base_area_km2", region.base_area_km2, precision);
+            add_double(out, first, "base_dissolved_polygon_area_km2", region.base_dissolved_polygon_area_km2, precision);
+            add_double(out, first, "base_boundary_perimeter_km", region.base_boundary_perimeter_km, precision);
+        }
         add_int(out, first, "region_id", region.region_id);
         add_int(out, first, "capital_settlement_id", region.capital_settlement_id);
         add_int(out, first, "culture_region_id", region.culture_region_id);
@@ -916,14 +986,14 @@ std::string snapshot_regions_json(const std::vector<SnapshotRegion>& regions, in
         add_bool(out, first, "crosses_antimeridian", region.crosses_antimeridian);
         add_raw(out, first, "boundary_cell_ids", int_array_json(region.boundary_cell_ids));
         add_raw(out, first, "boundary_ring", latlon_ring_json(region.boundary_ring, precision));
-        add_double(out, first, "area_km2", region.area_km2, precision);
-        add_double(out, first, "boundary_perimeter_km", region.boundary_perimeter_km, precision);
-        add_double(out, first, "dissolved_polygon_area_km2", region.dissolved_polygon_area_km2, precision);
-        add_double(out, first, "polygon_area_error_fraction", region.polygon_area_error_fraction, precision);
-        add_double(out, first, "compactness_index", region.compactness_index, precision);
-        add_double(out, first, "geometry_quality", region.geometry_quality, precision);
-        add_double(out, first, "estimated_population", region.estimated_population, precision);
-        add_double(out, first, "stability_index", region.stability_index, precision);
+        social_double(out, first, "area_km2", region.area_km2, precision, !native_social || region.geometry_estimate_available);
+        social_double(out, first, "boundary_perimeter_km", region.boundary_perimeter_km, precision, !native_social || region.geometry_estimate_available);
+        social_double(out, first, "dissolved_polygon_area_km2", region.dissolved_polygon_area_km2, precision, !native_social || region.geometry_estimate_available);
+        social_double(out, first, "polygon_area_error_fraction", region.polygon_area_error_fraction, precision, !native_social || region.geometry_estimate_available);
+        social_double(out, first, "compactness_index", region.compactness_index, precision, !native_social || region.geometry_estimate_available);
+        social_double(out, first, "geometry_quality", region.geometry_quality, precision, !native_social || region.geometry_estimate_available);
+        social_double(out, first, "estimated_population", region.estimated_population, precision, !native_social || region.population_estimate_available);
+        social_double(out, first, "stability_index", region.stability_index, precision, !native_social || region.geometry_estimate_available);
         add_double(out, first, "centroid_lat_deg", region.centroid_lat_deg, precision);
         add_double(out, first, "centroid_lon_deg", region.centroid_lon_deg, precision);
         out += "}";
@@ -932,28 +1002,78 @@ std::string snapshot_regions_json(const std::vector<SnapshotRegion>& regions, in
     return out;
 }
 
-std::string territorial_snapshots_json(const std::vector<TerritorialSnapshot>& snapshots, int precision) {
+std::string territorial_snapshots_json(const std::vector<TerritorialSnapshot>& snapshots, int precision, bool native_social) {
     std::string out = "[";
     bool first_snapshot = true;
     for (const TerritorialSnapshot& snapshot : snapshots) {
         comma(out, first_snapshot);
         out += "{";
         bool first = true;
+        if (native_social) {
+            add_bool(out, first, "geometry_estimate_available", snapshot.geometry_estimate_available);
+            add_bool(out, first, "population_estimate_available", snapshot.population_estimate_available);
+        }
         add_int(out, first, "id", snapshot.id);
         add_int(out, first, "era_id", snapshot.era_id);
         add_str(out, first, "dominant_process", HISTORICAL_PROCESS_NAMES[snapshot.dominant_process]);
         add_int(out, first, "region_count", snapshot.region_count);
-        add_int(out, first, "largest_region_id", snapshot.largest_region_id);
-        add_raw(out, first, "regions", snapshot_regions_json(snapshot.regions, precision));
+        social_int(out, first, "largest_region_id", snapshot.largest_region_id, !native_social || snapshot.geometry_estimate_available);
+        add_raw(out, first, "regions", snapshot_regions_json(snapshot.regions, precision, native_social));
         add_double(out, first, "year_bp", snapshot.year_bp, precision);
-        add_double(out, first, "assigned_land_fraction", snapshot.assigned_land_fraction, precision);
-        add_double(out, first, "estimated_population", snapshot.estimated_population, precision);
-        add_double(out, first, "largest_region_area_km2", snapshot.largest_region_area_km2, precision);
-        add_double(out, first, "fragmentation_index", snapshot.fragmentation_index, precision);
+        social_double(out, first, "assigned_land_fraction", snapshot.assigned_land_fraction, precision, !native_social || snapshot.geometry_estimate_available);
+        social_double(out, first, "estimated_population", snapshot.estimated_population, precision, !native_social || snapshot.population_estimate_available);
+        social_double(out, first, "largest_region_area_km2", snapshot.largest_region_area_km2, precision, !native_social || snapshot.geometry_estimate_available);
+        social_double(out, first, "fragmentation_index", snapshot.fragmentation_index, precision, !native_social || snapshot.geometry_estimate_available);
         out += "}";
     }
     out += "]";
     return out;
 }
 
+std::string native_social_model_json() {
+    return R"social({"conflict_selection_policy":"complete_actual_border_pair_sources_before_global_rank_cap","history_policy":"retain_independent_fields_and_families_with_explicit_incomplete_coverage","model_type":"native_settlement_source_complete_social_estimates_v1","population_membership_policy":"unchanged_nonmarine_political_territory_area_denominator","population_response_policy":"unchanged_independent_temperature_precipitation_ice_response","ruin_selection_policy":"complete_actual_candidate_sources_before_global_rank_spacing_cap","scope":"prescribed_social_estimate_availability_not_observed_occupation_or_human_survival","site_source_policy":"known_structural_zero_on_native_water_or_lake_else_exact_annual_settlement_support","snapshot_policy":"preserve_base_territory_and_null_unavailable_scaled_estimates","source_settlement_climate_support_model":"native_annual_settlement_suitability_proxy_support_v1","source_settlement_selection_model":"causal_native_score_local_max_separated_settlement_selection_v3","unavailable_numeric_policy":"null_with_strict_typed_availability_flag"})social";
+}
+std::string native_social_data_json(const SocialAvailability& a) {
+    std::string out = "{";
+    bool first = true;
+    add_int(out, first, "conflict_candidate_pair_count", a.conflict_candidate_pair_count);
+    add_bool(out, first, "conflict_inference_available", a.conflict_inference_available);
+    add_int(out, first, "conflict_supported_pair_count", a.conflict_supported_pair_count);
+    add_int(out, first, "dynasty_applicable_region_count", a.dynasty_applicable_region_count);
+    add_int(out, first, "dynasty_available_region_count", a.dynasty_available_region_count);
+    add_bool(out, first, "dynasty_inference_available", a.dynasty_inference_available);
+    add_raw(out, first, "dynasty_unavailable_region_ids", int_array_json(a.dynasty_unavailable_region_ids));
+    add_bool(out, first, "historical_event_inference_available", a.historical_event_inference_available);
+    add_int(out, first, "ruin_candidate_cell_count", a.ruin_candidate_cell_count);
+    add_bool(out, first, "ruin_inference_available", a.ruin_inference_available);
+    add_int(out, first, "ruin_supported_candidate_cell_count", a.ruin_supported_candidate_cell_count);
+    add_raw(out, first, "ruin_unavailable_cell_ids", int_array_json(a.ruin_unavailable_cell_ids));
+    add_bool(out, first, "territorial_snapshot_inference_available", a.territorial_snapshot_inference_available);
+
+    std::string pairs = "[";
+    bool first_pair = true;
+    for (const auto& pair : a.conflict_unavailable_region_pairs) {
+        comma(pairs, first_pair);
+        pairs += "[" + std::to_string(pair.first) + "," + std::to_string(pair.second) + "]";
+    }
+    pairs += "]";
+    add_raw(out, first, "conflict_unavailable_region_pairs", pairs);
+    std::string families = "[";
+    bool first_family = true;
+    for (std::size_t i = 0; i < a.historical_event_family_coverage.size(); ++i) {
+        comma(families, first_family);
+        families += "{";
+        bool f = true;
+        const auto& family = a.historical_event_family_coverage[i];
+        add_str(families, f, "event_type", HISTORY_EVENT_TYPE_NAMES[i]);
+        add_bool(families, f, "inference_available", family.inference_available);
+        social_int(families, f, "applicable_source_count", family.applicable_source_count, family.applicable_source_count >= 0);
+        add_int(families, f, "available_source_count", family.available_source_count);
+        add_int(families, f, "recorded_event_count", family.recorded_event_count);
+        families += "}";
+    }
+    families += "]";
+    add_raw(out, first, "historical_event_family_coverage", families);
+    return out + "}";
+}
 }  // namespace magic_geo::detail

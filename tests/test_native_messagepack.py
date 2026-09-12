@@ -3,21 +3,23 @@ from __future__ import annotations
 import json
 import struct
 from copy import deepcopy
-from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
 from magic_geo import native as native_module
-from magic_geo.config import config_to_native, load_config
+from magic_geo.config import config_to_native
 from magic_geo.native import generate_geo_world, generate_world
 from magic_geo.planet_parameters import planet_parameter_snapshot
 
 from support.nativestub import patch_generation_payload
+from support.worlds import build_legacy_config
 
 
 class NativeMessagePackTests(TestCase):
     def test_native_messagepack_matches_the_preserved_json_boundary(self) -> None:
-        config = load_config(Path("configs/earthlike_seed.yaml"))
+        # This test preserves V3 JSON/MessagePack byte parity. V4 has its own
+        # explicit boundary/integration tests and is the public default.
+        config = build_legacy_config()
         data = config.model_dump(mode="python")
         data["run"]["name"] = "binary \"world\"\n🌍\u0001"
         data["planet"]["radius_km"] = 6200.123456789
@@ -69,7 +71,7 @@ class NativeMessagePackTests(TestCase):
             generate_world(native, serialization="unknown")
 
     def test_generation_rejects_a_symbol_complete_stale_world_schema(self) -> None:
-        config = load_config(Path("configs/earthlike_seed.yaml"))
+        config = build_legacy_config()
         native = config_to_native(config)
 
         class StaleLibrary:

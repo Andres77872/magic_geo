@@ -7,6 +7,7 @@ what it needs from the shared world, so they no longer depend on order.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
@@ -15,15 +16,32 @@ from click.testing import Result
 from typer.testing import CliRunner
 
 from magic_geo.cli import app
+from magic_geo.native_climate_energy_enrichment_validation import validate_native_climate_energy_enrichment
+from magic_geo.human_geography_validation import validate_human_geography_replay
+from magic_geo.worldbuilding_fishery_validation import validate_worldbuilding_fishery_context
 
 from support import worlds
 from support.cli import assert_no_cli_crash
+from support.legacy_land_use_worlds import legacy_land_use_world
 
 
 class SmokeResourcesTests(TestCase):
     def test_resource_deposits(self) -> None:
         world = worlds.cached_world_readonly("small_smoke")
         summary = world["summary"]
+        self.assertEqual(world["resource_deposit_model"]["model_type"],
+                         "causal_geologic_resource_deposit_diagnostics_v5")
+        # This configured witness has complete economic and fishery inputs.
+        # Mixed-source nulls have separate availability regression coverage.
+        self.assertIs(summary["mean_resource_economic_viability_supported"], True)
+        self.assertIs(summary["high_viability_resource_deposit_count_complete"], True)
+        self.assertEqual(summary["unsupported_fishery_resource_proxy_cell_count"], 0)
+        for field in ("accessibility", "economic_viability"):
+            self.assertEqual(summary[f"resource_{field}_supported_deposit_count"],
+                             len(world["resource_deposits"]))
+            self.assertEqual(summary[f"unsupported_resource_{field}_deposit_count"], 0)
+            for deposit in world["resource_deposits"]:
+                self.assertIs(deposit[f"{field}_supported"], True)
         resource_cells = [cell for cell in world["cells"] if cell["resource"] != "none"]
         self.assertEqual(summary["resource_deposit_count"], len(world["resource_deposits"]))
         self.assertEqual(summary["resource_deposit_count"], len(resource_cells))
@@ -67,7 +85,16 @@ class SmokeResourcesTests(TestCase):
                 delta=max(0.001, summary["resource_deposit_total_area_km2"] * 0.0001),
             )
         ore_type_counts: dict[str, int] = {}
+        self.assertEqual(world["ore_genesis_model"]["model_type"],
+                         "causal_tectonic_lithologic_ore_genesis_diagnostics_v3")
+        self.assertEqual(world["ore_genesis_model"]["source_resource_deposit_model"],
+                         world["resource_deposit_model"]["model_type"])
         for system in world["ore_genesis_systems"]:
+            self.assertIs(system["mean_resource_viability_supported"], True)
+            self.assertEqual(system["resource_viability_supported_deposit_count"],
+                             system["resource_viability_applicable_deposit_count"])
+            self.assertGreaterEqual(system["mean_resource_viability_index"], 0.0)
+            self.assertLessEqual(system["mean_resource_viability_index"], 1.0)
             ore_type_counts[system["system_type"]] = ore_type_counts.get(system["system_type"], 0) + 1
         self.assertEqual(summary["ore_genesis_system_count"], len(world["ore_genesis_systems"]))
         self.assertEqual(summary["ore_genesis_system_type_counts"], dict(sorted(ore_type_counts.items())))
@@ -189,7 +216,18 @@ class SmokeResourcesTests(TestCase):
         }
         commodity_type_counts: dict[str, int] = {}
         commodity_group_counts: dict[str, int] = {}
+        self.assertEqual(world["commodity_occurrence_model"]["model_type"],
+                         "causal_resource_commodity_occurrences_with_parent_support_v3")
+        self.assertEqual(world["commodity_occurrence_model"]["source_resource_deposit_model"],
+                         world["resource_deposit_model"]["model_type"])
+        self.assertEqual(summary["unsupported_fishery_commodity_cell_count"], 0)
+        deposits_by_id = {deposit["id"]: deposit for deposit in world["resource_deposits"]}
         for occurrence in world["commodity_occurrences"]:
+            source = deposits_by_id[occurrence["resource_deposit_id"]]
+            self.assertIs(occurrence["accessibility_supported"], True)
+            for field in ("accessibility_index", "accessibility_supported",
+                          "geographic_accessibility_baseline_index"):
+                self.assertEqual(occurrence[field], source[field])
             commodity_type_counts[occurrence["commodity"]] = commodity_type_counts.get(occurrence["commodity"], 0) + 1
             commodity_group_counts[occurrence["commodity_group"]] = (
                 commodity_group_counts.get(occurrence["commodity_group"], 0) + 1
@@ -237,6 +275,17 @@ class SmokeResourcesTests(TestCase):
                 / len(world["commodity_occurrences"]),
                 delta=0.001,
             )
+        self.assertEqual(world["land_use_zone_model"]["model_type"],
+                         "causal_soil_climate_resource_connected_land_use_zones_v3")
+        self.assertIs(summary["mining_zone_selection_complete"], True)
+        self.assertIs(summary["mean_mining_potential_supported"], True)
+        self.assertEqual(summary["mining_input_supported_cell_count"],
+                         summary["mining_input_applicable_cell_count"])
+        self.assertEqual(summary["mining_potential_supported_cell_count"], len(world["cells"]))
+        self.assertEqual(summary["unsupported_mining_potential_cell_count"], 0)
+        for cell in world["cells"]:
+            self.assertIs(cell["mining_potential_supported"], True)
+            self.assertIs(cell["mining_zone_membership_supported"], True)
         agricultural_candidate_ids = {
             cell["id"] for cell in world["cells"] if cell["agricultural_potential_index"] >= 0.58
         }
@@ -461,6 +510,7 @@ class SmokeResourcesTests(TestCase):
             self.assertEqual(petroleum_cell["petroleum_system_id"], first_petroleum["id"])
         if world["commodity_occurrences"]:
             first_commodity = world["commodity_occurrences"][0]
+            self.assertIs(first_commodity["accessibility_supported"], True)
             deposits_by_id = {deposit["id"]: deposit for deposit in world["resource_deposits"]}
             cells_by_id = {cell["id"]: cell for cell in world["cells"]}
             source_deposit = deposits_by_id[first_commodity["resource_deposit_id"]]
@@ -499,6 +549,8 @@ class SmokeResourcesTests(TestCase):
             self.assertIn(key, first_cell)
         self.assertGreaterEqual(first_cell["agricultural_potential_index"], 0.0)
         self.assertLessEqual(first_cell["agricultural_potential_index"], 1.0)
+        self.assertIs(first_cell["mining_potential_supported"], True)
+        self.assertIs(first_cell["mining_zone_membership_supported"], True)
         self.assertGreaterEqual(first_cell["mining_potential_index"], 0.0)
         self.assertLessEqual(first_cell["mining_potential_index"], 1.0)
         self.assertGreaterEqual(first_cell["agricultural_zone_id"], -1)
@@ -690,20 +742,27 @@ class SmokeResourcesTests(TestCase):
             "energy_balance_residual_c",
             "climate_energy_stress_index",
         ):
+            self.assertNotIn(key, first_cell)
+        # The default world exposes duration-weighted native energy mirrors.
+        # Legacy post-hoc equilibrium/stress aliases have separate coverage.
+        self.assertEqual(world["native_climate_energy_enrichment_model"]["model"],
+                         "native_climate_energy_annual_aggregation_v1")
+        for key in (
+            "effective_toa_albedo", "effective_longwave_emissivity",
+            "annual_absorbed_shortwave_w_m2", "annual_emitted_longwave_w_m2",
+            "annual_horizontal_heat_convergence_w_m2", "annual_heat_storage_tendency_w_m2",
+            "annual_energy_balance_residual_w_m2", "annual_mean_abs_energy_balance_residual_w_m2",
+            "annual_mean_energy_balance_numerical_allowance_w_m2",
+            "annual_net_radiative_flux_w_m2", "annual_net_heating_w_m2",
+        ):
             self.assertIn(key, first_cell)
-        self.assertGreater(first_cell["top_of_atmosphere_insolation_w_m2"], 0.0)
-        self.assertGreaterEqual(first_cell["seasonal_insolation_range_w_m2"], 0.0)
-        self.assertGreaterEqual(first_cell["orbital_insolation_variability_index"], 0.0)
-        self.assertLessEqual(first_cell["orbital_insolation_variability_index"], 1.0)
-        self.assertGreaterEqual(first_cell["peak_seasonal_insolation_w_m2"], first_cell["low_seasonal_insolation_w_m2"])
-        self.assertGreaterEqual(first_cell["low_seasonal_insolation_w_m2"], 0.0)
-        self.assertGreaterEqual(first_cell["surface_albedo_index"], 0.0)
-        self.assertLessEqual(first_cell["surface_albedo_index"], 1.0)
-        self.assertGreaterEqual(first_cell["absorbed_shortwave_w_m2"], 0.0)
-        self.assertGreater(first_cell["outgoing_longwave_w_m2"], 0.0)
-        self.assertGreaterEqual(first_cell["greenhouse_trapping_w_m2"], 0.0)
-        self.assertGreaterEqual(first_cell["climate_energy_stress_index"], 0.0)
-        self.assertLessEqual(first_cell["climate_energy_stress_index"], 1.0)
+            self.assertTrue(math.isfinite(first_cell[key]), key)
+        for key in ("effective_toa_albedo", "effective_longwave_emissivity"):
+            self.assertGreaterEqual(first_cell[key], 0.0)
+            self.assertLessEqual(first_cell[key], 1.0)
+        self.assertGreaterEqual(first_cell["annual_absorbed_shortwave_w_m2"], 0.0)
+        self.assertGreater(first_cell["annual_emitted_longwave_w_m2"], 0.0)
+        self.assertEqual(validate_native_climate_energy_enrichment(world), [])
         self.assertIn("ice_thickness_m", first_cell)
         self.assertIn("ice_sheet_id", first_cell)
         self.assertIn("glacier_flow_to", first_cell)
@@ -762,8 +821,18 @@ class SmokeResourcesTests(TestCase):
             {"none", "ice_cap", "mountain_glacier", "fjord", "glacial_valley", "glacial_lake", "moraine"},
         )
         self.assertGreaterEqual(first_cell["glacial_landform_system_id"], -1)
+    def test_current_worldbuilding_fishery_contract_replays_clean(self) -> None:
+        """Fresh defaults have current fishery support, independently of v1 archives."""
+        world = worlds.cached_world_readonly("mid_512")
+        self.assertEqual(
+            world["worldbuilding_realism_model"]["model_type"],
+            "causal_upstream_evidence_worldbuilding_realism_checks_v4",
+        )
+        self.assertEqual(validate_worldbuilding_fishery_context(world), [])
+        self.assertEqual(validate_human_geography_replay(world), [])
+
     def test_validate_reports_every_land_use_and_realism_replay_verdict(self) -> None:
-        """``validate`` reaches and reports the land-use, frontier and realism replays.
+        """Historical ``validate`` reports all three independent family replays.
 
         The field-by-field tamper coverage for all three lives in
         ``test_human_geography_validation``, which calls the validators directly
@@ -772,7 +841,9 @@ class SmokeResourcesTests(TestCase):
         pass is all it needs.
         """
 
-        world = worlds.cached_world("mid_512")
+        # These exact historical declarations exercise the retained late numerical
+        # diagnostics. Fresh own-version boundaries have separate current controls.
+        world = legacy_land_use_world("mid_512")
 
         for model_key, model_type in (
             (
@@ -807,7 +878,12 @@ class SmokeResourcesTests(TestCase):
             assert_no_cli_crash(self, control, command="validate")
             self.assertEqual(control.exit_code, 0, control.output)
 
-            world["land_use_zone_model"]["agricultural_threshold"] += 0.01
+            # Keep the known declaration intact: an unknown model is rejected
+            # before late consumers under the current public contract.
+            cell = world["cells"][0]
+            original_potential = cell["agricultural_potential_index"]
+            cell["agricultural_potential_index"] = 0.987654
+            self.assertNotEqual(original_potential, cell["agricultural_potential_index"])
             world["natural_frontier_model"]["frontier_index_parameters"][
                 "border_weight"
             ] += 0.01

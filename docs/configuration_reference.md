@@ -5,19 +5,43 @@ Companion to [layers_reference.md](layers_reference.md) and the
 property that shapes a generated world: what it controls, its type, default,
 valid range, which layers/subsystems it moves, and its status/gaps.
 
-The generation config is a single validated schema — `WorldConfig` in
-[config.py](../src/magic_geo/config.py) — loaded from a YAML file
+Current generation configuration uses `WorldConfig` in
+[config.py](../src/magic_geo/config.py), loaded from a version-2 YAML file
 (`magic-geo generate --config <file>`). Every value below is verified against
 that schema; ranges are the pydantic `Field` bounds, so anything outside them is
 rejected at load time (`extra="forbid"` also rejects unknown keys,
 `allow_inf_nan=False` rejects `inf`/`nan`, and the YAML loader rejects duplicate
-mapping keys). All sections and fields have defaults, so even `{}` is valid;
+mapping keys). Every document requires the exact integer `config_version: 2`;
+empty and unversioned files receive migration errors. All section fields have defaults;
 omitted values come from the neutral schema defaults, not from the Earth-like
 file. Generate the curated Earth-like starter with
 `magic-geo init-config --profile earthlike`; the checked-in reference is
 [configs/earthlike_seed.yaml](../configs/earthlike_seed.yaml). Nine
 complete exploratory presets and their research/selection guidance are indexed
 in the [example seed gallery](example_seed_gallery.md).
+
+### Explicit seasonal configuration, version 2
+
+YAML with **`config_version: 2`** selects
+[`SeasonalWorldConfig`](../src/magic_geo/seasonal_config.py) and the seasonal
+native V4 interface through the same CLI/Python generation routes. The version
+must be an integer; numeric strings, booleans and floating-point lookalikes are
+rejected. Shared field bounds remain the same, with strict nested input types.
+`WorldConfig()` and all built-in profiles now select this model. The remaining
+tables describe current controls; the two obsolete Celsius fields are rejected.
+
+| Field | Seasonal meaning and bounds |
+| --- | --- |
+| `climate.reference_infrared_optical_depth` | Finite nonnegative gray opacity at one bar and Earth gravity, default 1. No arbitrary finite upper bound; unrepresentable or unconverged solves fail explicitly. |
+| `planet.greenhouse_factor` | Multiplies reference opacity, with local pressure/gravity scaling; shared range 0…100. |
+| `planet.atmosphere_pressure_bar` | Area-weighted mean pressure preserved by normalized hydrostatic columns; shared range 0…1000. |
+| `climate.base_temperature_c`, `climate.lapse_rate_c_per_km` | Obsolete and rejected in version 2. Generated temperature comes from the retained energy solution; no exact automatic conversion to opacity exists. |
+
+[`configs/seasonal_smoke.yaml`](../configs/seasonal_smoke.yaml) provides a small
+explicit example. All gallery files carry version 2 and an explicit reference
+opacity of 1; their other physical inputs are retained. Earth calibration has
+not been established for the seasonal model. Physical scope, evidence and remaining
+feedbacks are documented in the [seasonal integration record](seasonal_climate_native_integration.md).
 
 ## How configuration flows through generation
 
@@ -77,8 +101,8 @@ converted to absolute units on the fly (e.g. `gravity_g` × 9.80665 m/s²).
 | `axial_tilt_deg` | float | `23.5` | `[0, 90]` | Obliquity. Sets seasonal insolation amplitude and the latitude of the seasonal swing. | climate (seasonality), cryosphere |
 | `orbital_eccentricity` | float | `0.016` | `[0, 1)` | Orbit ellipticity. Modulates seasonal insolation asymmetry. | climate |
 | `stellar_luminosity` | float | `1.0` | `(0.01, 100]` | Incident stellar flux relative to Sol. Scales the whole energy balance and baseline temperatures. | climate, cryosphere |
-| `atmosphere_pressure_bar` | float | `1.0` | `[0, 1000]` | Surface pressure. Influences lapse/heat capacity and the energy balance. | climate |
-| `greenhouse_factor` | float | `1.0` | `[0, 100]` | Greenhouse trapping multiplier. Directly sets `greenhouse_trapping_w_m2` and equilibrium temperatures. | climate |
+| `atmosphere_pressure_bar` | float | `1.0` | `[0, 1000]` | Area-weighted mean surface pressure, preserved across hydrostatic columns. Controls atmospheric storage, gray opacity and horizontal transport; exactly zero gives an airless, zero-rainfall branch. | climate |
+| `greenhouse_factor` | float | `1.0` | `[0, 100]` | Multiplies reference infrared optical depth. Reduces effective longwave emissivity through `1 / (1 + 0.75 τ)`; it does not impose a Celsius offset. | climate |
 | `ocean_fraction_target` | float | `0.70` | `[0, 0.95]` | Diagnostic area reference only. It does **not** drive the sea-level solve. | validation, ocean diagnostics |
 | `ocean_water_inventory_km3` | float | `1.338e9` | `[0, 1e10]` | Ocean water volume used by the connected cell-column sea-level solve. It is not a closed total-water inventory across ice, lakes, groundwater, soil, and atmosphere. | ocean, water_budget |
 | `internal_heat` | float | `1.0` | `[0, 100]` | Internal heat flow relative to Earth. Scales tectonic vigour and volcanic/geothermal potential. | tectonics, resources |
@@ -224,8 +248,7 @@ blanket absolute or relative tolerance.
 | Property | Type | Default | Range | What it controls | Affects |
 | --- | --- | --- | --- | --- | --- |
 | `months` | enum | `12` | `12` | Months in the seasonal cycle. Fixed at 12 (the monthly layers are 12-long). | climate, water_budget |
-| `lapse_rate_c_per_km` | float | `6.5` | `[0, 15]` | Temperature drop per km of elevation. Sets mountain cooling → `temperature_c`, snowlines, biomes. | climate, cryosphere, ecology |
-| `base_temperature_c` | float | `15.0` | `[−100, 100]` | Global mean sea-level temperature anchor. Shifts the whole climate. | climate (all) |
+| `reference_infrared_optical_depth` | float | `1.0` | `[0, ∞)` finite | Reference gray optical depth at one bar and Earth gravity. Local opacity additionally scales with `greenhouse_factor`, hydrostatic pressure and inverse gravity. Radiation, storage and conservative heat transport determine temperature. | climate, cryosphere, ecology |
 | `precipitation_scale` | float | `1.0` | `[0, 10]` | Global precipitation multiplier. `0` is an exact dry boundary and near-zero positive values remain proportional; negative empirical precipitation combinations clamp to zero before the thermal-moisture multiplier and monthly partitioning. Scales precipitation → runoff, rivers, and biomes. | water_budget, hydrology, ecology |
 | `subtropical_drying_strength` | float | `0.65` | `[0, 0.9]` | Strength of subtropical (desert-belt) drying. Sets aridity of the horse latitudes. | climate, water_budget, ecology |
 
@@ -283,6 +306,14 @@ threading currently affects reproducibility (see gaps).
 | `include_cells` | bool | `true` | — | Whether per-cell arrays are written. **Required for the debugger** (`export-debug` errors without cells). | Debug cache availability |
 | `float_precision` | int | `4` | `[0, 8]` | Decimal places for general/display floats in the JSON payload. Replay-critical crust, equilibrium, boundary, transport, elevation, and water-depth roots override this with general-format `max_digits10` binary64 round-trip serialization; the sediment interface separately retains its declared 10-decimal canonical-state and 8-decimal replay-operand contract. | Payload size/precision |
 
+Full-world generation always completes enrichment with per-cell state available.
+Setting `output.include_cells: false` then emits `cells: []`; every other field,
+including derived summaries, histories, and resource records, matches the same
+run with cells included. This reduces the returned payload rather than generation
+work or peak memory. The resulting cell-free export is not a standalone input
+for validation, rendering, or the debugger because its records still reference
+cell IDs. Geo-only generation continues to require `include_cells: true`.
+
 ---
 
 ## Other configuration surfaces (not generation)
@@ -314,7 +345,7 @@ layers:
 
 ## Status & gaps
 
-**Coverage.** All 44 generation properties across 9 sections are validated by the
+**Coverage.** All 43 section fields and the root document version are validated by the
 `WorldConfig` schema with explicit bounds; unknown keys and non-finite values are
 rejected at load. Every property is documented above with its first-order effect.
 
@@ -438,13 +469,13 @@ rejected at load. Every property is documented above with its first-order effect
   (2005)](https://doi.org/10.1029/2004JF000274) for the additional terms needed
   for sediment mass and stratigraphic conservation.
 - **Native marshaling is explicit, but behavioural consumption is not
-  reported.** `config_to_native` returns the nine validated sections and
+  reported.** `config_to_native` returns the document version, nine validated sections and
   `native.py` projects every current field into versioned ctypes structs. There
   is still no per-field runtime evidence report proving which downstream model
   changed, so a valid knob with no material effect would require tests or output
   comparison to detect.
-- **No config-driven enable/disable of subsystems.** Every enricher always runs
-  (given `include_cells`); you cannot switch off, say, the petroleum or dynasty
+- **No config-driven enable/disable of subsystems.** Every enricher always runs;
+  you cannot switch off, say, the petroleum or dynasty
   models to shrink the payload. `erosion.iterations: 0` is the one coarse off-switch
   (disables the erosion/feedback passes).
 

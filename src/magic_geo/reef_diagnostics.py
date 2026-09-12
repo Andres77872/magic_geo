@@ -4,12 +4,49 @@ import math
 from collections import Counter, deque
 from typing import Any
 
+from .climate_model_dispatch import ecology_uses_native_seasonal_climate
 
 MARINE_WATER_TYPES = {"ocean", "continental_shelf", "inland_sea"}
 REEF_GROWTH_THRESHOLD = 0.46
+REEF_THERMAL_MINIMUM_C = 4.0
+REEF_THERMAL_MAXIMUM_C = 39.0
 VOLCANIC_LANDFORMS = {"volcanic_arc", "island_arc", "ridge"}
 REEF_COASTAL_FEATURE_TYPES = {"beach", "barrier_bar", "barrier_island", "coastal_cliff"}
 REEF_LANDMASS_CLASSES = {"islet", "island", "large_island"}
+
+LEGACY_REEF_MODEL = {
+    "model": "heuristic_coastal_reef_v2",
+    "thermal_eligibility": "annual_and_all_monthly_means_inside_existing_suitability_support",
+    "minimum_temperature_c": REEF_THERMAL_MINIMUM_C,
+    "maximum_temperature_c": REEF_THERMAL_MAXIMUM_C,
+    "temperature_bounds": "exclusive",
+    "monthly_temperature_count": 12,
+    "missing_monthly_temperature_policy": "annual_only_if_field_absent",
+    "invalid_monthly_temperature_policy": "ineligible",
+    "bleaching_model": "legacy_energy_aridity_current_proxy_v1",
+    "thermal_limits_scope": "empirical_model_support_not_universal_coral_survival_limits",
+}
+NATIVE_REEF_MODEL = {
+    **LEGACY_REEF_MODEL,
+    "model": "heuristic_coastal_reef_native_seasonal_v3",
+    "bleaching_model": "not_modelled_no_reference_climatology",
+    "bleaching_estimate_available": False,
+    "bleaching_output_policy": "omit_cell_record_and_summary_legacy_risk_fields",
+    "growth_model": "thermal_habitat_gated_existing_bonuses_without_bleaching_penalty",
+    "remaining_growth_weights": "unchanged_without_renormalization",
+    "climate_input_policy": "requires_known_native_identity_and_upstream_energy_enrichment",
+}
+
+
+def _matches_reef_model(value: Any, expected: dict[str, Any]) -> bool:
+    if not isinstance(value, dict) or value.keys() != expected.keys():
+        return False
+    return all(
+        value[key] == item
+        and (type(item) not in (bool, int) or type(value[key]) is type(item))
+        and (type(item) is not float or (isinstance(value[key], (int, float)) and not isinstance(value[key], bool)))
+        for key, item in expected.items()
+    )
 
 
 def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
@@ -41,11 +78,36 @@ def _land_neighbors(cell: dict[str, Any], cells_by_id: dict[int, dict[str, Any]]
 
 
 def _temperature_suitability(temperature_c: float) -> float:
-    if temperature_c < 4.0:
+    if temperature_c < REEF_THERMAL_MINIMUM_C:
         return 0.0
     if temperature_c < 18.0:
         return _clamp((temperature_c - 4.0) / 14.0) * 0.55
     return _clamp(1.0 - abs(temperature_c - 26.0) / 13.0)
+
+
+def _thermal_habitat_eligible(cell: dict[str, Any]) -> bool:
+    """Require the existing empirical curve to support persistent habitat.
+
+    NOAA describes cold-water corals at 4--12 C and many shallow corals as
+    growing best at 23--29 C, with 40 C tolerated only briefly:
+    https://oceanexplorer.noaa.gov/ocean-fact/coral-water/
+    https://oceanservice.noaa.gov/education/tutorial_corals/coral05_distribution.html
+    The open (4, 39) C interval is this model's existing positive-suitability
+    support, not a universal physiological limit. A monthly mean outside it
+    cannot be offset by island, shelf, or fishery bonuses. Monthly means do
+    not resolve brief extreme exposure or depth-specific water temperature.
+    """
+    annual = cell.get("temperature_c")
+    monthly = cell.get("temperature_monthly_c", [annual] * 12)
+    if not isinstance(monthly, list) or len(monthly) != 12:
+        return False
+    return all(
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and REEF_THERMAL_MINIMUM_C < value < REEF_THERMAL_MAXIMUM_C
+        for value in [annual, *monthly]
+    )
 
 
 def _shallow_water_suitability(cell: dict[str, Any]) -> float:
@@ -182,11 +244,12 @@ def _reef_growth_index(
     cell: dict[str, Any],
     land_neighbors: list[dict[str, Any]],
     coastal_features_by_cell: dict[int, dict[str, Any]],
-) -> tuple[float, float, float, float, float]:
+    *, native_seasonal: bool = False,
+) -> tuple[float, float, float, float, float | None]:
     if str(cell.get("water_body_type", "land")) not in MARINE_WATER_TYPES or not bool(cell.get("is_water", False)):
-        return 0.0, 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0, None if native_seasonal else 0.0
     if not land_neighbors:
-        return 0.0, 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0, None if native_seasonal else 0.0
     temperature = _temperature_suitability(float(cell.get("temperature_c", 0.0)))
     shallow = _shallow_water_suitability(cell)
     water_body = str(cell.get("water_body_type", "land"))
@@ -194,7 +257,9 @@ def _reef_growth_index(
     island = _island_support(cell, land_neighbors)
     sediment = _sediment_stress(cell, land_neighbors, coastal_features_by_cell)
     wave = _wave_exposure(cell, land_neighbors, coastal_features_by_cell)
-    bleaching = _bleaching_risk(cell)
+    # A repeating surface-temperature cycle has no independent local MMM or
+    # exposure history. Do not label a missing bleaching estimate as zero risk.
+    bleaching = None if native_seasonal else _bleaching_risk(cell)
     ice = _clamp(float(cell.get("ice_thickness_m", 0.0)) / 60.0)
     wave_window = _clamp(1.0 - abs(wave - 0.42) / 0.58)
     fishery = _clamp(float(cell.get("fishery_productivity_index", 0.0)))
@@ -206,9 +271,11 @@ def _reef_growth_index(
         + wave_window * 0.10
         + fishery * 0.08
         - sediment * 0.22
-        - bleaching * 0.16
+        - (bleaching * 0.16 if bleaching is not None else 0.0)
         - ice * 0.54
     )
+    if not _thermal_habitat_eligible(cell):
+        growth = 0.0
     return growth, sediment, wave, island, bleaching
 
 
@@ -278,10 +345,18 @@ def _centroid(component: list[dict[str, Any]]) -> tuple[float, float]:
     return round(lat, 6), round(lon, 6)
 
 
-def enrich_world_with_reef_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
+def _enrich_reef_stage(world: dict[str, Any], *, available_port_links: bool = False) -> dict[str, Any]:
+    native_seasonal = ecology_uses_native_seasonal_climate(world)
+    model = NATIVE_REEF_MODEL if native_seasonal else LEGACY_REEF_MODEL
+    if "reef_diagnostics_model" in world and not _matches_reef_model(world["reef_diagnostics_model"], model):
+        # Explicitly migrate a known old reef diagnostic when a verified
+        # native source replaces it; unknown metadata never grants a fallback.
+        if not native_seasonal or not _matches_reef_model(world["reef_diagnostics_model"], LEGACY_REEF_MODEL):
+            raise ValueError("reef diagnostics require exact known model metadata")
     cells = world.get("cells", [])
     if not isinstance(cells, list) or not cells:
         return world
+    world["reef_diagnostics_model"] = dict(model)
     cells_by_id = {int(cell.get("id", -1)): cell for cell in cells if isinstance(cell, dict)}
     coastal_features_by_cell = _coastal_feature_by_cell(world)
     settlements_by_cell = _settlements_by_cell(world)
@@ -296,12 +371,17 @@ def enrich_world_with_reef_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
 
     for cell in cells:
         land_neighbors = _land_neighbors(cell, cells_by_id)
-        growth, sediment, wave, island, bleaching = _reef_growth_index(cell, land_neighbors, coastal_features_by_cell)
+        growth, sediment, wave, island, bleaching = _reef_growth_index(
+            cell, land_neighbors, coastal_features_by_cell, native_seasonal=native_seasonal,
+        )
         cell["reef_growth_index"] = round(growth, 6)
         cell["reef_sediment_stress_index"] = round(sediment, 6)
         cell["reef_wave_exposure_index"] = round(wave, 6)
         cell["reef_island_support_index"] = round(island, 6)
-        cell["reef_bleaching_risk_index"] = round(bleaching, 6)
+        if native_seasonal:
+            cell.pop("reef_bleaching_risk_index", None)
+        else:
+            cell["reef_bleaching_risk_index"] = round(bleaching, 6)
         cell["reef_type"] = "none"
         cell["reef_system_id"] = -1
         if growth >= REEF_GROWTH_THRESHOLD:
@@ -312,7 +392,8 @@ def enrich_world_with_reef_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
         sediment_sum += sediment
         wave_sum += wave
         island_sum += island
-        bleaching_sum += bleaching
+        if bleaching is not None:
+            bleaching_sum += bleaching
 
     records: list[dict[str, Any]] = []
     for component in _connected_components(candidate_ids, cells_by_id):
@@ -363,7 +444,9 @@ def enrich_world_with_reef_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
             {
                 int(cells_by_id[cell_id].get("port_site_id", -1))
                 for cell_id in nearby_cell_ids
-                if cell_id in cells_by_id and int(cells_by_id[cell_id].get("port_site_id", -1)) >= 0
+                if cell_id in cells_by_id
+                and (not available_port_links or cells_by_id[cell_id]["port_site_selection_supported"])
+                and int(cells_by_id[cell_id].get("port_site_id", -1)) >= 0
             }
         )
         fishery_resource_ids = sorted(
@@ -396,7 +479,7 @@ def enrich_world_with_reef_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
                 "mean_reef_sediment_stress_index": round(sum(float(cell.get("reef_sediment_stress_index", 0.0)) for cell in component) / len(component), 6),
                 "mean_reef_wave_exposure_index": round(sum(float(cell.get("reef_wave_exposure_index", 0.0)) for cell in component) / len(component), 6),
                 "mean_reef_island_support_index": round(sum(float(cell.get("reef_island_support_index", 0.0)) for cell in component) / len(component), 6),
-                "mean_reef_bleaching_risk_index": round(sum(float(cell.get("reef_bleaching_risk_index", 0.0)) for cell in component) / len(component), 6),
+                **({"mean_reef_bleaching_risk_index": round(sum(float(cell.get("reef_bleaching_risk_index", 0.0)) for cell in component) / len(component), 6)} if not native_seasonal else {}),
                 "mean_water_depth_m": round(sum(float(cell.get("water_depth_m", 0.0)) for cell in component) / len(component), 6),
                 "mean_temperature_c": round(sum(float(cell.get("temperature_c", 0.0)) for cell in component) / len(component), 6),
                 "mean_fishery_productivity_index": round(sum(float(cell.get("fishery_productivity_index", 0.0)) for cell in component) / len(component), 6),
@@ -405,6 +488,7 @@ def enrich_world_with_reef_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
                 "coastal_feature_ids": coastal_feature_ids,
                 "settlement_ids": settlement_ids,
                 "port_site_ids": port_site_ids,
+                **({"port_site_links_complete": all(cells_by_id[cid]["port_site_selection_supported"] for cid in nearby_cell_ids)} if available_port_links else {}),
                 "fishery_resource_record_ids": fishery_resource_ids,
                 "adjacent_volcanic_land_cell_count": volcanic_land_cell_count,
                 "reef_type_counts": dict(sorted(type_counts.items())),
@@ -421,7 +505,10 @@ def enrich_world_with_reef_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
     summary["mean_reef_sediment_stress_index"] = round(sediment_sum / cell_count, 6)
     summary["mean_reef_wave_exposure_index"] = round(wave_sum / cell_count, 6)
     summary["mean_reef_island_support_index"] = round(island_sum / cell_count, 6)
-    summary["mean_reef_bleaching_risk_index"] = round(bleaching_sum / cell_count, 6)
+    if native_seasonal:
+        summary.pop("mean_reef_bleaching_risk_index", None)
+    else:
+        summary["mean_reef_bleaching_risk_index"] = round(bleaching_sum / cell_count, 6)
     summary["fringing_reef_system_count"] = type_counts.get("fringing_reef", 0)
     summary["barrier_reef_system_count"] = type_counts.get("barrier_reef", 0)
     summary["atoll_reef_system_count"] = type_counts.get("atoll_reef", 0)
@@ -429,4 +516,57 @@ def enrich_world_with_reef_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
     summary["cold_water_reef_system_count"] = type_counts.get("cold_water_reef", 0)
     summary["reef_type_counts"] = dict(sorted(type_counts.items()))
     world["reef_systems"] = records
+    return world
+
+
+_REEF_CELL_FIELDS = ("reef_growth_index", "reef_sediment_stress_index", "reef_wave_exposure_index", "reef_island_support_index", "reef_bleaching_risk_index", "reef_type", "reef_system_id")
+_REEF_SUMMARY_FIELDS = ("reef_system_count", "reef_cell_count", "reef_total_area_km2", "mean_reef_growth_index", "mean_reef_sediment_stress_index", "mean_reef_wave_exposure_index", "mean_reef_island_support_index", "mean_reef_bleaching_risk_index", "fringing_reef_system_count", "barrier_reef_system_count", "atoll_reef_system_count", "patch_reef_system_count", "cold_water_reef_system_count", "reef_type_counts", "reef_port_links_model", "reef_port_links_complete", "reef_port_links_incomplete_system_count", "reef_source_port_selection_complete")
+
+
+def enrich_world_with_reef_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
+    from .reef_port_links_validation import MODEL, PORTS3, validate_reef_port_links
+    current = isinstance(world.get("port_site_model"), dict) and world["port_site_model"].get("model_type") == PORTS3
+    if not current:
+        errors = validate_reef_port_links(world)
+        if errors:
+            raise ValueError("; ".join(errors))
+        return _enrich_reef_stage(world)
+    from copy import deepcopy
+    from .human_water_transport_validation import validate_versioned_port_sites
+    errors = validate_versioned_port_sites(world)
+    if errors:
+        raise ValueError("reef port source: " + "; ".join(errors[:3])[:500])
+    if "reef_port_links_model" in world and world["reef_port_links_model"] != MODEL:
+        raise ValueError("unknown reef port annotation declaration")
+    if "reef_port_links_model" in world.get("summary", {}) and world["summary"]["reef_port_links_model"] != MODEL["model_type"]:
+        raise ValueError("unknown reef port annotation summary declaration")
+    if ("reef_port_links_model" in world) != ("reef_port_links_model" in world["summary"]):
+        raise ValueError("partial reef port annotation declaration")
+    if "reef_port_links_model" not in world and (
+        any(key in world["summary"] for key in ("reef_port_links_complete", "reef_port_links_incomplete_system_count", "reef_source_port_selection_complete"))
+        or any("port_site_links_complete" in row for row in world.get("reef_systems", []))
+    ):
+        raise ValueError("undeclared reef port annotation outputs require deliberate clearing")
+    staged = _enrich_reef_stage(deepcopy(world), available_port_links=True)
+    staged["reef_port_links_model"] = dict(MODEL)
+    incomplete = sum(not row["port_site_links_complete"] for row in staged["reef_systems"])
+    staged["summary"].update(reef_port_links_model=MODEL["model_type"], reef_port_links_complete=incomplete == 0,
+        reef_port_links_incomplete_system_count=incomplete,
+        reef_source_port_selection_complete=staged["summary"]["port_site_selection_complete"])
+    errors = validate_reef_port_links(staged)
+    if errors:
+        raise ValueError("; ".join(errors))
+    for original, result in zip(world["cells"], staged["cells"]):
+        for key in _REEF_CELL_FIELDS:
+            if key in result:
+                original[key] = result[key]
+            else:
+                original.pop(key, None)
+    for key in _REEF_SUMMARY_FIELDS:
+        if key in staged["summary"]:
+            world["summary"][key] = staged["summary"][key]
+        else:
+            world["summary"].pop(key, None)
+    for key in ("reef_diagnostics_model", "reef_port_links_model", "reef_systems"):
+        world[key] = staged[key]
     return world

@@ -2,7 +2,7 @@
 
 Every case below tampers with exactly one aspect of an otherwise healthy
 generated world, writes it out and drives the real ``validate`` command through
-``CliRunner``.  A single untampered control run per class proves the fixture is
+``CliRunner``.  An untampered control for each current or explicitly historical fixture proves it is
 healthy, so a ``FAIL`` line can only come from the tamper.  Each assertion pins
 the reported message as a whole output line: a crash and a clean validation
 failure both exit non-zero, so ``exit_code == 1`` alone would not distinguish
@@ -32,7 +32,9 @@ from typing import Any
 
 from magic_geo.cli import app
 from magic_geo.io import write_json
+from magic_geo.sediment_interface_validation import validate_sediment_interfaces
 from support import worlds
+from support.legacy_human_water_worlds import legacy_human_water_world_readonly
 from typer.testing import CliRunner
 
 from support.cli import assert_no_cli_crash
@@ -43,6 +45,29 @@ import pytest
 pytestmark = pytest.mark.slow
 
 Mutation = Callable[[dict[str, Any]], None]
+
+
+class HistoricalInlineMutation:
+    """An explicit historical inline-contract case on a complete archived world.
+
+    Its climate is still the genuine seasonal climate. Current water and
+    ecology outputs are checked earlier by independent causal replay, so old
+    inline diagnostics require their actual historical own/parent declarations.
+    """
+
+    def __init__(self, mutate: Mutation) -> None:
+        self.mutate = mutate
+
+    def __call__(self, world: dict[str, Any]) -> None:
+        self.mutate(world)
+
+
+def historical_water(mutate: Mutation) -> HistoricalInlineMutation:
+    return HistoricalInlineMutation(mutate)
+
+
+def historical_ecology(mutate: Mutation) -> HistoricalInlineMutation:
+    return HistoricalInlineMutation(mutate)
 
 _PAYLOAD_COUNTER = itertools.count()
 
@@ -223,6 +248,7 @@ class _ValidateViolationCase(unittest.TestCase):
         cls._workdir = Path(cls._tempdir.name)
         cls._runner = CliRunner()
         cls._world = worlds.cached_world(cls.WORLD_KEY)
+        cls._historical_water_control = None
         control = cls._workdir / "control.json"
         write_json(control, cls._world)
         cls._control = cls._runner.invoke(app, ["validate", "--world", str(control)])
@@ -259,8 +285,26 @@ class _ValidateViolationCase(unittest.TestCase):
         self.assertTrue(reported, result.output[:4000])
         return reported
 
+    def _baseline_for(self, mutate: Mutation) -> dict[str, Any]:
+        if not isinstance(mutate, HistoricalInlineMutation):
+            return self._world
+        # No declarations or outputs are recomputed/retagged for this control.
+        if self.__class__._historical_water_control is None:
+            world = legacy_human_water_world_readonly(self.WORLD_KEY)
+            path = self._workdir / "historical_water_control.json"
+            write_json(path, world)
+            try:
+                result = self._runner.invoke(app, ["validate", "--world", str(path)])
+            finally:
+                path.unlink(missing_ok=True)
+            assert_no_cli_crash(self, result)
+            self.assertEqual(result.exit_code, 0, result.output[:4000])
+            self.assertNotIn("FAIL ", result.output)
+            self.__class__._historical_water_control = world
+        return self.__class__._historical_water_control
+
     def _tampered(self, mutate: Mutation) -> dict[str, Any]:
-        world = copy.deepcopy(self._world)
+        world = copy.deepcopy(self._baseline_for(mutate))
         mutate(world)
         return world
 
@@ -281,18 +325,28 @@ class _ValidateViolationCase(unittest.TestCase):
         """
         messages = [message for message, _ in cases]
         self.assertEqual(len(set(messages)), len(messages), "batched messages must be distinct")
-        world = copy.deepcopy(self._world)
+        # Each explicit fixture group gets its own run. No mutation from one
+        # model version can mask another version's intended diagnostic.
+        for historical in (False, True):
+            group = [(message, mutate) for message, mutate in cases
+                     if isinstance(mutate, HistoricalInlineMutation) == historical]
+            if group:
+                self._assert_batch_on(group)
+
+    def _assert_batch_on(self, cases: Sequence[tuple[str, Mutation]]) -> None:
+        baseline = self._baseline_for(cases[0][1])
+        world = copy.deepcopy(baseline)
         touched: set[str] = set()
         for message, mutate in cases:
             mutate(world)
-            changed = _changed_paths(self._world, world)
+            changed = _changed_paths(baseline, world)
             self.assertTrue(
                 changed - touched,
                 f"{message}: tamper changed nothing an earlier tamper in the batch had not",
             )
             touched = changed
         reported = self._run(world)
-        for message in messages:
+        for message, _ in cases:
             with self.subTest(message=message):
                 self.assertIn(message, reported)
 
@@ -313,6 +367,80 @@ class _ValidateViolationCase(unittest.TestCase):
 # --------------------------------------------------------------------------
 # summary bookkeeping: counters that must agree with the records
 # --------------------------------------------------------------------------
+class ValidateCurrentWaterPreflightTest(_ValidateViolationCase):
+    """Current counterparts of the retained historical inline violations.
+
+    Each field/record/summary tamper is run alone: a parent's earlier failure
+    must not be credited with detecting a different child's corruption.
+    """
+
+    def test_current_water_replays_each_owned_cell_record_and_summary(self) -> None:
+        groups = (
+            (
+                "natural channels: hydraulics requires independently valid parent: "
+                "natural channels: river channel morphology model or causal replay invalid",
+                (
+                    ("cell", set_cell("river_channel_width_m", -1.0)),
+                    ("record", set_record("river_channel_systems", "channel_type", "tampered_channel")),
+                    ("summary", bump("river_channel_cell_count")),
+                ),
+            ),
+            (
+                "natural channels: river hydraulics model or causal replay invalid",
+                (
+                    ("cell", set_cell("froude_number", -1.0)),
+                    ("record", set_record("river_hydraulic_reaches", "length_km", -1.0)),
+                    ("summary", bump("river_hydraulic_cell_count")),
+                ),
+            ),
+            (
+                "human water transport: navigation: navigability model or causal replay invalid",
+                (
+                    ("cell", set_cell("navigability_index", 2.0)),
+                    ("record", set_record("navigable_waterways", "waterway_type", "tampered_waterway")),
+                    ("summary", bump("navigable_cell_count")),
+                ),
+            ),
+            (
+                "human water transport: ports: port site model or causal replay invalid",
+                (
+                    ("cell", set_cell("port_suitability_index", 2.0)),
+                    ("record", set_record("port_sites", "site_type", "tampered_port")),
+                    ("summary", bump("port_candidate_cell_count")),
+                ),
+            ),
+        )
+        self.assert_table(
+            [(f"{message} [{label}]", mutate)
+             for message, cases in groups for label, mutate in cases],
+            strip_label=True,
+        )
+
+    def test_current_transport_rejects_malformed_marine_sources(self) -> None:
+        self.assert_table(
+            [
+                ("human water transport: marine chokepoint constriction must be finite",
+                 drop_record("marine_chokepoints", "constriction_index")),
+                ("human water transport: navigation: navigability model or causal replay invalid",
+                 set_record("marine_chokepoints", "constriction_index", 2.0)),
+                ("human water transport: marine_regions IDs must be unique nonnegative integers",
+                 set_record("marine_regions", "id", -1)),
+                ("human water transport: marine_chokepoints IDs must be unique nonnegative integers",
+                 set_record("marine_chokepoints", "id", -1)),
+            ]
+        )
+
+    def test_current_ecology_rejects_each_changed_habitat_source(self) -> None:
+        # This precedence comes from the already adopted ecology availability
+        # contract, independently of the new natural/human water integration.
+        self.assert_table(
+            [(f"species parent cell 0: species_composition_confidence_supported mismatch [{field}]",
+              set_cell(field, 1.5))
+             for field in ("wetland_extent_index", "reef_growth_index")],
+            strip_label=True,
+        )
+
+
 class ValidateSummaryCounterTest(_ValidateViolationCase):
     def test_hydrologic_budget_and_wetland_counters(self) -> None:
         self.assert_batch(
@@ -689,56 +817,56 @@ class ValidateSummaryCounterTest(_ValidateViolationCase):
     def test_channel_hydraulic_navigability_and_port_counters(self) -> None:
         self.assert_batch(
             [
-                ("river_channel_cell_count does not match cells", bump("river_channel_cell_count")),
-                ("river_channel_system_count does not match systems", bump("river_channel_system_count")),
+                ("river_channel_cell_count does not match cells", historical_water(bump("river_channel_cell_count"))),
+                ("river_channel_system_count does not match systems", historical_water(bump("river_channel_system_count"))),
                 (
                     "channel_morphology_class_counts does not match cells",
-                    pollute_counts("channel_morphology_class_counts"),
+                    historical_water(pollute_counts("channel_morphology_class_counts")),
                 ),
                 (
                     "total_river_channel_length_km does not match systems",
-                    skew("total_river_channel_length_km"),
+                    historical_water(skew("total_river_channel_length_km")),
                 ),
                 (
                     "navigable_channel_depth_cell_count does not match cells",
-                    bump("navigable_channel_depth_cell_count"),
+                    historical_water(bump("navigable_channel_depth_cell_count")),
                 ),
-                ("mean_river_channel_width_m does not match cells", skew("mean_river_channel_width_m")),
-                ("river_hydraulic_cell_count does not match cells", bump("river_hydraulic_cell_count")),
-                ("river_hydraulic_reach_count does not match reaches", bump("river_hydraulic_reach_count")),
+                ("mean_river_channel_width_m does not match cells", historical_water(skew("mean_river_channel_width_m"))),
+                ("river_hydraulic_cell_count does not match cells", historical_water(bump("river_hydraulic_cell_count"))),
+                ("river_hydraulic_reach_count does not match reaches", historical_water(bump("river_hydraulic_reach_count"))),
                 (
                     "hydraulic_flow_regime_counts does not match cells",
-                    pollute_counts("hydraulic_flow_regime_counts"),
+                    historical_water(pollute_counts("hydraulic_flow_regime_counts")),
                 ),
-                ("mean_hydraulic_radius_m does not match cells", skew("mean_hydraulic_radius_m")),
+                ("mean_hydraulic_radius_m does not match cells", historical_water(skew("mean_hydraulic_radius_m"))),
                 (
                     "hydraulically_navigable_cell_count does not match cells",
-                    bump("hydraulically_navigable_cell_count"),
+                    historical_water(bump("hydraulically_navigable_cell_count")),
                 ),
                 (
                     "navigable_waterway_count does not match navigable_waterways length",
-                    bump("navigable_waterway_count"),
+                    historical_water(bump("navigable_waterway_count")),
                 ),
-                ("navigable_cell_count does not match candidate cells", bump("navigable_cell_count")),
+                ("navigable_cell_count does not match candidate cells", historical_water(bump("navigable_cell_count"))),
                 (
                     "high_harbor_suitability_cell_count does not match cells",
-                    bump("high_harbor_suitability_cell_count"),
+                    historical_water(bump("high_harbor_suitability_cell_count")),
                 ),
                 (
                     "transport_chokepoint_cell_count does not match cells",
-                    bump("transport_chokepoint_cell_count"),
+                    historical_water(bump("transport_chokepoint_cell_count")),
                 ),
                 (
                     "navigability_class_counts does not match cells",
-                    pollute_counts("navigability_class_counts"),
+                    historical_water(pollute_counts("navigability_class_counts")),
                 ),
-                ("mean_navigability_index does not match cells", skew("mean_navigability_index")),
-                ("port_site_count does not match port_sites length", bump("port_site_count")),
+                ("mean_navigability_index does not match cells", historical_water(skew("mean_navigability_index"))),
+                ("port_site_count does not match port_sites length", historical_water(bump("port_site_count"))),
                 (
                     "port_candidate_cell_count does not match candidate cells",
-                    bump("port_candidate_cell_count"),
+                    historical_water(bump("port_candidate_cell_count")),
                 ),
-                ("mean_port_suitability_index does not match cells", skew("mean_port_suitability_index")),
+                ("mean_port_suitability_index does not match cells", historical_water(skew("mean_port_suitability_index"))),
             ]
         )
 
@@ -746,7 +874,7 @@ class ValidateSummaryCounterTest(_ValidateViolationCase):
         # The one summary metric reconciled twice: against candidate cells and
         # against the waterway records.
         self.assert_reports(
-            skew("navigable_waterway_total_area_km2"),
+            historical_water(skew("navigable_waterway_total_area_km2")),
             "navigable_waterway_total_area_km2 does not match candidate cells",
             "navigable_waterway_total_area_km2 does not match waterways",
         )
@@ -759,10 +887,10 @@ class ValidateSummaryMetricsMissingTest(_ValidateViolationCase):
     def test_subsystem_summary_blocks_must_be_complete(self) -> None:
         self.assert_table(
             [
-                ("river channel summary metrics missing", drop_summary("river_channel_morphology_model")),
-                ("river hydraulic summary metrics missing", drop_summary("river_hydraulics_model")),
-                ("navigability summary metrics missing", drop_summary("navigability_model")),
-                ("port site summary metrics missing", drop_summary("port_site_model")),
+                ("natural channels: river_channel_morphology_model summary identity mismatch", drop_summary("river_channel_morphology_model")),
+                ("natural channels: river_hydraulics_model summary identity mismatch", drop_summary("river_hydraulics_model")),
+                ("human water transport: navigability_model summary identity mismatch", drop_summary("navigability_model")),
+                ("human water transport: port_site_model summary identity mismatch", drop_summary("port_site_model")),
                 ("sediment budget summary metrics missing", drop_summary("sediment_budget_closure_model")),
                 ("priority-flood depression metrics missing", drop_summary("spill_corrected_cell_count")),
                 ("water_body_counts missing", set_summary("water_body_counts", {})),
@@ -782,10 +910,10 @@ class ValidateRecordCollectionsMissingTest(_ValidateViolationCase):
                 ("river_reorganization_histories missing", not_a_list("river_reorganization_histories")),
                 ("reef_systems missing or invalid", not_a_list("reef_systems")),
                 ("sequence_stratigraphy_histories missing", not_a_list("sequence_stratigraphy_histories")),
-                ("river_channel_systems missing", not_a_list("river_channel_systems")),
-                ("river_hydraulic_reaches missing", not_a_list("river_hydraulic_reaches")),
-                ("navigable_waterways missing", not_a_list("navigable_waterways")),
-                ("port_sites missing", not_a_list("port_sites")),
+                ("river_channel_systems missing", historical_water(not_a_list("river_channel_systems"))),
+                ("river_hydraulic_reaches missing", historical_water(not_a_list("river_hydraulic_reaches"))),
+                ("navigable_waterways missing", historical_water(not_a_list("navigable_waterways"))),
+                ("port_sites missing", historical_water(not_a_list("port_sites"))),
             ]
         )
 
@@ -821,16 +949,16 @@ class ValidateRecordFieldsMissingTest(_ValidateViolationCase):
                 ),
                 ("landmass fields missing", drop_record("landmasses", "island_class")),
                 ("marine region fields missing", drop_record("marine_regions", "region_class")),
-                ("marine chokepoint fields missing", drop_record("marine_chokepoints", "constriction_index")),
+                ("marine chokepoint fields missing", historical_water(drop_record("marine_chokepoints", "constriction_index"))),
                 ("stratigraphic column fields missing", drop_record("stratigraphic_columns", "dominant_facies")),
                 (
                     "sequence stratigraphy column fields missing",
                     drop_record("stratigraphic_columns", "dominant_systems_tract"),
                 ),
-                ("river channel system fields missing", drop_record("river_channel_systems", "channel_type")),
-                ("river hydraulic reach fields missing", drop_record("river_hydraulic_reaches", "length_km")),
-                ("navigable waterway fields missing", drop_record("navigable_waterways", "route_ids")),
-                ("port site fields missing", drop_record("port_sites", "route_ids")),
+                ("river channel system fields missing", historical_water(drop_record("river_channel_systems", "channel_type"))),
+                ("river hydraulic reach fields missing", historical_water(drop_record("river_hydraulic_reaches", "length_km"))),
+                ("navigable waterway fields missing", historical_water(drop_record("navigable_waterways", "route_ids"))),
+                ("port site fields missing", historical_water(drop_record("port_sites", "route_ids"))),
                 ("coastal migration fields missing", drop_record("coastal_features", "shoreline_trend")),
             ]
         )
@@ -851,10 +979,10 @@ class ValidateCellFieldsMissingTest(_ValidateViolationCase):
                 ("river network evolution cell fields missing", drop_cell_field("river_capture_risk")),
                 ("sediment routing cell fields missing", drop_cell_field("sediment_routing_load_m")),
                 ("sediment budget cell fields missing", drop_cell_field("sediment_net_budget_m")),
-                ("river channel cell fields missing", drop_cell_field("river_channel_width_m")),
-                ("river hydraulic cell fields missing", drop_cell_field("hydraulic_radius_m")),
-                ("navigability cell fields missing", drop_cell_field("river_navigability_index")),
-                ("port site cell fields missing", drop_cell_field("protected_bay_index")),
+                ("river channel cell fields missing", historical_water(drop_cell_field("river_channel_width_m"))),
+                ("river hydraulic cell fields missing", historical_water(drop_cell_field("hydraulic_radius_m"))),
+                ("navigability cell fields missing", historical_water(drop_cell_field("river_navigability_index"))),
+                ("port site cell fields missing", historical_water(drop_cell_field("protected_bay_index"))),
             ]
         )
 
@@ -866,13 +994,13 @@ class ValidateCellDiagnosticsTest(_ValidateViolationCase):
     def test_out_of_range_cell_diagnostics_are_reported(self) -> None:
         self.assert_table(
             [
-                ("wetland cell fields invalid", set_cell("wetland_extent_index", 1.5)),
+                ("wetland cell fields invalid", historical_ecology(set_cell("wetland_extent_index", 1.5))),
                 ("river network evolution cell diagnostics invalid", set_cell("river_capture_risk", 1.5)),
-                ("reef cell fields invalid", set_cell("reef_growth_index", 1.5)),
-                ("river channel cell fields invalid", set_cell("river_channel_width_m", -1.0)),
-                ("river hydraulic cell fields invalid", set_cell("froude_number", -1.0)),
-                ("navigability cell fields invalid", set_cell("navigability_index", 2.0)),
-                ("port site cell fields invalid", set_cell("port_suitability_index", 2.0)),
+                ("reef cell fields invalid", historical_ecology(set_cell("reef_growth_index", 1.5))),
+                ("river channel cell fields invalid", historical_water(set_cell("river_channel_width_m", -1.0))),
+                ("river hydraulic cell fields invalid", historical_water(set_cell("froude_number", -1.0))),
+                ("navigability cell fields invalid", historical_water(set_cell("navigability_index", 2.0))),
+                ("port site cell fields invalid", historical_water(set_cell("port_suitability_index", 2.0))),
             ]
         )
 
@@ -915,14 +1043,18 @@ class ValidateSedimentBudgetTest(_ValidateViolationCase):
                 )
 
     def test_zero_area_cell_is_rejected_before_provenance_reconstruction(self) -> None:
-        # "sediment provenance cell area invalid" itself is unreachable through
-        # the CLI: the provenance block is guarded by the fluvial/hillslope/
-        # glacial routing validators, and any non-positive cell area trips those
-        # first, so the guarded branch never runs. Pin what is actually reported.
+        # Current native seasonal geometry is audited before sediment consumers.
+        # Independently keep the sediment area's own guard covered on exactly
+        # the same invalid world, without bypassing the public climate audit.
+        self.assertTrue(validate_sediment_interfaces(self._world)["passed"])
+        invalid = self._tampered(set_cell("area_km2", 0.0))
+        self.assertIn(
+            "cell area must be positive",
+            validate_sediment_interfaces(invalid)["failures"],
+        )
         self.assert_reports(
             set_cell("area_km2", 0.0),
-            "sediment interface replay invalid: cell area must be positive",
-            "sediment_budget_production_km3 does not match cell volumes",
+            "native climate energy: cell[0].area_km2: expected positive number",
         )
 
     def test_cell_provenance_must_reconstruct_the_budget(self) -> None:
@@ -956,20 +1088,20 @@ class ValidateRecordConsistencyTest(_ValidateViolationCase):
                 ("marine region records invalid", set_record("marine_regions", "cell_count", 99999)),
                 (
                     "marine chokepoint records invalid",
-                    set_record("marine_chokepoints", "constriction_index", 2.0),
+                    historical_water(set_record("marine_chokepoints", "constriction_index", 2.0)),
                 ),
                 ("wetland system records invalid", set_record("wetland_systems", "area_km2", -1.0)),
                 (
                     "river channel system records invalid",
-                    set_record("river_channel_systems", "channel_type", "tampered_channel"),
+                    historical_water(set_record("river_channel_systems", "channel_type", "tampered_channel")),
                 ),
                 (
                     "river hydraulic reach records invalid",
-                    set_record("river_hydraulic_reaches", "cell_ids", "not-a-list"),
+                    historical_water(set_record("river_hydraulic_reaches", "cell_ids", "not-a-list")),
                 ),
                 (
                     "navigable waterway records invalid",
-                    set_record("navigable_waterways", "waterway_type", "tampered_waterway"),
+                    historical_water(set_record("navigable_waterways", "waterway_type", "tampered_waterway")),
                 ),
             ]
         )
@@ -978,11 +1110,11 @@ class ValidateRecordConsistencyTest(_ValidateViolationCase):
         self.assert_table(
             [
                 ("landmass ids invalid", set_record("landmasses", "id", -1)),
-                ("marine region ids invalid", set_record("marine_regions", "id", -1)),
-                ("marine chokepoint ids invalid", set_record("marine_chokepoints", "id", -1)),
-                ("river channel system ids are not unique", _clone_id("river_channel_systems")),
-                ("river hydraulic reach ids are not unique", _clone_id("river_hydraulic_reaches")),
-                ("navigable waterway ids are not unique", _clone_id("navigable_waterways")),
+                ("marine region ids invalid", historical_water(set_record("marine_regions", "id", -1))),
+                ("marine chokepoint ids invalid", historical_water(set_record("marine_chokepoints", "id", -1))),
+                ("river channel system ids are not unique", historical_water(_clone_id("river_channel_systems"))),
+                ("river hydraulic reach ids are not unique", historical_water(_clone_id("river_hydraulic_reaches"))),
+                ("navigable waterway ids are not unique", historical_water(_clone_id("navigable_waterways"))),
             ]
         )
 
@@ -991,11 +1123,11 @@ class ValidateRecordConsistencyTest(_ValidateViolationCase):
             [
                 (
                     "river channel system membership does not match cells",
-                    _orphan_cell_assignment("river_channel_system_id", "river_channel_systems"),
+                    historical_water(_orphan_cell_assignment("river_channel_system_id", "river_channel_systems")),
                 ),
                 (
                     "navigable waterway membership does not match cells",
-                    _orphan_cell_assignment("navigable_waterway_id", "navigable_waterways"),
+                    historical_water(_orphan_cell_assignment("navigable_waterway_id", "navigable_waterways")),
                 ),
             ]
         )
@@ -1062,23 +1194,23 @@ class ValidateRecordConsistencyTest(_ValidateViolationCase):
             [
                 (
                     "river channel system records invalid [cell_ids not a list]",
-                    set_record("river_channel_systems", "cell_ids", {}),
+                    historical_water(set_record("river_channel_systems", "cell_ids", {})),
                 ),
                 (
                     "river channel system records invalid [dangling cell id]",
-                    set_record("river_channel_systems", "cell_ids", [999999]),
+                    historical_water(set_record("river_channel_systems", "cell_ids", [999999])),
                 ),
                 (
                     "navigable waterway records invalid [watershed_ids not a list]",
-                    set_record("navigable_waterways", "watershed_ids", {}),
+                    historical_water(set_record("navigable_waterways", "watershed_ids", {})),
                 ),
                 (
                     "navigable waterway records invalid [dangling cell id]",
-                    set_record("navigable_waterways", "cell_ids", [999999]),
+                    historical_water(set_record("navigable_waterways", "cell_ids", [999999])),
                 ),
                 (
                     "river hydraulic reach records invalid [dangling cell id]",
-                    set_record("river_hydraulic_reaches", "cell_ids", [999999]),
+                    historical_water(set_record("river_hydraulic_reaches", "cell_ids", [999999])),
                 ),
                 (
                     "wetland system records invalid [dangling cell id]",

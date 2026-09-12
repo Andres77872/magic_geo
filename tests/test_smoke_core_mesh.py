@@ -18,7 +18,8 @@ from magic_geo.api import backend_info, generate_world
 from magic_geo.cli import app
 from magic_geo.config import load_config
 
-from support import worlds
+from support import cryosphere_worlds, worlds
+from support.cli import assert_no_cli_crash
 
 
 class SmokeCoreMeshTests(TestCase):
@@ -578,34 +579,13 @@ class SmokeCoreMeshTests(TestCase):
         )
         glacial_model = world["glacial_sediment_transport_model"]
         glacial_stage = world["glacial_sediment_transport_history"][0]
-        self.assertGreater(glacial_stage["transfer_count"], 0)
-        self.assertTrue(
-            any(
-                abs(transfer["source_area_km2"] - transfer["target_area_km2"])
-                > 1.0
-                for transfer in glacial_stage["transfers"]
-            )
-        )
-        self.assertTrue(
-            any(
-                abs(
-                    transfer["source_production_depth_m"]
-                    - transfer["target_deposition_depth_m"]
-                )
-                > 0.000001
-                for transfer in glacial_stage["transfers"]
-                if abs(transfer["source_area_km2"] - transfer["target_area_km2"])
-                > 1.0
-            )
-        )
-        self.assertAlmostEqual(
-            glacial_model["total_production_volume_km3"],
-            glacial_model["total_deposition_volume_km3"],
-            delta=max(
-                0.000001,
-                glacial_model["total_production_volume_km3"] * 1.0e-10,
-            ),
-        )
+        # The current seasonal Earthlike witness has no mobilized glacial
+        # sediment. Keep that zero control separate from the cold positive case.
+        self.assertEqual(glacial_stage["transfer_count"], 0)
+        self.assertEqual(glacial_stage["transfers"], [])
+        for key in ("production_volume_km3", "deposition_volume_km3"):
+            self.assertEqual(glacial_stage[key], 0.0)
+            self.assertEqual(glacial_model["total_" + key], 0.0)
         inventory_model = world["sediment_inventory_model"]
         self.assertAlmostEqual(
             inventory_model["gross_mobilization_volume_km3"],
@@ -620,17 +600,6 @@ class SmokeCoreMeshTests(TestCase):
             delta=0.1,
         )
         self.assertLess(inventory_model["inventory_mass_balance_residual_km3"], 0.1)
-        for transfer in glacial_stage["transfers"]:
-            self.assertAlmostEqual(
-                transfer["source_production_depth_m"]
-                * transfer["source_area_km2"],
-                transfer["target_deposition_depth_m"]
-                * transfer["target_area_km2"],
-                delta=max(
-                    0.001,
-                    transfer["transfer_volume_km3"] * 1000.0 * 1.0e-7,
-                ),
-            )
         self.assertTrue(world["plate_kinematic_model"]["crust_advection_resolved"])
         self.assertTrue(world["plate_kinematic_model"]["mass_conserving_crust_transport"])
         self.assertEqual(
@@ -670,3 +639,60 @@ class SmokeCoreMeshTests(TestCase):
                 "native cell area model or spherical area closure invalid",
                 result.output,
             )
+
+    def test_cold_geodesic_glacial_transport_conserves_unequal_area_volumes(self) -> None:
+        # The shipped cryogenic forcing supplies actual ice; one erosion
+        # iteration preserves the coupled terrain/clock branch on unequal cells.
+        world = cryosphere_worlds.cached_cold_geodesic_world_readonly("full_world")
+        self.assertEqual(world["mesh_backend"], "geodesic_icosahedron")
+        self.assertEqual(len(world["cells"]), 162)
+        self.assertEqual(world["simulation_clock"]["configured_erosion_iteration_count"], 1)
+        self.assertGreater(world["summary"]["cell_area_coefficient_of_variation"], 0.1)
+        glacial_model = world["glacial_sediment_transport_model"]
+        glacial_stage = world["glacial_sediment_transport_history"][0]
+        self.assertGreater(glacial_stage["transfer_count"], 0)
+        self.assertTrue(
+            any(
+                abs(transfer["source_area_km2"] - transfer["target_area_km2"])
+                > 1.0
+                for transfer in glacial_stage["transfers"]
+            )
+        )
+        self.assertTrue(
+            any(
+                abs(
+                    transfer["source_production_depth_m"]
+                    - transfer["target_deposition_depth_m"]
+                )
+                > 0.000001
+                for transfer in glacial_stage["transfers"]
+                if abs(transfer["source_area_km2"] - transfer["target_area_km2"])
+                > 1.0
+            )
+        )
+        self.assertAlmostEqual(
+            glacial_model["total_production_volume_km3"],
+            glacial_model["total_deposition_volume_km3"],
+            delta=max(
+                0.000001,
+                glacial_model["total_production_volume_km3"] * 1.0e-10,
+            ),
+        )
+        self.assertEqual(glacial_stage["feedback_stage_id"], 2)
+        for transfer in glacial_stage["transfers"]:
+            self.assertAlmostEqual(
+                transfer["source_production_depth_m"]
+                * transfer["source_area_km2"],
+                transfer["target_deposition_depth_m"]
+                * transfer["target_area_km2"],
+                delta=max(
+                    0.001,
+                    transfer["transfer_volume_km3"] * 1000.0 * 1.0e-7,
+                ),
+            )
+        with TemporaryDirectory() as temp_dir:
+            world_path = Path(temp_dir) / "cold-geodesic.json"
+            world_path.write_text(json.dumps(world), encoding="utf-8")
+            result = CliRunner().invoke(app, ["validate", "--world", str(world_path)])
+            assert_no_cli_crash(self, result, command="validate")
+            self.assertEqual(result.exit_code, 0, result.output)

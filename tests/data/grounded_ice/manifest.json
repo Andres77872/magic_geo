@@ -1,0 +1,14 @@
+{
+  "native_unit.json": {
+    "sha256": "e37345ba2458f7e09f169b39d23715b051bf7a9bc797a0d254912b22336ad3b3",
+    "bytes": 17338,
+    "original_path": "/tmp/production-cryosphere-transition-review/native-correction/native-unit.json",
+    "scope": "actual native synthetic stage unit"
+  },
+  "legacy_cold.json.gz": {
+    "sha256": "3d2af722b00c59b7d82e710753fec7afb0f00e624e0e764672dd80544332d1a3",
+    "bytes": 735596,
+    "original_path": "/tmp/settlement-empty-source-api-review/full/world.json.gz",
+    "scope": "retained full world generated before grounded-domain successor"
+  }
+}

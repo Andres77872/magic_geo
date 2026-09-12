@@ -6,9 +6,13 @@ from pathlib import Path
 from typing import Any
 
 import csv
+import json
+
+from ..public_estimate_display import CELL_SUPPORT, nullable_kind, display_contract
 
 
 def write_cells_csv(path: Path, world: dict[str, Any]) -> None:
+    contract = display_contract(world)
     cells = world.get("cells", [])
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
@@ -409,8 +413,123 @@ def write_cells_csv(path: Path, world: dict[str, Any]) -> None:
         "groundwater_retained_storage_km3_y",
         "groundwater_flow_mass_balance_residual_km3_y",
         "thermal_subsidence_target_m",
+        "aquatic_climate_proxy_applicable",
+        "aquatic_primary_climate_supported",
+        "fishery_climate_supported",
+        "fishery_productivity_supported",
+        "species_terrestrial_habitat_eligible",
+        "species_freshwater_habitat_eligible",
+        "species_marine_habitat_eligible",
+        "species_freshwater_fish_score_supported",
+        "species_marine_fish_score_supported",
+        "species_freshwater_fishery_input_mode",
+        "effective_toa_albedo",
+        "effective_longwave_emissivity",
+        "annual_absorbed_shortwave_w_m2",
+        "annual_emitted_longwave_w_m2",
+        "annual_net_radiative_flux_w_m2",
+        "annual_horizontal_heat_convergence_w_m2",
+        "annual_net_heating_w_m2",
+        "annual_heat_storage_tendency_w_m2",
+        "annual_energy_balance_residual_w_m2",
+        "annual_mean_abs_energy_balance_residual_w_m2",
+        "annual_mean_energy_balance_numerical_allowance_w_m2",
+        "terrestrial_primary_climate_supported",
+        "primary_productivity_supported",
+        "vegetation_biomass_supported",
+        "forest_growth_supported",
+        "vegetation_succession_supported",
+        "species_richness_supported",
+        "ecosystem_wildfire_spread_risk_supported",
+        "ecosystem_disturbance_pressure_supported",
+        "vegetation_recovery_supported",
+        "species_canopy_tree_score_supported",
+        "species_grassland_grazer_score_supported",
+        "species_desert_specialist_score_supported",
+        "species_alpine_tundra_specialist_score_supported",
+        "species_large_predator_score_supported",
+        "species_wetland_amphibian_score_supported",
+        "species_reef_builder_score_supported",
+        "species_mangrove_coastal_bird_score_supported",
+        "species_composition_confidence_supported",
+        "species_endemism_supported",
+        "species_record_descriptors_supported",
+        "species_guild_scores",
+        "species_applicable_guild_count",
+        "species_supported_guild_count",
+        "species_composition_status",
+        "wildfire_fuel_continuity_supported",
+        "wildfire_firebreak_supported",
+        "wildfire_ignition_potential_supported",
+        "aquifer_natural_limitation_index",
+        "agricultural_habitat_applicable",
+        "agricultural_climate_supported",
+        "agricultural_potential_supported",
+        "mining_surface_applicable",
     ]
+    additions = ["settlement_climate_temperature_c", "settlement_climate_supported", "is_water", "is_lake",
+                 "harbor_site_applicable", *CELL_SUPPORT.values()]
+    fieldnames.extend(key for key in dict.fromkeys(additions) if key not in fieldnames)
+    for key in ("grounded_ice_surface_applicable", "grounded_ice_diagnostic_thickness_m"):
+        if any(key in cell for cell in cells):
+            fieldnames.append(key)
+    if any("marine_distance_status" in cell for cell in cells):
+        fieldnames.append("marine_distance_status")
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(cells)
+        for cell in cells:
+            row = cell
+            if isinstance(cell.get("species_guild_scores"), dict):
+                row = {**cell, "species_guild_scores": json.dumps(
+                    cell["species_guild_scores"], sort_keys=True, separators=(",", ":"), allow_nan=False,
+                )}
+            writer.writerow(row)
+
+    def column_type(key):
+        if key == "grounded_ice_diagnostic_thickness_m":
+            return "number"
+        if key == "distance_to_marine_water_km" and "marine_distance_status" in fieldnames:
+            return "number"
+        if key in set(CELL_SUPPORT.values()) | {"is_water", "is_lake", "harbor_site_applicable", "grounded_ice_surface_applicable"}:
+            return "boolean"
+        kinds = {type(cell[key]) for cell in cells if cell.get(key) is not None}
+        if kinds and kinds <= {int, float}:
+            return "number" if float in kinds else "integer"
+        if kinds == {bool}: return "boolean"
+        if kinds == {str}: return "string"
+        if key == "species_guild_scores": return "json_object"
+        known = nullable_kind(cells, key)
+        return {"int": "integer", "float": "number", "str": "string"}.get(known, "legacy_text_or_undeclared")
+    schema = {
+        "schema": "magic_geo_cell_csv_estimate_profile_v1",
+        "scope": world.get("generation_scope", "full"),
+        "columns": fieldnames,
+        "column_types": {key: column_type(key) for key in fieldnames},
+        "availability_fields": {key: value for key, value in CELL_SUPPORT.items() if key in fieldnames},
+        "boolean_lexical_values": {"true": "True", "false": "False"},
+        "empty_field_policy": "null_or_absent; consult declared model and availability fields; raw JSON retains exact key presence",
+        "zero_policy": "numeric_zero_is_preserved; settlement dry sentinel requires its climate support and water selectors",
+        "coverage": "cell_columns_only; linked world records require JSON or record exports",
+        "declarations": contract,
+    }
+    if "marine_distance_status" in fieldnames:
+        schema["marine_distance"] = {
+            "distance_field": "distance_to_marine_water_km",
+            "status_field": "marine_distance_status",
+            "status_values": ["reachable_marine", "no_marine_source"],
+            "null_meaning": "no_marine_source",
+            "zero_meaning": "defined_zero_distance_to_a_marine_source",
+            "legacy_absent_status": "undeclared; raw distance retained",
+        }
+    if "grounded_ice_surface_applicable" in fieldnames:
+        schema["grounded_ice_applicability"] = {
+            "field": "grounded_ice_surface_applicable",
+            "false_meaning": "grounded_ice_process_inapplicable_not_absence_of_lake_or_sea_ice",
+            "raw_values": "numeric_zero_and_glacier_flow_to_minus_one_are_retained_not_missing_estimates",
+            "association": "ice_sheet_id_may_link_glacial_context_not_active_ice_membership",
+            "active_thickness_field": "grounded_ice_diagnostic_thickness_m",
+            "active_thickness_precision": "roundtrip_binary64_decimal_v1",
+            "active_membership": "applicable_and_raw_diagnostic_thickness_strictly_above_25_m",
+        }
+    path.with_suffix(path.suffix + ".schema.json").write_text(json.dumps(schema, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")

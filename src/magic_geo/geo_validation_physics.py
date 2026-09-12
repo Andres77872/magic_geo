@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import math
 from collections import Counter
+from functools import lru_cache
 from typing import Any
 
+from .grounded_ice_validation import grounded_ice_version, validate_grounded_ice
+
+from .climate_energy_validation_dispatch import (
+    climate_energy_validation_mode,
+    validate_native_climate_energy_output,
+)
 from .crust_dry_rock_accounting_validation import (
     validate_crust_dry_rock_accounting,
 )
@@ -120,11 +127,12 @@ def _append_check(
 
 
 def _finite_number(value: Any) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(float(value))
-    )
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
 
 
 def _number(value: Any) -> float | None:
@@ -1087,16 +1095,17 @@ def _surface_albedo(cell: dict[str, Any]) -> tuple[float, str]:
     elevation = float(cell.get("elevation_m", 0.0))
     ice = max(0.0, float(cell.get("ice_thickness_m", 0.0)))
 
-    if bool(cell.get("is_water", False)):
-        if water_body in {"fresh_lake", "saline_basin", "inland_sea"}:
+    surface_water = bool(cell.get("is_water", False)) or bool(cell.get("is_lake", False))
+    if ice > 20.0 or biome == "ice_cap":
+        base = 0.58 + _clamp(ice / 2500.0) * 0.12
+        regime = "ice_albedo"
+    elif surface_water:
+        if bool(cell.get("is_lake", False)) or water_body in {"fresh_lake", "saline_basin", "inland_sea"}:
             base, regime = 0.10, "lake_water"
         elif water_body == "continental_shelf":
             base, regime = 0.08, "shallow_ocean"
         else:
             base, regime = 0.065, "open_ocean"
-    elif ice > 20.0 or biome == "ice_cap":
-        base = 0.58 + _clamp(ice / 2500.0) * 0.12
-        regime = "ice_albedo"
     elif biome in {"tundra", "alpine"}:
         base, regime = (0.34 if temperature < -2.0 else 0.28), "cold_sparse_cover"
     elif biome in {"hot_desert", "cold_desert"}:
@@ -1112,11 +1121,11 @@ def _surface_albedo(cell: dict[str, Any]) -> tuple[float, str]:
         0.0, float(cell.get("vertical_velocity_index", 0.0))
     ) * 0.018
     dry_brightening = seasonal_aridity * (
-        0.035 if not bool(cell.get("is_water", False)) else 0.0
+        0.035 if not surface_water else 0.0
     )
     snow_brightening = (
         0.08
-        if not bool(cell.get("is_water", False))
+        if not surface_water
         and temperature < -3.0
         and precipitation >= 250.0
         else 0.0
@@ -1169,6 +1178,54 @@ def _greenhouse_effect_c(
     )
 
 
+@lru_cache(maxsize=128)
+def _replay_orbit(tilt_degrees: float, eccentricity: float, months: int) -> tuple:
+    # Independent safeguarded Newton solution at month boundaries. The
+    # producer uses bisection and a half-angle transformation instead.
+    def true_anomaly(mean: float) -> float:
+        revolutions = math.floor((mean + math.pi) / (2.0 * math.pi))
+        mean -= revolutions * 2.0 * math.pi
+        lower, upper = max(-math.pi, mean - eccentricity), min(math.pi, mean + eccentricity)
+        anomaly = mean
+        for _ in range(64):
+            residual = anomaly - eccentricity * math.sin(anomaly) - mean
+            if residual > 0.0:
+                upper = anomaly
+            elif residual < 0.0:
+                lower = anomaly
+            else:
+                break
+            candidate = anomaly - residual / (1.0 - eccentricity * math.cos(anomaly))
+            if not lower < candidate < upper:
+                candidate = (lower + upper) / 2.0
+            if candidate == anomaly:
+                break
+            anomaly = candidate
+        return math.atan2(
+            math.sqrt((1.0 - eccentricity) * (1.0 + eccentricity)) * math.sin(anomaly),
+            math.cos(anomaly) - eccentricity,
+        ) + revolutions * 2.0 * math.pi
+
+    boundaries = [true_anomaly(2.0 * math.pi * (i - 0.5) / months) for i in range(months + 1)]
+    orbit = []
+    for month in range(months):
+        start, end = boundaries[month:month + 2]
+        span = end - start
+        count = max(1, math.ceil(span * 768 / (2.0 * math.pi) - 1.0e-10))
+        mean_factor = span * months / (
+            2.0 * math.pi * math.sqrt((1.0 - eccentricity) * (1.0 + eccentricity))
+        )
+        samples = []
+        for sample in range(count):
+            anomaly = start + (end - start) * (sample + 0.5) / count
+            cos_true, sin_true = math.cos(anomaly), math.sin(anomaly)
+            sin_longitude = sin_true * math.cos(math.radians(-75.0)) + cos_true * math.sin(math.radians(-75.0))
+            sin_declination = _clamp(math.sin(math.radians(tilt_degrees)) * sin_longitude, -1.0, 1.0)
+            samples.append((sin_declination, math.sqrt(max(0.0, 1.0 - sin_declination**2)), mean_factor))
+        orbit.append(tuple(samples))
+    return tuple(orbit)
+
+
 def _seasonal_insolation_series(
     latitude_radians: float,
     stellar_luminosity: float,
@@ -1176,50 +1233,98 @@ def _seasonal_insolation_series(
     orbital_eccentricity: float,
     months: int,
 ) -> tuple[list[float], list[float]]:
-    eccentricity = _clamp(orbital_eccentricity, 0.0, 0.8)
-    tilt = _clamp(axial_tilt_degrees, 0.0, 90.0)
-    tilt_radians = math.radians(tilt)
-    tilt_contrast = 1.0 + (tilt / 90.0 - 23.5 / 90.0) * 0.18
-    latitude_factor = 0.46 + 0.72 * max(
-        0.0, math.cos(latitude_radians)
-    ) * tilt_contrast
-    monthly: list[float] = []
-    orbital_factors: list[float] = []
-    for month in range(max(1, months)):
-        season_angle = 2.0 * math.pi * (float(month) - 5.5) / max(1, months)
-        declination = tilt_radians * math.cos(season_angle)
-        seasonal_latitude_factor = _clamp(
-            1.0 + 0.65 * math.sin(latitude_radians) * math.sin(declination),
-            0.08,
-            1.92,
-        )
-        true_anomaly = 2.0 * math.pi * float(month) / max(1, months)
-        orbital_distance_au = (1.0 - eccentricity * eccentricity) / max(
-            0.02, 1.0 + eccentricity * math.cos(true_anomaly)
-        )
-        orbital_factor = 1.0 / max(
-            0.02, orbital_distance_au * orbital_distance_au
-        )
-        monthly.append(
-            SOLAR_CONSTANT_W_M2
-            * stellar_luminosity
-            * latitude_factor
-            * seasonal_latitude_factor
-            * orbital_factor
-            / 4.0
-        )
-        orbital_factors.append(orbital_factor)
+    orbit = _replay_orbit(
+        _clamp(axial_tilt_degrees, 0.0, 90.0),
+        orbital_eccentricity, max(1, months),
+    )
+    monthly, orbital_factors = [], []
+    for samples in orbit:
+        daily, factors = [], []
+        for sin_delta, cos_delta, factor in samples:
+            constant = math.sin(latitude_radians) * sin_delta
+            amplitude = max(0.0, math.cos(latitude_radians) * cos_delta)
+            if constant >= amplitude:
+                cosine_mean = max(0.0, constant)
+            elif constant <= -amplitude:
+                cosine_mean = 0.0
+            else:
+                hour_angle = math.acos(-constant / amplitude)
+                cosine_mean = (constant * hour_angle + amplitude * math.sin(hour_angle)) / math.pi
+            daily.append(SOLAR_CONSTANT_W_M2 * stellar_luminosity * factor * cosine_mean)
+            factors.append(factor)
+        monthly.append(math.fsum(daily) / len(samples))
+        orbital_factors.append(factors[0])
     return monthly, orbital_factors
+
+
+def _climate_energy_replay_tolerance(field: str, net_roundoff: float) -> float:
+    # Keep ordinary six-decimal replay strict. Only subtractive net flux and
+    # its stress contribution inherit roundoff from their large parent fluxes.
+    if field == "net_radiative_balance_w_m2":
+        return max(1.1e-6, net_roundoff)
+    if field == "climate_energy_stress_index":
+        return max(1.1e-6, net_roundoff / 220.0)
+    return 1.1e-6
 
 
 def _validate_climate_energy(
     world: dict[str, Any], checks: list[dict[str, Any]]
 ) -> None:
+    try:
+        mode = climate_energy_validation_mode(world)
+    except ValueError as error:
+        mode, native_errors, report = "invalid", [str(error)], None
+    else:
+        native_errors, report = (
+            validate_native_climate_energy_output(world) if mode == "native" else ([], None)
+        )
+    if mode != "legacy":
+        _append_check(
+            checks,
+            domain="climate",
+            name="climate_energy_balance_replay",
+            passed=not native_errors,
+            message=(
+                "Native source-node forcing, physical columns, monthly energy ledger, "
+                "periodic closure and full cell linkage must replay independently; "
+                "legacy posthoc stress diagnostics are unavailable."
+            ),
+            observed=report or {"violation_count": len(native_errors)},
+            expected={
+                "native_certificate_and_cell_linkage_match": True,
+                "legacy_posthoc_diagnostics_present": False,
+                "unexported_thermal_trajectory_replayed": False,
+            },
+            evidence={"violations": native_errors},
+        )
+        return
     cells = world.get("cells")
     records = world.get("climate_energy_balance_records")
     summary = world.get("summary")
     violations: list[str] = []
     maximum_equation_residual = 0.0
+
+    expected_model = {
+        "insolation_method": "kepler_equal_time_months_true_anomaly_quadrature_v2",
+        "orbital_quadrature": "midpoint_true_anomaly_with_exact_kepler_time_weights",
+        "minimum_samples_per_orbit": 768,
+        "maximum_true_anomaly_step_rad": 2.0 * math.pi / 768,
+        "orbital_eccentricity_range": "[0,1)",
+        "calendar": "equal_duration_months_periapsis_at_month_zero_center",
+        "solar_longitude_at_periapsis_deg": -75.0,
+        "semimajor_axis_au": 1.0,
+        "solar_constant_w_m2": SOLAR_CONSTANT_W_M2,
+        "daily_rotation_averaged": True,
+        "orbital_motion_during_rotation_resolved": False,
+        "native_temperature_forcing_coupled": False,
+        "albedo_greenhouse_model": "posthoc_empirical_graybody_surface_diagnostic_v2",
+        "surface_longwave_emissivity": SURFACE_LONGWAVE_EMISSIVITY,
+        "global_energy_conservation_resolved": False,
+        "mean_summary_weighting": "cell_count",
+        "area_weighted_summary_weighting": "cell_area_km2_complete_coverage_only",
+    }
+    if world.get("climate_energy_model") != expected_model:
+        _record_violation(violations, "climate energy model declaration is inconsistent")
 
     if not isinstance(cells, list) or not cells or not all(
         isinstance(cell, dict) for cell in cells
@@ -1261,9 +1366,10 @@ def _validate_climate_energy(
     greenhouse_factor = max(0.0, _planet_value(world, "greenhouse_factor", 1.0))
     pressure_bar = max(0.0, _planet_value(world, "atmosphere_pressure_bar", 1.0))
     axial_tilt = _clamp(_planet_value(world, "axial_tilt_deg", 23.5), 0.0, 90.0)
-    eccentricity = _clamp(
-        _planet_value(world, "orbital_eccentricity", 0.016), 0.0, 0.8
-    )
+    eccentricity = _planet_value(world, "orbital_eccentricity", 0.016)
+    if not math.isfinite(eccentricity) or not 0.0 <= eccentricity < 1.0:
+        _record_violation(violations, "orbital eccentricity must be in [0, 1)")
+        eccentricity = 0.0
 
     required_fields = {
         "id",
@@ -1295,6 +1401,7 @@ def _validate_climate_energy(
         "climate_energy_stress_index",
     }
     expected_by_cell: dict[int, dict[str, Any]] = {}
+    net_roundoff_by_cell: dict[int, float] = {}
     regime_counts: Counter[str] = Counter()
     sums = Counter()
     high_stress_count = 0
@@ -1342,30 +1449,42 @@ def _validate_climate_energy(
         orbital_variability = _clamp(seasonal_range / max(1.0, top))
         mean_orbital_factor = sum(orbital_factors) / len(orbital_factors)
         absorbed = top * (1.0 - albedo)
-        no_greenhouse_c = (
-            (absorbed / STEFAN_BOLTZMANN_W_M2_K4) ** 0.25 - 273.15
+        no_greenhouse_kelvin = (
+            (absorbed / (SURFACE_LONGWAVE_EMISSIVITY * STEFAN_BOLTZMANN_W_M2_K4)) ** 0.25
             if absorbed > 0.0
-            else -273.15
+            else 0.0
         )
-        equilibrium_c = (
-            no_greenhouse_c
-            + greenhouse_effect
-            + ocean_current_temperature * 0.35
-        )
+        no_greenhouse_c = no_greenhouse_kelvin - 273.15
+        thermal_increment = greenhouse_effect + ocean_current_temperature * 0.35
+        equilibrium_c = no_greenhouse_c + thermal_increment
         observed_kelvin = max(1.0, observed_temperature + 273.15)
-        equilibrium_kelvin = max(1.0, equilibrium_c + 273.15)
         outgoing = (
             SURFACE_LONGWAVE_EMISSIVITY
             * STEFAN_BOLTZMANN_W_M2_K4
             * observed_kelvin**4
         )
-        equilibrium_longwave = (
-            SURFACE_LONGWAVE_EMISSIVITY
-            * STEFAN_BOLTZMANN_W_M2_K4
-            * equilibrium_kelvin**4
+        # Independently expand the fourth-power increment, preserving the
+        # existing 1 K floor without cancellation against absorbed flux.
+        delta = max(thermal_increment, 1.0 - no_greenhouse_kelvin)
+        fourth_power_increment = (
+            4.0 * no_greenhouse_kelvin**3 * delta
+            + 6.0 * no_greenhouse_kelvin**2 * delta**2
+            + 4.0 * no_greenhouse_kelvin * delta**3
+            + delta**4
         )
-        trapping = max(0.0, equilibrium_longwave - absorbed)
+        trapping = max(
+            0.0,
+            SURFACE_LONGWAVE_EMISSIVITY * STEFAN_BOLTZMANN_W_M2_K4
+            * fourth_power_increment,
+        )
         net = absorbed + trapping - outgoing
+        parent_fluxes = (absorbed, trapping, outgoing)
+        # Independent quadrature can differ by a few ulps before the
+        # large fluxes cancel. Use replayed inputs, never reported values.
+        net_roundoff_by_cell[cell_id] = (
+            16.0 * math.ulp(max(parent_fluxes))
+            if all(math.isfinite(value) for value in parent_fluxes) else 0.0
+        )
         residual_c = observed_temperature - equilibrium_c
         stress = _clamp(abs(residual_c) / 28.0 + abs(net) / 220.0)
         expected = {
@@ -1408,7 +1527,6 @@ def _validate_climate_energy(
         sums["peak"] += peak
         sums["low"] += low
         sums["orbital_factor"] += mean_orbital_factor
-        high_stress_count += stress >= 0.65
 
     seen_cell_ids: set[int] = set()
     for index, record in enumerate(records):
@@ -1468,7 +1586,7 @@ def _validate_climate_energy(
                 maximum_equation_residual = max(
                     maximum_equation_residual, residual
                 )
-                if not _close(actual, expected_value, absolute=1.1e-6, relative=0.0):
+                if not _close(actual, expected_value, absolute=1.1e-6, relative=2.0e-12):
                     _record_violation(
                         violations,
                         f"energy record[{index}] monthly insolation does not replay",
@@ -1488,7 +1606,9 @@ def _validate_climate_energy(
             )
             maximum_equation_residual = max(maximum_equation_residual, residual)
             if not _close(
-                record.get(field), expected_value, absolute=1.1e-6, relative=0.0
+                record.get(field), expected_value,
+                absolute=_climate_energy_replay_tolerance(field, net_roundoff_by_cell[cell_id]),
+                relative=2.0e-12,
             ):
                 _record_violation(
                     violations, f"energy record[{index}] {field} does not replay"
@@ -1521,6 +1641,11 @@ def _validate_climate_energy(
                     violations, f"energy record[{index}] {field} is out of range"
                 )
 
+        # Published stress has already been checked against independent replay.
+        # Count its exact threshold classification, including export rounding.
+        published_stress = _number(record.get("climate_energy_stress_index"))
+        high_stress_count += published_stress is not None and published_stress >= 0.65
+
         cell_mirrors = {
             "top_of_atmosphere_insolation_w_m2": "top_of_atmosphere_insolation_w_m2",
             "surface_albedo_index": "surface_albedo_index",
@@ -1541,8 +1666,8 @@ def _validate_climate_energy(
             if not _close(
                 cell.get(cell_field),
                 expected[expected_field],
-                absolute=1.1e-6,
-                relative=0.0,
+                absolute=_climate_energy_replay_tolerance(expected_field, net_roundoff_by_cell[cell_id]),
+                relative=2.0e-12,
             ):
                 _record_violation(
                     violations,
@@ -1582,6 +1707,7 @@ def _validate_climate_energy(
         "orbital_eccentricity": eccentricity,
         "high_climate_energy_stress_cell_count": high_stress_count,
     }
+    mean_net_roundoff = math.fsum(net_roundoff_by_cell.values()) / divisor
     for field, expected in expected_summary.items():
         if field in {
             "climate_energy_balance_record_count",
@@ -1591,7 +1717,11 @@ def _validate_climate_energy(
                 _record_violation(
                     violations, f"summary {field} does not mirror energy records"
                 )
-        elif not _close(summary.get(field), expected, absolute=1.1e-6, relative=0.0):
+        elif not _close(
+            summary.get(field), expected,
+            absolute=_climate_energy_replay_tolerance(field.removeprefix("mean_"), mean_net_roundoff),
+            relative=2.0e-12,
+        ):
             _record_violation(
                 violations, f"summary {field} does not mirror the energy replay"
             )
@@ -1601,6 +1731,47 @@ def _validate_climate_energy(
         _record_violation(
             violations, "summary surface_albedo_regime_counts is inconsistent"
         )
+
+    areas = [_number(cell.get("area_km2")) for cell in cells]
+    valid_areas = [area for area in areas if area is not None and area > 0.0]
+    represented_area = sum(valid_areas)
+    complete_area = bool(cells) and len(valid_areas) == len(cells) and math.isfinite(represented_area)
+    if _integer(summary.get("climate_energy_valid_area_cell_count")) != len(valid_areas):
+        _record_violation(violations, "summary climate_energy_valid_area_cell_count is inconsistent")
+    reported_area = summary.get("climate_energy_represented_area_km2")
+    if math.isfinite(represented_area):
+        if not _close(reported_area, represented_area, absolute=1.0e-6, relative=2.0e-12):
+            _record_violation(violations, "summary climate_energy_represented_area_km2 is inconsistent")
+    elif "climate_energy_represented_area_km2" not in summary or reported_area is not None:
+        _record_violation(violations, "summary climate_energy_represented_area_km2 must be unavailable")
+    if summary.get("climate_energy_area_weighted_summary_available") is not complete_area:
+        _record_violation(violations, "summary climate_energy_area_weighted_summary_available is inconsistent")
+    for field in (
+        "top_of_atmosphere_insolation_w_m2",
+        "absorbed_shortwave_w_m2",
+        "outgoing_longwave_w_m2",
+        "greenhouse_trapping_w_m2",
+        "net_radiative_balance_w_m2",
+    ):
+        summary_field = f"area_weighted_mean_{field}"
+        if not complete_area:
+            if summary_field not in summary or summary[summary_field] is not None:
+                _record_violation(violations, f"summary {summary_field} must be unavailable")
+        elif len(expected_by_cell) == len(cells):
+            expected_mean = math.fsum(
+                expected_by_cell[int(cell["id"])][field] * (area / represented_area)
+                for cell, area in zip(cells, areas)
+            )
+            weighted_net_roundoff = math.fsum(
+                net_roundoff_by_cell[int(cell["id"])] * (area / represented_area)
+                for cell, area in zip(cells, areas)
+            )
+            if not _close(
+                summary.get(summary_field), expected_mean,
+                absolute=_climate_energy_replay_tolerance(field, weighted_net_roundoff),
+                relative=2.0e-12,
+            ):
+                _record_violation(violations, f"summary {summary_field} does not mirror the energy replay")
 
     _append_check(
         checks,
@@ -2503,6 +2674,19 @@ def validate_physics_replays(world: dict[str, Any]) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     if not isinstance(world, dict):
         world = {}
+    grounded_errors = validate_grounded_ice(world)
+    try:
+        grounded_current = grounded_ice_version(world) == 1
+    except (ValueError, TypeError, OverflowError):
+        grounded_current = True
+    if grounded_current:
+        _append_check(
+            checks, domain="cryosphere", name="grounded_ice_domain_and_membership",
+            passed=not grounded_errors,
+            message="Current grounded ice uses exact exposed-land applicability, native thickness, active components and permitted context links.",
+            observed={"violations": grounded_errors}, expected="zero grounded-domain violations",
+            evidence={"violations": grounded_errors},
+        )
     _validate_plate_aggregates(world, checks)
     boundary_edges = validate_plate_boundary_edges(world)
     _append_check(

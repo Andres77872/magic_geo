@@ -627,6 +627,7 @@ There is no wave model, no tidal range, no fetch-limited wave growth and no sedi
 | Constant | Value |
 |---|---|
 | `REEF_GROWTH_THRESHOLD` | `0.46` |
+| `REEF_THERMAL_MINIMUM_C`, `REEF_THERMAL_MAXIMUM_C` | `4`, `39`; exclusive support bounds for positive growth |
 | `VOLCANIC_LANDFORMS` | `{"volcanic_arc", "island_arc", "ridge"}` |
 | `REEF_COASTAL_FEATURE_TYPES` | `{"beach", "barrier_bar", "barrier_island", "coastal_cliff"}` (declared; not referenced by the scoring path) |
 | `REEF_LANDMASS_CLASSES` | `{"islet", "island", "large_island"}` |
@@ -642,6 +643,10 @@ Note `VOLCANIC_LANDFORMS` contains `island_arc` and `ridge`, neither of which is
 3. the cell has ≥1 land neighbour.
 
 So reefs only ever occur on marine cells that touch land. Open-ocean cells score zero by construction, which is why `patch_reef` (the `_reef_type` fallback for zero land neighbours, `reef_diagnostics.py:232`) is unreachable at cell level and only appears as the record-level `_primary_key` fallback default.
+
+The `heuristic_coastal_reef_v2` model additionally requires the annual temperature and all 12 supplied monthly means to lie strictly inside `(4, 39) °C`. Otherwise growth is zero, while sediment, wave, island and bleaching diagnostics remain available. Only an absent monthly field permits an annual-only fallback; malformed, empty or nonfinite monthly input is ineligible. This fixes the earlier additive score, whose nonthermal bonuses could qualify a reef even when temperature suitability was zero. The published `reef_diagnostics_model` identifies the bounds and fallback policy.
+
+These are the existing empirical curve's support limits, not universal coral survival limits. The model uses surface-column temperature and does not resolve brief extremes, coral species physiology or deep-water habitat temperature. Its legacy bleaching index remains a heuristic; it is not observed accumulated thermal stress.
 
 ### Sub-index formulas
 
@@ -676,7 +681,7 @@ reef_growth_index = clamp(
 )                                                   # reef_diagnostics.py:201-211
 ```
 
-A cell is a reef candidate when `reef_growth_index >= 0.46` (`reef_diagnostics.py:307`).
+A cell is a reef candidate when the thermal gate passes and `reef_growth_index >= 0.46`. The weights and threshold above are unchanged for eligible cells.
 
 ### Type classification
 

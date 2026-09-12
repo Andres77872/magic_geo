@@ -112,18 +112,25 @@ def _system_cells(group: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(candidates or group, key=lambda cell: int(cell.get("id", -1)))
 
 
-def _weighted_layer_average(column: dict[str, Any] | None, key: str) -> float:
+def _weighted_layer_average(column: dict[str, Any] | None, key: str) -> float | None:
+    """Return None only when no layer supplies this property.
+
+    Partially missing properties retain their existing zero contribution and
+    thickness weight; a supplied zero is available evidence, not a default.
+    """
     layers = column.get("layers", []) if isinstance(column, dict) else []
     if not isinstance(layers, list) or not layers:
-        return 0.0
+        return None
     weights = [max(0.001, float(layer.get("thickness_m", 0.0))) for layer in layers if isinstance(layer, dict)]
     if not weights:
-        return 0.0
+        return None
     weighted_sum = sum(
         max(0.001, float(layer.get("thickness_m", 0.0))) * _clamp(float(layer.get(key, 0.0)))
         for layer in layers
         if isinstance(layer, dict)
     )
+    if not any(key in layer for layer in layers if isinstance(layer, dict)):
+        return None
     return weighted_sum / sum(weights)
 
 
@@ -205,6 +212,12 @@ def enrich_world_with_sedimentary_resource_systems(world: dict[str, Any]) -> dic
         layer_organic = _weighted_layer_average(column, "organic_potential")
         layer_reservoir = _weighted_layer_average(column, "reservoir_quality")
         layer_seal = _weighted_layer_average(column, "seal_quality")
+        if layer_organic is None:
+            layer_organic = 0.35
+        if layer_reservoir is None:
+            layer_reservoir = 0.28
+        if layer_seal is None:
+            layer_seal = 0.30
         organic_facies = _weighted_facies_fraction(column, ORGANIC_FACIES)
         reservoir_facies = _weighted_facies_fraction(column, RESERVOIR_FACIES)
         seal_facies = _weighted_facies_fraction(column, SEAL_FACIES)
@@ -224,7 +237,7 @@ def enrich_world_with_sedimentary_resource_systems(world: dict[str, Any]) -> dic
             ]
         )
         source_rock = _clamp(
-            (layer_organic or 0.35) * 0.40
+            layer_organic * 0.40
             + organic_facies * 0.18
             + sediment_index * 0.14
             + subsidence * 0.10
@@ -232,14 +245,14 @@ def enrich_world_with_sedimentary_resource_systems(world: dict[str, Any]) -> dic
             + (0.06 if str(basin.get("dominant_resource", "none")) == "sedimentary_fuels" else 0.0)
         )
         reservoir_quality = _clamp(
-            (layer_reservoir or 0.28) * 0.50
+            layer_reservoir * 0.50
             + reservoir_facies * 0.24
             + sediment_index * 0.10
             + marine_facies * 0.08
             + fuel_deposit_evidence * 0.08
         )
         seal_quality = _clamp(
-            (layer_seal or 0.30) * 0.56
+            layer_seal * 0.56
             + seal_facies * 0.16
             + subsidence * 0.10
             + evaporite_deposit_evidence * 0.10
@@ -271,7 +284,7 @@ def enrich_world_with_sedimentary_resource_systems(world: dict[str, Any]) -> dic
             + maturity_age * 0.18
         )
         coal_potential = _clamp(
-            (layer_organic or 0.35) * 0.24
+            layer_organic * 0.24
             + coal_facies * 0.24
             + wet_organic_fraction * 0.18
             + sediment_index * 0.12

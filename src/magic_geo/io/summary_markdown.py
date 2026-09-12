@@ -7,9 +7,21 @@ from typing import Any
 
 
 def write_summary_markdown(path: Path, world: dict[str, Any]) -> None:
+    from ..public_estimate_display import display_contract
+    contract = display_contract(world)
     path.parent.mkdir(parents=True, exist_ok=True)
     summary = world.get("summary", {})
     backend = world.get("backend", {})
+    social_model = world.get("native_social_availability_model", {})
+    population_model = world.get("population_region_model", {})
+    modeled_population_scope = (
+        world.get("generation_scope") != "geo_only"
+        and isinstance(social_model, dict)
+        and social_model.get("model_type") == "native_settlement_source_complete_social_estimates_v1"
+        and isinstance(population_model, dict)
+        and population_model.get("model_type") == "causal_area_weighted_capacity_occupancy_population_regions_v2"
+        and population_model.get("membership_model") == "nonwater_political_region_cells_v1"
+    )
 
     lines = [
         f"# {world.get('name', 'magic-geo world')}",
@@ -939,6 +951,8 @@ def write_summary_markdown(path: Path, world: dict[str, Any]) -> None:
         "ocean_current_regime_counts",
         "ocean_current_system_class_counts",
         "mean_distance_to_marine_water_km",
+        "marine_distance_defined_cell_count",
+        "no_marine_source_cell_count",
         "mean_continentality_index",
         "max_continentality_index",
         "high_continentality_cell_count",
@@ -966,6 +980,30 @@ def write_summary_markdown(path: Path, world: dict[str, Any]) -> None:
         "max_climate_humidity_storage_mm",
         "max_climate_monsoon_index",
         "climate_energy_balance_record_count",
+        "native_climate_energy_record_count",
+        "native_climate_energy_total_area_m2",
+        "native_climate_energy_year_duration_seconds",
+        *(
+            f"{weight}_{field}"
+            for weight in ("cell_count_mean", "area_weighted_mean")
+            for field in (
+                "effective_toa_albedo", "effective_longwave_emissivity",
+                "annual_absorbed_shortwave_w_m2", "annual_emitted_longwave_w_m2",
+                "annual_net_radiative_flux_w_m2", "annual_horizontal_heat_convergence_w_m2",
+                "annual_net_heating_w_m2", "annual_heat_storage_tendency_w_m2",
+                "annual_energy_balance_residual_w_m2",
+                "annual_mean_abs_energy_balance_residual_w_m2",
+                "annual_mean_energy_balance_numerical_allowance_w_m2",
+            )
+        ),
+        "climate_energy_area_weighted_summary_available",
+        "climate_energy_valid_area_cell_count",
+        "climate_energy_represented_area_km2",
+        "area_weighted_mean_top_of_atmosphere_insolation_w_m2",
+        "area_weighted_mean_absorbed_shortwave_w_m2",
+        "area_weighted_mean_outgoing_longwave_w_m2",
+        "area_weighted_mean_greenhouse_trapping_w_m2",
+        "area_weighted_mean_net_radiative_balance_w_m2",
         "mean_top_of_atmosphere_insolation_w_m2",
         "mean_seasonal_insolation_range_w_m2",
         "mean_orbital_insolation_variability_index",
@@ -991,6 +1029,7 @@ def write_summary_markdown(path: Path, world: dict[str, Any]) -> None:
         "climate_realism_pass_count",
         "climate_realism_pass_fraction",
         "mean_climate_realism_score",
+        "grounded_ice_model",
         "mean_ice_thickness_m",
         "mean_glacial_erosion_m",
         "mean_ice_surface_mass_balance_m_y",
@@ -1088,6 +1127,7 @@ def write_summary_markdown(path: Path, world: dict[str, Any]) -> None:
         "groundwater_recharge_model",
         "high_productivity_aquifer_cell_count",
         "groundwater_stressed_cell_count",
+        "high_natural_limitation_aquifer_cell_count",
         "total_groundwater_recharge_km3_y",
         "total_groundwater_recharge_source_infiltration_km3_y",
         "total_vadose_zone_retention_km3_y",
@@ -1097,6 +1137,7 @@ def write_summary_markdown(path: Path, world: dict[str, Any]) -> None:
         "mean_aquifer_quality_index",
         "mean_aquifer_productivity_index",
         "mean_aquifer_extraction_risk_index",
+        "mean_aquifer_natural_limitation_index",
         "groundwater_flow_model",
         "groundwater_flow_cell_count",
         "groundwater_flow_system_count",
@@ -1113,6 +1154,7 @@ def write_summary_markdown(path: Path, world: dict[str, Any]) -> None:
         "mean_groundwater_discharge_mm_y",
         "mean_spring_discharge_index",
         "mean_baseflow_support_index",
+        "karst_diagnostics_model",
         "karst_cell_count",
         "karst_system_count",
         "mean_karst_potential_index",
@@ -1121,6 +1163,26 @@ def write_summary_markdown(path: Path, world: dict[str, Any]) -> None:
         "limestone_karst_cell_fraction",
         "vegetation_succession_history_count",
         "vegetation_succession_step_count",
+        "terrestrial_primary_climate_supported_cell_count",
+        "primary_productivity_supported_cell_count",
+        "vegetation_biomass_supported_cell_count",
+        "forest_growth_supported_cell_count",
+        "vegetation_succession_supported_cell_count",
+        "species_richness_supported_cell_count",
+        "ecosystem_wildfire_spread_risk_supported_cell_count",
+        "ecosystem_disturbance_pressure_supported_cell_count",
+        "vegetation_recovery_supported_cell_count",
+        "species_composition_confidence_supported_cell_count",
+        "species_endemism_supported_cell_count",
+        "species_record_descriptors_supported_cell_count",
+        "wildfire_fuel_continuity_supported_cell_count",
+        "wildfire_firebreak_supported_cell_count",
+        "wildfire_ignition_potential_supported_cell_count",
+        "wildfire_unavailable_cell_count",
+        "wildfire_partial_front_history_count",
+        "wildfire_unmodelled_adjacent_cell_count",
+        "wildfire_unmodelled_front_edge_count",
+        "wildfire_supported_front_edge_count",
         "mean_primary_productivity_index",
         "mean_vegetation_biomass_index",
         "mean_species_richness_index",
@@ -1213,6 +1275,12 @@ def write_summary_markdown(path: Path, world: dict[str, Any]) -> None:
         "mean_commodity_occurrence_potential_index",
         "mean_commodity_occurrence_confidence_index",
         "land_use_zone_model",
+        "agricultural_habitat_applicable_cell_count",
+        "agricultural_climate_supported_cell_count",
+        "agricultural_potential_supported_cell_count",
+        "mining_surface_applicable_cell_count",
+        "agricultural_potential_supported_area_km2",
+        "unsupported_terrestrial_agricultural_cell_count",
         "agricultural_zone_count",
         "agricultural_zone_cell_count",
         "agricultural_zone_total_area_km2",
@@ -1263,7 +1331,72 @@ def write_summary_markdown(path: Path, world: dict[str, Any]) -> None:
         "mean_calibration_score",
     ]:
         if key in summary:
-            lines.append(f"- `{key}`: {summary[key]}")
+            lines.append(f"- `{key}`: {summary[key] if summary[key] is not None else 'Unavailable'}")
+            if key == "estimated_world_population" and modeled_population_scope:
+                lines.append("  Population total sums modeled population regions, whose membership follows political regions. An empty region set has a supported sum of zero; this does not establish that the world is uninhabited. Unavailable member estimates remain unavailable.")
+
+    marine_distance_model = world.get("climate_continentality_model", {})
+    if (isinstance(marine_distance_model, dict)
+            and marine_distance_model.get("model_type") == "marine_source_aware_continentality_v1"):
+        lines.append("- Marine distance scope: distance is mesh shortest-path distance to a declared marine source. A null distance with `marine_distance_status=no_marine_source` means there is no marine source; it is not zero coastal distance. Mean distance includes only defined distances and is unavailable when none are defined. The oceanic humidity and coastal contributions are zero without a marine source; this does not mean absent total humidity or rainfall.")
+
+    land_use_model = world.get("land_use_zone_model", {})
+    if isinstance(land_use_model, dict) and land_use_model.get("model_type") in {"causal_soil_climate_resource_connected_land_use_zones_v2", "causal_soil_climate_resource_connected_land_use_zones_v3"}:
+        lines.append("- Agricultural availability: potential is estimated only for exposed land with supported annual air climate and required inputs. A false support flag makes a stored zero unavailable; a supported zero remains valid. All-cell means include unavailable zeros, so read them with supported-cell counts and area. This model does not predict crop survival or yield.")
+        lines.append("- Mining surface applicability: underwater surface extraction is outside this model; geological deposits remain present. The surface flag does not establish complete mining inputs or economic access, and mining is not gated by agricultural temperature support.")
+    elif isinstance(land_use_model, dict) and land_use_model.get("model_type") == "causal_soil_climate_resource_connected_land_use_zones_v1":
+        lines.append("- Historical land-use estimates: agricultural availability and mining surface applicability are undeclared. Original values and means are retained.")
+
+    if "native_social_availability_model" in world or any(
+        key in summary for key in ("mining_potential_supported_cell_count", "navigability_supported_cell_count", "resource_accessibility_supported_deposit_count")
+    ):
+        lines.extend(["", "## Estimate availability", "",
+            "New derived estimates use null for unavailable inputs and retain numeric zero when supported. Selection completeness is separate from the number of emitted records. Settlement scores retain their declared dry sentinel and structural water-zero convention."])
+        for key, value in sorted(summary.items()):
+            if any(term in key for term in ("_available", "_supported", "_complete", "_applicable", "_availability", "geographic_", "recorded_")):
+                lines.append(f"- `{key}`: {value if value is not None else 'Unavailable'}")
+        for key in ("native_social_availability_model", "resource_deposit_model", "commodity_occurrence_model", "ore_genesis_model", "navigability_model", "port_site_model", "route_corridor_model", "land_use_zone_model"):
+            if key in contract["models"]:
+                lines.append(f"- `{key}`: {contract['models'][key].get('model_type', contract['models'][key].get('model'))}")
+        if world.get("generation_scope") == "geo_only":
+            lines.append("- Geography-only economic scope: full economic estimates are unavailable. Separately named geographic baselines omit human-site inputs and are not full economic suitability.")
+
+    grounded_ice_model = world.get("grounded_ice_model", {})
+    if (isinstance(grounded_ice_model, dict)
+            and grounded_ice_model.get("model_type") == "exposed_land_annual_grounded_ice_diagnostic_v1"):
+        lines.append("- Grounded ice scope: the annual diagnostic applies to exposed nonmarine, nonlake cells. Water-cell zeros mean this grounded process is inapplicable; lake and sea ice are unmodeled. A sheet reference may identify adjacent glacial terrain rather than active ice; membership uses raw roundtrip thickness, not display rounding. This is not a seasonal mass/energy or time-evolution model. Mean thickness includes all cells; glaciated_land_fraction retains its nonmarine denominator, including lakes.")
+
+    ecosystem_model = world.get("ecosystem_dynamics_model", {})
+    if isinstance(ecosystem_model, dict) and ecosystem_model.get("model") in (
+        "heuristic_ecosystem_climate_support_v4", "heuristic_ecosystem_climate_support_v5",
+    ):
+        lines.append("- Ecology availability: these estimates use annual air climate and their required inputs. An unavailable stored zero is not measured absence of growth, biomass or species. All-cell means include those zeros; read them together with the supported-cell counts.")
+        if ecosystem_model.get("model") == "heuristic_ecosystem_climate_support_v5":
+            lines.append("- Ecosystem activity scope: prescribed natural disturbance omits settlement suitability without replacement or renormalization. Human activity is outside this scenario; this does not infer an uninhabited world or observed disturbance history.")
+    species_model = world.get("species_ranges_model", {})
+    if isinstance(species_model, dict) and species_model.get("model") in (
+        "heuristic_species_parent_support_v3", "heuristic_species_parent_support_v4",
+    ):
+        lines.append("- Species score coverage: complete means every habitat-applicable guild has a supported score; partial or unavailable means some estimates cannot be made. It does not count actual species. Range records additionally need supported common descriptors, so complete score coverage can coexist with no range records.")
+    fire_model = world.get("wildfire_disturbance_model", {})
+    if isinstance(fire_model, dict) and fire_model.get("model") in (
+        "heuristic_wildfire_parent_availability_v4", "heuristic_wildfire_native_seasonal_parent_availability_v5",
+        "heuristic_wildfire_prescribed_natural_parent_availability_v6",
+        "heuristic_wildfire_native_seasonal_prescribed_natural_parent_availability_v7",
+    ):
+        lines.append("- Wildfire coverage: unavailable fuel does not establish an empty fuel supply or a fire barrier. Partial fronts have neighbors whose spread cannot be estimated. Containment is an index over modeled cells, not evidence of physical containment; the front counts describe examined adjacency only.")
+        if fire_model.get("model") in (
+            "heuristic_wildfire_prescribed_natural_parent_availability_v6",
+            "heuristic_wildfire_native_seasonal_prescribed_natural_parent_availability_v7",
+        ):
+            lines.append("- Wildfire activity scope: the prescribed natural ignition index omits settlement suitability. It is a dimensionless susceptibility estimate, not a calibrated ignition frequency or a history of human fire use. The legacy-climate variant retains its historical energy-stress proxy.")
+
+    reef_model = world.get("reef_diagnostics_model")
+    if isinstance(reef_model, dict) and (
+        reef_model.get("model") == "heuristic_coastal_reef_native_seasonal_v3"
+        and reef_model.get("bleaching_estimate_available") is False
+    ):
+        lines.append("- Reef bleaching: not estimated; an independent reference climatology and bleaching time history are unavailable.")
 
     for section in [
         "boundary_counts",
@@ -1289,6 +1422,8 @@ def write_summary_markdown(path: Path, world: dict[str, Any]) -> None:
         "groundwater_flow_regime_counts",
         "vegetation_succession_stage_counts",
         "renewable_resource_type_counts",
+        "species_score_supported_cell_counts",
+        "species_composition_status_counts",
         "species_guild_type_counts",
         "species_habitat_class_counts",
         "dominant_species_guild_counts",

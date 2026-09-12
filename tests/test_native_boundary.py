@@ -28,7 +28,7 @@ import msgpack
 
 from magic_geo import native as native_module
 from magic_geo import serialization as serialization_module
-from magic_geo.config import config_to_native, load_config
+from magic_geo.config import config_to_native
 from magic_geo.native import backend_info, generate_geo_world, generate_world
 from magic_geo.planet_parameters import PLANET_PARAMETER_DEFAULTS
 from magic_geo.serialization import (
@@ -45,6 +45,7 @@ from magic_geo.serialization import (
 
 from support.builders import sample_world
 from support.nativestub import patch_loaded_library
+from support.worlds import build_legacy_config
 
 
 _ABSENT = object()
@@ -547,7 +548,8 @@ class NativeSchemaGateTests(TestCase):
 class NativeGenerationArgumentTests(TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        config = load_config(Path("configs/earthlike_seed.yaml"))
+        # Argument and serialization compatibility of the preserved V3 entry.
+        config = build_legacy_config()
         data = config.model_dump(mode="python")
         data["mesh"]["cell_count"] = 128
         data["tectonics"]["plate_count"] = 8

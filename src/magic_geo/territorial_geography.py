@@ -6,7 +6,7 @@ from typing import Any
 TERRITORIAL_SNAPSHOT_MODEL = "causal_era_scaled_spherical_region_territorial_snapshots_v1"
 
 
-def enrich_world_with_territorial_geography_model(world: dict[str, Any]) -> dict[str, Any]:
+def _legacy_enrich_world_with_territorial_geography_model(world: dict[str, Any]) -> dict[str, Any]:
     snapshots = world.get("territorial_snapshots", [])
     if not isinstance(snapshots, list):
         return world
@@ -30,3 +30,11 @@ def enrich_world_with_territorial_geography_model(world: dict[str, Any]) -> dict
     }
     world.setdefault("summary", {})["territorial_snapshot_model"] = TERRITORIAL_SNAPSHOT_MODEL
     return world
+
+
+def enrich_world_with_territorial_geography_model(world: dict[str, Any]) -> dict[str, Any]:
+    from .native_social_models import annotate_native_social_models
+
+    return annotate_native_social_models(
+        world, _legacy_enrich_world_with_territorial_geography_model, ('territorial_snapshot_model',),
+    )

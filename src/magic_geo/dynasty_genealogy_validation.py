@@ -415,6 +415,13 @@ def _contains_expected(actual: Any, expected: Any) -> bool:
 
 
 def validate_dynasty_genealogy_replay(payload: dict[str, Any]) -> list[str]:
+    from .native_dynasty_genealogy_validation import genealogy_version
+    try:
+        if genealogy_version(payload) == 2:
+            from .native_dynasty_genealogy_validation import validate_native_dynasty_genealogy
+            return validate_native_dynasty_genealogy(payload)
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+        return ["ruler genealogy model or causal replay invalid"]
     try:
         summary = payload.get("summary", {})
         required_lists = (

@@ -13,9 +13,9 @@ are broken together in one invocation; checks reached through a loop that stops
 at its first offending record get one invocation each, because a second tamper
 in the same loop would never be evaluated.
 
-``small_smoke`` (256 cells) is the cheapest canonical world that actually
-contains conflicts, campaign operations, borders and marriage alliances -- all of
-which are empty at 128 cells -- so the whole file shares it.
+``mid_512`` retains multiple populated regions, conflicts, campaign operations,
+borders and marriage alliances after standing lake cells are excluded from
+settlement selection. The whole file shares that populated control.
 
 Every case runs through :meth:`report_for`, which refuses a tamper that leaves the
 world untouched and refuses an exit code that came from an exception rather than
@@ -45,7 +45,7 @@ import pytest
 pytestmark = pytest.mark.slow
 
 #: The cheapest canonical world holding every record family exercised here.
-WORLD_KEY = "small_smoke"
+WORLD_KEY = "mid_512"
 
 Tamper = Callable[[dict[str, Any]], Any]
 
@@ -87,7 +87,11 @@ def _replace_ref(family: str, key: str) -> Tamper:
     """
 
     def tamper(world: dict[str, Any]) -> None:
-        world[family][0][key][0] = 999999
+        for record in world[family]:
+            if record[key]:
+                record[key][0] = 999999
+                return
+        raise AssertionError(f"the fixture has no {family} record with {key}")
 
     return tamper
 
@@ -403,6 +407,7 @@ def _rehome_price_iteration(world: dict[str, Any]) -> None:
         if int(market["id"]) != current:
             iteration["market_exchange_id"] = int(market["id"])
             return
+    raise AssertionError("the fixture has no second market exchange")
 
 
 LOGISTICS_RECORD_TAMPERS: tuple[tuple[str, Tamper], ...] = (
@@ -473,9 +478,12 @@ def _scale_campaign_path(world: dict[str, Any]) -> None:
     The per-segment distances no longer add up to the declared path length, which
     is a different branch from the distance/path-length cross-check.
     """
-    campaign = world["campaign_movements"][0]
-    campaign["distance_km"] = float(campaign["distance_km"]) * 2.0
-    campaign["path_length_km"] = float(campaign["path_length_km"]) * 2.0
+    for campaign in world["campaign_movements"]:
+        if float(campaign["path_length_km"]) > 0.0:
+            campaign["distance_km"] = float(campaign["distance_km"]) * 2.0
+            campaign["path_length_km"] = float(campaign["path_length_km"]) * 2.0
+            return
+    raise AssertionError("the fixture has no campaign with a nonzero path")
 
 
 def _front_occupied_cell_dangling(world: dict[str, Any]) -> None:
@@ -485,6 +493,7 @@ def _front_occupied_cell_dangling(world: dict[str, Any]) -> None:
             if len(step["occupied_cell_ids"]) > 1:
                 step["occupied_cell_ids"][0] = 999999
                 return
+    raise AssertionError("the fixture has no front step with multiple occupied cells")
 
 
 def _front_line_cell_dangling(world: dict[str, Any]) -> None:
@@ -493,6 +502,7 @@ def _front_line_cell_dangling(world: dict[str, Any]) -> None:
             if step["front_line_cell_ids"]:
                 step["front_line_cell_ids"][0] = 999999
                 return
+    raise AssertionError("the fixture has no front-line cell")
 
 
 CAMPAIGN_RECORD_TAMPERS: tuple[tuple[str, Tamper], ...] = (
@@ -539,6 +549,7 @@ def _rehome_life_event(world: dict[str, Any]) -> None:
         if int(region["id"]) != current:
             event["population_region_id"] = int(region["id"])
             return
+    raise AssertionError("the fixture has no second population region")
 
 
 def _property_transfer_without_inheritance(world: dict[str, Any]) -> None:
@@ -546,6 +557,7 @@ def _property_transfer_without_inheritance(world: dict[str, Any]) -> None:
         if event.get("event_type") == "property_transfer":
             event["inheritance_fraction"] = 0.0
             return
+    raise AssertionError("the fixture has no property-transfer event")
 
 
 DEMOGRAPHIC_RECORD_TAMPERS: tuple[tuple[str, Tamper], ...] = (
@@ -782,7 +794,9 @@ class ValidateHistoryAndGraphGateTest(TestCase):
         """
         world = copy.deepcopy(self.baseline)
         tamper(world)
-        self.assertNotEqual(world, self.baseline, "the tamper left the world unchanged")
+        # Avoid dumping two entire generated worlds when a fixture no longer
+        # carries the relationship a mutation is meant to break.
+        self.assertTrue(world != self.baseline, "the tamper left the world unchanged")
         path = self.work_dir / "tampered.json"
         write_json(path, world)
         result = CliRunner().invoke(app, ["validate", "--world", str(path)])

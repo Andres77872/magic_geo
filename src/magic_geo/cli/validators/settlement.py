@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from typing import Any
+from .settlement_climate import replay_settlement_climate, exact_support_declaration
 
 from .._constants import (
     ROUTE_LINKS_PER_SETTLEMENT,
@@ -30,14 +31,17 @@ def _validate_settlement_selection(
     model = payload.get("settlement_selection_model", {})
     settlements = payload.get("settlements", [])
     try:
+        selection_model, annual_inputs = replay_settlement_climate(payload)
+        seasonal = annual_inputs is not None
         metadata_invalid = (
             not isinstance(model, dict)
             or not isinstance(settlements, list)
-            or model.get("model_type") != SETTLEMENT_SELECTION_MODEL
+            or model.get("model_type") != selection_model
             or model.get("score_model")
-            != "native_soil_biome_resource_water_climate_hazard_landform_score_v1"
+            != ("native_soil_biome_resource_water_climate_hazard_landform_score_with_annual_proxy_support_v3" if seasonal else "native_soil_biome_resource_water_climate_hazard_landform_score_v2")
             or model.get("candidate_model")
-            != "nonwater_raw_score_threshold_neighbor_local_max_v1"
+            != ("nonmarine_nonlake_annual_proxy_supported_raw_score_threshold_neighbor_local_max_v3" if seasonal else "nonmarine_nonlake_raw_score_threshold_neighbor_local_max_v2")
+            or (not exact_support_declaration(model.get("annual_climate_applicability")) if seasonal else "annual_climate_applicability" in model)
             or model.get("rank_model")
             != "descending_raw_score_then_cell_id_v1"
             or model.get("selection_model")
@@ -99,9 +103,9 @@ def _validate_settlement_selection(
             or model.get("model_limitation")
             != "static_suitability_selection_without_population_growth_land_market_or_infrastructure_feedback"
             or summary.get("settlement_selection_model")
-            != SETTLEMENT_SELECTION_MODEL
+            != selection_model
         )
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return failure
     if metadata_invalid or not cells_by_id:
         return failure
@@ -136,11 +140,11 @@ def _validate_settlement_selection(
         )
 
     def native_score(cell: dict[str, Any]) -> float:
-        if bool(cell.get("is_water", False)):
+        if bool(cell.get("is_water", False)) or bool(cell.get("is_lake", False)):
             return 0.0
         relief = local_relief(cell)
         slope_penalty = clamp(relief / 1800.0)
-        temperature = float(cell.get("temperature_c", 0.0))
+        temperature = annual_inputs[cell["id"]] if seasonal else float(cell.get("temperature_c", 0.0))
         precipitation = float(cell.get("precipitation_mm_y", 0.0))
         aridity = precipitation / max(1.0, (temperature + 8.0) * 31.0)
         latitude = abs(float(cell.get("lat_deg", 0.0)))
@@ -188,11 +192,7 @@ def _validate_settlement_selection(
         )
         elevation = float(cell.get("elevation_m", 0.0))
         ice = float(cell.get("ice_thickness_m", 0.0))
-        is_lake = bool(cell.get("is_lake", False))
-        if is_lake:
-            soil = "saline" if aridity < 0.5 else "wetland"
-            biome = "hot_desert" if aridity < 0.5 else "lake"
-        elif ice > 180.0 or (
+        if ice > 180.0 or (
             temperature < -8.0 and (latitude > 55.0 or elevation > 1600.0)
         ):
             soil = "tundra"
@@ -271,8 +271,6 @@ def _validate_settlement_selection(
         water_access = (
             1.0
             if bool(cell.get("is_river", False))
-            else 0.85
-            if is_lake
             else 0.78
             if coast
             else clamp(float(cell.get("runoff_mm_y", 0.0)) / 550.0, 0.0, 0.55)
@@ -306,7 +304,7 @@ def _validate_settlement_selection(
             score *= 0.72 if landform == "glacial_lake" else 0.42
         elif landform == "coastal_plain" and score > 0.0:
             score = clamp(score + 0.04)
-        return score
+        return score if not seasonal or -14.0 < temperature < 48.0 else 0.0
 
     try:
         score_unit = 10.0 ** (-int(model["selection_score_precision"]))
@@ -328,10 +326,17 @@ def _validate_settlement_selection(
         candidates = []
         for cell_id, cell in cells_by_id.items():
             score = float(cell.get("settlement_score", 0.0))
-            if bool(cell.get("is_water", False)) or score < SETTLEMENT_SCORE_THRESHOLD:
+            if (
+                bool(cell.get("is_water", False))
+                or bool(cell.get("is_lake", False))
+                or (seasonal and not -14.0 < annual_inputs[cell_id] < 48.0)
+                or score < SETTLEMENT_SCORE_THRESHOLD
+            ):
                 continue
             if any(
                 not bool(neighbor.get("is_water", False))
+                and not bool(neighbor.get("is_lake", False))
+                and (not seasonal or -14.0 < annual_inputs[neighbor["id"]] < 48.0)
                 and float(neighbor.get("settlement_score", 0.0)) > score
                 for neighbor in neighbors(cell)
             ):
@@ -376,7 +381,7 @@ def _validate_settlement_selection(
             selected_ids.append(cell_id)
             if len(selected_ids) >= target:
                 break
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return failure
 
     if (
@@ -391,6 +396,39 @@ def _validate_settlement_selection(
 
     precision = int(summary.get("output_float_precision", -1))
     mirror_tolerance = 0.5 * 10.0 ** (-precision) + 1.0e-12
+
+    # Settlement allegiance uses different basin/coast discounts and can add a
+    # direct-route discount. Its assignment can differ from the territorial
+    # cell partition even without a direct route to either capital.
+    # Check the region/settlement links here. The independent political replay
+    # reconstructs both assignment costs and verifies the chosen capitals.
+    region_membership: dict[int, int] = {}
+    regions = payload.get("political_regions", [])
+    if not isinstance(regions, list):
+        return failure
+    region_ids: set[int] = set()
+    try:
+        for region in regions:
+            if not isinstance(region, dict):
+                return failure
+            region_id = int(region.get("id", -1))
+            member_ids = region.get("settlement_ids")
+            if region_id < 0 or region_id in region_ids or not isinstance(member_ids, list):
+                return failure
+            region_ids.add(region_id)
+            for raw_member_id in member_ids:
+                member_id = int(raw_member_id)
+                if member_id < 0 or member_id >= len(settlements) or member_id in region_membership:
+                    return failure
+                region_membership[member_id] = region_id
+            if int(region.get("capital_settlement_id", -1)) not in region_membership or (
+                region_membership[int(region["capital_settlement_id"])] != region_id
+            ):
+                return failure
+        if set(region_membership) != set(range(len(settlements))):
+            return failure
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return failure
 
     def settlement_type(cell: dict[str, Any]) -> str:
         if any(
@@ -445,7 +483,7 @@ def _validate_settlement_selection(
                 or bool(settlement.get("is_river", False))
                 != bool(cell.get("is_river", False))
                 or int(settlement.get("region_id", -2))
-                != int(cell.get("political_region_id", -1))
+                != region_membership[settlement_id]
                 or int(settlement.get("culture_region_id", -2))
                 != int(cell.get("culture_region_id", -1))
                 or int(settlement.get("language_region_id", -2))
@@ -475,6 +513,8 @@ def _validate_route_network(
     settlements = payload.get("settlements", [])
     planet = payload.get("planet_parameters", {})
     try:
+        selection_model, annual_inputs = replay_settlement_climate(payload)
+        seasonal = annual_inputs is not None
         metadata_invalid = (
             not isinstance(model, dict)
             or not isinstance(routes, list)
@@ -482,7 +522,7 @@ def _validate_route_network(
             or not isinstance(planet, dict)
             or model.get("model_type") != ROUTE_NETWORK_MODEL
             or model.get("source_settlement_model")
-            != SETTLEMENT_SELECTION_MODEL
+            != selection_model
             or model.get("ranking_model")
             != "endpoint_great_circle_distance_times_barrier_with_port_or_river_discount_v1"
             or model.get("barrier_model")
@@ -518,7 +558,7 @@ def _validate_route_network(
             != "endpoint_only_network_selection_before_downstream_cell_path_routing_capacity_congestion_and_equilibrium"
             or summary.get("route_network_model") != ROUTE_NETWORK_MODEL
         )
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return failure
     if metadata_invalid or any(
         not isinstance(record, dict) for record in [*settlements, *routes]
@@ -705,6 +745,6 @@ def _validate_route_network(
                 > cost_tolerance
             ):
                 return failure
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return failure
     return []

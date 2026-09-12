@@ -248,7 +248,7 @@ def _waterway_records(
     return records
 
 
-def enrich_world_with_navigability_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
+def _enrich_legacy_equations(world: dict[str, Any]) -> dict[str, Any]:
     cells = world.get("cells", [])
     if not isinstance(cells, list) or not cells:
         return world
@@ -343,3 +343,30 @@ def enrich_world_with_navigability_diagnostics(world: dict[str, Any]) -> dict[st
     summary["navigability_class_counts"] = dict(sorted(class_counts.items()))
     world["navigable_waterways"] = records
     return world
+
+
+NATURAL_MODEL = {'model_type': 'causal_channel_hydraulic_coastal_navigability_v2',
+ 'source_channel_model': 'causal_flow_sediment_wetland_baseflow_channel_morphology_v2',
+ 'source_hydraulics_model': 'manning_blended_diagnostic_river_hydraulics_v2',
+ 'domain': 'all_cells',
+ 'flow_normalization_model': 'global_max_flow_accumulation_v1',
+ 'river_model': 'flow_runoff_lowland_relief_sediment_channel_hydraulic_ice_aridity_v1',
+ 'coastal_model': 'marine_depth_shelf_land_contact_constriction_or_coastal_land_context_v1',
+ 'harbor_model': 'coastal_protection_river_mouth_relief_settlement_ice_v1',
+ 'transport_chokepoint_model': 'marine_constriction_and_coastal_navigability_v1',
+ 'overall_model': 'maximum_component_navigability_v1',
+ 'classification_model': 'chokepoint_harbor_river_mouth_river_coastal_priority_v1',
+ 'system_grouping_model': 'undirected_mesh_connected_raw_threshold_components_v1',
+ 'link_model': 'component_cell_settlement_route_marine_region_watershed_links_v1',
+ 'navigable_threshold': 0.52,
+ 'high_harbor_threshold': 0.62,
+ 'transport_chokepoint_threshold': 0.55,
+ 'threshold_semantics': 'unrounded_pre_serialization_values',
+ 'deterministic': True,
+ 'model_limitation': 'diagnostic_transport_suitability_without_vessel_classes_seasonal_discharge_bathymetric_channels_or_route_cost_optimization',
+ 'watershed_link_basis': 'native_cell_basin_ids_not_watershed_record_ids'}
+
+def enrich_world_with_navigability_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
+    """Publish exact v1/v2 or settlement-available v3 after independent audit."""
+    from ._human_water_publication import publish_human_water_stage
+    return publish_human_water_stage(world, 'navigation', _enrich_legacy_equations, NATURAL_MODEL)

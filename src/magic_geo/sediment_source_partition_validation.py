@@ -5,6 +5,8 @@ import sys
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .grounded_ice_validation import MODEL as GROUNDED_MODEL, TRANSPORT_MODEL as GROUNDED_TRANSPORT_MODEL, grounded_ice_version, require_grounded_stage_inputs
+
 
 FLUVIAL_ACTIVE_VOLUME_THRESHOLD_KM3 = 1.0e-15
 
@@ -515,6 +517,7 @@ def validate_sediment_source_partitions(world: Any) -> dict[str, Any]:
     }
     try:
         _require(isinstance(world, Mapping), "world must be an object")
+        grounded_current = grounded_ice_version(world) == 1
         _, areas = _parse_cells(world)
         metrics["cell_count"] = len(areas)
         clock = world.get("simulation_clock")
@@ -528,6 +531,8 @@ def validate_sediment_source_partitions(world: Any) -> dict[str, Any]:
         _require(isinstance(feedback, list), "feedback history must be a list")
 
         for mechanism, metadata in MODEL_METADATA.items():
+            if mechanism == "glacial" and grounded_current:
+                metadata = {**metadata, "model_type": GROUNDED_TRANSPORT_MODEL, "source_grounded_ice_model": GROUNDED_MODEL["model_type"], "stage_input_snapshot": "complete_cell_cryosphere_terrain_and_sediment_inventory_before_transport_v3"}
             model = world.get(metadata["model_key"])
             history = world.get(metadata["history_key"])
             _require(isinstance(model, dict), f"{metadata['model_key']} must be an object")
@@ -563,6 +568,8 @@ def validate_sediment_source_partitions(world: Any) -> dict[str, Any]:
                     isinstance(stage, dict),
                     f"{metadata['history_key']}[{stage_index}] must be an object",
                 )
+                if mechanism == "glacial" and grounded_current:
+                    require_grounded_stage_inputs(stage)
                 replay = _validate_stage(
                     mechanism,
                     stage,

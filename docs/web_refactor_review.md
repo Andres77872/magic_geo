@@ -299,6 +299,10 @@ syntax check pass after the change.
 
 ## Remaining limitations (explicit, not hidden)
 
+The [family scalar-view correction](../runs/workbench-family-scalar-review/README.md) resolves misleading scalar selection for JSONL-only families, including one-row families without a sidecar. The API projects the requested page, retaining nulls and boolean availability flags while preserving full records. The viewer uses returned detail for its title and coverage help. Ten focused tests and four subtests pass; all 83 JavaScript handler tests pass. Live checks on a retained generated world verify both compact scalar and full nested views.
+
+The [2026-09-11 cancellation follow-up](../runs/workbench-spawn-cancel-review/README.md) fixes cancellation during subprocess startup. Handle registration shares the normal five-second forced-stop path, including when shutdown requested cancellation before `Popen` returned. Repeated requests claim one timer for that process. Its retained job/API run passes 120 tests and 202 subtests. The subsequent [process cleanup review](../runs/workbench-process-cleanup-review/README.md) also closes descendant-held stdout after leader exit and output-reading/log-handler exceptions. Signals remain valid until output completion and child reaping are coordinated under the manager lock; failure publication follows cleanup. All 65 job tests and 139 subtests pass, including five real-child controls, plus five selected API/lifecycle tests. Descendants that leave the owned process group remain outside this mechanism.
+
 1. **Generic access is not bespoke geometry.** Every family is usable in Data,
    but only per-cell layers and plate segments have map renderers. Routes,
    rivers, settlements, borders, currents, faults, and corridors can receive

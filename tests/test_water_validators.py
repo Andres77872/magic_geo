@@ -37,10 +37,17 @@ from magic_geo.cli.validators import (
     _validate_river_hydraulics,
 )
 from magic_geo.navigability_diagnostics import (
+    _enrich_legacy_equations as enrich_legacy_navigability_equations,
     enrich_world_with_navigability_diagnostics,
 )
+from magic_geo.natural_water_validation_dispatch import validate_public_natural_water_chain
+from magic_geo.human_water_validation_dispatch import validate_public_human_water_transport
 
 from support import worlds
+from support.legacy_human_water_worlds import (
+    legacy_human_water_world,
+    legacy_human_water_world_readonly,
+)
 
 WATER_BUDGET_FAILURE = "hydrologic water budget model or replay invalid"
 RECHARGE_FAILURE = "groundwater recharge model or source partition invalid"
@@ -114,7 +121,12 @@ class WaterValidatorCase(TestCase):
     """Shared direct branch driver plus CLI integration assertions."""
 
     world_key = "replay_128"
+    historical_water = False
     validator: Callable[..., list[str]]
+
+    def fixture(self) -> World:
+        return (legacy_human_water_world(self.world_key) if self.historical_water
+                else worlds.cached_world(self.world_key))
 
     def assert_clean_validation_failure(self, result: Any) -> None:
         """The command must have reached the ``FAIL`` gate, not crashed.
@@ -133,7 +145,7 @@ class WaterValidatorCase(TestCase):
         tamper: Tamper,
         message: str,
     ) -> None:
-        world = worlds.cached_world(self.world_key)
+        world = self.fixture()
         tamper(world)
         failures = _direct_failures(self.validator, world)
         self.assertIn(message, failures)
@@ -160,7 +172,9 @@ class WaterValidatorControlTests(TestCase):
         """The exact-``[message]`` assertions below only mean something if the
         pristine world makes every one of these validators return ``[]``."""
 
-        world = worlds.cached_world_readonly("replay_128")
+        # These functions retain their exact historical water equations. A
+        # legacy climate configuration alone no longer selects that water chain.
+        world = legacy_human_water_world_readonly("replay_128")
 
         for name, validator in (
             ("water_budget", _validate_hydrologic_water_budget),
@@ -173,6 +187,13 @@ class WaterValidatorControlTests(TestCase):
         ):
             with self.subTest(validator=name):
                 self.assertEqual(_direct_failures(validator, world), [])
+
+    def test_current_world_passes_complete_versioned_water_audits(self) -> None:
+        world = worlds.cached_world_readonly("replay_128")
+        self.assertEqual(validate_public_natural_water_chain(world), (True, []))
+        self.assertEqual(validate_public_human_water_transport(world, natural_water=True), (True, []))
+        self.assertEqual(_direct_failures(_validate_hydrologic_water_budget, world), [])
+        self.assertEqual(_direct_failures(_validate_groundwater_recharge, world), [])
 
     def test_control_world_exercises_every_water_subsystem(self) -> None:
         world = worlds.cached_world_readonly("replay_128")
@@ -194,7 +215,7 @@ class WaterValidatorControlTests(TestCase):
         )
         self.assertEqual(
             summary["navigability_model"],
-            "causal_channel_hydraulic_coastal_navigability_v1",
+            "causal_channel_hydraulic_coastal_navigability_v2",
         )
 
     def test_control_world_supports_every_tamper_helper(self) -> None:
@@ -204,7 +225,7 @@ class WaterValidatorControlTests(TestCase):
         tamper into a no-op (or into a different tamper than the one named).
         """
 
-        world = worlds.cached_world_readonly("replay_128")
+        world = legacy_human_water_world_readonly("replay_128")
         cells = world["cells"]
 
         # ``river_cell_on_top_of_downstream`` reads the downstream cell as
@@ -373,7 +394,10 @@ class GroundwaterRechargeValidatorTests(WaterValidatorCase):
             _land_cell(world)["vadose_zone_retention_mm_y"] = "wet"
 
         def summary_vadose_total(world: World) -> None:
-            world["summary"]["total_vadose_zone_retention_km3_y"] += 1.0
+            summary = world["summary"]
+            summary["total_vadose_zone_retention_km3_y"] = (
+                float(summary["total_vadose_zone_retention_km3_y"]) * 2.0 + 1.0
+            )
 
         def summary_total_infiltration(world: World) -> None:
             summary = world["summary"]
@@ -409,24 +433,37 @@ class GroundwaterRechargeValidatorTests(WaterValidatorCase):
         )
 
     def test_zero_area_land_cell_breaks_recharge_and_groundwater_flow(self) -> None:
-        """One tamper, two independent area guards.
+        """Independent area guards and the earlier native public boundary.
 
         Both validators divide per-cell volumes by ``area_km2``; a zero-area
         land cell has to be rejected rather than divided by, which is why this
-        insists on a clean ``FAIL`` gate and not merely a non-zero exit.
+        checks both pure guards. The full CLI rejects the invalid native cell
+        geometry before consuming any downstream groundwater diagnostics.
         """
 
-        world = worlds.cached_world(self.world_key)
-        _land_cell(world)["area_km2"] = 0.0
+        # This pair covers the preserved recharge/groundwater-v1 equations;
+        # its actual native climate remains seasonal, so the public geometry
+        # preflight below is the same authoritative current boundary.
+        world = legacy_human_water_world(self.world_key)
+        self.assertEqual(_direct_failures(_validate_groundwater_flow, world), [])
+        cell = _land_cell(world)
+        cell_index = world["cells"].index(cell)
+        cell["area_km2"] = 0.0
+
+        self.assertIn(RECHARGE_FAILURE, _direct_failures(_validate_groundwater_recharge, world))
+        self.assertIn(GROUNDWATER_FLOW_FAILURE, _direct_failures(_validate_groundwater_flow, world))
 
         result = _run_validate(world)
 
         self.assert_clean_validation_failure(result)
-        self.assertIn(f"FAIL {RECHARGE_FAILURE}", _fail_lines(result))
-        self.assertIn(f"FAIL {GROUNDWATER_FLOW_FAILURE}", _fail_lines(result))
+        self.assertIn(
+            f"FAIL native climate energy: cell[{cell_index}].area_km2: expected positive number",
+            _fail_lines(result),
+        )
 
 
 class AquiferResourceValidatorTests(WaterValidatorCase):
+    historical_water = True
     validator = staticmethod(_validate_aquifer_resources)
 
     def test_aquifer_replay_violations_are_reported(self) -> None:
@@ -468,6 +505,7 @@ class AquiferResourceValidatorTests(WaterValidatorCase):
 
 
 class GroundwaterFlowValidatorTests(WaterValidatorCase):
+    historical_water = True
     validator = staticmethod(_validate_groundwater_flow)
 
     def test_groundwater_flow_replay_violations_are_reported(self) -> None:
@@ -520,6 +558,7 @@ class GroundwaterFlowValidatorTests(WaterValidatorCase):
 
 
 class RiverChannelMorphologyValidatorTests(WaterValidatorCase):
+    historical_water = True
     validator = staticmethod(_validate_river_channel_morphology)
 
     def test_channel_morphology_violations_are_reported(self) -> None:
@@ -527,10 +566,22 @@ class RiverChannelMorphologyValidatorTests(WaterValidatorCase):
             world["river_channel_morphology_model"]["slope_normalization"] = "steep"
 
         def river_cell_without_downstream(world: World) -> None:
-            _ice_free_river_cell(world)["flow_to"] = -1
+            # Losing the downstream edge must change the replayed slope. A
+            # channel already at zero slope has the same morphology afterward;
+            # structural flow validity belongs to the hydrology validator.
+            cell = next(
+                cell for cell in _river_cells(world)
+                if cell["ice_thickness_m"] == 0.0
+                and float(cell["channel_slope_index"]) > 0.0
+            )
+            cell["flow_to"] = -1
 
         def river_cell_on_top_of_downstream(world: World) -> None:
-            cell = _ice_free_river_cell(world)
+            cell = next(
+                cell for cell in _river_cells(world)
+                if cell["ice_thickness_m"] == 0.0
+                and float(cell["channel_slope_index"]) > 0.0
+            )
             downstream = world["cells"][int(cell["flow_to"])]
             cell["lat_deg"] = downstream["lat_deg"]
             cell["lon_deg"] = downstream["lon_deg"]
@@ -595,6 +646,7 @@ class RiverChannelMorphologyValidatorTests(WaterValidatorCase):
 
 
 class RiverHydraulicsValidatorTests(WaterValidatorCase):
+    historical_water = True
     validator = staticmethod(_validate_river_hydraulics)
 
     def test_hydraulics_violations_are_reported(self) -> None:
@@ -645,7 +697,7 @@ class RiverHydraulicsValidatorTests(WaterValidatorCase):
             empty["cell_ids"] = []
             systems.append(empty)
 
-        world = worlds.cached_world(self.world_key)
+        world = self.fixture()
         channel_system_without_cells(world)
 
         # The extra system has no channel cells, so the reach model skips it and
@@ -661,6 +713,7 @@ class RiverHydraulicsValidatorTests(WaterValidatorCase):
 
 
 class NavigabilityValidatorTests(WaterValidatorCase):
+    historical_water = True
     validator = staticmethod(_validate_navigability)
 
     def test_navigability_violations_are_reported(self) -> None:
@@ -708,10 +761,20 @@ class ChokepointFreeNavigabilityTests(WaterValidatorCase):
     validator = staticmethod(_validate_navigability)
 
     def build_world(self) -> World:
-        world = worlds.cached_world("routed_512")
+        world = legacy_human_water_world("routed_512")
         world["marine_chokepoints"] = []
-        enrich_world_with_navigability_diagnostics(world)
+        # Equation-only historical fallback fixture: its stale chokepoint
+        # references intentionally make the whole world invalid. Public stage
+        # publication now rejects this source instead of silently consuming it.
+        enrich_legacy_navigability_equations(world)
         return world
+
+    def test_public_stage_rejects_stale_chokepoint_source_before_mutation(self) -> None:
+        world = self.build_world()
+        before = copy.deepcopy(world)
+        with self.assertRaisesRegex(ValueError, "human water transport"):
+            enrich_world_with_navigability_diagnostics(world)
+        self.assertEqual(world, before)
 
     def test_pristine_routed_world_passes_validate(self) -> None:
         """Without this the "still invalid overall" runs below prove nothing."""
@@ -799,17 +862,11 @@ class NominalTimeRecordTests(TestCase):
 
 
 class WaterValidatorDirectGuardTests(TestCase):
-    """Guards the ``validate`` command cannot reach.
+    """Exact historical equation guards, independent of public preflight.
 
-    ``validate`` parses these very fields with a bare ``float()``/``int()`` (or
-    indexes ``cells_by_id`` directly) before or after the validator runs, so a
-    non-numeric value or a dangling neighbour id aborts the command with an
-    exception instead of a ``FAIL`` line.  The validators themselves degrade
-    gracefully, which is what these cases pin down.
-
-    Every tamper here was checked against the CLI first: each one makes
-    ``validate`` raise ``ValueError``/``AttributeError``/``KeyError`` and print
-    no ``FAIL`` line at all. ``WaterValidatorCase`` covers reportable branches.
+    Current public dependency checks can reject these fields earlier. These
+    tests keep each original local guard load-bearing on a clean v1 water
+    chain, without claiming that malformed input reaches it through the CLI.
     """
 
     def assert_guard(
@@ -818,7 +875,7 @@ class WaterValidatorDirectGuardTests(TestCase):
         tamper: Tamper,
         message: str,
     ) -> None:
-        world = worlds.cached_world("replay_128")
+        world = legacy_human_water_world("replay_128")
         tamper(world)
         self.assertEqual(_direct_failures(validator, world), [message])
 
@@ -973,7 +1030,7 @@ class WaterValidatorDirectGuardTests(TestCase):
         ``assertEqual`` reports just as loudly.
         """
 
-        world = worlds.cached_world("replay_128")
+        world = legacy_human_water_world("replay_128")
         world["navigable_waterways"] = []
         world["navigability_model"]["candidate_cell_count"] = 0
         world["navigability_model"]["waterway_count"] = 0
@@ -987,6 +1044,6 @@ class WaterValidatorDirectGuardTests(TestCase):
         # reason entirely (the emptied waterway list), so the assertion above
         # is not simply "any tampered world fails".
         self.assertEqual(
-            _direct_failures(_validate_navigability, worlds.cached_world("replay_128")),
+            _direct_failures(_validate_navigability, legacy_human_water_world("replay_128")),
             [],
         )

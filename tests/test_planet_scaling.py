@@ -22,8 +22,14 @@ from magic_geo.planet_parameters import (
     planet_radius_km,
 )
 from magic_geo.planet_realism import enrich_world_with_planet_realism
-from magic_geo.river_hydraulics import enrich_world_with_river_hydraulics
-from magic_geo.route_corridors import enrich_world_with_route_corridors
+from magic_geo.river_hydraulics import (
+    _build_hydraulics as build_historical_hydraulic_equations,
+    enrich_world_with_river_hydraulics,
+)
+from magic_geo.route_corridors import (
+    _enrich_legacy_equations as enrich_historical_corridor_equations,
+    enrich_world_with_route_corridors,
+)
 
 
 class PlanetScalingTests(TestCase):
@@ -57,13 +63,13 @@ class PlanetScalingTests(TestCase):
 
         with (
             patch(
-                "magic_geo.native.generate_world",
+                "magic_geo.native.generate_seasonal_world",
                 return_value={
                     "cells": [],
                     "summary": {},
                     "planet_parameters": planet_parameter_snapshot(config.planet),
                 },
-            ),
+            ) as native_generator,
             patch(
                 "magic_geo.api.enrich_world_with_mesh_lod",
                 side_effect=inspect_first_enricher,
@@ -71,6 +77,7 @@ class PlanetScalingTests(TestCase):
             self.assertRaises(FirstEnricherObserved),
         ):
             generate_world(config)
+        native_generator.assert_called_once()
 
     def test_planet_realism_rejects_native_config_snapshot_mismatch(self) -> None:
         config = WorldConfig.model_validate(
@@ -97,17 +104,18 @@ class PlanetScalingTests(TestCase):
 
         with (
             patch(
-                "magic_geo.native.generate_world",
+                "magic_geo.native.generate_seasonal_world",
                 return_value={
                     "cells": [],
                     "summary": {},
                     "planet_parameters": native_parameters,
                 },
-            ),
+            ) as native_generator,
             patch("magic_geo.api.enrich_world_with_mesh_lod") as first_enricher,
             self.assertRaisesRegex(RuntimeError, "do not match the configured planet"),
         ):
             generate_world(config)
+        native_generator.assert_called_once()
         first_enricher.assert_not_called()
 
     def test_planet_scale_accessors_reject_invalid_world_parameters(self) -> None:
@@ -248,10 +256,17 @@ class PlanetScalingTests(TestCase):
             }
             return world
 
+        # Equation-only geometry probe: these fragments have no audited parents.
+        incomplete = world_for_radius(3000.0)
+        before = copy.deepcopy(incomplete)
+        with self.assertRaisesRegex(ValueError, "port_site_model declaration required"):
+            enrich_world_with_route_corridors(incomplete)
+        self.assertEqual(incomplete, before)
+
         small = world_for_radius(3000.0)
         super_earth = world_for_radius(9000.0)
         for world in (small, super_earth):
-            enrich_world_with_route_corridors(world)
+            enrich_historical_corridor_equations(world)
             cells_by_id = {cell["id"]: cell for cell in world["cells"]}
             self.assertEqual(
                 _validate_route_corridors(world, world["summary"], cells_by_id),
@@ -272,7 +287,7 @@ class PlanetScalingTests(TestCase):
         missing_parameters = world_for_radius(6371.0)
         missing_parameters.pop("planet_parameters")
         with self.assertRaisesRegex(ValueError, "world must provide planet_parameters"):
-            enrich_world_with_route_corridors(missing_parameters)
+            enrich_historical_corridor_equations(missing_parameters)
 
     def test_campaign_distances_scale_from_small_to_super_earth_and_replay(
         self,
@@ -413,12 +428,18 @@ class PlanetScalingTests(TestCase):
             "river_channel_systems": [],
             "summary": {},
         }
+        # Equation-only gravity probe; strict public stages require real channels.
+        before = copy.deepcopy(base_world)
+        with self.assertRaisesRegex(ValueError, "river_channel_morphology_model declaration required"):
+            enrich_world_with_river_hydraulics(base_world)
+        self.assertEqual(base_world, before)
+
         earth = copy.deepcopy(base_world)
         earth["planet_parameters"] = {"gravity_g": 1.0}
         low_gravity = copy.deepcopy(base_world)
         low_gravity["planet_parameters"] = {"gravity_g": 0.25}
         for world in (earth, low_gravity):
-            enrich_world_with_river_hydraulics(world)
+            build_historical_hydraulic_equations(world)
 
         self.assertAlmostEqual(
             low_gravity["river_hydraulics_model"]["gravity_m_s2"],
@@ -437,7 +458,7 @@ class PlanetScalingTests(TestCase):
             places=5,
         )
         with self.assertRaisesRegex(ValueError, "world must provide planet_parameters"):
-            enrich_world_with_river_hydraulics(copy.deepcopy(base_world))
+            build_historical_hydraulic_equations(copy.deepcopy(base_world))
 
     def test_non_earth_generation_passes_strict_natural_model_replays(self) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))
@@ -449,6 +470,15 @@ class PlanetScalingTests(TestCase):
         data["planet"]["gravity_g"] = 0.4
         world = generate_world(type(config).model_validate(data))
 
+        self.assertEqual(world["climate_model"]["model_type"], "prescribed_seasonal_surface_energy_v1")
+        self.assertEqual(
+            world["river_channel_morphology_model"]["model_type"],
+            "causal_flow_sediment_wetland_baseflow_channel_morphology_v2",
+        )
+        self.assertEqual(
+            world["river_hydraulics_model"]["model_type"],
+            "manning_blended_diagnostic_river_hydraulics_v2",
+        )
         self.assertEqual(world["river_channel_morphology_model"]["planet_radius_km"], 3200.0)
         self.assertAlmostEqual(
             world["river_hydraulics_model"]["gravity_m_s2"],

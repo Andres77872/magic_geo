@@ -1,3 +1,5 @@
+config_version: 2
+
 # Original ice-dominated world based on the snowball/slushball climate
 # archetype. Reduced stellar forcing and greenhouse trapping are the primary
 # controls; liquid refugia are possible and should be inspected after generation.
@@ -36,8 +38,7 @@ tectonics:
 
 climate:
   months: 12
-  lapse_rate_c_per_km: 6.5
-  base_temperature_c: -10.0
+  reference_infrared_optical_depth: 1.0
   precipitation_scale: 0.60
   subtropical_drying_strength: 0.45
 

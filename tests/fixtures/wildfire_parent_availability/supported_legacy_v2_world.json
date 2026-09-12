@@ -1,0 +1,519 @@
+{
+  "cells": [
+    {
+      "aquatic_climate_proxy_applicable": false,
+      "aquatic_primary_climate_supported": false,
+      "area_km2": 1.0,
+      "biome": "temperate_forest",
+      "climate_energy_stress_index": 1.0,
+      "ecosystem_disturbance_pressure_index": 0.635871,
+      "fertility": 1.0,
+      "fire_frequency_index": 1.0,
+      "fishery_climate_supported": false,
+      "fishery_productivity_index": 0.0,
+      "fishery_productivity_supported": false,
+      "forest_growth_index": 0.556949,
+      "id": 0,
+      "is_lake": false,
+      "is_water": false,
+      "lat_deg": 0.0,
+      "lon_deg": 0.0,
+      "neighbors": [
+        1
+      ],
+      "primary_productivity_index": 0.48,
+      "seasonal_aridity_index": 1.0,
+      "settlement_score": 1.0,
+      "soil_moisture_index": 1.0,
+      "soil_organic_carbon_fraction": 0.2,
+      "species_richness_index": 0.570512,
+      "temperature_c": 18.0,
+      "vegetation_biomass_index": 0.6696,
+      "vegetation_recovery_years": 55,
+      "vegetation_succession_stage": "disturbance_mosaic",
+      "water_body_type": "land",
+      "wildfire_disturbance_regime": "wind_driven_crown_fire",
+      "wildfire_firebreak_index": 0.032304,
+      "wildfire_fuel_continuity_index": 0.820534,
+      "wildfire_ignition_potential_index": 0.955608,
+      "wildfire_spread_history_ids": [
+        0
+      ],
+      "wildfire_spread_risk_index": 0.847312,
+      "wildfire_wind_alignment_index": 1.0,
+      "wind_east": 1.0,
+      "wind_north": 0.0
+    },
+    {
+      "aquatic_climate_proxy_applicable": false,
+      "aquatic_primary_climate_supported": false,
+      "area_km2": 1.0,
+      "biome": "temperate_forest",
+      "climate_energy_stress_index": 1.0,
+      "ecosystem_disturbance_pressure_index": 0.635871,
+      "fertility": 1.0,
+      "fire_frequency_index": 1.0,
+      "fishery_climate_supported": false,
+      "fishery_productivity_index": 0.0,
+      "fishery_productivity_supported": false,
+      "forest_growth_index": 0.556949,
+      "id": 1,
+      "is_lake": false,
+      "is_water": false,
+      "lat_deg": 0.0,
+      "lon_deg": 1.0,
+      "neighbors": [
+        0,
+        2
+      ],
+      "primary_productivity_index": 0.48,
+      "seasonal_aridity_index": 1.0,
+      "settlement_score": 1.0,
+      "soil_moisture_index": 1.0,
+      "soil_organic_carbon_fraction": 0.2,
+      "species_richness_index": 0.570512,
+      "temperature_c": 18.0,
+      "vegetation_biomass_index": 0.6696,
+      "vegetation_recovery_years": 55,
+      "vegetation_succession_stage": "disturbance_mosaic",
+      "water_body_type": "land",
+      "wildfire_disturbance_regime": "wind_driven_crown_fire",
+      "wildfire_firebreak_index": 0.032304,
+      "wildfire_fuel_continuity_index": 0.820534,
+      "wildfire_ignition_potential_index": 0.955608,
+      "wildfire_spread_history_ids": [
+        0
+      ],
+      "wildfire_spread_risk_index": 0.847312,
+      "wildfire_wind_alignment_index": 1.0,
+      "wind_east": 1.0,
+      "wind_north": 0.0
+    },
+    {
+      "aquatic_climate_proxy_applicable": false,
+      "aquatic_primary_climate_supported": false,
+      "area_km2": 1.0,
+      "biome": "temperate_forest",
+      "climate_energy_stress_index": 1.0,
+      "ecosystem_disturbance_pressure_index": 0.635871,
+      "fertility": 1.0,
+      "fire_frequency_index": 1.0,
+      "fishery_climate_supported": false,
+      "fishery_productivity_index": 0.0,
+      "fishery_productivity_supported": false,
+      "forest_growth_index": 0.556949,
+      "id": 2,
+      "is_lake": false,
+      "is_water": false,
+      "lat_deg": 0.0,
+      "lon_deg": 2.0,
+      "neighbors": [
+        1
+      ],
+      "primary_productivity_index": 0.48,
+      "seasonal_aridity_index": 1.0,
+      "settlement_score": 1.0,
+      "soil_moisture_index": 1.0,
+      "soil_organic_carbon_fraction": 0.2,
+      "species_richness_index": 0.570512,
+      "temperature_c": 18.0,
+      "vegetation_biomass_index": 0.6696,
+      "vegetation_recovery_years": 55,
+      "vegetation_succession_stage": "disturbance_mosaic",
+      "water_body_type": "land",
+      "wildfire_disturbance_regime": "seasonal_surface_fire",
+      "wildfire_firebreak_index": 0.032304,
+      "wildfire_fuel_continuity_index": 0.820534,
+      "wildfire_ignition_potential_index": 0.875608,
+      "wildfire_spread_history_ids": [
+        0
+      ],
+      "wildfire_spread_risk_index": 0.847312,
+      "wildfire_wind_alignment_index": 0.0,
+      "wind_east": 1.0,
+      "wind_north": 0.0
+    }
+  ],
+  "ecosystem_dynamics_model": {
+    "aquatic_ecology_policy": "shared_aquatic_selector_for_primary_and_terrestrial_exclusion",
+    "aquatic_primary_maximum_temperature_c": 52.0,
+    "aquatic_primary_minimum_temperature_c": -16.0,
+    "aquatic_selector": "is_water_or_is_lake_or_fishery_water_body_type",
+    "aquatic_temperature_source": "annual_surface_air_climate_proxy",
+    "fishery_maximum_temperature_c": 44.0,
+    "fishery_minimum_temperature_c": -20.0,
+    "fishery_water_body_types": [
+      "continental_shelf",
+      "fresh_lake",
+      "inland_sea",
+      "ocean"
+    ],
+    "invalid_annual_temperature_policy": "unsupported_without_numeric_coercion",
+    "model": "heuristic_ecosystem_climate_support_v3",
+    "monthly_temperature_policy": "not_used",
+    "support_relationship": "fishery_estimate_requires_own_climate_and_supported_primary_input",
+    "support_scope": "empirical_climate_proxy_not_aquatic_survival_limits",
+    "temperature_bounds": "exclusive",
+    "unsupported_fishery_record_policy": "no_record_without_supported_fishery_productivity",
+    "unsupported_productivity_policy": "numeric_zero_with_false_support_flag"
+  },
+  "renewable_resource_records": [
+    {
+      "biome": "temperate_forest",
+      "cell_id": 0,
+      "climate_dependency_index": 0.35,
+      "disturbance_risk_index": 0.635871,
+      "formation_evidence": {
+        "fishery_productivity_index": 0.0,
+        "forest_growth_index": 0.556949,
+        "primary_productivity_index": 0.48,
+        "runoff_mm_y": 0.0,
+        "soil_moisture_index": 1.0,
+        "vegetation_biomass_index": 0.6696
+      },
+      "id": 0,
+      "productivity_index": 0.556949,
+      "regeneration_years": 55,
+      "resource_type": "forest_growth",
+      "sustainable_yield_index": 0.387178,
+      "water_body_type": "land",
+      "water_dependency_index": 0.45
+    },
+    {
+      "biome": "temperate_forest",
+      "cell_id": 1,
+      "climate_dependency_index": 0.35,
+      "disturbance_risk_index": 0.635871,
+      "formation_evidence": {
+        "fishery_productivity_index": 0.0,
+        "forest_growth_index": 0.556949,
+        "primary_productivity_index": 0.48,
+        "runoff_mm_y": 0.0,
+        "soil_moisture_index": 1.0,
+        "vegetation_biomass_index": 0.6696
+      },
+      "id": 1,
+      "productivity_index": 0.556949,
+      "regeneration_years": 55,
+      "resource_type": "forest_growth",
+      "sustainable_yield_index": 0.387178,
+      "water_body_type": "land",
+      "water_dependency_index": 0.45
+    },
+    {
+      "biome": "temperate_forest",
+      "cell_id": 2,
+      "climate_dependency_index": 0.35,
+      "disturbance_risk_index": 0.635871,
+      "formation_evidence": {
+        "fishery_productivity_index": 0.0,
+        "forest_growth_index": 0.556949,
+        "primary_productivity_index": 0.48,
+        "runoff_mm_y": 0.0,
+        "soil_moisture_index": 1.0,
+        "vegetation_biomass_index": 0.6696
+      },
+      "id": 2,
+      "productivity_index": 0.556949,
+      "regeneration_years": 55,
+      "resource_type": "forest_growth",
+      "sustainable_yield_index": 0.387178,
+      "water_body_type": "land",
+      "water_dependency_index": 0.45
+    }
+  ],
+  "summary": {
+    "fishery_productivity_resource_count": 0,
+    "forest_growth_resource_count": 3,
+    "high_wildfire_firebreak_cell_count": 0,
+    "high_wildfire_fuel_continuity_cell_count": 3,
+    "high_wildfire_ignition_potential_cell_count": 3,
+    "high_wildfire_spread_risk_cell_count": 3,
+    "mature_vegetation_cell_fraction": 0.0,
+    "mean_ecosystem_disturbance_pressure_index": 0.635871,
+    "mean_fishery_productivity_index": 0.0,
+    "mean_forest_growth_index": 0.556949,
+    "mean_primary_productivity_index": 0.48,
+    "mean_species_richness_index": 0.570512,
+    "mean_vegetation_biomass_index": 0.6696,
+    "mean_wildfire_firebreak_index": 0.032304,
+    "mean_wildfire_fuel_continuity_index": 0.820534,
+    "mean_wildfire_ignition_potential_index": 0.928941,
+    "mean_wildfire_spread_risk_index": 0.847312,
+    "mean_wildfire_wind_alignment_index": 0.666667,
+    "renewable_resource_record_count": 3,
+    "renewable_resource_type_counts": {
+      "forest_growth": 3
+    },
+    "vegetation_succession_history_count": 3,
+    "vegetation_succession_stage_counts": {
+      "disturbance_mosaic": 3
+    },
+    "vegetation_succession_step_count": 12,
+    "wildfire_disturbance_cell_count": 3,
+    "wildfire_disturbance_regime_counts": {
+      "seasonal_surface_fire": 1,
+      "wind_driven_crown_fire": 2
+    },
+    "wildfire_spread_history_count": 1,
+    "wildfire_spread_step_count": 3,
+    "wildfire_total_burned_area_km2": 3.0
+  },
+  "vegetation_succession_histories": [
+    {
+      "biome": "temperate_forest",
+      "cell_id": 0,
+      "final_succession_stage": "disturbance_mosaic",
+      "id": 0,
+      "initial_succession_stage": "disturbance_mosaic",
+      "max_wildfire_spread_risk_index": 0.847312,
+      "mean_biomass_index": 0.498675,
+      "mean_canopy_closure_index": 0.365987,
+      "mean_disturbance_pressure_index": 0.595589,
+      "recovery_years": 55,
+      "step_count": 4,
+      "steps": [
+        {
+          "biomass_index": 0.317841,
+          "canopy_closure_index": 0.23327,
+          "disturbance_pressure_index": 0.635871,
+          "phase": "establishment",
+          "primary_productivity_index": 0.48,
+          "recovery_fraction": 0.0,
+          "succession_stage": "disturbance_mosaic",
+          "wildfire_spread_risk_index": 0.847312,
+          "years_since_start": 0
+        },
+        {
+          "biomass_index": 0.438397,
+          "canopy_closure_index": 0.321748,
+          "disturbance_pressure_index": 0.597719,
+          "phase": "canopy_building",
+          "primary_productivity_index": 0.48,
+          "recovery_fraction": 0.257622,
+          "succession_stage": "disturbance_mosaic",
+          "wildfire_spread_risk_index": 0.847312,
+          "years_since_start": 25
+        },
+        {
+          "biomass_index": 0.558954,
+          "canopy_closure_index": 0.410226,
+          "disturbance_pressure_index": 0.559567,
+          "phase": "mature_state",
+          "primary_productivity_index": 0.48,
+          "recovery_fraction": 0.52491,
+          "succession_stage": "mid_successional_cover",
+          "wildfire_spread_risk_index": 0.847312,
+          "years_since_start": 60
+        },
+        {
+          "biomass_index": 0.67951,
+          "canopy_closure_index": 0.498705,
+          "disturbance_pressure_index": 0.589199,
+          "phase": "disturbance_recovery",
+          "primary_productivity_index": 0.48,
+          "recovery_fraction": 0.776104,
+          "succession_stage": "disturbance_mosaic",
+          "wildfire_spread_risk_index": 0.847312,
+          "years_since_start": 90
+        }
+      ]
+    },
+    {
+      "biome": "temperate_forest",
+      "cell_id": 1,
+      "final_succession_stage": "disturbance_mosaic",
+      "id": 1,
+      "initial_succession_stage": "disturbance_mosaic",
+      "max_wildfire_spread_risk_index": 0.847312,
+      "mean_biomass_index": 0.498675,
+      "mean_canopy_closure_index": 0.365987,
+      "mean_disturbance_pressure_index": 0.595589,
+      "recovery_years": 55,
+      "step_count": 4,
+      "steps": [
+        {
+          "biomass_index": 0.317841,
+          "canopy_closure_index": 0.23327,
+          "disturbance_pressure_index": 0.635871,
+          "phase": "establishment",
+          "primary_productivity_index": 0.48,
+          "recovery_fraction": 0.0,
+          "succession_stage": "disturbance_mosaic",
+          "wildfire_spread_risk_index": 0.847312,
+          "years_since_start": 0
+        },
+        {
+          "biomass_index": 0.438397,
+          "canopy_closure_index": 0.321748,
+          "disturbance_pressure_index": 0.597719,
+          "phase": "canopy_building",
+          "primary_productivity_index": 0.48,
+          "recovery_fraction": 0.257622,
+          "succession_stage": "disturbance_mosaic",
+          "wildfire_spread_risk_index": 0.847312,
+          "years_since_start": 25
+        },
+        {
+          "biomass_index": 0.558954,
+          "canopy_closure_index": 0.410226,
+          "disturbance_pressure_index": 0.559567,
+          "phase": "mature_state",
+          "primary_productivity_index": 0.48,
+          "recovery_fraction": 0.52491,
+          "succession_stage": "mid_successional_cover",
+          "wildfire_spread_risk_index": 0.847312,
+          "years_since_start": 60
+        },
+        {
+          "biomass_index": 0.67951,
+          "canopy_closure_index": 0.498705,
+          "disturbance_pressure_index": 0.589199,
+          "phase": "disturbance_recovery",
+          "primary_productivity_index": 0.48,
+          "recovery_fraction": 0.776104,
+          "succession_stage": "disturbance_mosaic",
+          "wildfire_spread_risk_index": 0.847312,
+          "years_since_start": 90
+        }
+      ]
+    },
+    {
+      "biome": "temperate_forest",
+      "cell_id": 2,
+      "final_succession_stage": "disturbance_mosaic",
+      "id": 2,
+      "initial_succession_stage": "disturbance_mosaic",
+      "max_wildfire_spread_risk_index": 0.847312,
+      "mean_biomass_index": 0.498675,
+      "mean_canopy_closure_index": 0.365987,
+      "mean_disturbance_pressure_index": 0.595589,
+      "recovery_years": 55,
+      "step_count": 4,
+      "steps": [
+        {
+          "biomass_index": 0.317841,
+          "canopy_closure_index": 0.23327,
+          "disturbance_pressure_index": 0.635871,
+          "phase": "establishment",
+          "primary_productivity_index": 0.48,
+          "recovery_fraction": 0.0,
+          "succession_stage": "disturbance_mosaic",
+          "wildfire_spread_risk_index": 0.847312,
+          "years_since_start": 0
+        },
+        {
+          "biomass_index": 0.438397,
+          "canopy_closure_index": 0.321748,
+          "disturbance_pressure_index": 0.597719,
+          "phase": "canopy_building",
+          "primary_productivity_index": 0.48,
+          "recovery_fraction": 0.257622,
+          "succession_stage": "disturbance_mosaic",
+          "wildfire_spread_risk_index": 0.847312,
+          "years_since_start": 25
+        },
+        {
+          "biomass_index": 0.558954,
+          "canopy_closure_index": 0.410226,
+          "disturbance_pressure_index": 0.559567,
+          "phase": "mature_state",
+          "primary_productivity_index": 0.48,
+          "recovery_fraction": 0.52491,
+          "succession_stage": "mid_successional_cover",
+          "wildfire_spread_risk_index": 0.847312,
+          "years_since_start": 60
+        },
+        {
+          "biomass_index": 0.67951,
+          "canopy_closure_index": 0.498705,
+          "disturbance_pressure_index": 0.589199,
+          "phase": "disturbance_recovery",
+          "primary_productivity_index": 0.48,
+          "recovery_fraction": 0.776104,
+          "succession_stage": "disturbance_mosaic",
+          "wildfire_spread_risk_index": 0.847312,
+          "years_since_start": 90
+        }
+      ]
+    }
+  ],
+  "wildfire_disturbance_model": {
+    "aquatic_fire_policy": "zero_fuel_ignition_and_spread_non_burnable_no_history",
+    "aquatic_selector": "is_water_or_is_lake_or_fishery_water_body_type",
+    "ignition_model": "legacy_energy_aridity_fuel_wind_settlement_proxy_v1",
+    "model": "heuristic_wildfire_aquatic_exclusion_v2",
+    "neighbor_fuel_policy": "terrestrial_biomass_neighbors"
+  },
+  "wildfire_spread_histories": [
+    {
+      "area_km2": 3.0,
+      "cell_count": 3,
+      "cell_ids": [
+        0,
+        1,
+        2
+      ],
+      "centroid_lat_deg": 0.0,
+      "centroid_lon_deg": 1.0,
+      "containment_index": 0.028907,
+      "disturbance_regime_counts": {
+        "seasonal_surface_fire": 1,
+        "wind_driven_crown_fire": 2
+      },
+      "dominant_biome": "temperate_forest",
+      "dominant_disturbance_regime": "wind_driven_crown_fire",
+      "id": 0,
+      "ignition_cell_id": 0,
+      "max_spread_probability_index": 0.955608,
+      "mean_ecosystem_disturbance_pressure_index": 0.635871,
+      "mean_firebreak_index": 0.032304,
+      "mean_fuel_continuity_index": 0.820534,
+      "mean_ignition_potential_index": 0.928941,
+      "mean_wildfire_spread_risk_index": 0.847312,
+      "mean_wind_alignment_index": 0.666667,
+      "spread_step_count": 3,
+      "steps": [
+        {
+          "active_front_cell_ids": [
+            0
+          ],
+          "burned_area_km2": 1.0,
+          "containment_index": 0.044734,
+          "cumulative_burned_cell_count": 1,
+          "mean_spread_probability_index": 0.955608,
+          "newly_burned_cell_ids": [
+            0
+          ],
+          "step_index": 0
+        },
+        {
+          "active_front_cell_ids": [
+            1
+          ],
+          "burned_area_km2": 2.0,
+          "containment_index": 0.078016,
+          "cumulative_burned_cell_count": 2,
+          "mean_spread_probability_index": 0.836743,
+          "newly_burned_cell_ids": [
+            1
+          ],
+          "step_index": 1
+        },
+        {
+          "active_front_cell_ids": [
+            2
+          ],
+          "burned_area_km2": 3.0,
+          "containment_index": 0.08384,
+          "cumulative_burned_cell_count": 3,
+          "mean_spread_probability_index": 0.815943,
+          "newly_burned_cell_ids": [
+            2
+          ],
+          "step_index": 2
+        }
+      ]
+    }
+  ]
+}

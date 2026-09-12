@@ -16,7 +16,7 @@ from typer.testing import CliRunner
 
 from magic_geo.cli import app
 
-from support import worlds
+from support import cryosphere_worlds, worlds
 from support.cli import assert_no_cli_crash
 
 
@@ -189,15 +189,18 @@ class SmokeCryosphereTests(TestCase):
             self.assertGreaterEqual(summary[key], 0.0)
             self.assertLessEqual(summary[key], 1.0)
     def test_glacial_sediment_transport_provenance_and_terrain_coupling(self) -> None:
-        world = worlds.cached_world("coupled_128")
+        # Positive ice transport needs the shipped cold forcing. The ordinary
+        # Earthlike coupled witness is now warm under the seasonal energy model.
+        world = cryosphere_worlds.cached_cold_world("full_world")
 
         model = world["glacial_sediment_transport_model"]
         history = world["glacial_sediment_transport_history"]
         cells = world["cells"]
         self.assertEqual(
             model["model_type"],
-            "downhill_area_conserving_glacial_sediment_transport_v2",
+            "downhill_area_conserving_glacial_sediment_transport_v3",
         )
+        self.assertEqual(model["source_grounded_ice_model"], "exposed_land_annual_grounded_ice_diagnostic_v1")
         self.assertEqual(
             model["routing_graph"],
             "single_steepest_downhill_mesh_neighbor_v1",
@@ -217,7 +220,8 @@ class SmokeCryosphereTests(TestCase):
 
         stage = history[0]
         self.assertEqual(stage["id"], 0)
-        self.assertEqual(stage["feedback_stage_id"], 2)
+        self.assertEqual(world["simulation_clock"]["configured_erosion_iteration_count"], 0)
+        self.assertEqual(stage["feedback_stage_id"], 1)
         self.assertEqual(stage["input_cell_count"], len(cells))
         self.assertEqual(stage["transfer_count"], len(stage["transfers"]))
         self.assertGreater(stage["transfer_count"], 0)

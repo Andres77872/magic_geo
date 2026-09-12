@@ -116,7 +116,7 @@ scenarios:
         stellar_luminosity: 0.55
         greenhouse_factor: 0.50
       climate:
-        base_temperature_c: -10.0
+        reference_infrared_optical_depth: 1.0
       erosion:
         iterations: 3
     expectations:
@@ -135,7 +135,7 @@ scenarios:
         stellar_luminosity: 1.60
         greenhouse_factor: 1.70
       climate:
-        base_temperature_c: 35.0
+        reference_infrared_optical_depth: 1.0
       erosion:
         iterations: 3
     expectations:

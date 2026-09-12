@@ -1,11 +1,10 @@
 """Public ``validate`` CLI violations for biosphere and resource records.
 
-``magic-geo validate`` accumulates every complaint into one list and echoes it
-as ``FAIL <message>`` lines before exiting 1, so a healthy generated world never
-executes the reporting side of any check. Each test here takes a generated
-world, tampers with exactly one derived quantity (or one key per domain when the
-domains cannot observe each other), and pins the *exact* message the check under
-test is supposed to emit.
+``magic-geo validate`` checks the native certificate and versioned ecology
+dependencies before its remaining record checks. Each test takes a generated
+world, tampers with one derived quantity, and pins the exact first applicable
+diagnostic. Separating mutations prevents an upstream failure from hiding an
+unrelated field check.
 
 Four habits keep the assertions honest:
 
@@ -23,10 +22,9 @@ Four habits keep the assertions honest:
   looked up through :meth:`~ValidateCliTestCase.first`, so a world that stops
   generating one says so instead of raising ``StopIteration`` mid-test.
 
-Tampers that provably cannot reach each other's checks share one CLI invocation
-(the command has a single failure gate at the end, so nothing is swallowed);
-tampers that walk the same record loop get one invocation each, because such a
-loop stops at its first offending record.
+Each current summary/shape mutation has its own CLI invocation. Explicit old
+archive coverage is used only where a historical downstream diagnostic is the
+subject; current parent preflight is never bypassed.
 
 The 128-cell world carries every record family this span validates except
 ``karst_systems``, which is empty below 512 cells; those checks use ``mid_512``.
@@ -46,6 +44,7 @@ from magic_geo.cli import app
 from magic_geo.io import write_json
 
 from support import worlds
+from support.ecology_worlds import historical_ecology_world_readonly
 import pytest
 
 # Exhaustive branch coverage of ``validate``: every case invokes the full CLI
@@ -120,6 +119,7 @@ class ValidateCliTestCase(TestCase):
         path = self.directory / f"{name}.json"
         write_json(path, world)
         result = CliRunner().invoke(app, ["validate", "--world", str(path)])
+        self.assertTrue(result.exception is None or isinstance(result.exception, SystemExit), repr(result.exception))
         reported = {
             line.removeprefix("FAIL ")
             for line in result.output.splitlines()
@@ -179,9 +179,8 @@ class ValidateCliTestCase(TestCase):
 
 
 # --------------------------------------------------------------------------
-# Summary metrics: every derived aggregate is re-computed from the records it
-# claims to summarise. One key per check, so a single world exercises a whole
-# domain's worth of comparisons.
+# Summary metrics: each derived aggregate is checked independently. Current
+# species/fire/resource preflights may stop before the generic summary loops.
 # --------------------------------------------------------------------------
 
 SOIL_SUMMARY = {
@@ -308,6 +307,7 @@ SPECIES_SUMMARY = {
     ),
     "species_range_total_area_km2": "species_range_total_area_km2 does not match records",
 }
+SPECIES_SUMMARY = {key: f"species parent summary: {key} mismatch" for key in SPECIES_SUMMARY}
 
 WILDFIRE_SUMMARY = {
     "wildfire_disturbance_regime_counts": (
@@ -334,6 +334,12 @@ WILDFIRE_SUMMARY = {
         "wildfire_total_burned_area_km2 does not match histories"
     ),
 }
+WILDFIRE_SUMMARY = {key: f"wildfire availability: summary {key}" for key in WILDFIRE_SUMMARY}
+WILDFIRE_SUMMARY.update({
+    "wildfire_disturbance_regime_counts": "wildfire availability: summary regimes",
+    "mean_wildfire_ignition_potential_index": "wildfire availability: summary mean wildfire_ignition_potential_index",
+    "wildfire_total_burned_area_km2": "wildfire availability: summary burned area",
+})
 
 RESOURCE_SUMMARY = {
     "resource_deposit_count": "resource_deposit_count does not match resource_deposits length",
@@ -355,6 +361,13 @@ RESOURCE_SUMMARY = {
         "ore_resource_deposit_count does not match resource deposits"
     ),
 }
+RESOURCE_SUMMARY.update({
+    "resource_deposit_count": "biological resource summary: resource_deposit_count mismatch",
+    "resource_deposit_class_counts": "resource deposit class counts mismatch",
+    "metal_resource_deposit_count": "biological resource summary: metal_resource_deposit_count mismatch",
+    "mean_resource_reserve_potential_index": "mean_resource_reserve_potential_index: numerical replay mismatch",
+    "resource_deposit_total_area_km2": "resource deposit total area: numerical replay mismatch",
+})
 
 #: One key per ``<domain> summary metrics missing`` guard. Deleting the key also
 #: trips that domain's value comparison, which is why the guards are asserted by
@@ -372,20 +385,26 @@ SUMMARY_KEY_GUARDS = {
     "resource_deposit_count": "resource deposit summary metrics missing",
     "ore_genesis_system_count": "ore genesis summary metrics missing",
 }
+SUMMARY_KEY_GUARDS.update({
+    "species_range_record_count": "species parent summary: species_range_record_count mismatch",
+    "wildfire_spread_history_count": "wildfire availability: summary wildfire_spread_history_count",
+    "resource_deposit_count": "biological resource summary: resource_deposit_count mismatch",
+})
 
 
 class SummaryMetricsTest(ValidateCliTestCase):
     """Summary aggregates are replayed from the records they summarise."""
 
     def assert_summary_tamper_rejected(self, table: dict[str, str], name: str) -> None:
-        world = self.world()
-        summary = world["summary"]
-        for key in table:
-            self.assertIn(key, summary, f"{key} missing from the generated summary")
-            summary[key] = self.assert_changed(
-                summary[key], _tampered_summary_value(summary[key]), f"summary[{key!r}]"
-            )
-        self.assert_rejects(world, name, *table.values())
+        for key, message in table.items():
+            with self.subTest(key=key):
+                world = self.world()
+                summary = world["summary"]
+                self.assertIn(key, summary, f"{key} missing from the generated summary")
+                summary[key] = self.assert_changed(
+                    summary[key], _tampered_summary_value(summary[key]), f"summary[{key!r}]"
+                )
+                self.assert_rejects(world, name + "_" + key, message)
 
     def test_soil_summary_metrics_replayed(self) -> None:
         self.assert_summary_tamper_rejected(SOIL_SUMMARY, "summary_soil")
@@ -409,17 +428,17 @@ class SummaryMetricsTest(ValidateCliTestCase):
         self.assert_summary_tamper_rejected(RESOURCE_SUMMARY, "summary_resource")
 
     def test_absent_summary_keys_reported_per_domain(self) -> None:
-        world = self.world()
-        summary = world["summary"]
-        for key in SUMMARY_KEY_GUARDS:
-            self.assertIn(key, summary, f"{key} missing from the generated summary")
-            del summary[key]
-        self.assert_rejects(world, "summary_absent", *SUMMARY_KEY_GUARDS.values())
+        for key, message in SUMMARY_KEY_GUARDS.items():
+            with self.subTest(key=key):
+                world = self.world()
+                self.assertIn(key, world["summary"], f"{key} missing from the generated summary")
+                del world["summary"][key]
+                self.assert_rejects(world, "summary_absent_" + key, message)
 
 
 # --------------------------------------------------------------------------
-# Payload shape: absent record collections, absent cell fields, absent record
-# fields. Each domain reads its own key, so one world covers them all.
+# Payload shape: each absent collection, cell field and record field is tested
+# separately so an upstream failure cannot hide another guard.
 # --------------------------------------------------------------------------
 
 PAYLOAD_COLLECTIONS = [
@@ -446,6 +465,10 @@ CELL_FIELD_GUARDS = {
     "wildfire_spread_history_ids": "wildfire disturbance cell fields missing",
     "ore_genesis_system_id": "ore genesis cell fields missing",
 }
+CELL_FIELD_GUARDS.update({
+    "species_range_record_ids": "species parent cell 0: range inverse mismatch",
+    "wildfire_spread_history_ids": "wildfire availability: cell 0: inverse histories",
+})
 
 RECORD_FIELD_GUARDS = {
     "biome_diagnostics": ("ecotone_index", "biome diagnostic fields missing"),
@@ -466,43 +489,53 @@ RECORD_FIELD_GUARDS = {
     "resource_deposits": ("formation_evidence", "resource deposit fields missing"),
     "ore_genesis_systems": ("formation_steps", "ore genesis system fields missing"),
 }
+RECORD_FIELD_GUARDS.update({
+    "species_range_records": ("habitat_evidence", "species parent range 0: consumed habitat evidence mismatch"),
+    "wildfire_spread_histories": ("disturbance_regime_counts", "wildfire availability: history 0: disturbance_regime_counts"),
+})
+
+CURRENT_COLLECTION_ERRORS = {
+    "vegetation_succession_histories": "aquatic ecology requires a valid succession history list",
+    "renewable_resource_records": "aquatic climate support requires a valid renewable record list",
+    "species_range_records": "species parent support requires a valid range record list",
+    "wildfire_spread_histories": "wildfire availability: invalid histories",
+    "resource_deposits": "biological resources require a resource_deposits list",
+}
 
 
 class PayloadShapeTest(ValidateCliTestCase):
     """Absent collections, cell fields and record fields are named, not crashed on."""
 
     def test_non_list_record_collections_reported(self) -> None:
-        world = self.world()
         for key in PAYLOAD_COLLECTIONS:
-            self.assertIsInstance(world.get(key), list, f"{key} is not a generated list")
-            # An empty mapping is not a list, and earlier passes that iterate the
-            # same key see nothing, so the shape guard is what reacts.
-            world[key] = {}
-        self.assert_rejects(
-            world,
-            "collections_absent",
-            *[f"{key} missing" for key in PAYLOAD_COLLECTIONS],
-            "biome_diagnostics length does not match cells",
-            "resource_deposits length does not match non-empty resource cells",
-        )
+            with self.subTest(collection=key):
+                world = self.world()
+                self.assertIsInstance(world.get(key), list, f"{key} is not a generated list")
+                world[key] = {}
+                messages = [CURRENT_COLLECTION_ERRORS.get(key, f"{key} missing")]
+                if key == "biome_diagnostics":
+                    messages.append("biome_diagnostics length does not match cells")
+                self.assert_rejects(world, "collections_absent_" + key, *messages)
 
     def test_absent_cell_fields_reported_per_domain(self) -> None:
-        world = self.world()
-        cell = world["cells"][0]
-        for field in CELL_FIELD_GUARDS:
-            self.assertIn(field, cell, f"{field} missing from generated cells")
-            del cell[field]
-        self.assert_rejects(world, "cell_fields_absent", *CELL_FIELD_GUARDS.values())
+        for field, message in CELL_FIELD_GUARDS.items():
+            with self.subTest(field=field):
+                world = self.world()
+                cell = world["cells"][0]
+                self.assertIn(field, cell, f"{field} missing from generated cells")
+                del cell[field]
+                self.assert_rejects(world, "cell_fields_absent_" + field, message)
 
     def test_absent_record_fields_reported_per_domain(self) -> None:
-        world = self.world()
-        expected = []
         for collection, (field, message) in RECORD_FIELD_GUARDS.items():
-            record = world[collection][0]
-            self.assertIn(field, record, f"{field} missing from generated {collection}")
-            del record[field]
-            expected.append(message)
-        self.assert_rejects(world, "record_fields_absent", *expected)
+            with self.subTest(collection=collection, field=field):
+                world = self.world()
+                record = world[collection][0]
+                self.assertIn(field, record, f"{field} missing from generated {collection}")
+                del record[field]
+                if collection == "resource_deposits":
+                    message = f"resource deposit 0 cell {record['cell_id']}: missing or mismatched formation evidence"
+                self.assert_rejects(world, "record_fields_absent_" + collection, message)
 
 
 # --------------------------------------------------------------------------
@@ -805,7 +838,7 @@ class BiomeRecordTest(ValidateCliTestCase):
         )
 
     def test_biome_ecotone_region_treats_neighbourless_cells_as_non_coastal(self) -> None:
-        """A cell whose neighbour list is not a list can never be coastal land."""
+        """Current adjacency preflight precedes the historical ecotone guard."""
 
         world = self.world()
         cells_by_id = {int(cell["id"]): cell for cell in world["cells"]}
@@ -826,8 +859,24 @@ class BiomeRecordTest(ValidateCliTestCase):
             coastal["neighbors"], {}, "the coastal cell's neighbour list"
         )
         self.assert_rejects(
-            world, "ecotone_region_neighborless", "biome ecotone region records invalid"
+            world, "ecotone_region_neighborless",
+            f"species parent cell {coastal['id']}: invalid neighbor IDs",
+            f"wildfire availability: cell {coastal['id']}: complete neighbor list",
         )
+
+        # Explicit original archive retains the old downstream message. This
+        # is a separate legacy control, never a bypass of current preflight.
+        historical = copy.deepcopy(historical_ecology_world_readonly())
+        code, reported, output = self.reported_failures(historical, "historical_ecotone_control")
+        self.assertEqual((code, reported), (0, set()), output)
+        by_id = {c["id"]: c for c in historical["cells"]}
+        old_coastal = self.first((by_id[r["cell_ids"][0]] for r in historical["biome_ecotone_regions"]
+            if not by_id[r["cell_ids"][0]]["is_water"] and any(by_id[n]["water_body_type"] in MARINE_WATER_TYPES
+                for n in by_id[r["cell_ids"][0]]["neighbors"])), "historical coastal ecotone source")
+        self.tamper(old_coastal, "neighbors", {})
+        code, reported, output = self.reported_failures(historical, "historical_ecotone_neighborless")
+        self.assertEqual(code, 1, output)
+        self.assertIn("biome ecotone region records invalid", reported)
 
     def test_biome_realism_check_records_are_range_checked(self) -> None:
         world = self.world()
@@ -932,8 +981,6 @@ class GroundwaterRecordTest(ValidateCliTestCase):
 # --------------------------------------------------------------------------
 
 VEGETATION_INVALID = "vegetation succession histories invalid"
-SPECIES_RECORD_INVALID = "species range records invalid"
-WILDFIRE_HISTORY_INVALID = "wildfire spread histories invalid"
 
 
 class EcosystemRecordTest(ValidateCliTestCase):
@@ -942,7 +989,7 @@ class EcosystemRecordTest(ValidateCliTestCase):
     def test_ecosystem_cell_fields_are_range_checked(self) -> None:
         world = self.world()
         self.tamper(world["cells"][0], "vegetation_recovery_years", 0)
-        self.assert_rejects(world, "ecosystem_cell", "ecosystem dynamic cell fields invalid")
+        self.assert_rejects(world, "ecosystem_cell", "ecosystem parent support cell 0: supported recovery years must be a positive integer")
 
     def test_vegetation_history_steps_must_be_a_list(self) -> None:
         world = self.world()
@@ -1001,17 +1048,17 @@ class EcosystemRecordTest(ValidateCliTestCase):
         )
 
     def test_species_range_cell_fields_are_range_checked(self) -> None:
-        for field, value, name in (
-            ("species_guild_richness_count", -1, "richness"),
-            ("species_endemism_index", "not-a-number", "endemism_type"),
-            ("species_range_record_ids", {}, "ids_mapping"),
-            ("species_range_record_ids", ["not-an-id"], "ids_text"),
+        for field, value, name, message in (
+            ("species_guild_richness_count", -1, "richness", "guild richness count mismatch"),
+            ("species_endemism_index", "not-a-number", "endemism_type", "species_endemism_index mismatch"),
+            ("species_range_record_ids", {}, "ids_mapping", "range inverse mismatch"),
+            ("species_range_record_ids", ["not-an-id"], "ids_text", "range inverse mismatch"),
         ):
             with self.subTest(field=field, case=name):
                 world = self.world()
                 self.tamper(world["cells"][0], field, value)
                 self.assert_rejects(
-                    world, f"species_cell_{name}", "species range cell fields invalid"
+                    world, f"species_cell_{name}", "species parent cell 0: " + message
                 )
 
     def test_species_range_record_identity_fields_are_checked(self) -> None:
@@ -1024,7 +1071,7 @@ class EcosystemRecordTest(ValidateCliTestCase):
             with self.subTest(field=field, case=name):
                 world = self.world()
                 self.tamper(world["species_range_records"][0], field, value)
-                self.assert_rejects(world, f"species_rec_{name}", SPECIES_RECORD_INVALID)
+                self.assert_rejects(world, f"species_rec_{name}", "species parent range 0: guild/member/component identity mismatch")
 
     def test_species_range_record_aggregates_are_replayed(self) -> None:
         world = self.world()
@@ -1032,23 +1079,31 @@ class EcosystemRecordTest(ValidateCliTestCase):
         self.assert_rejects(
             world,
             "species_rec_endemism",
-            SPECIES_RECORD_INVALID,
-            "species range record ids are not unique",
-            "species range record membership does not match cells",
+            "species parent range 0: endemism_index mismatch",
         )
 
+    def test_species_record_duplicates_and_inverse_links_are_independent_mutations(self) -> None:
+        world = self.world()
+        self.assertGreaterEqual(len(world["species_range_records"]), 2)
+        self.tamper(world["species_range_records"][1], "id", world["species_range_records"][0]["id"])
+        self.assert_rejects(world, "species_duplicate_id", "species parent range 1: guild/member/component identity mismatch")
+        world = self.world()
+        cell = self.first((c for c in world["cells"] if c["species_range_record_ids"]), "species member cell")
+        self.tamper(cell, "species_range_record_ids", [])
+        self.assert_rejects(world, "species_inverse", f"species parent cell {cell['id']}: range inverse mismatch")
+
     def test_wildfire_cell_fields_are_range_checked(self) -> None:
-        for field, value, name in (
-            ("wildfire_firebreak_index", 5.0, "firebreak"),
-            ("wildfire_ignition_potential_index", "not-a-number", "ignition_type"),
-            ("wildfire_spread_history_ids", {}, "ids_mapping"),
-            ("wildfire_spread_history_ids", ["not-an-id"], "ids_text"),
+        for field, value, name, message in (
+            ("wildfire_firebreak_index", 5.0, "firebreak", "cell 0: wildfire_firebreak_index"),
+            ("wildfire_ignition_potential_index", "not-a-number", "ignition_type", "non-numeric consumed input"),
+            ("wildfire_spread_history_ids", {}, "ids_mapping", "cell 0: inverse histories"),
+            ("wildfire_spread_history_ids", ["not-an-id"], "ids_text", "cell 0: inverse histories"),
         ):
             with self.subTest(field=field, case=name):
                 world = self.world()
                 self.tamper(world["cells"][0], field, value)
                 self.assert_rejects(
-                    world, f"wildfire_cell_{name}", "wildfire disturbance cell fields invalid"
+                    world, f"wildfire_cell_{name}", "wildfire availability: " + message
                 )
 
     def test_wildfire_history_identity_fields_are_checked(self) -> None:
@@ -1060,12 +1115,12 @@ class EcosystemRecordTest(ValidateCliTestCase):
             with self.subTest(field=field, case=name):
                 world = self.world()
                 self.tamper(world["wildfire_spread_histories"][0], field, value)
-                self.assert_rejects(world, f"wildfire_hist_{name}", WILDFIRE_HISTORY_INVALID)
+                self.assert_rejects(world, f"wildfire_hist_{name}", "wildfire availability: history 0: " + field)
 
     def test_wildfire_history_probability_bounds_are_checked(self) -> None:
         world = self.world()
         self.tamper(world["wildfire_spread_histories"][0], "max_spread_probability_index", 5.0)
-        self.assert_rejects(world, "wildfire_hist_probability", WILDFIRE_HISTORY_INVALID)
+        self.assert_rejects(world, "wildfire_hist_probability", "wildfire availability: history 0: max_spread_probability_index")
 
     def test_wildfire_history_aggregates_are_replayed(self) -> None:
         world = self.world()
@@ -1073,10 +1128,18 @@ class EcosystemRecordTest(ValidateCliTestCase):
         self.assert_rejects(
             world,
             "wildfire_hist_mean",
-            WILDFIRE_HISTORY_INVALID,
-            "wildfire spread history ids are not unique",
-            "wildfire spread history membership does not match cells",
+            "wildfire availability: history 0: mean_firebreak_index",
         )
+
+    def test_fire_record_duplicates_and_inverse_links_are_independent_mutations(self) -> None:
+        world = self.world()
+        self.assertGreaterEqual(len(world["wildfire_spread_histories"]), 2)
+        self.tamper(world["wildfire_spread_histories"][1], "id", world["wildfire_spread_histories"][0]["id"])
+        self.assert_rejects(world, "fire_duplicate_id", "wildfire availability: history 1: id")
+        world = self.world()
+        cell = self.first((c for c in world["cells"] if c["wildfire_spread_history_ids"]), "fire member cell")
+        self.tamper(cell, "wildfire_spread_history_ids", [])
+        self.assert_rejects(world, "fire_inverse", f"wildfire availability: cell {cell['id']}: inverse histories")
 
     def test_wildfire_spread_steps_are_replayed(self) -> None:
         for field, value, name in (
@@ -1087,14 +1150,14 @@ class EcosystemRecordTest(ValidateCliTestCase):
             with self.subTest(field=field, case=name):
                 world = self.world()
                 self.tamper(world["wildfire_spread_histories"][0]["steps"][0], field, value)
-                self.assert_rejects(world, f"wildfire_step_{name}", WILDFIRE_HISTORY_INVALID)
+                self.assert_rejects(world, f"wildfire_step_{name}", "wildfire availability: history 0: steps")
 
     def test_wildfire_steps_must_burn_every_cell_of_the_history(self) -> None:
         world = self.world()
         history = world["wildfire_spread_histories"][0]
         self.tamper(history, "steps", history["steps"][:-1])
         self.tamper(history, "spread_step_count", len(history["steps"]))
-        self.assert_rejects(world, "wildfire_step_dropped", WILDFIRE_HISTORY_INVALID)
+        self.assert_rejects(world, "wildfire_step_dropped", "wildfire availability: history 0: spread_step_count")
 
 
 # --------------------------------------------------------------------------
@@ -1111,10 +1174,20 @@ class ResourceRecordTest(ValidateCliTestCase):
         self.assert_rejects(
             world,
             "deposit",
-            "resource deposit records invalid",
-            "resource deposit ids are not unique",
-            "resource deposits do not match resource cells",
+            f"resource deposit 0 cell {world['resource_deposits'][0]['cell_id']}: renewability_index must be a finite unit index",
         )
+
+    def test_resource_duplicates_and_source_links_are_independent_mutations(self) -> None:
+        world = self.world()
+        self.assertGreaterEqual(len(world["resource_deposits"]), 2)
+        second = world["resource_deposits"][1]
+        self.tamper(second, "id", world["resource_deposits"][0]["id"])
+        self.assert_rejects(world, "deposit_duplicate_id", f"resource deposit 1 cell {second['cell_id']}: IDs must be dense in cell order")
+        world = self.world()
+        first, second = world["resource_deposits"][:2]
+        original_cell = first["cell_id"]
+        self.tamper(first, "cell_id", second["cell_id"])
+        self.assert_rejects(world, "deposit_source", f"resource deposit 0 cell {original_cell}: source linkage mismatch")
 
     def test_resource_deposits_must_cover_every_resource_cell(self) -> None:
         world = self.world()
@@ -1123,8 +1196,7 @@ class ResourceRecordTest(ValidateCliTestCase):
         self.assert_rejects(
             world,
             "deposit_dropped",
-            "resource_deposits length does not match non-empty resource cells",
-            "resource_deposit_count does not match resource_deposits length",
+            "resource deposit coverage: missing supported deposit or unexpected unsupported deposit",
         )
 
     def test_ore_genesis_cell_indices_are_range_checked(self) -> None:

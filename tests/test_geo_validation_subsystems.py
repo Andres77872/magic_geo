@@ -7,6 +7,7 @@ from unittest import TestCase
 from magic_geo.api import generate_geo_world
 from magic_geo.config import WorldConfig, load_config
 from magic_geo.geo_validation_subsystems import validate_natural_subsystems
+from support.cryosphere_worlds import cached_cold_world_readonly
 
 
 def _small_earth_config() -> WorldConfig:
@@ -138,6 +139,31 @@ class NaturalSubsystemValidationTests(TestCase):
         )
         self.assertFalse(check["passed"])
         self.assertIn("basin 0: overflow_index replay", check["observed"])
+
+    def test_lake_surface_cannot_be_reclassified_by_downstream_layers(self) -> None:
+        lake = next(cell for cell in self.world["cells"] if cell["is_lake"])
+        target = "lake_basin_membership_and_storage"
+        clean = _check(validate_natural_subsystems(self.world), "lakes_watersheds", target)
+        self.assertTrue(clean["passed"], clean["observed"])
+        changes = {
+            "biome": "wetland",
+            "soil_type": "alluvial",
+            "soil_depth_m": 1.0,
+            "fertility": 0.8,
+            "settlement_score": 0.8,
+            "landform": "salt_flat",
+            "water_body_type": (
+                "saline_basin" if lake["water_body_type"] == "fresh_lake" else "fresh_lake"
+            ),
+        }
+        for field, value in changes.items():
+            with self.subTest(field=field):
+                altered = deepcopy(self.world)
+                altered["cells"][lake["id"]][field] = value
+                check = _check(
+                    validate_natural_subsystems(altered), "lakes_watersheds", target
+                )
+                self.assertFalse(check["passed"], check["observed"])
 
     def test_soil_history_uses_natural_stages_without_fake_years(self) -> None:
         model = self.world["soil_pedogenesis_model"]
@@ -384,7 +410,8 @@ class NaturalSubsystemValidationTests(TestCase):
         )
         for label, domain, check_name, mutate in cases:
             with self.subTest(label=label):
-                altered = deepcopy(self.world)
+                source = cached_cold_world_readonly() if label == "ice continuity" else self.world
+                altered = deepcopy(source)
                 mutate(altered)
 
                 check = _check(
@@ -559,8 +586,10 @@ class NaturalSubsystemFailureModeTests(TestCase):
         errors: tuple[str, ...],
         also_failed: tuple[str, ...] = (),
         cascade: dict[str, tuple[str, ...]] | None = None,
+        *,
+        world: dict | None = None,
     ) -> None:
-        altered = deepcopy(self.world)
+        altered = deepcopy(self.world if world is None else world)
         mutate(altered)
         checks = validate_natural_subsystems(altered)
 
@@ -581,7 +610,7 @@ class NaturalSubsystemFailureModeTests(TestCase):
             for expected in cascaded_errors:
                 self.assertIn(expected, cascade_observed)
 
-    def _run_cases(self, cases) -> None:
+    def _run_cases(self, cases, *, world=None) -> None:
         for label, mutate, target, errors, *rest in cases:
             with self.subTest(case=label):
                 self._assert_failure(
@@ -590,7 +619,15 @@ class NaturalSubsystemFailureModeTests(TestCase):
                     errors,
                     rest[0] if rest else (),
                     rest[1] if len(rest) > 1 else None,
+                    world=world,
                 )
+
+    def _run_cold_cases(self, cases) -> None:
+        world = cached_cold_world_readonly()
+        # Availability of an actual cold branch is part of the control, not a
+        # synthetic temperature change on an existing energy certificate.
+        self.assertFalse(_failed_names(validate_natural_subsystems(world)))
+        self._run_cases(cases, world=world)
 
     # ---- ocean circulation --------------------------------------------
 
@@ -649,12 +686,31 @@ class NaturalSubsystemFailureModeTests(TestCase):
                     (
                         "coastal_marine_landmass/land_marine_shelf_partitions",
                         "ocean_circulation/transport_source_links_and_ranges",
+                        "ecosystems_reefs_species_wildfire/succession_and_renewable_sources",
+                        "ecosystems_reefs_species_wildfire/species_range_inverse_links_and_envelopes",
+                        "ecosystems_reefs_species_wildfire/reef_membership_sources_and_ranges",
                     ),
                     {
                         "coastal_marine_landmass/land_marine_shelf_partitions": (
                             f"marine_region {marine_region_id}:"
                             f" cell mirror {land_cell_id}",
-                        )
+                        ),
+                        # Relabeling a fishery source as land also invalidates
+                        # its retained support flags and derived estimate.
+                        "ecosystems_reefs_species_wildfire/succession_and_renewable_sources": (
+                            f"aquatic climate support cell {land_cell_id}: fishery_climate_supported mismatch",
+                            f"aquatic climate support cell {land_cell_id}: fishery_productivity_supported mismatch",
+                        ),
+                        "ecosystems_reefs_species_wildfire/species_range_inverse_links_and_envelopes": (
+                            f"species habitat cell {land_cell_id}: species_marine_habitat_eligible mismatch",
+                            f"species habitat cell {land_cell_id}: species_marine_fish_score_supported mismatch",
+                            f"species habitat cell {land_cell_id}: dominant guild marine_fish lacks habitat or input support",
+                        ),
+                        # Native reef growth consumes this marine selector;
+                        # changing it invalidates the retained growth estimate.
+                        "ecosystems_reefs_species_wildfire/reef_membership_sources_and_ranges": (
+                            f"reef native cell {land_cell_id}: growth must omit bleaching without renormalizing weights",
+                        ),
                     },
                 ),
             )
@@ -1630,7 +1686,8 @@ class NaturalSubsystemFailureModeTests(TestCase):
         reach_mirror_id = self.world["river_hydraulic_reaches"][0]["cell_ids"][0]
         # Clearing ``is_river`` on a channel cell is not just a mirror break:
         # placer/ore genesis and deposit accessibility are replayed from that
-        # flag, so the derived registries must disagree on that exact cell.
+        # flag, as is freshwater fish habitat, so the derived registries must
+        # disagree on that exact cell.
         channel_deposit_ids = [
             deposit["id"]
             for deposit in self.world["resource_deposits"]
@@ -1698,6 +1755,7 @@ class NaturalSubsystemFailureModeTests(TestCase):
                     (
                         "geologic_resources/resource_deposit_sources_and_ranges",
                         "geologic_resources/ore_system_membership_and_formation_sources",
+                        "ecosystems_reefs_species_wildfire/species_range_inverse_links_and_envelopes",
                     ),
                     {
                         "geologic_resources/resource_deposit_sources_and_ranges": (
@@ -1712,6 +1770,11 @@ class NaturalSubsystemFailureModeTests(TestCase):
                             f"cell {channel_mirror_id}:"
                             " placer_concentration_index replay",
                             "ore 0: mean_placer_concentration_index replay",
+                        ),
+                        "ecosystems_reefs_species_wildfire/species_range_inverse_links_and_envelopes": (
+                            f"species habitat cell {channel_mirror_id}: species_freshwater_habitat_eligible mismatch",
+                            f"species habitat cell {channel_mirror_id}: species_freshwater_fish_score_supported mismatch",
+                            f"species habitat cell {channel_mirror_id}: species_freshwater_fishery_input_mode mismatch",
                         ),
                     },
                 ),
@@ -1847,7 +1910,7 @@ class NaturalSubsystemFailureModeTests(TestCase):
             history["total_surface_balance_km3"] += 1.0e6
 
         target = "cryosphere_permafrost_glacial/ice_sheet_history_conservation"
-        self._run_cases(
+        self._run_cold_cases(
             (
                 (
                     "unknown sheet source",
@@ -1909,7 +1972,7 @@ class NaturalSubsystemFailureModeTests(TestCase):
             flowline["steps"][1]["basal_sliding_index"] = 2.0
 
         target = "cryosphere_permafrost_glacial/stability_and_flowline_sources"
-        self._run_cases(
+        self._run_cold_cases(
             (
                 (
                     "stability sources",
@@ -1958,7 +2021,7 @@ class NaturalSubsystemFailureModeTests(TestCase):
         )
 
     def test_permafrost_and_glacial_membership_mutations_are_rejected(self) -> None:
-        mirror_cell_id = self.world["permafrost_regions"][0]["cell_ids"][1]
+        mirror_cell_id = cached_cold_world_readonly()["permafrost_regions"][0]["cell_ids"][1]
 
         def invalid_cells(world: dict) -> None:
             world["permafrost_regions"][0]["cell_ids"] = [9999]
@@ -1977,7 +2040,7 @@ class NaturalSubsystemFailureModeTests(TestCase):
             world["cells"][0]["active_layer_depth_m"] = -1.0
 
         target = "cryosphere_permafrost_glacial/permafrost_and_glacial_membership"
-        self._run_cases(
+        self._run_cold_cases(
             (
                 (
                     "invalid cell ids",

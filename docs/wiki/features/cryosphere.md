@@ -4,6 +4,10 @@
 
 The cryosphere is the last physical process the native engine applies before it hands the world to the entity generators. It is a **terminal, zero-duration endpoint operator**: `derive_cryosphere_state` runs once after the maturation loop, drives a single bulk glacial sediment transfer, and is then recomputed a second time after the sea-level/climate/hydrology stabilization has re-solved the surface. Everything above that — ice-sheet histories, stability trajectories, flowlines, permafrost classes and glacial landform systems — is a **post-hoc Python diagnostic** layered on top of the native per-cell ice state; none of it is a time-stepped ice-dynamics solver, and the codebase says so explicitly (`multi_step_ice_dynamics_resolved: false`, `physical_time_resolved: false`).
 
+Current native output declares `grounded_ice_model.model_type = exposed_land_annual_grounded_ice_diagnostic_v1` and the same type in the summary. Its strict boolean `grounded_ice_surface_applicable` is true only on nonmarine, nonlake cells. The exposed-land annual formulas remain unchanged; the domain correction prevents native lakes from becoming grounded glaciers. A zero on an inapplicable water cell does not establish absence of lake or sea ice. Both remain unmodeled, as do seasonal phase energy, physical ice mass balance and perennial evolution. Retained worlds without this declaration keep their historical interpretation and glacial-transport v2 replay; they are not implicitly upgraded.
+
+Active sheet members are applicable cells with `grounded_ice_diagnostic_thickness_m` strictly above 25 m. This native authority is serialized with `roundtrip_binary64_decimal_v1` precision; the rounded `ice_thickness_m` display field must not decide a threshold crossing. `ice_sheet_id` can also associate adjacent glacial terrain, including native standing glacial lakes (fresh or saline) and marine fjords; a reference alone does not establish active ice. Context does not contribute to active member count, area or thickness statistics. This correction does not resolve the [seasonal-ice research limits](../../current_simulation_review_status.md#seasonal-ice-isolated-research-production-issue-open); the separate [production transition review](../../production_cryosphere_transition_research.md) describes remaining physics and integration requirements.
+
 ## On this page
 
 - [Where the cryosphere sits in the pipeline](#where-the-cryosphere-sits-in-the-pipeline)
@@ -83,7 +87,7 @@ ice_velocity_m_y = 0.0
 glacial_erosion_m = 0.0
 ```
 
-**Step 1 — water short-circuit (`environment.cpp:33-35`):** `if (cell.is_water) continue;`. Water cells never receive ice. See [Sea ice](#sea-ice).
+**Step 1 — grounded-surface short-circuit:** current output resets the six fields on every cell, then excludes `is_water || is_lake`. The historical undeclared constructor excluded only `is_water` and could assign grounded-ice diagnostics to standing lakes. The new applicability flag records the corrected domain; it is not a lake/sea-ice estimate. See [Sea ice](#sea-ice).
 
 **Step 2 — glaciation persistence (`environment.cpp:37-50`):**
 
@@ -145,7 +149,7 @@ The cryosphere reads no dedicated snow field. Every input is an already-stabiliz
 
 | Input field | Produced by | Used for |
 |---|---|---|
-| `is_water` | `apply_sea_level` / `label_marine_water_bodies` (`cpp/src/engine/ocean.cpp`) | Water short-circuit (`environment.cpp:33`) |
+| `is_water`, `is_lake` | Native sea-level/marine and standing-water classification | Current grounded-surface short-circuit; historical constructor read only `is_water` |
 | `lat` (radians) | `build_mesh` (`cpp/src/engine/mesh.cpp`) | `lat_factor` |
 | `elevation_m` | sediment-interface primitive; derived as `bedrock_surface_elevation_m + sediment_thickness_m` | `elevation_factor`, flow target, slope |
 | `temperature_c` | `compute_climate` (`cpp/src/engine/climate.cpp`) | `cold_index`, accumulation, ablation, sliding |
@@ -166,7 +170,8 @@ There is no separate snowpack reservoir, no firn densification, no refreezing te
 
 | Key | Value |
 |---|---|
-| `model_type` | `downhill_area_conserving_glacial_sediment_transport_v2` |
+| `model_type` | `downhill_area_conserving_glacial_sediment_transport_v3` |
+| `source_grounded_ice_model` | `exposed_land_annual_grounded_ice_diagnostic_v1` |
 | `routing_graph` | `single_steepest_downhill_mesh_neighbor_v1` |
 | `source_state` | `post_erosion_pre_cryosphere_feedback_cell_state_v1` |
 | `erosion_potential_model` | `ice_thickness_times_local_slope_proxy_bounded_85m_v1` |
@@ -174,7 +179,7 @@ There is no separate snowpack reservoir, no firn densification, no refreezing te
 | `source_depth_model` | `glacial_erosion_potential_times_mobile_sediment_fraction` |
 | `source_material_partition_model` | `available_alluvium_first_then_bedrock_erosion_v1` |
 | `volume_transfer_model` | `source_depth_times_source_area_equals_target_depth_times_target_area` |
-| `stage_input_snapshot` | `complete_cell_cryosphere_terrain_and_sediment_inventory_before_transport_v2` |
+| `stage_input_snapshot` | `complete_cell_cryosphere_terrain_and_sediment_inventory_before_transport_v3` |
 | `mass_conserving` | `true` |
 | `mass_conserving_semantics` | `bulk_reference_volume_only_not_dry_rock_mass` |
 | `finite_sediment_inventory_resolved` | `true` |
@@ -187,10 +192,12 @@ There is no separate snowpack reservoir, no firn densification, no refreezing te
 | `source_partition_audit_is_mass_claim` | `false` |
 | `source_partition_audit_is_provenance_claim` | `false` |
 
+The retained v2 declaration and v2 snapshot have their own unchanged replay branch. Current v3 requires the matching grounded model and explicit stage lake flags. Lake membership is read from the pre-transport snapshot, not substituted from the terminal cells after stabilization.
+
 **Algorithm.**
 
-1. **Input snapshot** (`environment.cpp:123-134`): every cell, in cell-id order, contributes a `GlacialSedimentTransportInputCell` carrying `cell_id`, `glacier_flow_to_cell_id`, `is_water`, `elevation_m`, `ice_thickness_m`, `glacial_erosion_m`, `sediment_thickness_m`. This is the replay operand set; the serializer refuses to emit the stage if the array is not exactly cell-id indexed (`process_serialization.cpp:946-955`).
-2. **Transfer loop** (`environment.cpp:136-212`). A cell contributes a transfer only if `glacier_flow_to >= 0` **and** `glacial_erosion_m > 0.0`. It then hard-fails if the target is out of range or not a mesh neighbor (`"glacial sediment transfer target is invalid"`), and hard-fails if the source is water, has no ice, has a non-positive elevation drop, or either area is non-positive (`"glacial sediment transfer source state is invalid"`).
+1. **Input snapshot**: every cell, in cell-id order, contributes a `GlacialSedimentTransportInputCell` carrying `cell_id`, `glacier_flow_to_cell_id`, strict boolean `is_water` and `is_lake`, `elevation_m`, `ice_thickness_m`, `glacial_erosion_m`, and `sediment_thickness_m`. The v2 snapshot did not contain `is_lake`. This is the replay operand set; complete cell-ID coverage remains required even with no transfers.
+2. **Transfer loop**. An eligible exposed-land cell contributes a transfer only if `glacier_flow_to >= 0` **and** `glacial_erosion_m > 0.0`. It hard-fails on an invalid/nonneighbor target, inapplicable source, absent ice, non-positive elevation drop or non-positive area. Lakes and marine cells remain valid sediment targets; excluding them as grounded-ice donors does not prohibit deposition.
 3. **Volume identity** (`environment.cpp:166-173`):
    ```
    source_depth_m     = glacial_erosion_m * 0.28
@@ -225,8 +232,8 @@ Because each source cell has exactly one steepest-descent target, `stage.source_
 | `cell_count` | int | Mesh cell count |
 | `source_cell_count` | int | Equals `transfer_count` (one target per source) |
 | `target_cell_count` | int | Distinct deposition targets |
-| `land_target_transfer_count` | int | Transfers whose target is land |
-| `marine_target_transfer_count` | int | Transfers whose target is water |
+| `land_target_transfer_count` | int | Transfers to nonmarine targets, including lakes |
+| `marine_target_transfer_count` | int | Transfers to marine targets |
 | `production_volume_km3` | double | Σ `transfer_volume_km3` |
 | `deposition_volume_km3` | double | Σ `deposited_volume_km3` |
 | `alluvium_entrainment_volume_km3` | double | Σ alluvium-sourced volume |
@@ -302,7 +309,7 @@ Glacial cells also steer stratigraphy: `stratigraphic_facies_for_layer` (`enviro
 
 **Phase 1 — reset (`environment.cpp:1028-1032`):** every cell gets `ice_sheet_id = -1`, `moraine_deposition_m = 0.0`, `deglaciation_age_ka = 0.0`.
 
-**Phase 2 — BFS flood fill (`environment.cpp:1037-1086`).** A cell seeds a new sheet if it is unvisited, not water, and `ice_thickness_m > 25.0`. The queue expands to unvisited, non-water neighbors with `ice_thickness_m > 25.0`. Per sheet the loop accumulates area-weighted sums:
+**Phase 2 — BFS flood fill.** A current cell seeds a new sheet if it is unvisited, `grounded_ice_surface_applicable` is true, and raw `grounded_ice_diagnostic_thickness_m > 25.0`. Expansion uses the same active-member predicate; lake and marine cells do not enter the queue. Historical output excluded only marine water. Per sheet the loop accumulates area-weighted sums over active members; `ice_thickness_m` in these native equations is the unrounded internal value, not the rounded exported display value:
 
 | Accumulator | Weight | Line |
 |---|---|---|
@@ -320,9 +327,9 @@ All are divided by `area_km2` at `environment.cpp:1073-1080`.
 
 **Equilibrium line altitude (`environment.cpp:1081-1084`):** member elevations are sorted ascending and `equilibrium_line_altitude_m = elevations[(size_t)(0.42 * (n - 1))]` — the truncated 42nd-percentile index, not an interpolated percentile and not a mass-balance-derived ELA.
 
-**Phase 3 — peripheral assignment and glacial memory (`environment.cpp:1088-1102`).** A cell with `ice_sheet_id < 0` is adopted by `nearest_neighbor_ice_sheet` (`environment.cpp:992-1006`, which picks the neighbor sheet maximizing `ice_thickness_m + 0.8 * glacial_erosion_m`) when it is `landform ∈ {moraine(18), glacial_valley(17), glacial_lake(19)}`, **or** when `ice_thickness_m <= 25.0` and `has_glacier_neighbor(cells, id, 25.0)` — note the explicit 25 m threshold here, overriding the 80 m default.
+**Phase 3 — peripheral assignment and glacial memory.** Current associations distinguish active ice from one-edge adjacent glacial terrain. Water context is limited to the model-declared glacial-lake or marine-fjord cases. These cells retain context-associated moraine/deglaciation memory proxies; the reference and proxies do not establish active ice or actual sediment transfer. Ordinary wet cells outside those contexts retain no sheet ID and zero memory proxies. The historical peripheral rule adopted unassigned moraine/glacial-valley/glacial-lake cells or thin cells with a glacier neighbor, using `nearest_neighbor_ice_sheet` and its `ice_thickness_m + 0.8 * glacial_erosion_m` ranking. It did not provide this explicit grounded/context distinction.
 
-For any cell with `ice_sheet_id >= 0` and `ice_thickness_m <= 25.0` (i.e. deglaciated members):
+For associated thin/zero-ice context with `ice_sheet_id >= 0` and raw `grounded_ice_diagnostic_thickness_m <= 25.0`, including permitted glacial-lake/fjord context, the existing diagnostic memory formulas remain. They describe terrain memory, not active ice, dated deglaciation or actual transport:
 
 ```
 cold_memory     = clamp((-temperature_c + 4.0) / 18.0, 0, 1)
@@ -373,7 +380,7 @@ Struct: `cpp/src/engine/types/world.hpp:381-398`. Serializer: `ice_sheets_json` 
 |---|---|---|---|---|
 | 1 | `id` | int | Rank by `area_km2` descending, `0`-based | `environment.cpp:1146-1149` |
 | 2 | `retreat_stage` | enum str | `advancing` / `stable` / `retreating` / `stagnant` / `relict` | `environment.cpp:1008-1025` |
-| 3 | `cell_count` | int | BFS component size (thickness > 25 m cells only) | `environment.cpp:1052` |
+| 3 | `cell_count` | int | Active BFS component size; current applicability and raw thickness >25 m | `environment.cpp:1052` |
 | 4 | `moraine_cell_count` | int | Members with `moraine_deposition_m > 0` or `landform == moraine` | `environment.cpp:1112-1115` |
 | 5 | `area_km2` | double | Σ member `area_km2` | `environment.cpp:1053` |
 | 6 | `mean_ice_thickness_m` | double | Area-weighted mean | `environment.cpp:1054`, `1074` |
@@ -818,7 +825,7 @@ Normalizations: `ice_presence = ice_thickness_m/850`, `erosion_raw = glacial_ero
 
 ## Sea ice
 
-**There is no sea-ice model.** `derive_cryosphere_state` returns immediately for any cell with `is_water == true` (`cpp/src/engine/environment.cpp:33-35`) after zeroing the six ice state fields, so a serialized water cell always has `ice_thickness_m == 0.0`, `glacier_flow_to == -1`, `ice_surface_mass_balance_m_y == 0.0`, `basal_sliding_index == 0.0`, `ice_velocity_m_y == 0.0` and `glacial_erosion_m == 0.0`. `generate_ice_sheets` likewise excludes water cells from both the seed test and the BFS expansion (`environment.cpp:1038`, `1066`).
+**There is no lake-ice or sea-ice model.** Under the current grounded declaration, marine and lake cells have `grounded_ice_surface_applicable == false`, numeric zero for the five grounded scalar diagnostics and `glacier_flow_to == -1`. They cannot seed or join active sheets. These are structural grounded-process outputs, not evidence that floating ice is absent. Historical undeclared output skipped marine cells only and could misclassify lake cells as grounded ice.
 
 Two consequences worth knowing:
 
@@ -835,8 +842,10 @@ Native fields, from `cpp/src/engine/types/core.hpp:187-200`, serialized at `cpp/
 
 | # | Field | Type | Precision | Written by | Notes |
 |---|---|---|---|---|---|
-| 135 | `ice_thickness_m` | double | `P` | `derive_cryosphere_state` (2nd call) | `0` on water; `0` or `>= 25` on land |
-| 136 | `ice_sheet_id` | int | — | `generate_ice_sheets` | `-1` if unassigned; includes peripheral non-ice members |
+| — | `grounded_ice_surface_applicable` | bool | exact | `derive_cryosphere_state` | Current exposed nonmarine, nonlake domain; absent historically |
+| — | `grounded_ice_diagnostic_thickness_m` | double | roundtrip | Native diagnostic state | Active-membership authority; conditional CSV column and raw debug table, without a duplicate map layer |
+| 135 | `ice_thickness_m` | double | `P` | `derive_cryosphere_state` (2nd call) | Current inapplicable water has grounded zero; applicable land has `0` or `>= 25` |
+| 136 | `ice_sheet_id` | int | — | `generate_ice_sheets` | `-1` if unassigned; active membership and peripheral glacial context remain distinct |
 | 137 | `glacier_flow_to` | int | — | `derive_cryosphere_state` | Steepest-descent mesh neighbor; `-1` at local minima |
 | 138 | `ice_surface_mass_balance_m_y` | double | `P` | `derive_cryosphere_state` | Clamped `[-4.0, 3.2]` |
 | 139 | `basal_sliding_index` | double | `P` | `derive_cryosphere_state` | Clamped `[0, 1]` |
@@ -878,19 +887,20 @@ Python-added cryosphere cell fields:
 
 | Key | Denominator / definition |
 |---|---|
+| `grounded_ice_model` | Exact own-model type mirror; absent in historical output |
 | `mean_ice_thickness_m` | Σ `ice_thickness_m` ÷ **all** cells |
 | `mean_glacial_erosion_m` | Σ `glacial_erosion_m` ÷ **all** cells |
 | `mean_ice_surface_mass_balance_m_y` | Σ over glacier cells ÷ glacier cell count (`0.0` if none) |
 | `mean_basal_sliding_index` | Σ over glacier cells ÷ glacier cell count |
 | `mean_ice_velocity_m_y` | Σ over glacier cells ÷ glacier cell count |
-| `glaciated_land_fraction` | glacier cells ÷ land cells |
+| `glaciated_land_fraction` | active glacier cells ÷ nonmarine cells, including lakes in the denominator |
 | `ice_sheet_count` | `ice_sheets.size()` |
 | `mean_ice_sheet_retreat_rate_m_y` | Σ sheet `retreat_rate_m_y` ÷ sheet count |
 | `moraine_deposition_cell_count` | cells with `moraine_deposition_m > 0.0` |
 | `mean_moraine_deposition_m` | Σ `moraine_deposition_m` ÷ **all** cells |
 | `mean_deglaciation_age_ka` | Σ ÷ cells with `deglaciation_age_ka > 0.0` |
 
-"Glacier cell" here is `!is_water && ice_thickness_m > 25.0` (`summary.cpp:475`). Related glacial-sediment aggregates are derived from the stage history but emitted in **two other** summary blocks, not this one: `glacial_sediment_transport_stage_count`, `glacial_sediment_transfer_count`, `glacial_sediment_source_cell_count`, `glacial_sediment_target_cell_count`, `glacial_sediment_land_target_transfer_count`, `glacial_sediment_marine_target_transfer_count`, `glacial_sediment_production_volume_km3`, `glacial_sediment_deposition_volume_km3`, `glacial_sediment_mass_balance_residual_km3`, `glacial_sediment_terrain_volume_change_residual_km3`, `max_glacial_sediment_source_production_depth_m` and `max_glacial_sediment_target_deposition_depth_m` at `summary.cpp:1467-1499`; `glacial_sediment_alluvium_entrainment_volume_km3` and `glacial_sediment_bedrock_erosion_volume_km3` at `summary.cpp:2000-2004`.
+Current active glacier cells use applicability and raw `grounded_ice_diagnostic_thickness_m > 25.0`; historical output used `!is_water && ice_thickness_m > 25.0`. The fraction keeps its existing nonmarine denominator rather than changing calibration metrics silently. Glacial sediment aggregate keys continue to summarize the separate retained transport history, including its alluvium/bedrock partition.
 
 **Python enricher summary keys:**
 
@@ -994,16 +1004,16 @@ The native settlement/landform coupling is described in [Glacial landforms in th
 
 ## Validation
 
-Three independent validators cover the cryosphere.
+Validation combines grounded-domain/source checks with the existing numerical and record-coherence checks below. The current branch requires the exact own marker, summary mirror, typed applicability and matching glacial v3 source/snapshot. Active-member tests exclude lakes as well as marine water, while contextual sheet references remain distinct. Explicit historical v2 records keep their old snapshot replay; validators must not infer missing lake flags from the final world or silently relabel a v2 record. The equations and tolerances below describe the retained diagnostic checks, not seasonal-ice validation.
 
 **1. `geo_validation.py` — `cryosphere / ice_sheet_and_flow_coherence`** (`src/magic_geo/geo_validation.py:2124-2194`). Fails unless:
 
 | Rule | Line |
 |---|---|
 | Every cell has `ice_thickness_m >= 0.0` | 2135 |
-| Every land cell with `ice_thickness_m > 25.0` has an `ice_sheet_id` present in `ice_sheets[]` | 2135-2140 |
+| Every current applicable cell with raw `grounded_ice_diagnostic_thickness_m > 25.0` has an `ice_sheet_id` present in `ice_sheets[]`; historical branch uses nonmarine cells | 2135-2140 |
 | `glacier_flow_to` is an int; if `>= 0` it is a mesh neighbor, the cell has `ice_thickness_m > 0`, and the target elevation is not higher than the source by more than `1e-6` | 2141-2149 |
-| Each sheet's `cell_count`, `area_km2` (tolerance `max(0.01, area*1e-6)`) and `mean_ice_thickness_m` (tolerance `1e-3`) exactly reproduce the area-weighted member aggregate over `ice_thickness_m > 25.0` non-water cells | 2151-2176 |
+| Each sheet's `cell_count`, `area_km2` (tolerance `max(0.01, area*1e-6)`) and `mean_ice_thickness_m` (tolerance `1e-3`) reproduce active member aggregates; contextual references do not enter the current aggregate | 2151-2176 |
 | `len(ice_sheet_records) == len(ice_sheets)` (no duplicate ids) | 2184 |
 
 **2. `geo_validation_subsystems.py` — domain `cryosphere_permafrost_glacial`** (`_validate_cryosphere`, `src/magic_geo/geo_validation_subsystems.py:1739-1939`), three checks:
@@ -1121,7 +1131,9 @@ Note the `--geo-only` path requires `output.include_cells` to be true; `generate
 
 **No glacio-eustasy and no ice-load isostasy.** Ice mass is never exchanged with the ocean inventory, and `ice_thickness_m` never enters the isostatic equilibrium calculation. Sea level after the cryosphere stage changes only because the *sediment interface* moved, never because ice grew or melted.
 
-**No sea ice, no ice shelves, no calving flux.** `derive_cryosphere_state` returns before assigning anything to water cells (`environment.cpp:33-35`). `calving_susceptibility_index` and `projected_calving_loss_km3` are risk scores computed from marine-margin fraction and sheet state; no mass is removed and no floating ice is represented. `grounding_line_instability_index` likewise names a process the model does not simulate.
+**No lake ice, sea ice, ice shelves or calving flux.** The grounded surface predicate excludes both marine and lake cells. `calving_susceptibility_index` and `projected_calving_loss_km3` remain diagnostic risk scores; no ice mass is removed and no floating ice is represented. `grounding_line_instability_index` likewise names a process the model does not simulate.
+
+**Annual ablation remains unreachable where the constructor creates ice.** Created thickness requires annual temperature below −3 °C, while its positive-ablation term requires temperature above −1.5 °C. Correcting lake applicability does not alter this limitation, resolve seasonal snowmelt or establish perennial glacier survival. The independent seasonal research and unchanged Earth-profile bounds remain separate.
 
 **The two `derive_cryosphere_state` calls produce different fields.** The serialized cell ice state is the *second* call's output, on the stabilized post-transport surface; the transport was driven by the *first* call's output, preserved only in `glacial_sediment_transport_history[0].input_cells[]`. Any analysis that multiplies the serialized `glacial_erosion_m` by `0.28` and expects `glacial_sediment_production_m` will not close.
 

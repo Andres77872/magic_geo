@@ -27,11 +27,11 @@ tamper cannot be identified by its message. Those tests therefore pin the
 *input* they tampered instead, and each one starts from a control that replays
 cleanly, so a green result cannot come from a broken fixture.
 
-The generated world is ``small_smoke`` rather than the usual ``replay_128``
-because ``replay_128`` has a single political region and therefore no conflicts
-at all — no conflict, no campaign, no path, no front. ``small_smoke`` is the
-smallest canonical world with a conflict, and its one conflict runs region 0
-(the stronger attacker) against region 1.
+The generated world is ``mid_512`` rather than the usual ``replay_128``
+because ``replay_128`` and ``small_smoke`` each have a single political region
+and therefore no conflict, campaign, path or front. ``mid_512`` has two regions,
+and its one exhaustion conflict runs region 0 (the stronger attacker) against
+region 1. Its campaign advances across multiple cells and border segments.
 
 Tampers already covered elsewhere are deliberately absent: the campaign path
 segment / front step / tactical step / strategic plan / model-descriptor
@@ -56,8 +56,8 @@ from magic_geo.logistics_history import (
     enrich_world_with_logistics_history,
 )
 
-#: The smallest canonical world that owns a conflict, and therefore a campaign.
-CAMPAIGN_WORLD = "small_smoke"
+#: Two regions, one exhaustion conflict, and a campaign led by region 0.
+CAMPAIGN_WORLD = "mid_512"
 
 #: The smallest canonical world of all: one region, so no conflicts.
 QUIET_WORLD = "replay_128"
@@ -448,7 +448,7 @@ class SyntheticCampaignWorldTests(_TamperMixin, TestCase):
 
 
 class GeneratedCampaignWorldTests(_TamperMixin, TestCase):
-    """One-field tampers on the inputs of a generated world."""
+    """Scoped campaign-stage input mutations from a genuine generated world."""
 
     control: dict[str, Any]
 
@@ -657,14 +657,37 @@ class GeneratedCampaignWorldTests(_TamperMixin, TestCase):
         # it still runs against region 1 with no network of its own.
         self.assertEqual(self._only_movement(world)["target_region_id"], 1)
 
-    def test_capital_cell_off_the_mesh_produces_no_campaign(self) -> None:
+    def test_route_origin_remains_usable_when_capital_cell_is_off_the_mesh(self) -> None:
+        """The selected trade-route origin takes precedence over the capital."""
+
+        world = self._world()
+        movement = self._only_movement(world)
+        region = next(item for item in world["political_regions"] if item["id"] == movement["origin_region_id"])
+        capital = next(item for item in world["settlements"] if item["id"] == region["capital_settlement_id"])
+        self.assertNotEqual(capital["cell_id"], movement["origin_cell_id"])
+        self._tamper(capital, "cell_id", 9999)
+
+        world = self._enriched(world)
+
+        self.assertEqual(self._only_movement(world)["origin_cell_id"], movement["origin_cell_id"])
+        self.assertEqual(self._only_movement(world)["path_cell_ids"], movement["path_cell_ids"])
+
+    def test_route_origin_and_capital_off_the_mesh_produce_no_campaign(self) -> None:
         """No origin cell means no path, and a conflict without a path is skipped."""
 
         world = self._world()
-        # Settlement 0 is region 0's capital and the origin endpoint of the
-        # campaign route, so this removes both the route endpoint and the
-        # capital fallback in one write.
-        self._tamper(world["settlements"][0], "cell_id", 9999)
+        movement = self._only_movement(world)
+        region = next(item for item in world["political_regions"] if item["id"] == movement["origin_region_id"])
+        capital = next(item for item in world["settlements"] if item["id"] == region["capital_settlement_id"])
+        route = next(item for item in world["routes"] if item["id"] == movement["route_id"])
+        origin = next(item for item in world["settlements"]
+                      if item["id"] in (route["from"], route["to"])
+                      and item["cell_id"] == movement["origin_cell_id"])
+        self.assertNotEqual(origin["id"], capital["id"])
+        # The current witness uses a noncapital route endpoint. Remove both
+        # sources so the producer really reaches its missing-origin branch.
+        self._tamper(origin, "cell_id", 9999)
+        self._tamper(capital, "cell_id", 9999)
 
         world = self._enriched(world)
 

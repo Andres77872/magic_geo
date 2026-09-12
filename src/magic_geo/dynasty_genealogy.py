@@ -108,6 +108,10 @@ def _dynasty_ruler_count(dynasty: dict[str, Any]) -> int:
 
 
 def enrich_world_with_dynasty_genealogy(world: dict[str, Any]) -> dict[str, Any]:
+    from .native_dynasty_genealogy_validation import genealogy_version
+    if genealogy_version(world) == 2:
+        from .dynasty_genealogy_availability import enrich_native_dynasty_genealogy
+        return enrich_native_dynasty_genealogy(world)
     _set_ruler_genealogy_model(world)
     dynasties = world.get("dynasties", [])
     if not isinstance(dynasties, list):

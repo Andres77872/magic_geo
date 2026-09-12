@@ -218,7 +218,7 @@ ROUTE_DESERT_BIOMES = {
     "semi_arid_desert",
 }
 SETTLEMENT_SELECTION_MODEL = (
-    "causal_native_score_local_max_separated_settlement_selection_v1"
+    "causal_native_score_local_max_separated_settlement_selection_v2"
 )
 ROUTE_NETWORK_MODEL = "causal_endpoint_barrier_ranked_route_network_v1"
 SETTLEMENT_SCORE_THRESHOLD = 0.48

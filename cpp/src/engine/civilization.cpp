@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "social_availability.hpp"
 
 namespace magic_geo::detail {
 
@@ -611,8 +612,10 @@ CulturalLayers generate_cultural_layers(
     std::vector<Settlement>& settlements,
     const std::vector<PoliticalRegion>& political_regions,
     const std::vector<BorderSegment>& borders,
-    const std::vector<TradeFlow>& trade_flows
+    const std::vector<TradeFlow>& trade_flows,
+    SocialAvailability* availability
 ) {
+    if (social_mode(availability)) social_cells_preflight(cells);
     (void)params;
     for (Cell& cell : cells) {
         cell.culture_region_id = -1;
@@ -764,6 +767,7 @@ CulturalLayers generate_cultural_layers(
             0.0,
             1.0
         );
+        if (!social_mode(availability)) {
         culture.continuity_index = clamp(
             0.30 + 0.22 * culture.barrier_isolation +
                 0.18 * culture.mean_fertility +
@@ -780,6 +784,7 @@ CulturalLayers generate_cultural_layers(
             120.0,
             4200.0
         );
+        }
 
         LanguageRegion& language = layers.language_regions[culture.language_region_id];
         language.culture_count += 1;
@@ -932,11 +937,32 @@ CulturalLayers generate_cultural_layers(
             active_settlement_cell[settlement.cell_id] = 1;
         }
     }
+    if (social_mode(availability)) {
+        availability->ruin_inference_available = true;
+        availability->ruin_candidate_cell_count = 0;
+        availability->ruin_supported_candidate_cell_count = 0;
+        availability->ruin_unavailable_cell_ids.clear();
+        for (const Cell& cell : cells) {
+            if (cell.is_water || cell.culture_region_id < 0 || active_settlement_cell[cell.id]) continue;
+            auto& culture = layers.cultures.at(static_cast<std::size_t>(cell.culture_region_id));
+            ++culture.ruin_candidate_cell_count;
+            ++availability->ruin_candidate_cell_count;
+            if (social_site_available(cell)) {
+                ++culture.ruin_supported_candidate_cell_count;
+                ++availability->ruin_supported_candidate_cell_count;
+            } else {
+                availability->ruin_inference_available = false;
+                availability->ruin_unavailable_cell_ids.push_back(cell.id);
+            }
+        }
+        std::sort(availability->ruin_unavailable_cell_ids.begin(), availability->ruin_unavailable_cell_ids.end());
+    }
     std::vector<std::pair<double, int>> ruin_candidates;
     for (const Cell& cell : cells) {
         if (cell.is_water || cell.culture_region_id < 0 || active_settlement_cell[cell.id]) {
             continue;
         }
+        if (social_mode(availability) && !availability->ruin_inference_available) continue;
         const double significance = ruin_significance_for_cell(cells, cell);
         if (significance >= 0.32) {
             ruin_candidates.emplace_back(significance, cell.id);
@@ -986,6 +1012,12 @@ CulturalLayers generate_cultural_layers(
     }
 
     for (CultureRegion& culture : layers.cultures) {
+        if (social_mode(availability)) {
+            culture.recorded_ruin_count = culture.ruin_count;
+            culture.ruin_count_available = availability->ruin_inference_available || culture.ruin_candidate_cell_count == 0;
+            culture.continuity_estimate_available = culture.ruin_count_available;
+            if (!culture.continuity_estimate_available) continue;
+        }
         culture.continuity_index = clamp(
             0.30 + 0.22 * culture.barrier_isolation +
                 0.18 * culture.mean_fertility +

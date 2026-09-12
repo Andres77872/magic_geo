@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -362,6 +363,9 @@ class WebJob:
     artifacts: list[dict[str, Any]] = field(default_factory=list)
     cache_dir: str | None = None
     _process: subprocess.Popen[str] | None = field(default=None, repr=False)
+    _stopping_process: subprocess.Popen[str] | None = field(default=None, repr=False)
+    _process_active: bool = field(default=False, repr=False)
+    _stop_timer: threading.Timer | None = field(default=None, repr=False)
     _cancel_requested: bool = field(default=False, repr=False)
     _publishing: bool = field(default=False, repr=False)
     _finalizing: bool = field(default=False, repr=False)
@@ -557,16 +561,8 @@ class JobManager:
             if job.status == "queued":
                 job.status = "cancelled"
                 job.finished_at = datetime.now(timezone.utc).isoformat()
-        if process is not None and process.poll() is None:
-            self._terminate_process(process)
-            timer = threading.Timer(
-                5.0,
-                lambda: self._terminate_process(process, force=True)
-                if process.poll() is None
-                else None,
-            )
-            timer.daemon = True
-            timer.start()
+        if process is not None:
+            self._request_process_stop(job, process)
         return self.get(job_id)
 
     def artifact_path(self, job_id: str, artifact_index: int) -> Path:
@@ -847,6 +843,8 @@ class JobManager:
                 raise JobInputError(f"{name} is outside the supported 64-bit range")
             value = converted
         elif kind == "number":
+            if isinstance(value, bool):
+                raise JobInputError(f"{name} must be a number")
             try:
                 value = float(value)
             except (TypeError, ValueError, OverflowError) as exc:
@@ -1195,18 +1193,75 @@ class JobManager:
             bufsize=1,
             start_new_session=os.name == "posix",
         )
-        with self._lock:
-            job._process = process
-            cancel_immediately = job._cancel_requested
-        if cancel_immediately and process.poll() is None:
-            self._terminate_process(process)
-        assert process.stdout is not None
         try:
+            with self._lock:
+                job._process = process
+                job._process_active = True
+                job._stopping_process = None
+                cancel_immediately = job._cancel_requested
+            if cancel_immediately:
+                self._request_process_stop(job, process)
+            assert process.stdout is not None
             for line in process.stdout:
                 self._append_log(job, line)
-        finally:
             process.stdout.close()
-        return process.wait()
+
+            # Keep the leader unreaped while descendants can hold its output
+            # pipe. After EOF, serialize reaping with timer invalidation so a
+            # delayed group signal cannot target a reused process ID. A child
+            # may close stdout before exiting, so cancellation stays enabled.
+            while True:
+                with self._lock:
+                    code = process.poll()
+                    if code is not None:
+                        self._finish_process(job, process)
+                        return code
+                time.sleep(0.05)
+        except BaseException:
+            # Reading, decoding or consuming output can fail while the child
+            # is still writing. Do not publish failure or release its handle
+            # until the group has been stopped and the direct child reaped.
+            with self._lock:
+                self._terminate_process(process, force=True)
+                self._finish_process(job, process)
+            try:
+                if process.stdout is not None:
+                    process.stdout.close()
+            except Exception:
+                pass  # Preserve the original output-handling failure.
+            process.wait()
+            raise
+
+    def _finish_process(self, job: WebJob, process: subprocess.Popen[str]) -> None:
+        """Disable signals while reaping and completion share the manager lock."""
+        if job._process is process:
+            job._process_active = False
+            if job._stop_timer is not None:
+                job._stop_timer.cancel()
+                job._stop_timer = None
+
+    def _request_process_stop(self, job: WebJob, process: subprocess.Popen[str]) -> None:
+        # cancel() may run before Popen returns. Both cancellation paths must
+        # include escalation, and overlapping/repeated requests share one timer.
+        with self._lock:
+            if (
+                job._process is not process
+                or not job._process_active
+                or job._stopping_process is process
+            ):
+                return
+            job._stopping_process = process
+            self._terminate_process(process)
+
+            def force_stop() -> None:
+                with self._lock:
+                    if job._process is process and job._process_active:
+                        self._terminate_process(process, force=True)
+
+            timer = threading.Timer(5.0, force_stop)
+            job._stop_timer = timer
+            timer.daemon = True
+            timer.start()
 
     @staticmethod
     def _terminate_process(process: subprocess.Popen[str], *, force: bool = False) -> None:
@@ -1283,6 +1338,9 @@ class JobManager:
         finally:
             with self._lock:
                 job._process = None
+                job._stopping_process = None
+                job._process_active = False
+                job._stop_timer = None
                 job._publishing = False
                 job._finalizing = False
                 job.status = final_status

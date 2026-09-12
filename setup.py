@@ -60,6 +60,10 @@ class PlatformWheel(bdist_wheel):
                 "magic_geo_generate_geo_json_v3",
                 "magic_geo_generate_msgpack_v3",
                 "magic_geo_generate_geo_msgpack_v3",
+                "magic_geo_generate_json_v4",
+                "magic_geo_generate_geo_json_v4",
+                "magic_geo_generate_msgpack_v4",
+                "magic_geo_generate_geo_msgpack_v4",
                 "magic_geo_free_string",
                 "magic_geo_free_buffer",
             ):
@@ -67,7 +71,9 @@ class PlatformWheel(bdist_wheel):
         except (OSError, AttributeError) as exc:
             raise RuntimeError(
                 f"the staged native core is incompatible with this build host or package: "
-                f"{native_path}: {exc}"
+                f"{native_path}: {exc}; the current package requires the V3 "
+                "and seasonal V4 JSON/MessagePack APIs; rebuild the native "
+                "Release target with CMake first"
             ) from exc
         finally:
             library = None

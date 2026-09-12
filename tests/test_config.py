@@ -34,7 +34,8 @@ from magic_geo.native import (
     NativeConfigV1,
     NativeConfigV2,
     NativeConfigV3,
-    _native_config,
+    NativeConfigV4,
+    _native_seasonal_config,
 )
 
 from support.nativestub import patch_loaded_library
@@ -65,6 +66,10 @@ class ConfigTests(TestCase):
                 self.assertIsInstance(raw, dict)
                 self.assertEqual(set(raw), expected_sections)
                 for section_name, section_field in WorldConfig.model_fields.items():
+                    if section_name == "config_version":
+                        self.assertIs(type(raw[section_name]), int)
+                        self.assertEqual(raw[section_name], 2)
+                        continue
                     section_model = section_field.annotation
                     self.assertEqual(
                         set(raw[section_name]),
@@ -98,7 +103,7 @@ class ConfigTests(TestCase):
             2_000_000_000.0,
         )
         self.assertLess(configs["cryogenic_slushball"].planet.stellar_luminosity, 0.60)
-        self.assertLessEqual(configs["cryogenic_slushball"].climate.base_temperature_c, -10.0)
+        self.assertEqual(configs["cryogenic_slushball"].climate.reference_infrared_optical_depth, 1.0)
         self.assertGreater(configs["verdant_hothouse"].climate.precipitation_scale, 1.5)
         self.assertGreater(configs["verdant_hothouse"].planet.greenhouse_factor, 1.4)
         self.assertIs(configs["verdant_hothouse"].hydrology.preserve_geologic_depressions, False)
@@ -173,11 +178,9 @@ class ConfigTests(TestCase):
             ),
             0.0,
         )
-        self.assertGreaterEqual(
-            max(config.climate.lapse_rate_c_per_km for config in configs.values())
-            - min(config.climate.lapse_rate_c_per_km for config in configs.values()),
-            2.0,
-        )
+        self.assertTrue(all(config.config_version == 2 for config in configs.values()))
+        self.assertTrue(all("base_temperature_c" not in config.climate.model_dump() for config in configs.values()))
+        self.assertTrue(all("lapse_rate_c_per_km" not in config.climate.model_dump() for config in configs.values()))
         self.assertLessEqual(
             min(config.hydrology.river_percentile for config in configs.values()),
             0.86,
@@ -215,7 +218,7 @@ class ConfigTests(TestCase):
                     world["summary"]["cell_count"],
                 )
 
-    def test_native_library_requires_the_current_v3_transport_abi(self) -> None:
+    def test_native_library_requires_the_current_v4_transport_abi(self) -> None:
         class FakeFunction:
             argtypes: list | None = None
             restype: object | None = None
@@ -228,9 +231,9 @@ class ConfigTests(TestCase):
         incomplete = IncompleteLibrary()
         with patch_loaded_library(incomplete):
             with self.assertRaisesRegex(
-                RuntimeError, "does not expose the current V3 JSON and MessagePack ABI"
+                RuntimeError, "does not expose the seasonal V4 JSON and MessagePack ABI"
             ):
-                native_module._load_library()
+                native_module._load_seasonal_library()
 
     def test_seed_config_loads(self) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))
@@ -290,7 +293,8 @@ class ConfigTests(TestCase):
                     expected_section_order,
                 )
 
-        self.assertEqual(parse_config_yaml("", source="empty.yaml"), create_config())
+        with self.assertRaisesRegex(ConfigError, "config_version is required"):
+            parse_config_yaml("", source="empty.yaml")
 
     def test_yaml_errors_are_source_aware_and_duplicate_keys_are_rejected(self) -> None:
         duplicate = "run:\n  seed: 1\n  seed: 2\n"
@@ -314,7 +318,7 @@ class ConfigTests(TestCase):
 
         with self.assertRaises(ConfigError) as validation_context:
             parse_config_yaml(
-                "planet:\n  radius_km: 10\n",
+                "config_version: 2\nplanet:\n  radius_km: 10\n",
                 source="invalid.yaml",
             )
         validation_error = validation_context.exception
@@ -347,7 +351,7 @@ class ConfigTests(TestCase):
         ):
             with self.subTest(name_document=document[:40]):
                 with self.assertRaises(ConfigError):
-                    parse_config_yaml(document, source="name.yaml")
+                    parse_config_yaml("config_version: 2\n" + document, source="name.yaml")
 
     def test_dotted_overrides_are_validated_and_do_not_mutate_input(self) -> None:
         base = create_config("earthlike")
@@ -356,7 +360,7 @@ class ConfigTests(TestCase):
             base,
             {
                 "run.name": "custom",
-                "mesh.cell_count": "256",
+                "mesh.cell_count": 256,
                 "tectonics.plate_count": 12,
                 "climate.precipitation_scale": 0.5,
             },
@@ -380,6 +384,7 @@ class ConfigTests(TestCase):
             {"mesh.unknown": 1},
             {"mesh": {}},
             {"mesh.cell_count": 64},
+            {"mesh.cell_count": "256"},
             {"mesh.cell_count": 128, "tectonics.plate_count": 128},
         ):
             with self.subTest(overrides=invalid_overrides):
@@ -423,6 +428,11 @@ class ConfigTests(TestCase):
         for section_name, section_schema in schema["properties"].items():
             with self.subTest(section=section_name):
                 self.assertTrue(section_schema["description"])
+                if section_name == "config_version":
+                    self.assertEqual(section_schema["const"], 2)
+                    self.assertIn(section_name, schema["required"])
+                    described_field_count += 1
+                    continue
                 reference = section_schema.get("$ref")
                 if reference is None:
                     reference = section_schema["allOf"][0]["$ref"]
@@ -435,6 +445,7 @@ class ConfigTests(TestCase):
 
         self.assertEqual(described_field_count, 44)
         metadata = schema["x-magic-geo"]
+        self.assertEqual(metadata["schema_version"], 2)
         self.assertEqual(metadata["section_order"], list(WorldConfig.model_fields))
         self.assertEqual(
             [profile["name"] for profile in metadata["profiles"]],
@@ -493,13 +504,15 @@ class ConfigTests(TestCase):
         data["compute"]["backend"] = "opencl"
         data["compute"]["opencl_prefer_gpu"] = False
 
-        native = _native_config(data)
+        native = _native_seasonal_config(WorldConfig.model_validate(data))
 
         self.assertEqual(native.compute_backend, 2)
         self.assertEqual(native.opencl_prefer_gpu, 0)
         self.assertEqual(ctypes.sizeof(NativeConfigV1), 304)
         self.assertEqual(ctypes.sizeof(NativeConfigV2), 312)
         self.assertEqual(ctypes.sizeof(NativeConfigV3), 320)
+        self.assertEqual(ctypes.sizeof(NativeConfigV4), 312)
+        self.assertEqual(NativeConfigV4.reference_infrared_optical_depth.offset, 192)
         self.assertEqual(NativeConfigV2.base.offset, 0)
         self.assertEqual(NativeConfigV2.compute_backend.offset, 304)
         self.assertEqual(NativeConfigV2.opencl_prefer_gpu.offset, 308)
@@ -508,7 +521,7 @@ class ConfigTests(TestCase):
         self.assertEqual(native.maturation_timestep_ma, 5.0)
 
         data["compute"]["backend"] = "cuda"
-        cuda_native = _native_config(data)
+        cuda_native = _native_seasonal_config(WorldConfig.model_validate(data))
         self.assertEqual(cuda_native.compute_backend, 3)
 
         expected_v1_offsets = {
@@ -590,10 +603,10 @@ class ConfigTests(TestCase):
         data["compute"]["threads"] = MAX_COMPUTE_THREADS
 
         bounded = type(config).model_validate(data)
-        native = _native_config(bounded.model_dump(mode="json"))
-        self.assertEqual(native.base.seed, MAX_SEED)
-        self.assertEqual(native.base.radius_km, MAX_PLANET_RADIUS_KM)
-        self.assertEqual(native.base.threads, MAX_COMPUTE_THREADS)
+        native = _native_seasonal_config(bounded)
+        self.assertEqual(native.seed, MAX_SEED)
+        self.assertEqual(native.radius_km, MAX_PLANET_RADIUS_KM)
+        self.assertEqual(native.threads, MAX_COMPUTE_THREADS)
 
         generation_data = bounded.model_dump(mode="python")
         generation_data["mesh"]["cell_count"] = 128

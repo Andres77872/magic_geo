@@ -22,6 +22,10 @@
 
 namespace magic_geo::detail {
 
+class PrescribedSeasonalClimateCache;
+struct PrescribedSeasonalClimate;
+struct PrescribedSeasonalClimateOptions;
+
 // Shared numeric, geometry, configuration, and JSON primitives.
 inline constexpr double OCEANIC_AGE_DEPTH_YOUNG_CUTOFF_MA = 70.0;
 inline constexpr double
@@ -241,10 +245,25 @@ void label_marine_water_bodies(std::vector<Cell>& cells);
 std::vector<int> ocean_distance(const std::vector<Cell>& cells);
 double wrap_angle(double radians);
 double local_relief(const std::vector<Cell>& cells, int cell_id);
-void compute_climate(const Params& params, std::vector<Cell>& cells);
+PrescribedSeasonalClimateOptions make_prescribed_seasonal_climate_options(const Params& params);
+double prescribed_climate_annual_temperature_c(const PrescribedSeasonalClimate& climate, std::size_t cell);
+double prescribed_climate_global_mean_temperature_c(const PrescribedSeasonalClimate& climate);
+double prescribed_climate_thermal_moisture_factor(const PrescribedSeasonalClimate& climate);
+void compute_climate(
+    const Params& params,
+    std::vector<Cell>& cells,
+    PrescribedSeasonalClimateCache* climate_cache = nullptr
+);
 double hydrologic_lithology_permeability(int lithology);
 double neighbor_distance_m(const Params& params, const Cell& a, const Cell& b);
 bool is_geologic_depression(const Cell& cell);
+HydrologicWaterBudgetStage compute_hydrologic_water_budget(
+    std::vector<Cell>& cells, int id, int feedback_stage_id,
+    const std::string& stage_name, int erosion_iteration,
+    int stabilization_recomputation_index);
+void project_hydrologic_liquid_supply_rates(
+    std::vector<Cell>&, const std::vector<double>& liquid_supply_mm_y,
+    const std::vector<bool>& terrestrial_applicable);
 HydrologyStabilizationResult stabilize_numeric_depressions(
     const Params& params,
     std::vector<Cell>& cells,
@@ -252,7 +271,8 @@ HydrologyStabilizationResult stabilize_numeric_depressions(
     const std::string& stage,
     int erosion_iteration,
     std::vector<NumericDepressionCorrectionEvent>& correction_history,
-    std::vector<HydrologicWaterBudgetStage>& water_budget_history
+    std::vector<HydrologicWaterBudgetStage>& water_budget_history,
+    PrescribedSeasonalClimateCache* climate_cache = nullptr
 );
 FeedbackReference capture_feedback_reference(const std::vector<Cell>& cells);
 EarthSystemFeedbackStep summarize_feedback_step(
@@ -311,7 +331,8 @@ void erode(
     std::vector<NumericDepressionCorrectionEvent>& numeric_depression_correction_history,
     std::vector<HydrologicWaterBudgetStage>& hydrologic_water_budget_history,
     std::vector<FluvialSedimentRoutingStage>& sediment_routing_history,
-    std::vector<HillslopeSedimentTransportStage>& hillslope_transport_history
+    std::vector<HillslopeSedimentTransportStage>& hillslope_transport_history,
+    PrescribedSeasonalClimateCache* climate_cache = nullptr
 );
 bool has_ocean_neighbor(const std::vector<Cell>& cells, int cell_id);
 bool has_glacier_neighbor(
@@ -327,6 +348,7 @@ GlacialSedimentTransportStage transport_glacial_sediment(
 );
 void derive_soils_biomes_resources(const Params& params, std::vector<Cell>& cells);
 void derive_landforms(std::vector<Cell>& cells);
+void finalize_settlement_climate_applicability(const Params& params, std::vector<Cell>& cells);
 std::vector<CoastalFeature> generate_coastal_features(
     const Params& params,
     const std::vector<Cell>& cells
@@ -391,7 +413,8 @@ CulturalLayers generate_cultural_layers(
     std::vector<Settlement>& settlements,
     const std::vector<PoliticalRegion>& political_regions,
     const std::vector<BorderSegment>& borders,
-    const std::vector<TradeFlow>& trade_flows
+    const std::vector<TradeFlow>& trade_flows,
+    SocialAvailability* availability = nullptr
 );
 HistoricalLayers generate_historical_layers(
     const std::vector<Cell>& cells,
@@ -399,12 +422,14 @@ HistoricalLayers generate_historical_layers(
     const std::vector<PoliticalRegion>& political_regions,
     const std::vector<BorderSegment>& borders,
     const std::vector<TradeFlow>& trade_flows,
-    const CulturalLayers& cultural_layers
+    const CulturalLayers& cultural_layers,
+    SocialAvailability* availability = nullptr
 );
 std::vector<PopulationRegion> generate_population_regions(
     const std::vector<Cell>& cells,
     const std::vector<PoliticalRegion>& political_regions,
-    const CulturalLayers& cultural_layers
+    const CulturalLayers& cultural_layers,
+    SocialAvailability* availability = nullptr
 );
 std::vector<ConflictRecord> generate_conflicts(
     const std::vector<Cell>& cells,
@@ -412,14 +437,16 @@ std::vector<ConflictRecord> generate_conflicts(
     const std::vector<BorderSegment>& borders,
     const std::vector<TradeFlow>& trade_flows,
     const CulturalLayers& cultural_layers,
-    const std::vector<PopulationRegion>& population_regions
+    const std::vector<PopulationRegion>& population_regions,
+    SocialAvailability* availability = nullptr
 );
 std::vector<DynastyRecord> generate_dynasties(
     const std::vector<PoliticalRegion>& political_regions,
     const CulturalLayers& cultural_layers,
     const HistoricalLayers& historical_layers,
     const std::vector<PopulationRegion>& population_regions,
-    const std::vector<ConflictRecord>& conflicts
+    const std::vector<ConflictRecord>& conflicts,
+    SocialAvailability* availability = nullptr
 );
 std::vector<TerritorialSnapshot> generate_territorial_snapshots(
     const Params& params,
@@ -429,7 +456,8 @@ std::vector<TerritorialSnapshot> generate_territorial_snapshots(
     const CulturalLayers& cultural_layers,
     const HistoricalLayers& historical_layers,
     const std::vector<PopulationRegion>& population_regions,
-    const std::vector<ConflictRecord>& conflicts
+    const std::vector<ConflictRecord>& conflicts,
+    SocialAvailability* availability = nullptr
 );
 std::vector<CalibrationCheck> generate_calibration_checks(
     const std::vector<Cell>& cells,
@@ -462,7 +490,8 @@ std::string summary_json(
     const std::vector<PlateMotionStep>& plate_motion_history,
     const std::vector<NumericDepressionCorrectionEvent>& numeric_depression_correction_history,
     const std::vector<HillslopeSedimentTransportStage>& hillslope_transport_history,
-    const std::vector<GlacialSedimentTransportStage>& glacial_transport_history
+    const std::vector<GlacialSedimentTransportStage>& glacial_transport_history,
+    const SocialAvailability* availability = nullptr
 );
 std::string plates_json(const std::vector<Plate>& plates, int precision);
 std::string int_array_json(const std::vector<int>& values);
@@ -485,7 +514,8 @@ std::string double_array_json(
 }
 std::string vec3_json(Vec3 value, int precision);
 std::string latlon_ring_json(const std::vector<LatLon>& ring, int precision);
-std::string cells_json(const std::vector<Cell>& cells, int precision);
+std::string cells_json(const std::vector<Cell>& cells, int precision,
+    ClimateTemperatureModel temperature_model = ClimateTemperatureModel::legacy_empirical);
 std::string settlements_json(
     const std::vector<Cell>& cells,
     const std::vector<Settlement>& settlements,
@@ -503,22 +533,22 @@ std::string stratigraphic_columns_json(
 );
 std::string ice_sheets_json(const std::vector<IceSheet>& sheets, int precision);
 std::string political_regions_json(const std::vector<PoliticalRegion>& regions, int precision);
-std::string cultures_json(const std::vector<CultureRegion>& cultures, int precision);
+std::string cultures_json(const std::vector<CultureRegion>& cultures, int precision, bool native_social = false);
 std::string language_regions_json(const std::vector<LanguageRegion>& languages, int precision);
 std::string sacred_areas_json(const std::vector<SacredArea>& sacred_areas, int precision);
 std::string ruins_json(const std::vector<Ruin>& ruins, int precision);
-std::string historical_eras_json(const std::vector<HistoricalEra>& eras, int precision);
-std::string historical_events_json(const std::vector<HistoricalEvent>& events, int precision);
+std::string historical_eras_json(const std::vector<HistoricalEra>& eras, int precision, bool native_social = false);
+std::string historical_events_json(const std::vector<HistoricalEvent>& events, int precision, bool native_social = false);
 std::string population_regions_json(
     const std::vector<PopulationRegion>& populations,
-    int precision
+    int precision, bool native_social = false
 );
 std::string conflicts_json(const std::vector<ConflictRecord>& conflicts, int precision);
 std::string dynasties_json(const std::vector<DynastyRecord>& dynasties, int precision);
-std::string snapshot_regions_json(const std::vector<SnapshotRegion>& regions, int precision);
+std::string snapshot_regions_json(const std::vector<SnapshotRegion>& regions, int precision, bool native_social = false);
 std::string territorial_snapshots_json(
     const std::vector<TerritorialSnapshot>& snapshots,
-    int precision
+    int precision, bool native_social = false
 );
 std::string climate_model_json(const Params& params);
 std::string hydrologic_water_budget_model_json(
@@ -535,6 +565,7 @@ std::string numeric_depression_correction_history_json(
     const std::vector<NumericDepressionCorrectionEvent>& history,
     int precision
 );
+std::string grounded_ice_model_json();
 std::string glacial_sediment_transport_model_json(
     const std::vector<GlacialSedimentTransportStage>& history,
     int precision
@@ -614,3 +645,8 @@ std::string calibration_checks_json(
 std::string borders_json(const std::vector<BorderSegment>& borders, int precision);
 
 }  // namespace magic_geo::detail
+
+namespace magic_geo::detail {
+std::string native_social_model_json();
+std::string native_social_data_json(const SocialAvailability& availability);
+}

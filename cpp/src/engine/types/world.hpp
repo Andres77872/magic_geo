@@ -3,8 +3,37 @@
 #include "core.hpp"
 
 #include <vector>
+#include <array>
+#include <utility>
 
 namespace magic_geo::detail {
+
+// Explicit pipeline-owned context. Default arguments preserve legacy stage callers.
+struct HistoricalFamilyCoverage {
+    bool inference_available = true;
+    int applicable_source_count = 0;  // -1 means an unavailable parent selection
+    int available_source_count = 0;
+    int recorded_event_count = 0;
+};
+struct SocialAvailability {
+    bool enabled = false;
+    bool ruin_inference_available = true;
+    int ruin_candidate_cell_count = 0;
+    int ruin_supported_candidate_cell_count = 0;
+    std::vector<int> ruin_unavailable_cell_ids;
+    bool historical_event_inference_available = true;
+    std::array<HistoricalFamilyCoverage, 7> historical_event_family_coverage{};
+    bool conflict_inference_available = true;
+    std::vector<int> conflict_candidate_region_ids;  // internal actual exposure scope
+    int conflict_candidate_pair_count = 0;
+    int conflict_supported_pair_count = 0;
+    std::vector<std::pair<int, int>> conflict_unavailable_region_pairs;
+    bool dynasty_inference_available = true;
+    int dynasty_applicable_region_count = 0;
+    int dynasty_available_region_count = 0;
+    std::vector<int> dynasty_unavailable_region_ids;
+    bool territorial_snapshot_inference_available = true;
+};
 
 struct Settlement {
     int id = 0;
@@ -40,6 +69,11 @@ struct TradeFlow {
 };
 
 struct CultureRegion {
+    int ruin_candidate_cell_count = 0;
+    int ruin_supported_candidate_cell_count = 0;
+    int recorded_ruin_count = 0;
+    bool continuity_estimate_available = true;
+    bool ruin_count_available = true;
     int id = 0;
     int language_region_id = -1;
     int homeland_region_id = -1;
@@ -113,6 +147,13 @@ struct CulturalLayers {
 };
 
 struct HistoricalEra {
+    int recorded_event_count = 0;
+    bool event_count_available = true;
+    bool language_event_count_available = true;
+    bool mean_connectivity_available = true;
+    bool mean_instability_available = true;
+    bool migration_event_count_available = true;
+    bool state_event_count_available = true;
     int id = 0;
     int dominant_process = 0;
     int event_count = 0;
@@ -126,6 +167,7 @@ struct HistoricalEra {
 };
 
 struct HistoricalEvent {
+    bool continuity_estimate_available = true;
     int id = 0;
     int era_id = 0;
     int type = 0;
@@ -147,6 +189,22 @@ struct HistoricalLayers {
 };
 
 struct PopulationRegion {
+    int territory_cell_count = 0;
+    int site_input_applicable_cell_count = 0;
+    int site_input_supported_cell_count = 0;
+    int structural_zero_site_cell_count = 0;
+    double territory_area_km2 = 0.0;
+    double site_input_applicable_area_km2 = 0.0;
+    double site_input_supported_area_km2 = 0.0;
+    double structural_zero_site_area_km2 = 0.0;
+    bool site_input_complete = true;
+    bool capacity_estimate_available = true;
+    bool migration_balance_available = true;
+    bool physical_means_available = true;
+    bool population_estimate_available = true;
+    bool site_strength_available = true;
+    double site_strength_index = 0.0;
+    int estimate_scope_status = 0;  // complete, unavailable inputs, no positive territory
     int id = 0;
     int region_id = -1;
     int culture_region_id = -1;
@@ -216,6 +274,11 @@ struct LatLon {
 };
 
 struct SnapshotRegion {
+    double base_area_km2 = 0.0;
+    double base_dissolved_polygon_area_km2 = 0.0;
+    double base_boundary_perimeter_km = 0.0;
+    bool geometry_estimate_available = true;
+    bool population_estimate_available = true;
     int region_id = -1;
     int capital_settlement_id = -1;
     int culture_region_id = -1;
@@ -237,6 +300,8 @@ struct SnapshotRegion {
 };
 
 struct TerritorialSnapshot {
+    bool geometry_estimate_available = true;
+    bool population_estimate_available = true;
     int id = 0;
     int era_id = 0;
     int dominant_process = 0;

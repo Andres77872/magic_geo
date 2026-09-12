@@ -13,7 +13,9 @@ bool has_ocean_neighbor(const std::vector<Cell>& cells, int i) {
 
 bool has_glacier_neighbor(const std::vector<Cell>& cells, int i, double threshold_m) {
     for (int j : cells[i].neighbors) {
-        if (cells[j].ice_thickness_m >= threshold_m) {
+        if (!cells[j].is_water && !cells[j].is_lake &&
+            cells[j].ice_thickness_m > 25.0 &&
+            cells[j].ice_thickness_m >= threshold_m) {
             return true;
         }
     }
@@ -24,13 +26,14 @@ void derive_cryosphere_state(const Params& params, std::vector<Cell>& cells) {
     const int n = static_cast<int>(cells.size());
     for (int i = 0; i < n; ++i) {
         Cell& cell = cells[i];
+        cell.grounded_ice_surface_applicable = !cell.is_water && !cell.is_lake;
         cell.ice_thickness_m = 0.0;
         cell.glacier_flow_to = -1;
         cell.ice_surface_mass_balance_m_y = 0.0;
         cell.basal_sliding_index = 0.0;
         cell.ice_velocity_m_y = 0.0;
         cell.glacial_erosion_m = 0.0;
-        if (cell.is_water) {
+        if (!cell.grounded_ice_surface_applicable) {
             continue;
         }
 
@@ -126,6 +129,7 @@ GlacialSedimentTransportStage transport_glacial_sediment(
         input.cell_id = cell_id;
         input.glacier_flow_to_cell_id = cell.glacier_flow_to;
         input.is_water = cell.is_water;
+        input.is_lake = cell.is_lake;
         input.elevation_m = cell.elevation_m;
         input.ice_thickness_m = cell.ice_thickness_m;
         input.glacial_erosion_m = cell.glacial_erosion_m;
@@ -155,7 +159,7 @@ GlacialSedimentTransportStage transport_glacial_sediment(
         const double elevation_drop_m =
             source.elevation_m - target.elevation_m;
         if (
-            source.is_water || source.ice_thickness_m <= 0.0 ||
+            source.is_water || source.is_lake || source.ice_thickness_m <= 0.0 ||
             elevation_drop_m <= 0.0 || source.area_km2 <= 0.0 ||
             target.area_km2 <= 0.0
         ) {
@@ -335,14 +339,23 @@ void derive_soils_biomes_resources(const Params& params, std::vector<Cell>& cell
         }
         const double litho_base = cell.lithology == 5 ? 0.78 : (cell.lithology == 1 ? 0.50 : (cell.lithology == 4 ? 0.44 : 0.58));
         const double climate_soil = clamp(cell.precipitation_mm_y / 1300.0, 0.0, 1.2) * clamp((cell.temperature_c + 8.0) / 30.0, 0.0, 1.1);
+        if (cell.is_lake) {
+            // Hydrology owns the water-body class: its basin water budget and
+            // overflow decision cannot be replaced by one cell's aridity.
+            // Standing lake water also takes precedence over river/alluvial
+            // and volcanic-soil rules used for exposed terrestrial surfaces.
+            cell.soil_type = cell.water_body == 5 ? 10 : 9;
+            cell.soil_depth_m = 0.0;
+            cell.fertility = 0.0;
+            cell.biome = 2;
+            cell.resource = cell.water_body == 5 ? 4 : 8;
+            cell.settlement_score = 0.0;
+            continue;
+        }
         cell.soil_depth_m = clamp(0.12 + 1.8 * climate_soil + (cell.is_river ? 0.85 : 0.0) - 1.5 * slope_penalty, 0.02, 5.0);
         cell.fertility = clamp(litho_base + 0.20 * climate_soil + (cell.is_river ? 0.24 : 0.0) -
             0.35 * slope_penalty - (aridity < 0.45 ? 0.28 : 0.0), 0.0, 1.0);
-        if (cell.is_lake) {
-            cell.water_body = aridity < 0.5 ? 5 : 4;
-            cell.soil_type = aridity < 0.5 ? 10 : 9;
-            cell.biome = aridity < 0.5 ? 10 : 2;
-        } else if (cell.ice_thickness_m > 180.0 ||
+        if (cell.ice_thickness_m > 180.0 ||
             (cell.temperature_c < -8.0 && (std::abs(cell.lat) * DEG > 55.0 || cell.elevation_m > 1600.0))) {
             cell.soil_type = 8;
             cell.biome = 3;
@@ -402,7 +415,8 @@ void derive_soils_biomes_resources(const Params& params, std::vector<Cell>& cell
         } else {
             cell.resource = 0;
         }
-        const double water_access = cell.is_river ? 1.0 : (cell.is_lake ? 0.85 : (coast ? 0.78 : clamp(cell.runoff_mm_y / 550.0, 0.0, 0.55)));
+        const double water_access = cell.is_river ? 1.0 :
+            (coast ? 0.78 : clamp(cell.runoff_mm_y / 550.0, 0.0, 0.55));
         const double climate_score = clamp(1.0 - std::abs(cell.temperature_c - 17.0) / 31.0, 0.0, 1.0);
         const double resource_score = cell.resource == 0 ? 0.0 : 0.18;
         const double hazard = clamp(cell.boundary_convergent * 0.28 + cell.boundary_transform * 0.18 +
@@ -443,7 +457,9 @@ void derive_landforms(std::vector<Cell>& cells) {
         }
 
         if (cell.is_lake) {
-            cell.landform = glacier_neighbor ? 19 : (cell.water_body == 5 ? 4 : 3);
+            // A saline lake with standing water is still a lake basin. The
+            // salt-flat class below describes an exposed, dry basin floor.
+            cell.landform = glacier_neighbor ? 19 : 3;
         } else if (cell.is_closed_basin || cell.water_body == 5) {
             cell.landform = cell.water_body == 5 ? 4 : 3;
         } else if (cell.ice_thickness_m > 180.0 || cell.biome == 3) {
@@ -994,7 +1010,10 @@ int nearest_neighbor_ice_sheet(const std::vector<Cell>& cells, const Cell& cell)
     double best_score = -1.0;
     for (int neighbor_id : cell.neighbors) {
         const Cell& neighbor = cells[neighbor_id];
-        if (neighbor.ice_sheet_id >= 0) {
+        // Only an active member can donate an association. Context cells
+        // cannot propagate sheet IDs along the iteration order.
+        if (neighbor.ice_sheet_id >= 0 && !neighbor.is_water &&
+            !neighbor.is_lake && neighbor.ice_thickness_m > 25.0) {
             const double score = neighbor.ice_thickness_m + 0.8 * neighbor.glacial_erosion_m;
             if (score > best_score) {
                 best_score = score;
@@ -1026,6 +1045,15 @@ int retreat_stage_for_ice_sheet(const IceSheet& sheet) {
 
 std::vector<IceSheet> generate_ice_sheets(std::vector<Cell>& cells) {
     for (Cell& cell : cells) {
+        cell.grounded_ice_surface_applicable = !cell.is_water && !cell.is_lake;
+        if (!cell.grounded_ice_surface_applicable) {
+            cell.ice_thickness_m = 0.0;
+            cell.glacier_flow_to = -1;
+            cell.ice_surface_mass_balance_m_y = 0.0;
+            cell.basal_sliding_index = 0.0;
+            cell.ice_velocity_m_y = 0.0;
+            cell.glacial_erosion_m = 0.0;
+        }
         cell.ice_sheet_id = -1;
         cell.moraine_deposition_m = 0.0;
         cell.deglaciation_age_ka = 0.0;
@@ -1035,7 +1063,7 @@ std::vector<IceSheet> generate_ice_sheets(std::vector<Cell>& cells) {
     const int n = static_cast<int>(cells.size());
     std::vector<char> visited(static_cast<std::size_t>(n), 0);
     for (int i = 0; i < n; ++i) {
-        if (visited[static_cast<std::size_t>(i)] || cells[i].ice_thickness_m <= 25.0 || cells[i].is_water) {
+        if (visited[static_cast<std::size_t>(i)] || cells[i].ice_thickness_m <= 25.0 || !cells[i].grounded_ice_surface_applicable) {
             continue;
         }
         IceSheet sheet;
@@ -1063,7 +1091,7 @@ std::vector<IceSheet> generate_ice_sheets(std::vector<Cell>& cells) {
             elevations.push_back(cell.elevation_m);
             for (int neighbor_id : cell.neighbors) {
                 if (!visited[static_cast<std::size_t>(neighbor_id)] &&
-                    !cells[neighbor_id].is_water &&
+                    cells[neighbor_id].grounded_ice_surface_applicable &&
                     cells[neighbor_id].ice_thickness_m > 25.0) {
                     visited[static_cast<std::size_t>(neighbor_id)] = 1;
                     queue.push(neighbor_id);
@@ -1086,8 +1114,11 @@ std::vector<IceSheet> generate_ice_sheets(std::vector<Cell>& cells) {
     }
 
     for (Cell& cell : cells) {
-        if (cell.ice_sheet_id < 0 && (cell.landform == 18 || cell.landform == 17 || cell.landform == 19 ||
-            (cell.ice_thickness_m <= 25.0 && has_glacier_neighbor(cells, cell.id, 25.0)))) {
+        const bool explicit_water_context =
+            (!cell.is_water && cell.is_lake && cell.landform == 19) ||
+            (cell.is_water && !cell.is_lake && cell.landform == 16);
+        if (cell.ice_sheet_id < 0 &&
+            (cell.grounded_ice_surface_applicable || explicit_water_context)) {
             cell.ice_sheet_id = nearest_neighbor_ice_sheet(cells, cell);
         }
         if (cell.ice_sheet_id >= 0 && cell.ice_thickness_m <= 25.0) {

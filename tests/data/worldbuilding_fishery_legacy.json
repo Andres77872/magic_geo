@@ -1,0 +1,621 @@
+{
+  "input": {
+    "cells": [
+      {
+        "id": 0,
+        "resource": "volcanic_arc_metals",
+        "neighbors": [
+          8
+        ],
+        "water_body_type": "land",
+        "temperature_c": 18.0,
+        "fertility": 0.7,
+        "boundary_convergent": 0.31,
+        "crust_age_ma": 2000.0,
+        "sediment_thickness_m": 2.0,
+        "soil_salinity_index": 0.6,
+        "flow_accumulation": 30.0,
+        "runoff_mm_y": 5.0
+      },
+      {
+        "id": 1,
+        "resource": "craton_iron_gold",
+        "neighbors": [],
+        "water_body_type": "land",
+        "temperature_c": 18.0,
+        "fertility": 0.7,
+        "boundary_convergent": 0.31,
+        "crust_age_ma": 2000.0,
+        "sediment_thickness_m": 2.0,
+        "soil_salinity_index": 0.6,
+        "flow_accumulation": 30.0
+      },
+      {
+        "id": 2,
+        "resource": "sedimentary_fuels",
+        "neighbors": [],
+        "water_body_type": "land",
+        "temperature_c": 18.0,
+        "fertility": 0.7,
+        "boundary_convergent": 0.31,
+        "crust_age_ma": 2000.0,
+        "sediment_thickness_m": 2.0,
+        "soil_salinity_index": 0.6,
+        "flow_accumulation": 30.0
+      },
+      {
+        "id": 3,
+        "resource": "evaporites",
+        "neighbors": [],
+        "water_body_type": "land",
+        "temperature_c": 18.0,
+        "fertility": 0.7,
+        "boundary_convergent": 0.31,
+        "crust_age_ma": 2000.0,
+        "sediment_thickness_m": 2.0,
+        "soil_salinity_index": 0.6,
+        "flow_accumulation": 30.0
+      },
+      {
+        "id": 4,
+        "resource": "placer_metals",
+        "neighbors": [],
+        "water_body_type": "land",
+        "temperature_c": 18.0,
+        "fertility": 0.7,
+        "boundary_convergent": 0.31,
+        "crust_age_ma": 2000.0,
+        "sediment_thickness_m": 2.0,
+        "soil_salinity_index": 0.6,
+        "flow_accumulation": 30.0
+      },
+      {
+        "id": 5,
+        "resource": "geothermal",
+        "neighbors": [],
+        "water_body_type": "land",
+        "temperature_c": 18.0,
+        "fertility": 0.7,
+        "boundary_convergent": 0.31,
+        "crust_age_ma": 2000.0,
+        "sediment_thickness_m": 2.0,
+        "soil_salinity_index": 0.6,
+        "flow_accumulation": 30.0
+      },
+      {
+        "id": 6,
+        "resource": "fertile_alluvium",
+        "neighbors": [],
+        "water_body_type": "land",
+        "temperature_c": 18.0,
+        "fertility": 0.7,
+        "boundary_convergent": 0.31,
+        "crust_age_ma": 2000.0,
+        "sediment_thickness_m": 2.0,
+        "soil_salinity_index": 0.6,
+        "flow_accumulation": 30.0
+      },
+      {
+        "id": 7,
+        "resource": "coastal_fisheries",
+        "neighbors": [],
+        "water_body_type": "fresh_lake",
+        "temperature_c": 18.0,
+        "fertility": 0.7,
+        "boundary_convergent": 0.31,
+        "crust_age_ma": 2000.0,
+        "sediment_thickness_m": 2.0,
+        "soil_salinity_index": 0.6,
+        "flow_accumulation": 30.0,
+        "is_lake": true,
+        "is_water": false
+      },
+      {
+        "id": 8,
+        "resource": "coastal_fisheries",
+        "neighbors": [],
+        "water_body_type": "continental_shelf",
+        "temperature_c": 18.0,
+        "fertility": 0.7,
+        "boundary_convergent": 0.31,
+        "crust_age_ma": 2000.0,
+        "sediment_thickness_m": 2.0,
+        "soil_salinity_index": 0.6,
+        "flow_accumulation": 30.0,
+        "is_water": true
+      },
+      {
+        "id": 9,
+        "resource": "other",
+        "neighbors": [],
+        "water_body_type": "land",
+        "temperature_c": 18.0,
+        "fertility": 0.7,
+        "boundary_convergent": 0.31,
+        "crust_age_ma": 2000.0,
+        "sediment_thickness_m": 2.0,
+        "soil_salinity_index": 0.6,
+        "flow_accumulation": 30.0
+      }
+    ],
+    "summary": {
+      "unrelated": {
+        "keep": true
+      }
+    },
+    "resource_deposits": [
+      {
+        "id": 0,
+        "cell_id": 0,
+        "resource": "volcanic_arc_metals",
+        "geologic_confidence_index": 0.3
+      },
+      {
+        "id": 1,
+        "cell_id": 1,
+        "resource": "craton_iron_gold",
+        "geologic_confidence_index": 0.3
+      },
+      {
+        "id": 2,
+        "cell_id": 2,
+        "resource": "sedimentary_fuels",
+        "geologic_confidence_index": 0.3
+      },
+      {
+        "id": 3,
+        "cell_id": 3,
+        "resource": "evaporites",
+        "geologic_confidence_index": 0.3
+      },
+      {
+        "id": 4,
+        "cell_id": 4,
+        "resource": "placer_metals",
+        "geologic_confidence_index": 0.3
+      },
+      {
+        "id": 5,
+        "cell_id": 5,
+        "resource": "geothermal",
+        "geologic_confidence_index": 0.3
+      },
+      {
+        "id": 6,
+        "cell_id": 6,
+        "resource": "fertile_alluvium",
+        "geologic_confidence_index": 0.3
+      },
+      {
+        "id": 7,
+        "cell_id": 7,
+        "resource": "coastal_fisheries",
+        "geologic_confidence_index": 0.3
+      },
+      {
+        "id": 8,
+        "cell_id": 8,
+        "resource": "coastal_fisheries",
+        "geologic_confidence_index": 0.3
+      },
+      {
+        "id": 9,
+        "cell_id": 9,
+        "resource": "other",
+        "geologic_confidence_index": 0.3
+      }
+    ],
+    "settlements": [
+      {
+        "id": 0,
+        "cell_id": 0,
+        "score": 0.8
+      },
+      {
+        "id": 1,
+        "cell_id": 1,
+        "score": 0.7
+      }
+    ],
+    "routes": [],
+    "political_regions": [],
+    "borders": []
+  },
+  "expected": {
+    "cells": [
+      {
+        "id": 0,
+        "resource": "volcanic_arc_metals",
+        "neighbors": [
+          8
+        ],
+        "water_body_type": "land",
+        "temperature_c": 18.0,
+        "fertility": 0.7,
+        "boundary_convergent": 0.31,
+        "crust_age_ma": 2000.0,
+        "sediment_thickness_m": 2.0,
+        "soil_salinity_index": 0.6,
+        "flow_accumulation": 30.0,
+        "runoff_mm_y": 5.0
+      },
+      {
+        "id": 1,
+        "resource": "craton_iron_gold",
+        "neighbors": [],
+        "water_body_type": "land",
+        "temperature_c": 18.0,
+        "fertility": 0.7,
+        "boundary_convergent": 0.31,
+        "crust_age_ma": 2000.0,
+        "sediment_thickness_m": 2.0,
+        "soil_salinity_index": 0.6,
+        "flow_accumulation": 30.0
+      },
+      {
+        "id": 2,
+        "resource": "sedimentary_fuels",
+        "neighbors": [],
+        "water_body_type": "land",
+        "temperature_c": 18.0,
+        "fertility": 0.7,
+        "boundary_convergent": 0.31,
+        "crust_age_ma": 2000.0,
+        "sediment_thickness_m": 2.0,
+        "soil_salinity_index": 0.6,
+        "flow_accumulation": 30.0
+      },
+      {
+        "id": 3,
+        "resource": "evaporites",
+        "neighbors": [],
+        "water_body_type": "land",
+        "temperature_c": 18.0,
+        "fertility": 0.7,
+        "boundary_convergent": 0.31,
+        "crust_age_ma": 2000.0,
+        "sediment_thickness_m": 2.0,
+        "soil_salinity_index": 0.6,
+        "flow_accumulation": 30.0
+      },
+      {
+        "id": 4,
+        "resource": "placer_metals",
+        "neighbors": [],
+        "water_body_type": "land",
+        "temperature_c": 18.0,
+        "fertility": 0.7,
+        "boundary_convergent": 0.31,
+        "crust_age_ma": 2000.0,
+        "sediment_thickness_m": 2.0,
+        "soil_salinity_index": 0.6,
+        "flow_accumulation": 30.0
+      },
+      {
+        "id": 5,
+        "resource": "geothermal",
+        "neighbors": [],
+        "water_body_type": "land",
+        "temperature_c": 18.0,
+        "fertility": 0.7,
+        "boundary_convergent": 0.31,
+        "crust_age_ma": 2000.0,
+        "sediment_thickness_m": 2.0,
+        "soil_salinity_index": 0.6,
+        "flow_accumulation": 30.0
+      },
+      {
+        "id": 6,
+        "resource": "fertile_alluvium",
+        "neighbors": [],
+        "water_body_type": "land",
+        "temperature_c": 18.0,
+        "fertility": 0.7,
+        "boundary_convergent": 0.31,
+        "crust_age_ma": 2000.0,
+        "sediment_thickness_m": 2.0,
+        "soil_salinity_index": 0.6,
+        "flow_accumulation": 30.0
+      },
+      {
+        "id": 7,
+        "resource": "coastal_fisheries",
+        "neighbors": [],
+        "water_body_type": "fresh_lake",
+        "temperature_c": 18.0,
+        "fertility": 0.7,
+        "boundary_convergent": 0.31,
+        "crust_age_ma": 2000.0,
+        "sediment_thickness_m": 2.0,
+        "soil_salinity_index": 0.6,
+        "flow_accumulation": 30.0,
+        "is_lake": true,
+        "is_water": false
+      },
+      {
+        "id": 8,
+        "resource": "coastal_fisheries",
+        "neighbors": [],
+        "water_body_type": "continental_shelf",
+        "temperature_c": 18.0,
+        "fertility": 0.7,
+        "boundary_convergent": 0.31,
+        "crust_age_ma": 2000.0,
+        "sediment_thickness_m": 2.0,
+        "soil_salinity_index": 0.6,
+        "flow_accumulation": 30.0,
+        "is_water": true
+      },
+      {
+        "id": 9,
+        "resource": "other",
+        "neighbors": [],
+        "water_body_type": "land",
+        "temperature_c": 18.0,
+        "fertility": 0.7,
+        "boundary_convergent": 0.31,
+        "crust_age_ma": 2000.0,
+        "sediment_thickness_m": 2.0,
+        "soil_salinity_index": 0.6,
+        "flow_accumulation": 30.0
+      }
+    ],
+    "summary": {
+      "unrelated": {
+        "keep": true
+      },
+      "large_settlement_water_access_index": 0.5,
+      "route_barrier_avoidance_index": 1.0,
+      "political_region_connectivity_index": 1.0,
+      "natural_border_alignment_index": 1.0,
+      "resource_geology_dependency_index": 0.9,
+      "worldbuilding_realism_check_count": 5,
+      "worldbuilding_realism_pass_count": 4,
+      "worldbuilding_realism_pass_fraction": 0.8,
+      "mean_worldbuilding_realism_score": 0.917647,
+      "worldbuilding_realism_model": "causal_upstream_evidence_worldbuilding_realism_checks_v1"
+    },
+    "resource_deposits": [
+      {
+        "id": 0,
+        "cell_id": 0,
+        "resource": "volcanic_arc_metals",
+        "geologic_confidence_index": 0.3
+      },
+      {
+        "id": 1,
+        "cell_id": 1,
+        "resource": "craton_iron_gold",
+        "geologic_confidence_index": 0.3
+      },
+      {
+        "id": 2,
+        "cell_id": 2,
+        "resource": "sedimentary_fuels",
+        "geologic_confidence_index": 0.3
+      },
+      {
+        "id": 3,
+        "cell_id": 3,
+        "resource": "evaporites",
+        "geologic_confidence_index": 0.3
+      },
+      {
+        "id": 4,
+        "cell_id": 4,
+        "resource": "placer_metals",
+        "geologic_confidence_index": 0.3
+      },
+      {
+        "id": 5,
+        "cell_id": 5,
+        "resource": "geothermal",
+        "geologic_confidence_index": 0.3
+      },
+      {
+        "id": 6,
+        "cell_id": 6,
+        "resource": "fertile_alluvium",
+        "geologic_confidence_index": 0.3
+      },
+      {
+        "id": 7,
+        "cell_id": 7,
+        "resource": "coastal_fisheries",
+        "geologic_confidence_index": 0.3
+      },
+      {
+        "id": 8,
+        "cell_id": 8,
+        "resource": "coastal_fisheries",
+        "geologic_confidence_index": 0.3
+      },
+      {
+        "id": 9,
+        "cell_id": 9,
+        "resource": "other",
+        "geologic_confidence_index": 0.3
+      }
+    ],
+    "settlements": [
+      {
+        "id": 0,
+        "cell_id": 0,
+        "score": 0.8
+      },
+      {
+        "id": 1,
+        "cell_id": 1,
+        "score": 0.7
+      }
+    ],
+    "routes": [],
+    "political_regions": [],
+    "borders": [],
+    "worldbuilding_realism_checks": [
+      {
+        "id": 0,
+        "domain": "worldbuilding",
+        "name": "large_settlement_water_access",
+        "question": "Do large settlements have water access?",
+        "metric": "fraction_top_settlements_with_water_access",
+        "value": 0.5,
+        "target_min": 0.85,
+        "target_max": 1.0,
+        "score": 0.588235,
+        "passed": false,
+        "evidence": {
+          "top_settlement_count": 2,
+          "water_accessible_top_settlement_count": 1,
+          "mean_top_settlement_score": 0.75
+        }
+      },
+      {
+        "id": 1,
+        "domain": "worldbuilding",
+        "name": "route_barrier_avoidance",
+        "question": "Do routes avoid expensive terrain barriers?",
+        "metric": "fraction_routes_below_type_specific_barrier_cost",
+        "value": 1.0,
+        "target_min": 0.8,
+        "target_max": 1.0,
+        "score": 1.0,
+        "passed": true,
+        "evidence": {
+          "route_count": 0,
+          "low_barrier_route_count": 0,
+          "high_cost_route_count": 0,
+          "mean_route_friction": 0.0,
+          "max_route_friction": 0.0
+        }
+      },
+      {
+        "id": 2,
+        "domain": "worldbuilding",
+        "name": "political_region_connectivity",
+        "question": "Do generated political regions originate around connected settlement networks?",
+        "metric": "fraction_region_settlements_reachable_from_capital_by_internal_routes",
+        "value": 1.0,
+        "target_min": 0.55,
+        "target_max": 1.0,
+        "score": 1.0,
+        "passed": true,
+        "evidence": {
+          "political_region_count": 0,
+          "connected_region_count": 0,
+          "region_settlement_count": 0,
+          "capital_reachable_settlement_count": 0,
+          "mean_region_capital_reachability": 0.0
+        }
+      },
+      {
+        "id": 3,
+        "domain": "worldbuilding",
+        "name": "natural_border_alignment",
+        "question": "Do political borders follow real terrain, water, desert, ice, or coastal barriers?",
+        "metric": "length_weighted_fraction_borders_on_natural_barriers",
+        "value": 1.0,
+        "target_min": 0.4,
+        "target_max": 1.0,
+        "score": 1.0,
+        "passed": true,
+        "evidence": {
+          "border_segment_count": 0,
+          "natural_border_segment_count": 0,
+          "border_total_length_km": 0.0,
+          "natural_border_length_km": 0.0,
+          "mean_border_barrier_score": 0.0
+        }
+      },
+      {
+        "id": 4,
+        "domain": "worldbuilding",
+        "name": "resource_geology_dependency",
+        "question": "Do resources depend on geology and causal physical context?",
+        "metric": "fraction_resource_deposits_with_resource_specific_geologic_support",
+        "value": 0.9,
+        "target_min": 0.85,
+        "target_max": 1.0,
+        "score": 1.0,
+        "passed": true,
+        "evidence": {
+          "resource_deposit_count": 10,
+          "geologically_supported_resource_deposit_count": 9,
+          "resource_counts": {
+            "coastal_fisheries": 2,
+            "craton_iron_gold": 1,
+            "evaporites": 1,
+            "fertile_alluvium": 1,
+            "geothermal": 1,
+            "other": 1,
+            "placer_metals": 1,
+            "sedimentary_fuels": 1,
+            "volcanic_arc_metals": 1
+          },
+          "supported_resource_counts": {
+            "coastal_fisheries": 1,
+            "craton_iron_gold": 1,
+            "evaporites": 1,
+            "fertile_alluvium": 1,
+            "geothermal": 1,
+            "other": 1,
+            "placer_metals": 1,
+            "sedimentary_fuels": 1,
+            "volcanic_arc_metals": 1
+          }
+        }
+      }
+    ],
+    "worldbuilding_realism_model": {
+      "model_type": "causal_upstream_evidence_worldbuilding_realism_checks_v1",
+      "deterministic": true,
+      "check_order": [
+        "large_settlement_water_access",
+        "route_barrier_avoidance",
+        "political_region_connectivity",
+        "natural_border_alignment",
+        "resource_geology_dependency"
+      ],
+      "score_model": "bounded_distance_to_closed_target_interval_v1",
+      "targets": {
+        "large_settlement_water_access": [
+          0.85,
+          1.0
+        ],
+        "route_barrier_avoidance": [
+          0.8,
+          1.0
+        ],
+        "political_region_connectivity": [
+          0.55,
+          1.0
+        ],
+        "natural_border_alignment": [
+          0.4,
+          1.0
+        ],
+        "resource_geology_dependency": [
+          0.85,
+          1.0
+        ]
+      },
+      "large_settlement_model": "top_max_5_or_ceil_quarter_by_descending_score_v1",
+      "water_access_model": "river_lake_water_body_runoff_or_adjacent_marine_v1",
+      "water_access_runoff_threshold_mm_y": 120.0,
+      "route_friction_model": "cost_div_max_one_distance_v1",
+      "route_type_friction_thresholds": {
+        "coastal_sea": 0.95,
+        "river_corridor": 1.1,
+        "mountain_pass": 1.75,
+        "default": 1.35
+      },
+      "high_cost_route_threshold": 1.55,
+      "political_connectivity_model": "capital_reachability_on_internal_settlement_route_graph_v1",
+      "connected_region_reachability_threshold": 0.6,
+      "natural_border_model": "length_weighted_non_open_or_threshold_barrier_fraction_v1",
+      "natural_border_barrier_threshold": 0.45,
+      "resource_support_model": "resource_specific_geology_and_physical_context_predicates_v1",
+      "model_limitation": "internal_generated_evidence_checks_without_external_historical_geographic_calibration"
+    }
+  }
+}

@@ -1,8 +1,43 @@
 from __future__ import annotations
 
 from collections import Counter, deque
+from copy import deepcopy
+import math
 from typing import Any
 
+from .land_use_availability_validation import (
+    LandUseAvailabilityError, land_use_model_version, validate_land_use_inputs, validate_land_use_availability, mining_inputs,
+)
+
+
+LAND_USE_AVAILABILITY_POLICY = {'model_type': 'causal_soil_climate_resource_connected_land_use_zones_v2',
+ 'agricultural_temperature_source': 'annual_surface_air_climate_proxy',
+ 'agricultural_minimum_temperature_c': -9.0,
+ 'agricultural_maximum_temperature_c': 43.0,
+ 'agricultural_temperature_bounds': 'exclusive',
+ 'agricultural_habitat_selector': 'complement_of_is_water_or_is_lake_or_fishery_water_body_type',
+ 'agricultural_parent_policy': 'own_soil_climate_water_descriptors_without_ecosystem_primary_dependency',
+ 'agricultural_support_scope': 'existing_annual_potential_proxy_not_crop_survival_or_yield',
+ 'unsupported_agricultural_policy': 'numeric_zero_false_support_no_zone_not_observed_absence',
+ 'fresh_lake_water_bonus_policy': 'inapplicable_on_aquatic_cells_not_transferred_to_neighbors',
+ 'summary_availability_policy': 'all_cell_means_include_unavailable_zero_sentinels_with_supported_cell_counts',
+ 'agricultural_descriptor_policy': 'present_finite_numeric_nonboolean_and_typed_categorical_inputs_required',
+ 'agricultural_numeric_inputs': ['erosion_rate',
+                                 'fertility',
+                                 'groundwater_recharge_mm_y',
+                                 'growing_season_months',
+                                 'ice_thickness_m',
+                                 'runoff_mm_y',
+                                 'seasonal_aridity_index',
+                                 'soil_depth_m',
+                                 'soil_erodibility_index',
+                                 'soil_moisture_index',
+                                 'soil_salinity_index'],
+ 'agricultural_categorical_inputs': ['biome', 'landform'],
+ 'agricultural_boolean_inputs': ['is_river'],
+ 'habitat_input_policy': 'explicit_boolean_water_lake_and_nonempty_string_water_body_required',
+ 'mining_surface_policy': 'exposed_land_only_without_underwater_extraction_model',
+ 'mining_surface_applicability_scope': 'exposed_land_not_complete_mining_input_or_economic_access_availability'}
 
 AGRICULTURAL_THRESHOLD = 0.58
 MINING_THRESHOLD = 0.52
@@ -23,6 +58,22 @@ AGRICULTURAL_BIOMES = {
     "savanna",
     "wetland",
 }
+
+LAND_USE_MINING_POLICY = {
+    'model_type': 'causal_soil_climate_resource_connected_land_use_zones_v3',
+    'source_resource_deposit_model': 'causal_geologic_resource_deposit_diagnostics_v5',
+    'source_settlement_model': 'causal_native_score_local_max_separated_settlement_selection_v3',
+    'mining_input_policy': 'audited_matching_material_deposit_and_settlement_v3_complete_economic_inputs',
+    'unsupported_mining_policy': 'null_potential_false_support_preserve_structural_zero',
+    'mining_zone_policy': 'withhold_complete_component_family_if_any_eligible_candidate_input_unavailable',
+    'mining_summary_policy': 'emitted_zone_counts_with_explicit_completeness_and_complete_all_cell_mean_or_null',
+    'summary_availability_policy': 'agricultural_v2_sentinel_means_mining_complete_all_cell_mean_or_null',
+    'agricultural_policy': 'unchanged_v2_equations_flags_zero_sentinels_and_components',
+}
+_MINING_FLAGS = ('mining_potential_supported', 'mining_zone_membership_supported')
+_MINING_SUMMARY = ('mining_potential_supported_cell_count','unsupported_mining_potential_cell_count',
+                  'mining_input_applicable_cell_count','mining_input_supported_cell_count',
+                  'mining_zone_selection_complete','mean_mining_potential_supported')
 
 
 def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
@@ -202,9 +253,9 @@ def _zone_records(
     return zones
 
 
-def enrich_world_with_land_use_zones(world: dict[str, Any]) -> dict[str, Any]:
+def _build_land_use_zones(world: dict[str, Any], *, availability: dict[int, tuple[bool, bool, bool, bool]] | None = None, mining_support: dict[int, tuple[bool, bool]] | None = None) -> dict[str, Any]:
     cells = world.get("cells", [])
-    if not isinstance(cells, list) or not cells:
+    if not isinstance(cells, list) or (not cells and availability is None):
         return world
 
     cells_by_id = {int(cell.get("id", -1)): cell for cell in cells}
@@ -221,9 +272,10 @@ def enrich_world_with_land_use_zones(world: dict[str, Any]) -> dict[str, Any]:
     mining_ids: set[int] = set()
     agricultural_sum = 0.0
     mining_sum = 0.0
+    complete_mining = mining_support is None or all(v[1] for v in mining_support.values())
     for cell in cells:
-        agricultural = _agricultural_potential(cell)
-        mining = _mining_potential(cell, deposit_by_cell)
+        agricultural = _agricultural_potential(cell) if availability is None or availability[cell["id"]][2] else 0.0
+        mining = _mining_potential(cell, deposit_by_cell) if (availability is None or availability[cell["id"]][3]) and (mining_support is None or mining_support[cell["id"]][1]) else 0.0
         cell["agricultural_potential_index"] = round(agricultural, 6)
         cell["mining_potential_index"] = round(mining, 6)
         cell["agricultural_zone_id"] = -1
@@ -245,6 +297,8 @@ def enrich_world_with_land_use_zones(world: dict[str, Any]) -> dict[str, Any]:
         routes_by_settlement,
         deposit_by_cell,
     )
+    if not complete_mining:
+        mining_ids.clear()
     mining_zones = _zone_records(
         "mining",
         _connected_components(mining_ids, cells_by_id),
@@ -262,11 +316,11 @@ def enrich_world_with_land_use_zones(world: dict[str, Any]) -> dict[str, Any]:
         sum(zone["area_km2"] for zone in agricultural_zones),
         6,
     )
-    summary["mean_agricultural_potential_index"] = round(agricultural_sum / len(cells), 6)
+    summary["mean_agricultural_potential_index"] = round(agricultural_sum / len(cells), 6) if cells else 0.0
     summary["mining_zone_count"] = len(mining_zones)
     summary["mining_zone_cell_count"] = len(mining_ids)
     summary["mining_zone_total_area_km2"] = round(sum(zone["area_km2"] for zone in mining_zones), 6)
-    summary["mean_mining_potential_index"] = round(mining_sum / len(cells), 6)
+    summary["mean_mining_potential_index"] = round(mining_sum / len(cells), 6) if cells else 0.0
     world["land_use_zone_model"] = {
         "model_type": LAND_USE_ZONE_MODEL,
         "deterministic": True,
@@ -329,4 +383,84 @@ def enrich_world_with_land_use_zones(world: dict[str, Any]) -> dict[str, Any]:
     summary["land_use_zone_model"] = LAND_USE_ZONE_MODEL
     world["agricultural_zones"] = agricultural_zones
     world["mining_zones"] = mining_zones
+    if mining_support is not None:
+        for cell in cells:
+            applicable, supported = mining_support[cell["id"]]
+            cell["mining_potential_supported"] = supported
+            cell["mining_zone_membership_supported"] = complete_mining or not applicable
+            if not supported:
+                cell["mining_potential_index"] = None
+            if not complete_mining and applicable:
+                cell["mining_zone_id"] = None
+        summary.update({"mining_potential_supported_cell_count": sum(v[1] for v in mining_support.values()),
+            "unsupported_mining_potential_cell_count": sum(not v[1] for v in mining_support.values()),
+            "mining_input_applicable_cell_count": sum(v[0] for v in mining_support.values()),
+            "mining_input_supported_cell_count": sum(v[0] and v[1] for v in mining_support.values()),
+            "mining_zone_selection_complete": complete_mining, "mean_mining_potential_supported": complete_mining})
+        if not complete_mining:
+            summary["mean_mining_potential_index"] = None
+    return world
+
+
+def _finite_agricultural_input(value: Any) -> bool:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _agricultural_availability(cell: dict[str, Any]) -> tuple[bool, bool, bool, bool]:
+    aquatic = cell["is_water"] or cell["is_lake"] or cell["water_body_type"] in {"ocean", "continental_shelf", "inland_sea", "fresh_lake"}
+    temperature = cell.get("temperature_c")
+    climate = _finite_agricultural_input(temperature) and -9.0 < temperature < 43.0
+    numeric = ("fertility", "soil_depth_m", "soil_moisture_index", "soil_salinity_index",
+               "soil_erodibility_index", "erosion_rate", "growing_season_months", "runoff_mm_y",
+               "groundwater_recharge_mm_y", "ice_thickness_m", "seasonal_aridity_index")
+    descriptors = all(_finite_agricultural_input(cell.get(key)) for key in numeric)
+    descriptors = descriptors and all(isinstance(cell.get(key), str) and bool(cell[key]) for key in ("landform", "biome"))
+    descriptors = descriptors and type(cell.get("is_river")) is bool
+    land = not aquatic
+    return land, climate, bool(land and climate and descriptors), land
+
+
+def enrich_world_with_land_use_zones(world: dict[str, Any]) -> dict[str, Any]:
+    """Build v2 for undeclared inputs; exact declared v1 remains historical.
+
+    Deliberate archive migration removes the own model and summary identity
+    before rebuilding. No ecosystem-productivity dependency selects this model.
+    """
+    version = land_use_model_version(world)
+    if version == 1:
+        return _build_land_use_zones(world)
+    validate_land_use_inputs(world)
+    mining_support = mining_inputs(world) if version == 3 else None
+    availability = {cell["id"]: _agricultural_availability(cell) for cell in world["cells"]}
+    staged = {**world, "cells": [dict(cell) for cell in world["cells"]], "summary": dict(world.get("summary", {}))}
+    try:
+        _build_land_use_zones(staged, availability=availability, mining_support=mining_support)
+    except (TypeError, ValueError, KeyError, OverflowError, ArithmeticError) as exc:
+        raise LandUseAvailabilityError("land use availability: malformed consumed mining or zone input (" + type(exc).__name__ + ")") from exc
+    staged["land_use_zone_model"].update(deepcopy(LAND_USE_AVAILABILITY_POLICY))
+    if version == 3:
+        staged["land_use_zone_model"].update(deepcopy(LAND_USE_MINING_POLICY))
+    staged["summary"]["land_use_zone_model"] = staged["land_use_zone_model"]["model_type"]
+    flags = ("agricultural_habitat_applicable", "agricultural_climate_supported", "agricultural_potential_supported", "mining_surface_applicable")
+    for cell in staged["cells"]:
+        for flag, supported in zip(flags, availability[cell["id"]]):
+            cell[flag] = supported
+    for index, flag in enumerate(flags):
+        staged["summary"][flag + "_cell_count"] = sum(value[index] for value in availability.values())
+    staged["summary"]["agricultural_potential_supported_area_km2"] = round(sum(float(c["area_km2"]) for c in staged["cells"] if availability[c["id"]][2]), 6)
+    staged["summary"]["unsupported_terrestrial_agricultural_cell_count"] = sum(value[0] and not value[2] for value in availability.values())
+    errors = validate_land_use_availability(staged)
+    if errors:
+        raise LandUseAvailabilityError(errors[0])
+    for cell, result in zip(world["cells"], staged["cells"]):
+        for key in (*flags, *(_MINING_FLAGS if version == 3 else ()), "agricultural_potential_index", "mining_potential_index", "agricultural_zone_id", "mining_zone_id"):
+            cell[key] = result[key]
+    for key in ("land_use_zone_model", "agricultural_zones", "mining_zones"):
+        world[key] = staged[key]
+    world.setdefault("summary", {}).update(staged["summary"])
     return world

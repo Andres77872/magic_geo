@@ -1,3 +1,5 @@
+config_version: 2
+
 # Original stormy archipelago world. A large ocean inventory, low continental
 # crust target, many plates, and strong rainfall favor scattered highlands,
 # maritime routes, island ports, reefs, and short river systems.
@@ -36,8 +38,7 @@ tectonics:
 
 climate:
   months: 12
-  lapse_rate_c_per_km: 6.0
-  base_temperature_c: 18.0
+  reference_infrared_optical_depth: 1.0
   precipitation_scale: 1.40
   subtropical_drying_strength: 0.45
 

@@ -320,9 +320,9 @@ def _formation_steps(
     return steps
 
 
-def enrich_world_with_ore_genesis(world: dict[str, Any]) -> dict[str, Any]:
+def _build_ore_genesis(world: dict[str, Any], *, economic_availability: bool = False) -> dict[str, Any]:
     cells_by_id = _cells_by_id(world)
-    if not cells_by_id:
+    if not cells_by_id and not economic_availability:
         return world
 
     deposits_by_cell = _ore_deposits_by_cell(world)
@@ -413,7 +413,7 @@ def enrich_world_with_ore_genesis(world: dict[str, Any]) -> dict[str, Any]:
                 "mean_ore_structural_control_index": _round(_mean([metrics_by_id[cell_id]["structural"] for cell_id in component_ids])),
                 "mean_placer_concentration_index": _round(_mean([metrics_by_id[cell_id]["placer"] for cell_id in component_ids])),
                 "mean_resource_viability_index": _round(
-                    _mean([float(deposit.get("economic_viability_index", 0.0)) for deposit in deposits])
+                    _mean([float(deposit.get("geographic_economic_viability_baseline_index", 0.0) if economic_availability else deposit.get("economic_viability_index", 0.0)) for deposit in deposits])
                 )
                 if deposits
                 else 0.0,
@@ -431,6 +431,16 @@ def enrich_world_with_ore_genesis(world: dict[str, Any]) -> dict[str, Any]:
                 "formation_steps": steps,
             }
         )
+        if economic_availability:
+            count = sum(d["economic_viability_supported"] for d in deposits)
+            complete = count == len(deposits)
+            systems[-1].update({
+                "mean_geographic_resource_viability_baseline_index": systems[-1]["mean_resource_viability_index"],
+                "mean_resource_viability_index": _round(_mean([d["economic_viability_index"] for d in deposits])) if complete else None,
+                "mean_resource_viability_supported": complete,
+                "resource_viability_applicable_deposit_count": len(deposits),
+                "resource_viability_supported_deposit_count": count,
+            })
         system_id = len(systems) - 1
         type_counts[system_type] += 1
         assigned_ids.update(component_ids)
@@ -482,4 +492,24 @@ def enrich_world_with_ore_genesis(world: dict[str, Any]) -> dict[str, Any]:
     )
     summary["ore_genesis_system_type_counts"] = dict(sorted(type_counts.items()))
     world["ore_genesis_systems"] = systems
+    return world
+
+
+def enrich_world_with_ore_genesis(world: dict[str, Any]) -> dict[str, Any]:
+    from .ore_resource_availability_validation import version, POLICY, CELL_FIELDS, SUMMARY_FIELDS, TOP_FIELDS, validate_ore_resource_availability, require_physical_sources
+    if version(world) == 2:
+        return _build_ore_genesis(world)
+    from .biological_resource_validation import audit_biological_resource_deposits
+    audit_biological_resource_deposits(world)
+    require_physical_sources(world)
+    staged = {**world, "cells": [dict(c) for c in world["cells"]], "summary": dict(world["summary"])}
+    _build_ore_genesis(staged, economic_availability=True)
+    staged["ore_genesis_model"].update(POLICY)
+    errors = validate_ore_resource_availability(staged)
+    if errors:
+        raise ValueError(errors[0])
+    for original, result in zip(world["cells"], staged["cells"]):
+        original.update({key: result[key] for key in CELL_FIELDS})
+    world.update({key: staged[key] for key in TOP_FIELDS})
+    world["summary"].update({key: staged["summary"][key] for key in SUMMARY_FIELDS})
     return world

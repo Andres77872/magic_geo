@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .grounded_ice_validation import STABILITY_MODEL, require_grounded_ice
+
 
 THRESHOLD_RISK = 0.65
 
@@ -62,6 +64,7 @@ def _stability_class(index: float) -> str:
 
 
 def enrich_world_with_ice_sheet_stability(world: dict[str, Any]) -> dict[str, Any]:
+    grounded_current = require_grounded_ice(world)
     ice_sheets = world.get("ice_sheets", [])
     if not isinstance(ice_sheets, list):
         return world
@@ -220,8 +223,12 @@ def enrich_world_with_ice_sheet_stability(world: dict[str, Any]) -> dict[str, An
             }
         )
 
+    if grounded_current:
+        world["grounded_ice_stability_model"] = dict(STABILITY_MODEL)
     world["ice_sheet_stability_histories"] = stability_histories
     summary = world.setdefault("summary", {})
+    if grounded_current:
+        summary["grounded_ice_stability_model"] = STABILITY_MODEL["model_type"]
     history_count = len(stability_histories)
     summary["ice_sheet_stability_history_count"] = history_count
     summary["ice_sheet_stability_step_count"] = total_step_count

@@ -15,13 +15,15 @@ double hydrologic_lithology_permeability(int lithology) {
     }
 }
 
-HydrologicWaterBudgetStage compute_hydrologic_water_budget(
+static HydrologicWaterBudgetStage evaluate_hydrologic_water_budget(
     std::vector<Cell>& cells,
     int id,
     int feedback_stage_id,
     const std::string& stage_name,
     int erosion_iteration,
-    int stabilization_recomputation_index
+    int stabilization_recomputation_index,
+    const std::vector<double>* liquid_supply_mm_y,
+    const std::vector<bool>* terrestrial_applicable
 ) {
     HydrologicWaterBudgetStage stage;
     stage.id = id;
@@ -59,6 +61,10 @@ HydrologicWaterBudgetStage compute_hydrologic_water_budget(
             0.0,
             cell.precipitation_mm_y
         );
+        const double supply_mm_y = liquid_supply_mm_y
+            ? (*liquid_supply_mm_y)[index] : precipitation_mm_y;
+        const bool supply_applicable = terrestrial_applicable
+            ? (*terrestrial_applicable)[index] : !is_marine;
         const double relief_m = local_relief(cells, static_cast<int>(index));
 
         double potential_evapotranspiration_mm_y = 0.0;
@@ -69,7 +75,7 @@ HydrologicWaterBudgetStage compute_hydrologic_water_budget(
         double runoff_mm_y = 0.0;
         double residual_mm_y = 0.0;
 
-        if (!is_marine) {
+        if (supply_applicable) {
             potential_evapotranspiration_mm_y = std::max(
                 0.0,
                 cell.temperature_c +
@@ -101,7 +107,7 @@ HydrologicWaterBudgetStage compute_hydrologic_water_budget(
                 HYDROLOGIC_MAX_INFILTRATION_CAPACITY
             );
             const double climate_loss_mm_y = std::min(
-                precipitation_mm_y,
+                supply_mm_y,
                 HYDROLOGIC_CLIMATE_LOSS_FRACTION *
                     potential_evapotranspiration_mm_y
             );
@@ -121,10 +127,10 @@ HydrologicWaterBudgetStage compute_hydrologic_water_budget(
             // Keep the calibrated loss envelope grouped so routing receives
             // the same residual while the causal source partition is explicit.
             water_balance_mm_y =
-                precipitation_mm_y - climate_loss_mm_y;
+                supply_mm_y - climate_loss_mm_y;
             runoff_mm_y = std::max(0.0, water_balance_mm_y);
             residual_mm_y =
-                precipitation_mm_y -
+                supply_mm_y -
                 actual_evapotranspiration_mm_y -
                 infiltration_mm_y -
                 runoff_mm_y;
@@ -142,7 +148,7 @@ HydrologicWaterBudgetStage compute_hydrologic_water_budget(
         cell.runoff_budget_residual_mm_y = residual_mm_y;
         cell.runoff_budget_consistency_index = clamp(
             1.0 - std::abs(residual_mm_y) /
-                std::max(1.0, precipitation_mm_y),
+                std::max(1.0, supply_mm_y),
             0.0,
             1.0
         );
@@ -152,7 +158,7 @@ HydrologicWaterBudgetStage compute_hydrologic_water_budget(
                 actual_evapotranspiration_mm_y
         );
         cell.runoff_generation_fraction = clamp(
-            runoff_mm_y / std::max(1.0, precipitation_mm_y),
+            runoff_mm_y / std::max(1.0, supply_mm_y),
             0.0,
             1.0
         );
@@ -204,6 +210,43 @@ HydrologicWaterBudgetStage compute_hydrologic_water_budget(
         }
     }
     return stage;
+}
+
+HydrologicWaterBudgetStage compute_hydrologic_water_budget(
+    std::vector<Cell>& cells, int id, int feedback_stage_id,
+    const std::string& stage_name, int erosion_iteration,
+    int stabilization_recomputation_index
+) {
+    return evaluate_hydrologic_water_budget(cells, id, feedback_stage_id,
+        stage_name, erosion_iteration, stabilization_recomputation_index,
+        nullptr, nullptr);
+}
+
+void project_hydrologic_liquid_supply_rates(
+    std::vector<Cell>& cells, const std::vector<double>& liquid_supply_mm_y,
+    const std::vector<bool>& terrestrial_applicable
+) {
+    if (liquid_supply_mm_y.size() != cells.size() ||
+        terrestrial_applicable.size() != cells.size()) {
+        throw std::runtime_error("liquid hydrology projection coverage mismatch");
+    }
+    for (std::size_t i=0; i<cells.size(); ++i) {
+        const bool exposed = !cells[i].is_water && !cells[i].is_lake;
+        if (!std::isfinite(local_relief(cells, static_cast<int>(i)))) {
+            throw std::runtime_error("nonfinite liquid hydrology relief");
+        }
+        if (terrestrial_applicable[i] != exposed ||
+            !std::isfinite(liquid_supply_mm_y[i]) || liquid_supply_mm_y[i] < 0 ||
+            (!exposed && liquid_supply_mm_y[i] != 0)) {
+            throw std::runtime_error("liquid hydrology projection source/domain mismatch");
+        }
+    }
+    // The legacy-shaped intermediate is not a new public receipt. Its original
+    // precipitation provenance is never replaced by liquid supply. Only the
+    // projected cell allocations are consumed by the distinct interval receipt.
+    (void)evaluate_hydrologic_water_budget(cells, 0, 0,
+        "private_terrestrial_liquid_supply_projection", -1, 0,
+        &liquid_supply_mm_y, &terrestrial_applicable);
 }
 
 double neighbor_distance_m(const Params& params, const Cell& a, const Cell& b) {
@@ -1126,7 +1169,8 @@ HydrologyStabilizationResult stabilize_numeric_depressions(
     const std::string& stage,
     int erosion_iteration,
     std::vector<NumericDepressionCorrectionEvent>& correction_history,
-    std::vector<HydrologicWaterBudgetStage>& water_budget_history
+    std::vector<HydrologicWaterBudgetStage>& water_budget_history,
+    PrescribedSeasonalClimateCache* climate_cache
 ) {
     HydrologyStabilizationResult result;
     std::set<int> temporary_lake_unique_cell_ids;
@@ -1140,7 +1184,7 @@ HydrologyStabilizationResult stabilize_numeric_depressions(
         result.sea_level_adjustment_m += apply_sea_level(params, cells);
         result.sea_level_recompute_count++;
         label_marine_water_bodies(cells);
-        compute_climate(params, cells);
+        compute_climate(params, cells, climate_cache);
         result.climate_recompute_count++;
         water_budget_history.push_back(compute_hydrologic_water_budget(
             cells,

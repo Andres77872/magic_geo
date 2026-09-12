@@ -22,6 +22,7 @@ from .._constants import (
     MATURATION_REFERENCE_TIMESTEP_MA,
     SEDIMENT_INVENTORY_MODEL,
 )
+from ...grounded_ice_validation import MODEL as GROUNDED_ICE_MODEL, TRANSPORT_MODEL as GROUNDED_GLACIAL_MODEL, grounded_ice_version, require_grounded_stage_inputs
 from ._shared import _nominal_time_record_valid
 
 
@@ -1926,6 +1927,10 @@ def _validate_glacial_sediment_transport(
         "outgoing_transfer_count": {cell_id: 0.0 for cell_id in cell_ids},
         "incoming_transfer_count": {cell_id: 0.0 for cell_id in cell_ids},
     }
+    try:
+        grounded_current = grounded_ice_version(payload) == 1
+    except (ValueError, TypeError, OverflowError) as error:
+        return [str(error)], expected, False
     model = payload.get("glacial_sediment_transport_model", {})
     history = payload.get("glacial_sediment_transport_history", [])
     model_keys = {
@@ -1983,7 +1988,7 @@ def _validate_glacial_sediment_transport(
         return ["glacial sediment transport metadata values invalid"], expected, False
     transport_valid = True
     if (
-        model.get("model_type") != GLACIAL_SEDIMENT_TRANSPORT_MODEL
+        model.get("model_type") != (GROUNDED_GLACIAL_MODEL if grounded_current else GLACIAL_SEDIMENT_TRANSPORT_MODEL)
         or model.get("routing_graph")
         != "single_steepest_downhill_mesh_neighbor_v1"
         or model.get("source_state")
@@ -1995,7 +2000,8 @@ def _validate_glacial_sediment_transport(
         or model.get("source_material_partition_model")
         != "available_alluvium_first_then_bedrock_erosion_v1"
         or model.get("stage_input_snapshot")
-        != "complete_cell_cryosphere_terrain_and_sediment_inventory_before_transport_v2"
+        != ("complete_cell_cryosphere_terrain_and_sediment_inventory_before_transport_v3" if grounded_current else "complete_cell_cryosphere_terrain_and_sediment_inventory_before_transport_v2")
+        or (grounded_current and model.get("source_grounded_ice_model") != GROUNDED_ICE_MODEL["model_type"])
         or model.get("volume_transfer_model")
         != "source_depth_times_source_area_equals_target_depth_times_target_area"
         or model.get("mass_conserving") is not True
@@ -2046,6 +2052,8 @@ def _validate_glacial_sediment_transport(
         "glacial_erosion_m",
         "sediment_thickness_m",
     }
+    if grounded_current:
+        input_required_keys.add("is_lake")
     transfer_required_keys = {
         "id",
         "source_cell_id",
@@ -2067,6 +2075,11 @@ def _validate_glacial_sediment_transport(
         failures.append("glacial sediment transport stage missing fields")
         return failures, expected, False
     stage = history[0]
+    if grounded_current:
+        try:
+            require_grounded_stage_inputs(stage)
+        except (ValueError, TypeError, OverflowError) as error:
+            return [str(error)], expected, False
     input_cells = stage.get("input_cells", [])
     transfers = stage.get("transfers", [])
     post_elevations = stage.get("post_transport_elevation_m_by_cell", [])
@@ -2152,6 +2165,8 @@ def _validate_glacial_sediment_transport(
             or cell_id not in cell_ids
             or cell_id in input_by_id
             or type(input_cell["is_water"]) is not bool
+            or (grounded_current and type(input_cell["is_lake"]) is not bool)
+            or (grounded_current and input_cell["is_water"] and input_cell["is_lake"])
             or not all(
                 math.isfinite(value)
                 for value in (
@@ -2206,7 +2221,7 @@ def _validate_glacial_sediment_transport(
                 expected_flow_to = neighbor_id
         expected_erosion_m = 0.0
         if (
-            not bool(input_cell["is_water"])
+            not (bool(input_cell["is_water"]) or (grounded_current and input_cell["is_lake"]))
             and ice_thickness_m > 0.0
             and expected_flow_to >= 0
         ):
@@ -2237,18 +2252,18 @@ def _validate_glacial_sediment_transport(
                 ),
             )
         if (
-            bool(input_cell["is_water"])
+            (bool(input_cell["is_water"]) or (grounded_current and input_cell["is_lake"]))
             and (
                 ice_thickness_m > 0.0000002
                 or emitted_flow_to != -1
                 or emitted_erosion_m > 0.0000002
             )
         ) or (
-            not bool(input_cell["is_water"])
+            not (bool(input_cell["is_water"]) or (grounded_current and input_cell["is_lake"]))
             and ice_thickness_m <= 0.0
             and (emitted_flow_to != -1 or emitted_erosion_m > 0.0000002)
         ) or (
-            not bool(input_cell["is_water"])
+            not (bool(input_cell["is_water"]) or (grounded_current and input_cell["is_lake"]))
             and ice_thickness_m > 0.0
             and (
                 emitted_flow_to != expected_flow_to

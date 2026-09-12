@@ -38,6 +38,256 @@ function formatValue(value) {
   return String(value);
 }
 
+const ECOLOGY_ESTIMATE_SUPPORT = {
+  agricultural_potential_index: 'agricultural_potential_supported',
+  mining_potential_index: 'mining_surface_applicable',
+  primary_productivity_index: 'primary_productivity_supported',
+  vegetation_biomass_index: 'vegetation_biomass_supported',
+  forest_growth_index: 'forest_growth_supported',
+  species_richness_index: 'species_richness_supported',
+  wildfire_spread_risk_index: 'ecosystem_wildfire_spread_risk_supported',
+  ecosystem_disturbance_pressure_index: 'ecosystem_disturbance_pressure_supported',
+  vegetation_recovery_years: 'vegetation_recovery_supported',
+  species_composition_confidence_index: 'species_composition_confidence_supported',
+  species_endemism_index: 'species_endemism_supported',
+  species_range_fragmentation_index: 'species_record_descriptors_supported',
+  wildfire_fuel_continuity_index: 'wildfire_fuel_continuity_supported',
+  wildfire_firebreak_index: 'wildfire_firebreak_supported',
+  wildfire_ignition_potential_index: 'wildfire_ignition_potential_supported',
+};
+const PUBLIC_ESTIMATE_SUPPORT = {
+  "settlement_score": "settlement_climate_supported",
+  "harbor_suitability_index": "harbor_suitability_supported",
+  "navigability_index": "navigability_supported",
+  "navigability_class": "navigability_classification_supported",
+  "navigable_waterway_id": "navigable_waterway_membership_complete",
+  "protected_bay_index": "protected_bay_supported",
+  "river_mouth_port_index": "river_mouth_port_supported",
+  "port_suitability_index": "port_suitability_supported",
+  "port_site_id": "port_site_selection_supported",
+  "port_site_type": "port_site_selection_supported",
+  "coastal_route_index": "coastal_route_supported",
+  "route_corridor_id": "route_corridor_membership_complete",
+  "route_corridor_type": "route_corridor_membership_complete",
+  "route_corridor_index": "route_corridor_membership_complete",
+  "mining_potential_index": "mining_potential_supported",
+  "mining_zone_id": "mining_zone_membership_supported",
+  "accessibility_index": "accessibility_supported",
+  "spouse_ruler_id": "alliance_estimate_available",
+  "marriage_alliance_id": "alliance_estimate_available",
+  "role": "role_available",
+  "economic_viability_index": "economic_viability_supported",
+  "mean_resource_viability_index": "mean_resource_viability_supported",
+  "continuity_index": "continuity_estimate_available",
+  "estimated_age_years": "continuity_estimate_available",
+  "ruin_count": "ruin_count_available",
+  "event_count": "event_count_available",
+  "language_event_count": "language_event_count_available",
+  "mean_connectivity": "mean_connectivity_available",
+  "mean_instability": "mean_instability_available",
+  "migration_event_count": "migration_event_count_available",
+  "state_event_count": "state_event_count_available",
+  "carrying_capacity": "capacity_estimate_available",
+  "urbanization_fraction": "capacity_estimate_available",
+  "migration_balance": "migration_balance_available",
+  "agricultural_capacity_index": "physical_means_available",
+  "water_security_index": "physical_means_available",
+  "hazard_mortality_index": "physical_means_available",
+  "estimated_population": "population_estimate_available",
+  "population_pressure": "population_estimate_available",
+  "growth_rate_per_year": "population_estimate_available",
+  "site_strength_index": "site_strength_available",
+  "area_km2": "geometry_estimate_available",
+  "stability_index": "geometry_estimate_available",
+  "boundary_perimeter_km": "geometry_estimate_available",
+  "dissolved_polygon_area_km2": "geometry_estimate_available",
+  "polygon_area_error_fraction": "geometry_estimate_available",
+  "compactness_index": "geometry_estimate_available",
+  "geometry_quality": "geometry_estimate_available",
+  "assigned_land_fraction": "geometry_estimate_available",
+  "largest_region_area_km2": "geometry_estimate_available",
+  "largest_region_id": "geometry_estimate_available",
+  "fragmentation_index": "geometry_estimate_available"
+};
+
+const SUMMARY_ESTIMATE_SUPPORT = {
+  mean_harbor_suitability_index: 'navigability_estimates_complete',
+  mean_navigability_index: 'navigability_estimates_complete',
+  high_harbor_suitability_cell_count: 'navigability_estimates_complete',
+  navigable_cell_count: 'navigable_waterway_selection_complete',
+  navigable_waterway_count: 'navigable_waterway_selection_complete',
+  navigable_waterway_total_area_km2: 'navigable_waterway_selection_complete',
+  navigability_class_counts: 'navigability_estimates_complete',
+  mean_route_corridor_index: 'route_corridor_membership_complete',
+  mean_coastal_route_index: 'coastal_route_estimates_complete',
+  route_corridor_type_counts: 'route_corridor_membership_complete',
+  route_feature_coverage_index: 'route_corridor_membership_complete',
+  route_corridor_cell_count: 'route_corridor_membership_complete',
+  coastal_route_corridor_count: 'route_corridor_diagnostics_complete',
+  river_valley_route_corridor_count: 'route_corridor_diagnostics_complete',
+  mountain_pass_route_corridor_count: 'route_corridor_diagnostics_complete',
+  oasis_route_corridor_count: 'route_corridor_diagnostics_complete',
+};
+
+const RECORD_CONTEXT_SUPPORT = {
+  route_corridor_id: 'route_path_supported', path_cell_ids: 'route_path_supported',
+  route_corridor_type: 'route_corridor_diagnostics_supported', corridor_type: 'route_corridor_diagnostics_supported',
+  mean_route_corridor_index: 'route_corridor_membership_complete', max_route_corridor_index: 'route_corridor_membership_complete',
+  navigable_waterway_ids: 'navigable_waterway_links_complete', port_site_ids: 'port_site_links_complete',
+};
+
+const SPECIES_COMPOSITION_FIELDS = new Set([
+  'dominant_species_guild', 'species_habitat_suitability_index', 'species_guild_richness_count',
+]);
+
+const GROUNDED_ICE_FIELDS = new Set([
+  'ice_thickness_m', 'glacier_flow_to', 'ice_surface_mass_balance_m_y',
+  'basal_sliding_index', 'ice_velocity_m_y', 'glacial_erosion_m',
+]);
+
+function formatInspectorValue(cell, key, value) {
+  const formatted = formatValue(value);
+  if (key === 'distance_to_marine_water_km' && value === null && cell.marine_distance_status === 'no_marine_source') {
+    return 'No marine source (distance undefined)';
+  }
+  if (key === 'grounded_ice_diagnostic_thickness_m' && Number.isFinite(value)) {
+    const scope = cell.grounded_ice_surface_applicable === false
+      ? 'raw grounded-ice authority; m; process inapplicable; lake and sea ice are unmodeled'
+      : 'raw grounded-ice thickness authority; m';
+    return `${Object.is(value, -0) ? '-0' : String(value)} (${scope})`;
+  }
+  if (GROUNDED_ICE_FIELDS.has(key) && cell.grounded_ice_surface_applicable === false) {
+    return `${formatted} (grounded ice not applicable; lake and sea ice are unmodeled)`;
+  }
+  if (key === 'ice_sheet_id' && typeof cell.grounded_ice_surface_applicable === 'boolean'
+      && Number.isInteger(value) && value >= 0) {
+    if (!Number.isFinite(cell.grounded_ice_diagnostic_thickness_m)) {
+      return `${formatted} (sheet association; active membership requires raw grounded-ice thickness)`;
+    }
+    const active = cell.grounded_ice_surface_applicable && cell.grounded_ice_diagnostic_thickness_m > 25;
+    return `${formatted} (${active ? 'active grounded-ice member' : 'glacial context association; not an active ice member'})`;
+  }
+  if (key === 'settlement_score' && typeof cell.settlement_climate_supported === 'boolean') {
+    if (cell.is_water === true || cell.is_lake === true) return `${formatted} (structural water contribution; placement not applicable)`;
+    if (cell.settlement_climate_supported === false) return 'Unavailable within the annual settlement model';
+  }
+  if (key === 'mining_potential_index' && cell.mining_surface_applicable === false && typeof cell.mining_potential_supported === 'boolean') {
+    return `${formatted} (surface mining not applicable)`;
+  }
+  const contextualFlag = RECORD_CONTEXT_SUPPORT[key];
+  const publicFlag = contextualFlag && typeof cell[contextualFlag] === 'boolean' ? contextualFlag : PUBLIC_ESTIMATE_SUPPORT[key];
+  if ((publicFlag && cell[publicFlag] === false)
+      || cell.estimate_availability?.[key] === false
+      || cell[`estimate_availability.${key}`] === false
+      || Object.entries(cell).some(([name, flags]) => (name.endsWith('availability') && flags && typeof flags === 'object' && flags[key] === false)
+        || (name.endsWith(`availability.${key}`) && flags === false))) return 'Unavailable';
+  const scoreGuild = key.startsWith('species_guild_scores.') ? key.slice('species_guild_scores.'.length) : null;
+  const support = scoreGuild ? `species_${scoreGuild}_score_supported` : ECOLOGY_ESTIMATE_SUPPORT[key];
+  if ((support && cell[support] === false)
+      || (SPECIES_COMPOSITION_FIELDS.has(key) && cell.species_supported_guild_count === 0)) {
+    return 'Unavailable';
+  }
+  if (SPECIES_COMPOSITION_FIELDS.has(key) && cell.species_composition_status === 'partial') {
+    return `${formatted} (partial score coverage)`;
+  }
+  if (key === 'primary_productivity_index'
+      && cell.aquatic_climate_proxy_applicable === true
+      && cell.aquatic_primary_climate_supported === false) {
+    return `${formatted} (estimate unavailable: climate outside model support)`;
+  }
+  if (key === 'fishery_productivity_index' && cell.fishery_productivity_supported === false) {
+    if (cell.fishery_climate_supported === true && cell.aquatic_primary_climate_supported === false) {
+      return `${formatted} (estimate unavailable: primary productivity unsupported)`;
+    }
+    return `${formatted} (estimate unavailable for this water type or climate)`;
+  }
+  return formatted;
+}
+
+function speciesAvailabilityMarkup(cell) {
+  if (typeof cell.species_composition_status !== 'string') return '';
+  const status = cell.species_composition_status;
+  const scoreCount = `${formatValue(cell.species_supported_guild_count)} / ${formatValue(cell.species_applicable_guild_count)}`;
+  const records = cell.species_record_descriptors_supported === false
+    ? 'Range records unavailable: their common descriptors are not supported.'
+    : cell.species_record_descriptors_supported === true
+      ? 'Range descriptors are supported. A record still requires a qualifying connected range.'
+      : 'Range descriptor availability is undeclared.';
+  let markup = '<div class="inspector-section"><h3>Species estimates</h3>'
+    + `<p>Score coverage: <strong>${escapeHtml(status)}</strong> (${escapeHtml(scoreCount)} habitat-applicable guilds).</p>`
+    + `<p>${escapeHtml(records)} Complete scores do not guarantee range records or establish actual species presence.</p>`;
+  if (cell.species_guild_scores && typeof cell.species_guild_scores === 'object' && !Array.isArray(cell.species_guild_scores)) {
+    for (const [guild, score] of Object.entries(cell.species_guild_scores)) {
+      markup += `<div class="field-row"><span class="k">${escapeHtml(guild.replaceAll('_', ' '))}</span>`
+        + `<span class="v">${escapeHtml(formatInspectorValue(cell, `species_guild_scores.${guild}`, score))}</span></div>`;
+    }
+  }
+  return markup + '</div>';
+}
+
+function landUseAvailabilityMarkup(cell) {
+  if (!cell || typeof cell !== 'object' || Array.isArray(cell)
+      || !('agricultural_potential_index' in cell || 'mining_potential_index' in cell)) return '';
+  const agriculture = cell.agricultural_potential_supported === false
+    ? 'Agriculture estimate unavailable: its habitat, annual air climate or required inputs are outside this model. This does not establish crop failure.'
+    : cell.agricultural_potential_supported === true
+      ? 'Agriculture estimate available within its annual air-climate model and required inputs. A supported zero is valid; this is not a crop-yield prediction.'
+      : 'Agriculture availability is undeclared; a legacy value remains visible.';
+  const mining = cell.mining_surface_applicable === false
+    ? 'Surface mining is not applicable to water-covered cells. Geological deposits may still be present.'
+    : cell.mining_surface_applicable === true
+      ? 'The exposed-land surface mining model applies. This flag does not establish complete mining inputs or economic access.'
+      : 'Mining surface applicability is undeclared; a legacy value remains visible.';
+  const miningInputs = cell.mining_potential_supported === false ? ' The economic estimate is unavailable from its required inputs.'
+    : cell.mining_potential_supported === true ? ' Its required economic inputs support an estimate, including zero.' : '';
+  return '<div class="inspector-section"><h3>Land use estimates</h3>'
+    + `<p>${agriculture}</p><p>${mining}${miningInputs}</p></div>`;
+}
+
+function populationScopeMarkup(catalog) {
+  const contract = catalog?.estimate_display;
+  const nativeModel = contract?.models?.native_social_availability_model;
+  const populationModel = contract?.models?.population_region_model;
+  if (contract?.schema !== 'typed_estimate_display_v1'
+      || contract.scope === 'geo_only' || catalog?.world?.generation_scope === 'geo_only'
+      || nativeModel?.model_type !== 'native_settlement_source_complete_social_estimates_v1'
+      || populationModel?.model_type !== 'causal_area_weighted_capacity_occupancy_population_regions_v2'
+      || populationModel.membership_model !== 'nonwater_political_region_cells_v1') return '';
+  return '<div class="notice">Population total sums modeled population regions, whose membership follows political regions. '
+    + 'An empty region set has a supported sum of zero; this does not establish that the world is uninhabited. '
+    + 'Unavailable member estimates remain unavailable.</div>';
+}
+
+function familyAvailabilityMarkup(name, rows, detail = 'full', availability = null) {
+  if (name === 'climate_continentality_regions' && rows.length && rows.every((row) =>
+    Number.isSafeInteger(row?.cell_count) && row.cell_count > 0
+    && Number.isSafeInteger(row.marine_distance_defined_cell_count) && row.marine_distance_defined_cell_count >= 0
+    && Number.isSafeInteger(row.no_marine_source_cell_count) && row.no_marine_source_cell_count >= 0
+    && row.marine_distance_defined_cell_count + row.no_marine_source_cell_count === row.cell_count)) {
+    return '<div class="notice">Marine distance means use cells with defined distances. '
+      + 'A region labeled no_marine_source has an undefined mean distance, displayed as —. '
+      + 'Rainfall and total humidity are separate outputs.</div>';
+  }
+  if (availability) {
+    const notice = availability.scope === 'field_specific_availability'
+      ? 'Record slots are retained. Each estimate has its own availability; an empty record list does not establish a zero estimate.'
+      : availability.complete === false
+      ? 'Selection incomplete: these are retained supported records. An empty list does not establish absence.'
+      : availability.complete === true
+        ? 'Selection covers its declared inputs. An empty list means no records selected within that model.'
+        : 'Availability is undeclared for this family; retain its historical values without inferring coverage.';
+    if (name !== 'wildfire_spread_histories') return `<div class="notice">${notice}</div>`;
+  }
+  if (name !== 'wildfire_spread_histories' || !rows.some((row) => typeof row?.front_coverage_status === 'string')) return '';
+  const partial = rows.filter((row) => row.front_coverage_status === 'partial_unavailable_inputs').length;
+  const count = rows.filter((row) => typeof row?.front_coverage_status === 'string').length;
+  const coverageHelp = detail === 'full'
+    ? 'The steps column contains unmodeled edges and step coverage. Open raw JSON for untruncated details.'
+    : 'Select Full nested records for the unmodeled edges and step coverage.';
+  return `<div class="notice">${partial} of ${count} histories on this page have partial fronts with unavailable neighboring estimates. `
+    + `Containment describes modeled cells only; it does not demonstrate physical containment. ${coverageHelp}</div>`;
+}
+
 function viridis(t) {
   const c = [
     [0.2777273272234177, 0.005407344544966578, 0.3340998053353061],
@@ -222,6 +472,8 @@ const state = {
   pickDirty: true,
   hoverCell: -1,
   selectedCell: -1,
+  inspectorRequest: 0,     // orders repeated requests, including the same cell
+  inspectorSparklines: [], // current panel nodes; refreshed only from committed slices
   docsVisible: true,       // docs card under the layer panel
   docsCollapsed: false,    // card body collapsed but header shown
   helpOpener: null,
@@ -232,6 +484,8 @@ const state = {
   selectedJobStatus: null,
   jobListRequest: 0,
   jobDetailRequest: 0,
+  jobSelectionRequest: 0,  // explicit selection intent, independent of polling
+  backendRequest: 0,
   operationSubmitting: false,
   configSchema: null,
   schemaFields: [],
@@ -249,9 +503,13 @@ const state = {
   dataTotal: 0,
   dataRequest: 0,
   worldRequest: 0,
+  worldSwitching: false,
   worldsSignature: null,  // last-rendered world list; unchanged polls skip the rebuild
   configTemplateRequest: 0,
+  configWorkbenchRequest: 0,
   configEditRevision: 0,
+  configResultRequest: 0,
+  savedConfig: null,
 };
 
 const three = {};
@@ -332,6 +590,9 @@ async function fetchLayerValues(layer, stage, month, context = currentCacheConte
   const buffer = await fetchBuffer(`/api/layer/${encodedLayerId}?${params}`);
   if (!cacheContextIsCurrent(context)) throw new Error('The selected cache changed.');
   const raw = new Float32Array(buffer);
+  if (raw.length !== state.cellCount) {
+    throw new Error(`Layer has ${raw.length} values; expected ${state.cellCount} cells.`);
+  }
   const values = new Float32Array(raw.length);
   for (let i = 0; i < raw.length; i += 1) {
     values[i] = Number.isNaN(raw[i]) ? MISSING_SENTINEL : raw[i];
@@ -359,6 +620,33 @@ function prefetchNeighborStages(layer, stage) {
 // ---------------------------------------------------------------------------
 // Scene construction
 
+function decodeMeshBuffers(positions, cellIds, indices, posEq, posMo, cellCount) {
+  const decoded = {
+    positions: new Float32Array(positions),
+    cellIds: new Uint32Array(cellIds),
+    indices: new Uint32Array(indices),
+    posEq: new Float32Array(posEq),
+    posMo: new Float32Array(posMo),
+  };
+  // cell_ids contains one world-cell reference for EACH render vertex. A
+  // polygon contributes its center and ring vertices, so this array is much
+  // larger than the number of world cells and must never size the value table.
+  const vertexCount = decoded.cellIds.length;
+  if (!Number.isSafeInteger(cellCount) || cellCount < 1) {
+    throw new Error('The cache must declare a positive world cell count.');
+  }
+  if (!vertexCount || decoded.positions.length !== vertexCount * 3
+      || decoded.posEq.length !== vertexCount * 2 || decoded.posMo.length !== vertexCount * 2
+      || !decoded.indices.length || decoded.indices.length % 3 !== 0) {
+    throw new Error('The cache mesh buffers have inconsistent vertex or triangle counts.');
+  }
+  if (decoded.cellIds.some((id) => id >= cellCount)
+      || decoded.indices.some((index) => index >= vertexCount)) {
+    throw new Error('The cache mesh contains an out-of-range cell or vertex reference.');
+  }
+  return decoded;
+}
+
 async function buildScene(context) {
   const [positions, cellIds, indices, posEq, posMo] = await Promise.all([
     fetchBuffer(cacheRevisionUrl('/mesh/positions.f32', context)),
@@ -368,6 +656,7 @@ async function buildScene(context) {
     fetchBuffer(cacheRevisionUrl('/mesh/pos_mollweide.f32', context)),
   ]);
   if (!cacheContextIsCurrent(context)) return false;
+  const mesh = decodeMeshBuffers(positions, cellIds, indices, posEq, posMo, state.cellCount);
 
   const canvas = $('#globe');
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -383,19 +672,12 @@ async function buildScene(context) {
   controls.maxDistance = 12;
 
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
-  geometry.setAttribute('aPosEq', new THREE.BufferAttribute(new Float32Array(posEq), 2));
-  geometry.setAttribute('aPosMo', new THREE.BufferAttribute(new Float32Array(posMo), 2));
-  const meshCellCount = cellIds.byteLength / 4;
-  // The mesh is authoritative: a manifest with a missing/zero cell_count would
-  // size the value texture at 1×1 and render every cell as missing (grey).
-  if (state.cellCount !== meshCellCount) {
-    console.warn(`manifest cell_count (${state.cellCount}) disagrees with mesh (${meshCellCount}); using the mesh count`);
-    state.cellCount = meshCellCount;
-  }
-  const idFloats = Float32Array.from(new Uint32Array(cellIds));
+  geometry.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3));
+  geometry.setAttribute('aPosEq', new THREE.BufferAttribute(mesh.posEq, 2));
+  geometry.setAttribute('aPosMo', new THREE.BufferAttribute(mesh.posMo, 2));
+  const idFloats = Float32Array.from(mesh.cellIds);
   geometry.setAttribute('aCellId', new THREE.BufferAttribute(idFloats, 1));
-  geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
+  geometry.setIndex(new THREE.BufferAttribute(mesh.indices, 1));
 
   // Value texture: square-ish R32F texture indexed by cell id.
   const texWidth = Math.max(1, Math.ceil(Math.sqrt(state.cellCount)));
@@ -668,11 +950,27 @@ function uploadValues(values) {
 }
 
 function updateLegend(layer) {
-  $('#legend-title').textContent = layer ? `${layer.source} / ${layer.name}` : 'no layer';
+  $('#legend-title').textContent = layer ? `${layer.source} / ${layer.name}${layer.applicability?.field === 'grounded_ice_surface_applicable' ? ' · grounded ice only' : ''}${layer.applicability ? ` · ${layer.unavailable_cell_count || 0} unavailable · ${layer.inapplicable_cell_count || 0} inapplicable` : ''}` : 'no layer';
   const ramp = $('#legend-ramp');
   const categoriesBox = $('#legend-categories');
   categoriesBox.innerHTML = '';
   if (!layer) { ramp.style.display = 'none'; return; }
+  if (layer.marine_distance && !layer.stats) {
+    ramp.style.display = 'none';
+    $('#legend-min').textContent = 'No marine source';
+    $('#legend-max').textContent = '';
+    $('#legend-min').title = 'Distance is undefined, not zero. Rainfall and total humidity are separate fields.';
+    $('#legend-max').title = '';
+    return;
+  }
+  if ((layer.availability || layer.applicability) && (isCategoricalLayer(layer) ? !(layer.categories || []).length : !layer.stats)) {
+    ramp.style.display = 'none';
+    $('#legend-min').textContent = 'No available estimates';
+    $('#legend-max').textContent = '';
+    $('#legend-min').title = '';
+    $('#legend-max').title = '';
+    return;
+  }
   if (isCategoricalLayer(layer)) {
     ramp.style.display = 'none';
     $('#legend-min').textContent = '';
@@ -1086,6 +1384,21 @@ function numericGuideColor(value, lo, hi) {
 }
 
 function buildNumericCodex(snapshot, doc, summary) {
+  if (snapshot.layer.marine_distance && summary.finiteCount === 0) {
+    return 'No marine source in this world. Distance is undefined, not zero. No numeric color scale is inferred.\n\nNeutral cells indicate the absence of a marine distance source, not missing rainfall or total humidity.';
+  }
+  if ((snapshot.layer.availability || snapshot.layer.applicability) && summary.finiteCount === 0) {
+    return [
+      'No available estimates in this layer slice. No numeric color scale is inferred.',
+      '',
+      '| Special color | Meaning | Cells | Share of slice |',
+      '|---|---|---:|---:|',
+      `| ${MISSING_COLOR_HEX} | Missing or unavailable cell; do not invent content | ${summary.missingCount} | ${shareLabel(summary.missingCount, summary.total)} |`,
+      `| ${MAP_BACKGROUND_HEX} | Canvas background outside the mapped world; keep it outside the geography | — | — |`,
+      '',
+      'Current slice: 0 finite cells; no available-value range.',
+    ].join('\n');
+  }
   const [lo, hi] = layerRange(snapshot.layer);
   const stats = snapshot.layer.stats || {};
   const unit = doc.unit;
@@ -1126,7 +1439,8 @@ function buildNumericCodex(snapshot, doc, summary) {
     `Current slice: ${summary.finiteCount} finite cells; finite range ${valueWithUnit(summary.min, unit)} to ${valueWithUnit(summary.max, unit)}.`,
   );
   if (Number.isFinite(stats.min) && Number.isFinite(stats.max)) {
-    lines.push(`Complete layer/time-axis raw range: ${valueWithUnit(stats.min, unit)} to ${valueWithUnit(stats.max, unit)}.`);
+    const scope = snapshot.layer.availability ? 'available-value' : 'raw';
+    lines.push(`Complete layer/time-axis ${scope} range: ${valueWithUnit(stats.min, unit)} to ${valueWithUnit(stats.max, unit)}.`);
   }
   if (Number.isFinite(stats.p2) && Number.isFinite(stats.p98)) {
     lines.push(`Robust display range (2nd–98th percentile): ${valueWithUnit(stats.p2, unit)} to ${valueWithUnit(stats.p98, unit)}.`);
@@ -1136,10 +1450,14 @@ function buildNumericCodex(snapshot, doc, summary) {
 
 function buildColorCodex(snapshot) {
   const doc = describeLayer(snapshot.layer);
+  const groundedScope = snapshot.layer.applicability?.field === 'grounded_ice_surface_applicable'
+    ? 'Grounded ice applies only to exposed nonmarine, nonlake cells. Lake and sea ice are unmodeled; their neutral color does not establish absence of floating ice.\n\n' : '';
+  const scope = snapshot.layer.applicability
+    ? `Surface applicability is separate from unavailable inputs: ${snapshot.layer.inapplicable_cell_count || 0} inapplicable cells; ${snapshot.layer.unavailable_cell_count || 0} unavailable estimates. Both use the neutral color; supported zero remains numeric.\n\n` : '';
   const summary = layerSliceSummary(snapshot);
-  return isCategoricalLayer(snapshot.layer)
+  return groundedScope + scope + (isCategoricalLayer(snapshot.layer)
     ? buildCategoricalCodex(snapshot, doc, summary)
-    : buildNumericCodex(snapshot, doc, summary);
+    : buildNumericCodex(snapshot, doc, summary));
 }
 
 function projectionLabel(projection) {
@@ -1437,11 +1755,14 @@ function setHelpVisible(visible) {
 async function activateLayer(layer, { stage = null, month = null } = {}) {
   const context = currentCacheContext();
   if (!cacheContextIsCurrent(context)) return;
-  const previous = {
-    layer: state.activeLayer,
-    stage: state.stage,
-    month: state.month,
-  };
+  // The active selection may belong to an older request still in flight.
+  // Roll back to the last uploaded slice, whose labels and values committed
+  // together, rather than to that uncommitted selection.
+  const displayed = state.exportSnapshot;
+  const previous = displayed && displayed.cacheIdentity === context.identity
+    && displayed.cacheRevision === context.revision && displayed.values === state.values
+    ? { layer: displayed.layer, stage: displayed.stage, month: displayed.month }
+    : { layer: null, stage: 0, month: 0 };
   state.activeLayer = layer;
   if (stage !== null) state.stage = stage;
   if (month !== null) state.month = month;
@@ -1504,6 +1825,7 @@ async function activateLayer(layer, { stage = null, month = null } = {}) {
     month: requestedMonth,
     values,
   });
+  updateInspectorStageMarkers();
   updateLegend(layer);
   updateDocsCard(layer);
   updateStageBar();
@@ -1661,6 +1983,20 @@ function filterLayerList(query) {
 // ---------------------------------------------------------------------------
 // Cell inspector
 
+function inspectorLedgerMarker(historyName) {
+  const displayed = state.exportSnapshot;
+  return displayed && displayed.cacheIdentity === state.cacheIdentity
+    && displayed.cacheRevision === (state.status?.cache_revision ?? null)
+    && displayed.values === state.values && isStageLayer(displayed.layer)
+    && displayed.layer.source === historyName ? displayed.stage : -1;
+}
+
+function updateInspectorStageMarkers() {
+  for (const { node, historyName, values } of state.inspectorSparklines) {
+    node.innerHTML = sparklineSvg(values, { marker: inspectorLedgerMarker(historyName) });
+  }
+}
+
 function sparklineSvg(values, { width = 290, height = 30, marker = -1 } = {}) {
   const finite = values.filter((value) => typeof value === 'number' && Number.isFinite(value));
   if (!finite.length) return '';
@@ -1695,6 +2031,8 @@ function escapeHtml(text) {
 async function openInspector(cellId) {
   const context = currentCacheContext();
   if (!cacheContextIsCurrent(context)) return;
+  const requestId = ++state.inspectorRequest;
+  state.inspectorSparklines = [];
   state.selectedCell = cellId;
   const inspector = $('#inspector');
   // Remember whether focus lives inside the panel: the innerHTML re-render
@@ -1711,15 +2049,20 @@ async function openInspector(cellId) {
       cacheRevisionUrl(`/api/cell/${cellId}`, context),
     );
   } catch (error) {
-    if (!cacheContextIsCurrent(context)) return;
+    if (requestId !== state.inspectorRequest || state.selectedCell !== cellId
+        || !cacheContextIsCurrent(context)) return;
     $('#inspector-body').innerHTML = `<div class="notice warning">The cell record could not be loaded. ${escapeHtml(error.message || String(error))}</div>`;
     return;
   }
-  if (state.selectedCell !== cellId || !cacheContextIsCurrent(context)) return;
+  if (requestId !== state.inspectorRequest || state.selectedCell !== cellId
+      || !cacheContextIsCurrent(context)) return;
 
   const cell = record.cell || {};
   const parts = [];
+  const ledgerSparklines = [];
   parts.push('<input id="inspector-filter" type="search" placeholder="Filter fields…" aria-label="Filter fields">');
+  parts.push(speciesAvailabilityMarkup(cell));
+  parts.push(landUseAvailabilityMarkup(cell));
 
   parts.push('<div class="inspector-section"><h3>Ledger slices (per stage)</h3>');
   for (const [historyName, ledger] of Object.entries(record.ledgers || {})) {
@@ -1727,8 +2070,9 @@ async function openInspector(cellId) {
     for (const [field, values] of Object.entries(ledger.fields)) {
       const numeric = values.filter((value) => typeof value === 'number');
       if (!numeric.length) continue;
-      const marker = state.activeLayer && state.activeLayer.source === historyName ? state.stage : -1;
-      parts.push(`<div class="spark-row"><span class="k">${escapeHtml(field)}</span>${sparklineSvg(values, { marker })}</div>`);
+      const marker = inspectorLedgerMarker(historyName);
+      const index = ledgerSparklines.push({ historyName, values }) - 1;
+      parts.push(`<div class="spark-row"><span class="k">${escapeHtml(field)}</span><span data-inspector-ledger="${index}">${sparklineSvg(values, { marker })}</span></div>`);
     }
   }
   parts.push('</div>');
@@ -1747,7 +2091,7 @@ async function openInspector(cellId) {
     parts.push(
       `<div class="field-row" data-search="${escapeHtml(key.toLowerCase())}">`
       + `<span class="k" title="${escapeHtml(key)}">${escapeHtml(key)}</span>`
-      + `<span class="v">${escapeHtml(formatValue(value))}</span></div>`,
+      + `<span class="v">${escapeHtml(formatInspectorValue(cell, key, value))}</span></div>`,
     );
   }
   parts.push('</div></div>');
@@ -1771,6 +2115,9 @@ async function openInspector(cellId) {
 
   const body = $('#inspector-body');
   body.innerHTML = parts.join('');
+  state.inspectorSparklines = ledgerSparklines.map((entry, index) => ({
+    ...entry, node: body.querySelector(`[data-inspector-ledger="${index}"]`),
+  })).filter((entry) => entry.node);
   body.querySelector('#inspector-filter').addEventListener('input', (event) => {
     const needle = event.target.value.trim().toLowerCase();
     body.querySelectorAll('#inspector-fields .field-row').forEach((row) => {
@@ -1854,7 +2201,7 @@ function tableMarkup(rows, explicitColumns = null) {
   const columns = explicitColumns || [...new Set(normalized.flatMap((row) => Object.keys(row)))];
   const head = columns.map((column) => `<th scope="col">${escapeHtml(column)}</th>`).join('');
   const body = normalized.map((row) => `<tr>${columns.map((column) => (
-    `<td>${escapeHtml(displayCell(row[column]))}</td>`
+    `<td>${escapeHtml(typeof row[column] === 'object' && row[column] !== null ? displayCell(row[column]) : formatInspectorValue(row, column, row[column]))}</td>`
   )).join('')}</tr>`).join('');
   return `<div class="data-table-wrap"><table class="data-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
@@ -1863,7 +2210,10 @@ function objectTableMarkup(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return `<pre>${escapeHtml(jsonText(value))}</pre>`;
   }
-  return tableMarkup(Object.entries(value).map(([key, entry]) => ({ key, value: entry })), ['key', 'value']);
+  const flags = Object.fromEntries(Object.entries(value).filter(([key, item]) => key.includes('availability') && item && typeof item === 'object' && !Array.isArray(item)).flatMap(([, item]) => Object.entries(item).filter(([, flag]) => typeof flag === 'boolean')));
+  return tableMarkup(Object.entries(value).map(([key, entry]) => ({ key,
+    value: entry === null && (flags[key] === false || value[key.replace(/_index$/, '_supported')] === false || value[SUMMARY_ESTIMATE_SUPPORT[key]] === false)
+      ? 'Unavailable' : entry })), ['key', 'value']);
 }
 
 function collectionNames(collection) {
@@ -1993,6 +2343,8 @@ function resetCacheDerivedState() {
   state.mapRequest += 1;
   state.dataRequest += 1;
   state.fetchSeq += 1;
+  state.inspectorRequest += 1;
+  state.inspectorSparklines = [];
   state.manifest = null;
   state.catalog = null;
   state.catalogLoading = null;
@@ -2077,7 +2429,9 @@ function beginCacheTransition(cacheDir) {
 async function refreshWorlds({ force = false } = {}) {
   const requestId = ++state.worldRequest;
   const payload = await optionalJson('/api/worlds');
-  if (requestId !== state.worldRequest) return;
+  // A poll may discover another cache while selection is still being applied.
+  // Keep the pending destination visible and its control locked until it settles.
+  if (requestId !== state.worldRequest || (state.worldSwitching && !force)) return;
   const select = $('#world-select');
   // A transient poll failure must not wipe a previously good list; only show
   // the "unavailable" placeholder when no list was ever loaded.
@@ -2113,13 +2467,15 @@ async function refreshWorlds({ force = false } = {}) {
   if (current && [...select.options].some((option) => option.value === current)) {
     select.value = current;
   }
-  select.disabled = worlds.length === 0;
+  select.disabled = state.worldSwitching || worlds.length === 0;
 }
 
 async function switchWorld() {
+  if (state.worldSwitching) return;
   const select = $('#world-select');
   const cacheDir = select.value;
   if (!cacheDir || cacheDir === state.status?.cache_dir) return;
+  state.worldSwitching = true;
   select.disabled = true;
   try {
     await fetchJson('/api/worlds/select', {
@@ -2140,6 +2496,7 @@ async function switchWorld() {
     await refreshWorlds({ force: true });
     select.value = state.status?.cache_dir ?? '';
   } finally {
+    state.worldSwitching = false;
     // Mirror refreshWorlds: keep the select disabled when it holds only a
     // placeholder option (no switchable caches).
     select.disabled = ![...select.options].some((option) => option.value);
@@ -2169,13 +2526,46 @@ async function loadServerStatus() {
   if (state.cacheAvailable) {
     const context = currentCacheContext();
     void Promise.allSettled([
-      loadCatalog(false, context).catch((error) => {
-        $('#data-output').innerHTML = `<div class="notice warning">${escapeHtml(error.message || String(error))}</div>`;
-      }),
+      loadCatalog(false, context),
       initializeMap(context),
     ]);
   }
   return status;
+}
+
+function validateDisplayMetadata(manifest) {
+  const count = manifest.world?.cell_count;
+  for (const layer of manifest.layers || []) {
+    if ('marine_distance' in layer) {
+      const rule = layer.marine_distance;
+      if (layer.id !== 'cells/distance_to_marine_water_km' || layer.source !== 'cells'
+          || layer.name !== 'distance_to_marine_water_km' || layer.kind !== 'numeric'
+          || !rule || typeof rule !== 'object' || Array.isArray(rule)
+          || Object.keys(rule).sort().join(',') !== 'no_source_cell_count,status_field'
+          || rule.status_field !== 'marine_distance_status' || !Number.isSafeInteger(count)
+          || !Number.isSafeInteger(rule.no_source_cell_count) || rule.no_source_cell_count < 0
+          || rule.no_source_cell_count > count
+          || (rule.no_source_cell_count === count) !== !Object.hasOwn(layer, 'stats')) throw new Error('Invalid marine distance display metadata');
+    }
+    if ('availability' in layer) {
+      const rule = layer.availability;
+      if (!rule || typeof rule !== 'object' || Array.isArray(rule)
+          || Object.keys(rule).sort().join(',') !== 'field,unavailable_when'
+          || typeof rule.field !== 'string' || !['false', 'zero'].includes(rule.unavailable_when)) {
+        throw new Error('Invalid layer availability metadata');
+      }
+    }
+    if ('applicability' in layer) {
+      const rule = layer.applicability;
+      const valid = rule && typeof rule === 'object' && !Array.isArray(rule)
+        && ((rule.kind === 'native_exposed_land_v1' && Object.keys(rule).join(',') === 'kind')
+            || (rule.kind === 'boolean_field_v1' && ['mining_surface_applicable', 'grounded_ice_surface_applicable'].includes(rule.field)
+                && Object.keys(rule).sort().join(',') === 'field,kind'));
+      const values = [layer.inapplicable_cell_count, layer.unavailable_cell_count];
+      if (!valid || !Number.isSafeInteger(count) || values.some(value => !Number.isSafeInteger(value) || value < 0 || value > count)
+          || values[0] + values[1] > count) throw new Error('Invalid layer applicability metadata or counts');
+    }
+  }
 }
 
 async function initializeMap(context = currentCacheContext()) {
@@ -2186,6 +2576,7 @@ async function initializeMap(context = currentCacheContext()) {
     const manifest = state.manifest
       || await fetchJson(cacheRevisionUrl('/api/manifest', context));
     if (requestId !== state.mapRequest || !cacheContextIsCurrent(context)) return;
+    validateDisplayMetadata(manifest);
     state.manifest = manifest;
     state.cellCount = Number(manifest.world?.cell_count ?? 0);
     const world = manifest.world || {};
@@ -2197,12 +2588,6 @@ async function initializeMap(context = currentCacheContext()) {
 
     if (!await buildScene(context)) return;
     if (requestId !== state.mapRequest || !cacheContextIsCurrent(context)) return;
-    // buildScene may correct cellCount against the mesh; reflect the final value.
-    $('#world-meta').innerHTML = [
-      `${escapeHtml(world.name ?? 'world')} · ${state.cellCount} cells`,
-      `${escapeHtml(world.mesh_backend ?? '')} · scope ${escapeHtml(world.generation_scope ?? 'full')}`,
-      `${(manifest.layers || []).length} layers · ${Object.keys(manifest.stage_histories || {}).length} stage histories`,
-    ].join('<br>');
     buildLayerList();
     wireMapEvents();
     updateDocsCard(null);
@@ -2236,10 +2621,12 @@ async function loadCatalog(force = false, context = currentCacheContext()) {
   if (state.catalog && !force) return state.catalog;
   if (state.catalogLoading !== null && !force) return null;
   const requestId = ++state.catalogRequest;
+  const dataRequest = state.dataRequest;
   state.catalogLoading = requestId;
   try {
     const catalog = await fetchJson(cacheRevisionUrl('/api/catalog', context));
     if (requestId !== state.catalogRequest || !cacheContextIsCurrent(context)) return null;
+    validateDisplayMetadata(catalog);
     state.catalog = catalog;
     if (!state.manifest && catalog?.layers) {
       // The layer help can still describe catalog entries before the map manifest is loaded.
@@ -2250,7 +2637,12 @@ async function loadCatalog(force = false, context = currentCacheContext()) {
     return catalog;
   } catch (error) {
     if (requestId !== state.catalogRequest || !cacheContextIsCurrent(context)) return null;
-    throw error;
+    // A newer data selection owns the panel even if this refresh is still the
+    // latest catalog request. Its pending or committed result must stay intact.
+    if (dataRequest === state.dataRequest) {
+      $('#data-output').innerHTML = `<div class="notice warning">${escapeHtml(error.message || String(error))}</div>`;
+    }
+    return null;
   } finally {
     if (state.catalogLoading === requestId) state.catalogLoading = null;
   }
@@ -2369,7 +2761,8 @@ async function loadDataSelection(resetOffset = true, context = currentCacheConte
         : null;
       const payload = url ? await fetchJson(url) : {};
       rawUrl = url;
-      markup = `<pre>${escapeHtml(jsonPreview(payload))}</pre>`;
+      markup = (name === 'summary' ? populationScopeMarkup(state.catalog) : '')
+        + `<pre>${escapeHtml(jsonPreview(payload))}</pre>`;
     } else if (kind === 'stages') {
       eyebrow = 'Stage history';
       title = name || 'Stage summaries';
@@ -2389,7 +2782,6 @@ async function loadDataSelection(resetOffset = true, context = currentCacheConte
     } else if (kind === 'families') {
       const limit = Number($('#data-limit').value || 10);
       const detail = $('#family-detail').value;
-      eyebrow = detail === 'full' ? 'Full nested family' : 'Scalar family view';
       title = name || 'Record families';
       const params = new URLSearchParams({
         limit: String(limit), offset: String(requestOffset), detail,
@@ -2398,8 +2790,11 @@ async function loadDataSelection(resetOffset = true, context = currentCacheConte
         ? cacheRevisionUrl(`/api/family/${encodeURIComponent(name)}?${params}`, context)
         : null;
       const payload = url ? await fetchJson(url) : { rows: [], total: 0 };
+      const returnedDetail = ['full', 'scalars'].includes(payload.detail) ? payload.detail : detail;
+      eyebrow = returnedDetail === 'full' ? 'Full nested family' : 'Scalar family view';
       rawUrl = url;
-      markup = tableMarkup(payload.rows || []);
+      markup = (name === 'population_regions' ? populationScopeMarkup(state.catalog) : '')
+        + familyAvailabilityMarkup(name, payload.rows || [], returnedDetail, payload.availability) + tableMarkup(payload.rows || []);
       dataTotal = Number(payload.total ?? payload.row_count ?? payload.rows?.length ?? 0);
     }
     if (requestId !== state.dataRequest || !cacheContextIsCurrent(context)) return;
@@ -2429,8 +2824,14 @@ async function loadDataSelection(resetOffset = true, context = currentCacheConte
 // YAML configuration editor and schema reference
 
 async function fetchTemplate(profile) {
+  const version = state.configSchema?.['x-magic-geo']?.schema_version;
+  if (version !== 2) throw new Error('The current configuration schema is unavailable. Reload the workbench before resetting a profile.');
   const payload = await fetchJson(`/api/config/template?${new URLSearchParams({ profile })}`);
-  return typeof payload === 'string' ? payload : payload.yaml ?? payload.template ?? '';
+  if (payload?.profile !== profile || payload?.config?.config_version !== version
+      || typeof payload?.yaml !== 'string' || !payload.yaml.trim()) {
+    throw new Error('The profile template does not match configuration schema 2. Reload the workbench; your YAML has been kept.');
+  }
+  return payload.yaml;
 }
 
 function normalizeProfiles(payload) {
@@ -2450,7 +2851,10 @@ function normalizeProfiles(payload) {
 
 function resolveSchemaNode(node, root) {
   if (!node?.$ref || !node.$ref.startsWith('#/')) return node || {};
-  return node.$ref.slice(2).split('/').reduce((value, part) => value?.[part.replace(/~1/g, '/').replace(/~0/g, '~')], root) || node;
+  const resolved = node.$ref.slice(2).split('/').reduce((value, part) => value?.[part.replace(/~1/g, '/').replace(/~0/g, '~')], root);
+  if (!resolved) return node;
+  const { $ref, ...overrides } = node;
+  return { ...resolved, ...overrides };
 }
 
 function flattenSchema(schema) {
@@ -2475,8 +2879,16 @@ function flattenSchema(schema) {
         type: type || (child.properties ? 'object' : 'value'),
         required: nodeRequired.has(name) || required.has(name),
         description: child.description || child.title || '',
+        help: fieldPath === 'climate.reference_infrared_optical_depth'
+          ? 'Infrared opacity (tau_ref), a dimensionless column parameter. The seasonal energy budget determines temperature.' : '',
         default: child.default,
         enum: child.enum,
+        constant: child.const,
+        minimum: child.minimum,
+        maximum: child.maximum,
+        exclusiveMinimum: child.exclusiveMinimum,
+        exclusiveMaximum: child.exclusiveMaximum,
+        exactIntegers: child['x-magic-geo-integer-display'],
       });
       if (child.properties || child.$ref) visit(child, fieldPath, nodeRequired, depth + 1);
       const item = child.items ? resolveSchemaNode(child.items, schema) : null;
@@ -2487,15 +2899,32 @@ function flattenSchema(schema) {
   return fields;
 }
 
+function schemaValueText(field, key, value) {
+  const exact = field.exactIntegers?.[key];
+  if (typeof value === 'number' && Number.isInteger(value) && !Number.isSafeInteger(value)) {
+    if (typeof exact === 'string' && /^-?(0|[1-9]\d*)$/.test(exact) && Number(exact) === value) return exact;
+    if (field.type === 'integer' || exact !== undefined) return 'exact integer unavailable';
+  }
+  return key === 'default' || key === 'const' ? displayCell(value) : String(value);
+}
+
 function renderSchemaDocs(query = '') {
   const needle = query.trim().toLowerCase();
-  const matches = state.schemaFields.filter((field) => !needle || `${field.path} ${field.type} ${field.description}`.toLowerCase().includes(needle));
+  const matches = state.schemaFields.filter((field) => !needle || `${field.path} ${field.type} ${field.description} ${field.help || ''}`.toLowerCase().includes(needle));
   $('#schema-docs').innerHTML = matches.map((field) => {
-    const defaultText = field.default !== undefined ? `Default: ${displayCell(field.default)}` : '';
+    const defaultText = field.default !== undefined ? `Default: ${schemaValueText(field, 'default', field.default)}` : '';
     const enumText = field.enum ? `Choices: ${field.enum.join(', ')}` : '';
+    const constraints = [
+      field.constant !== undefined ? `Fixed value: ${schemaValueText(field, 'const', field.constant)}` : '',
+      field.minimum !== undefined ? `Minimum: ${schemaValueText(field, 'minimum', field.minimum)} (inclusive)` : '',
+      field.maximum !== undefined ? `Maximum: ${schemaValueText(field, 'maximum', field.maximum)} (inclusive)` : '',
+      field.exclusiveMinimum !== undefined ? `Greater than: ${schemaValueText(field, 'exclusiveMinimum', field.exclusiveMinimum)}` : '',
+      field.exclusiveMaximum !== undefined ? `Less than: ${schemaValueText(field, 'exclusiveMaximum', field.exclusiveMaximum)}` : '',
+    ];
     return `<article class="schema-field"><div><code>${escapeHtml(field.path)}</code><span class="schema-meta">${escapeHtml(field.type)}${field.required ? ' · required' : ''}</span></div>`
       + `<p>${escapeHtml(field.description || 'No field description provided.')}</p>`
-      + `<small>${escapeHtml([defaultText, enumText].filter(Boolean).join(' · '))}</small></article>`;
+      + (field.help ? `<p>${escapeHtml(field.help)}</p>` : '')
+      + `<small>${escapeHtml([defaultText, enumText, ...constraints].filter(Boolean).join(' · '))}</small></article>`;
   }).join('') || '<p class="muted">No schema fields match this filter.</p>';
 }
 
@@ -2505,6 +2934,7 @@ async function resetConfigTemplate() {
   if (state.configEditRevision > 0
       && !window.confirm('Replace the current YAML with the profile template?')) return;
   const requestId = ++state.configTemplateRequest;
+  const resultRequest = ++state.configResultRequest;
   const editor = $('#config-yaml');
   const editRevision = state.configEditRevision;
   const editorValue = editor.value;
@@ -2514,14 +2944,21 @@ async function resetConfigTemplate() {
     const template = await fetchTemplate(profile);
     if (requestId !== state.configTemplateRequest || $('#config-profile').value !== profile) return;
     if (state.configEditRevision !== editRevision || editor.value !== editorValue) {
-      $('#config-result').textContent = `The ${profile} template was not applied because the YAML changed while it loaded. Choose Reset from profile to replace it.`;
+      if (resultRequest === state.configResultRequest) {
+        $('#config-result').textContent = `The ${profile} template was not applied because the YAML changed while it loaded. Choose Reset from profile to replace it.`;
+      }
       return;
     }
     editor.value = template;
     state.configEditRevision = 0;
+    // Applying a template changes the editor even if validation or saving was
+    // started while it loaded. Those earlier YAML results are now obsolete.
+    state.configResultRequest += 1;
+    updateSavedConfigControls();
+    $('#config-result').className = 'validation-result';
     $('#config-result').textContent = `Loaded the ${profile} template. Validate after making changes.`;
   } catch (error) {
-    if (requestId !== state.configTemplateRequest || $('#config-profile').value !== profile) return;
+    if (requestId !== state.configTemplateRequest || resultRequest !== state.configResultRequest || $('#config-profile').value !== profile) return;
     $('#config-result').className = 'validation-result invalid';
     $('#config-result').textContent = error.message || String(error);
   }
@@ -2547,11 +2984,14 @@ function validationErrorMarkup(payload) {
 async function validateConfig() {
   const result = $('#config-result');
   const button = $('#config-validate');
+  const requestId = ++state.configResultRequest;
+  const yaml = $('#config-yaml').value;
   button.disabled = true;
   result.className = 'validation-result';
   result.textContent = 'Validating…';
   try {
-    const payload = await fetchJson('/api/config/validate', { method: 'POST', body: { yaml: $('#config-yaml').value } });
+    const payload = await fetchJson('/api/config/validate', { method: 'POST', body: { yaml } });
+    if (requestId !== state.configResultRequest || yaml !== $('#config-yaml').value) return false;
     const valid = payload?.valid ?? payload?.ok ?? payload?.errors?.length === 0;
     result.className = `validation-result ${valid ? 'valid' : 'invalid'}`;
     result.innerHTML = valid
@@ -2559,6 +2999,7 @@ async function validateConfig() {
       : `<strong>Configuration is not valid.</strong><ul>${validationErrorMarkup(payload)}</ul>`;
     return valid;
   } catch (error) {
+    if (requestId !== state.configResultRequest || yaml !== $('#config-yaml').value) return false;
     const detail = error.payload?.detail;
     result.className = 'validation-result invalid';
     result.innerHTML = detail
@@ -2583,6 +3024,35 @@ function downloadConfig() {
   downloadBlob(new Blob([$('#config-yaml').value], { type: 'text/yaml;charset=utf-8' }), configFilename());
 }
 
+function updateSavedConfigControls() {
+  const saved = state.savedConfig;
+  const current = saved && saved.yaml === $('#config-yaml').value && saved.name === configNameRaw();
+  $('#config-generate').disabled = !current;
+  $('#config-saved-status').textContent = saved
+    ? `Saved ${saved.path}.${current ? ' Ready to generate.' : ' Save the current edits to generate them.'}`
+    : 'Save a configuration to use it in generation.';
+}
+
+function configEdited(yamlChanged = true) {
+  if (yamlChanged) state.configEditRevision += 1;
+  state.configResultRequest += 1;
+  $('#config-result').className = 'validation-result';
+  $('#config-result').textContent = 'Configuration changed. Validate to check the current YAML.';
+  updateSavedConfigControls();
+}
+
+function generateFromSavedConfig() {
+  if (!state.savedConfig || $('#config-generate').disabled) return;
+  $('#operation-select').value = 'generate';
+  renderOperationForm();
+  const config = $('#operation-fields').querySelector('[name="config"]');
+  if (!config) return;
+  config.value = state.savedConfig.path;
+  setView('operations');
+  config.focus();
+  $('#operation-result').textContent = `Using ${state.savedConfig.path}. Review the output paths and start the job.`;
+}
+
 async function saveConfig() {
   const result = $('#config-result');
   const nameInput = $('#config-name');
@@ -2591,32 +3061,41 @@ async function saveConfig() {
     return;
   }
   const button = $('#config-save');
+  const requestId = ++state.configResultRequest;
+  // Retries must save exactly the name and text whose overwrite was reviewed.
+  const snapshot = { yaml: $('#config-yaml').value, name: configNameRaw() };
   button.disabled = true;
   result.className = 'validation-result';
   result.textContent = 'Saving…';
   const submit = async (force) => fetchJson('/api/config/save', {
     method: 'POST',
     body: {
-      yaml: $('#config-yaml').value,
-      name: configNameRaw(),
+      ...snapshot,
       force,
     },
   });
+  const showSaved = (payload, replaced = false) => {
+    if (payload?.path) state.savedConfig = { ...snapshot, path: payload.path };
+    updateSavedConfigControls();
+    if (requestId !== state.configResultRequest) return;
+    result.className = 'validation-result valid';
+    result.textContent = `${replaced ? 'Replaced' : 'Saved'} ${payload?.path ?? snapshot.name}.`;
+  };
   try {
     const payload = await submit(false);
-    result.className = 'validation-result valid';
-    result.textContent = payload?.message ?? `Saved ${payload?.name ?? payload?.path ?? configFilename()}.`;
+    showSaved(payload);
   } catch (error) {
-    if (error.status === 409 && window.confirm('A configuration with this name already exists. Replace it?')) {
+    if (requestId !== state.configResultRequest) return;
+    if (error.status === 409 && window.confirm(`The configuration "${snapshot.name}" already exists. Replace it with the submitted YAML?`)) {
       try {
         const payload = await submit(true);
-        result.className = 'validation-result valid';
-        result.textContent = `Replaced ${payload?.path ?? configFilename()}.`;
+        showSaved(payload, true);
         return;
       } catch (overwriteError) {
         error = overwriteError;
       }
     }
+    if (requestId !== state.configResultRequest) return;
     result.className = 'validation-result invalid';
     result.textContent = error.message || String(error);
   } finally {
@@ -2625,42 +3104,67 @@ async function saveConfig() {
 }
 
 async function loadConfigWorkbench() {
+  const requestId = ++state.configWorkbenchRequest;
+  state.configTemplateRequest += 1;
   const editRevisionAtStart = state.configEditRevision;
+  const resultRequestAtStart = state.configResultRequest;
   const editorValueAtStart = $('#config-yaml').value;
-  const [schema, profilePayload] = await Promise.all([
-    optionalJson('/api/config/schema'),
-    optionalJson('/api/config/profiles'),
-  ]);
-  if (schema) {
-    state.configSchema = schema.schema ?? schema;
-    state.schemaFields = flattenSchema(state.configSchema);
-    renderSchemaDocs();
-  } else {
-    $('#schema-docs').innerHTML = '<div class="notice warning">Configuration schema is unavailable.</div>';
-  }
-  const profiles = normalizeProfiles(profilePayload);
   const select = $('#config-profile');
+  const previousProfile = select.value;
+  select.disabled = true;
+  $('#config-reset').disabled = true;
+  state.configSchema = null;
+  state.schemaFields = [];
   select.innerHTML = '';
-  for (const profile of profiles) {
-    const option = document.createElement('option');
-    option.value = profile.id;
-    option.textContent = profile.label;
-    select.appendChild(option);
-  }
-  if (!profiles.length) {
-    const option = document.createElement('option');
-    option.value = 'earthlike';
-    option.textContent = 'Earthlike';
-    select.appendChild(option);
-  }
-  const defaultProfile = profilePayload?.default;
-  if (defaultProfile && [...select.options].some((option) => option.value === defaultProfile)) {
-    select.value = defaultProfile;
-  }
-  if (state.configEditRevision === editRevisionAtStart && $('#config-yaml').value === editorValueAtStart) {
-    await resetConfigTemplate();
-  } else {
-    $('#config-result').textContent = 'Profiles loaded. Your YAML edits were kept; use Reset from profile to replace them.';
+  $('#config-schema-status').textContent = 'Loading the current configuration schema…';
+  $('#schema-docs').innerHTML = '';
+  try {
+    const [schemaPayload, profilePayload] = await Promise.all([
+      fetchJson('/api/config/schema'),
+      fetchJson('/api/config/profiles'),
+    ]);
+    if (requestId !== state.configWorkbenchRequest) return;
+    const schema = schemaPayload?.schema ?? schemaPayload;
+    const metadata = schema?.['x-magic-geo'];
+    const profiles = normalizeProfiles(profilePayload);
+    const declaredProfiles = metadata?.profiles;
+    if (metadata?.schema_version !== 2 || schema?.properties?.config_version?.const !== 2
+        || !Array.isArray(declaredProfiles) || !declaredProfiles.length
+        || declaredProfiles.some((profile) => profile?.values?.config_version !== 2)
+        || !profiles.length || new Set(profiles.map((profile) => profile.id)).size !== profiles.length
+        || profiles.length !== declaredProfiles.length
+        || profiles.some((profile) => !declaredProfiles.some((entry) => entry.name === profile.id))
+        || !profiles.some((profile) => profile.id === profilePayload?.default)) {
+      throw new Error('Configuration schema and profiles must declare the current version 2. Reload the workbench; your YAML has been kept.');
+    }
+    state.configSchema = schema;
+    state.schemaFields = flattenSchema(schema);
+    renderSchemaDocs($('#schema-search').value);
+    for (const profile of profiles) {
+      const option = document.createElement('option');
+      option.value = profile.id;
+      option.textContent = profile.label;
+      option.title = declaredProfiles.find((entry) => entry.name === profile.id)?.description || '';
+      select.appendChild(option);
+    }
+    select.value = profiles.some((profile) => profile.id === previousProfile) ? previousProfile : profilePayload.default;
+    select.disabled = false;
+    $('#config-reset').disabled = false;
+    $('#config-schema-status').textContent = 'Schema 2 · Seasonal energy model · config_version: 2 is required.';
+    if (!editorValueAtStart && state.configEditRevision === editRevisionAtStart
+        && $('#config-yaml').value === editorValueAtStart && state.configResultRequest === resultRequestAtStart) {
+      await resetConfigTemplate();
+    } else if (state.configResultRequest === resultRequestAtStart) {
+      $('#config-result').textContent = 'Profiles loaded. Your YAML was kept; use Reset from profile to replace it.';
+    }
+  } catch (error) {
+    if (requestId !== state.configWorkbenchRequest) return;
+    $('#config-schema-status').textContent = 'Current schema and profiles are unavailable.';
+    $('#schema-docs').innerHTML = `<div class="notice warning">${escapeHtml(error.message || String(error))}</div>`;
+    if (state.configResultRequest === resultRequestAtStart) {
+      $('#config-result').className = 'validation-result invalid';
+      $('#config-result').textContent = 'Profile loading failed. Your YAML was kept; validation, saving and downloading remain available.';
+    }
   }
 }
 
@@ -2706,7 +3210,7 @@ function renderOperationForm() {
   const operation = state.operations.find((entry) => entry.name === $('#operation-select').value);
   const unavailable = operation && operation.available === false;
   $('#operation-description').textContent = `${operation?.description ?? operation?.help ?? 'No description supplied.'}${unavailable ? ` This operation is unavailable${operation.dependency ? ` until ${operation.dependency} is installed` : ''}.` : ''}`;
-  $('#operation-form').querySelector('button[type="submit"]').disabled = !operation || unavailable;
+  $('#operation-form').querySelector('button[type="submit"]').disabled = state.operationSubmitting || !operation || unavailable;
   const fields = $('#operation-fields');
   fields.innerHTML = '';
   for (const argument of operationArguments(operation)) {
@@ -2735,6 +3239,7 @@ function renderOperationForm() {
       input = document.createElement('input');
       input.type = ['integer', 'number'].includes(argument.type) ? 'number' : 'text';
       if (argument.type === 'integer') input.step = '1';
+      if (argument.type === 'number') input.step = 'any';
       if (argument.minimum !== undefined) input.min = String(argument.minimum);
       if (argument.maximum !== undefined) input.max = String(argument.maximum);
       input.placeholder = argument.placeholder ?? '';
@@ -2763,7 +3268,7 @@ function collectOperationArguments() {
     const raw = input.value.trim();
     if (!raw) continue;
     const type = input.dataset.valueType;
-    if (type === 'integer') argumentsObject[input.name] = Number.parseInt(raw, 10);
+    if (type === 'integer') argumentsObject[input.name] = Number(raw);
     else if (type === 'number') argumentsObject[input.name] = Number(raw);
     else if (type === 'boolean') argumentsObject[input.name] = raw === 'true';
     else if (type === 'array' || type === 'object') {
@@ -2784,6 +3289,7 @@ async function submitOperation(event) {
   if (state.operationSubmitting) return;
   const result = $('#operation-result');
   const submitButton = $('#operation-form').querySelector('button[type="submit"]');
+  const selectionRequest = state.jobSelectionRequest;
   state.operationSubmitting = true;
   submitButton.disabled = true;
   result.textContent = 'Starting job…';
@@ -2792,10 +3298,12 @@ async function submitOperation(event) {
       method: 'POST',
       body: { operation: $('#operation-select').value, arguments: collectOperationArguments() },
     });
-    state.selectedJobId = String(payload?.id ?? payload?.job_id ?? '');
-    result.textContent = `Started job ${state.selectedJobId || ''}.`;
+    const submittedJobId = String(payload?.id ?? payload?.job_id ?? '');
+    result.textContent = `Started job ${submittedJobId}.`;
     await refreshJobs();
-    if (state.selectedJobId) await selectJob(state.selectedJobId);
+    if (submittedJobId && selectionRequest === state.jobSelectionRequest) {
+      await selectJob(submittedJobId, { automatic: true });
+    }
   } catch (error) {
     result.innerHTML = `<div class="notice warning">The job could not be started. ${escapeHtml(error.message || String(error))}</div>`;
   } finally {
@@ -2892,12 +3400,20 @@ function renderJobDetail(job) {
   $('#job-cancel').classList.toggle('hidden', !jobIsActive(job));
 }
 
-async function selectJob(id, { preserveScroll = false } = {}) {
+async function selectJob(id, { preserveScroll = false, automatic = false } = {}) {
+  if (!automatic) state.jobSelectionRequest += 1;
+  const changingJob = state.selectedJobId !== String(id);
   state.selectedJobId = String(id);
   const requestId = ++state.jobDetailRequest;
   const oldLog = $('#job-detail').querySelector('.job-log');
   const oldScroll = oldLog?.scrollTop ?? 0;
   const wasAtBottom = oldLog ? oldLog.scrollHeight - oldLog.clientHeight - oldScroll < 8 : true;
+  if (changingJob) {
+    state.selectedJobStatus = null;
+    $('#job-cancel').classList.add('hidden');
+    $('#job-detail-title').textContent = `Loading job ${id}…`;
+    $('#job-detail').textContent = 'Loading job details…';
+  }
   renderJobs();
   try {
     const job = await fetchJson(`/api/jobs/${encodeURIComponent(id)}`);
@@ -2946,20 +3462,27 @@ async function refreshJobs() {
       state.jobsSignature = null;
       renderJobs();
     } else if (jobIsActive(selected) || jobStatus(selected) !== state.selectedJobStatus) {
-      await selectJob(selected.id, { preserveScroll: true });
+      await selectJob(selected.id, { preserveScroll: true, automatic: true });
     }
   }
 }
 
 async function cancelSelectedJob() {
   if (!state.selectedJobId) return;
+  const jobId = state.selectedJobId;
   if (!window.confirm('Cancel this job?')) return;
+  const button = $('#job-cancel');
+  button.disabled = true;
   try {
-    await fetchJson(`/api/jobs/${encodeURIComponent(state.selectedJobId)}/cancel`, { method: 'POST' });
+    await fetchJson(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
     await refreshJobs();
-    await selectJob(state.selectedJobId);
+    if (state.selectedJobId === jobId) await selectJob(jobId, { automatic: true });
   } catch (error) {
-    $('#job-detail').insertAdjacentHTML('afterbegin', `<div class="notice warning">${escapeHtml(error.message || String(error))}</div>`);
+    if (state.selectedJobId === jobId) {
+      $('#job-detail').insertAdjacentHTML('afterbegin', `<div class="notice warning">${escapeHtml(error.message || String(error))}</div>`);
+    }
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -2986,12 +3509,15 @@ async function loadOperations() {
 // Backend/API view and workbench event wiring
 
 async function loadBackend() {
+  const requestId = ++state.backendRequest;
   const output = $('#backend-output');
   output.innerHTML = '<span class="state-pill pending">Loading…</span>';
   try {
     const payload = await fetchJson('/api/backend');
+    if (requestId !== state.backendRequest) return;
     output.innerHTML = `<pre>${escapeHtml(jsonText(payload))}</pre>`;
   } catch (error) {
+    if (requestId !== state.backendRequest) return;
     output.innerHTML = `<div class="notice warning">${escapeHtml(error.message || String(error))}</div>`;
   }
 }
@@ -3036,9 +3562,7 @@ function wireWorkbenchEvents() {
     setHelpVisible($('#help-overlay').classList.contains('hidden'));
   });
 
-  $('#data-refresh').addEventListener('click', () => loadCatalog(true).catch((error) => {
-    $('#data-output').innerHTML = `<div class="notice warning">${escapeHtml(error.message || String(error))}</div>`;
-  }));
+  $('#data-refresh').addEventListener('click', () => loadCatalog(true));
   $('#data-kind').addEventListener('change', () => { populateDataResources(); loadDataSelection(true); });
   $('#data-resource').addEventListener('change', () => loadDataSelection(true));
   $('#family-detail').addEventListener('change', () => loadDataSelection(true));
@@ -3056,6 +3580,7 @@ function wireWorkbenchEvents() {
     // Selecting a source profile is non-destructive. Only the explicit Reset
     // button is allowed to replace YAML that may contain unsaved edits.
     state.configTemplateRequest += 1;
+    state.configResultRequest += 1;
     const profile = $('#config-profile').value;
     $('#config-result').className = 'validation-result';
     $('#config-result').textContent = `Selected ${profile}. Choose Reset from profile to replace the editor.`;
@@ -3064,15 +3589,17 @@ function wireWorkbenchEvents() {
   $('#config-validate').addEventListener('click', validateConfig);
   $('#config-save').addEventListener('click', saveConfig);
   $('#config-download').addEventListener('click', downloadConfig);
+  $('#config-generate').addEventListener('click', generateFromSavedConfig);
+  $('#config-name').addEventListener('input', () => configEdited(false));
   $('#schema-search').addEventListener('input', (event) => renderSchemaDocs(event.target.value));
-  $('#config-yaml').addEventListener('input', () => { state.configEditRevision += 1; });
+  $('#config-yaml').addEventListener('input', configEdited);
   $('#config-yaml').addEventListener('keydown', (event) => {
     if (event.key !== 'Tab') return;
     event.preventDefault();
     const field = event.target;
     const start = field.selectionStart;
     field.setRangeText('  ', start, field.selectionEnd, 'end');
-    state.configEditRevision += 1;
+    configEdited();
   });
 
   $('#operation-select').addEventListener('change', renderOperationForm);
@@ -3181,6 +3708,9 @@ function wireMapEvents() {
   const slider = $('#stage-slider');
   const number = $('#stage-number');
   let stageFetchTimer = 0;
+  controller.signal.addEventListener('abort', () => {
+    if (stageFetchTimer) window.clearTimeout(stageFetchTimer);
+  });
   bind(slider, 'input', () => {
     const config = stageBarConfig();
     if (!config) return;
@@ -3190,9 +3720,13 @@ function wireMapEvents() {
     number.value = String(value);
     $('#stage-label').textContent = config.label(value);
     const layer = state.activeLayer;
+    const selectionSeq = state.fetchSeq;
     window.clearTimeout(stageFetchTimer);
     stageFetchTimer = window.setTimeout(() => {
-      if (state.activeLayer === layer) config.set(value);
+      stageFetchTimer = 0;
+      // A newer number, arrow or layer request owns the selection, even when
+      // it selects the same layer and its values have not arrived yet.
+      if (state.activeLayer === layer && state.fetchSeq === selectionSeq) config.set(value);
     }, 120);
   });
   bind(number, 'change', () => {
@@ -3204,6 +3738,8 @@ function wireMapEvents() {
 
   bind($('#inspector-close'), 'click', () => {
     $('#inspector').classList.add('hidden');
+    state.inspectorRequest += 1;
+    state.inspectorSparklines = [];
     state.selectedCell = -1;
     resizeRenderer();
   });

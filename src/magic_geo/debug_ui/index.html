@@ -168,7 +168,7 @@
 
   <section id="view-config" class="workbench-view page-view" data-view-panel="config" role="tabpanel" aria-labelledby="tab-config" hidden>
     <header class="page-heading">
-      <div><p class="eyebrow">World definition</p><h1>Configuration</h1><p>Start from a supported profile, edit YAML, validate it, and save or download the result.</p></div>
+      <div><p class="eyebrow">World definition</p><h1>Configuration</h1><p>Current profiles solve a seasonal energy budget. Choose infrared optical depth, edit YAML, then validate and save.</p></div>
       <div class="button-row">
         <button type="button" id="config-download">Download YAML</button>
         <button type="button" id="config-save" class="primary">Save configuration</button>
@@ -185,9 +185,14 @@
         <label class="sr-only" for="config-yaml">World YAML configuration</label>
         <textarea id="config-yaml" spellcheck="false" aria-describedby="config-result" placeholder="Loading configuration template…"></textarea>
         <div id="config-result" class="validation-result" role="status" aria-live="polite">Choose a profile or edit the template, then validate.</div>
+        <div class="form-toolbar">
+          <span id="config-saved-status" class="muted" role="status">Save a configuration to use it in generation.</span>
+          <button type="button" id="config-generate" disabled>Use saved config for generation →</button>
+        </div>
       </section>
       <aside class="content-panel schema-panel">
         <div class="panel-heading"><div><p class="eyebrow">Reference</p><h2>Schema fields</h2></div><input id="schema-search" type="search" placeholder="Filter fields…" aria-label="Filter schema fields"></div>
+        <p id="config-schema-status" class="muted" role="status">Loading the current configuration schema…</p>
         <div id="schema-docs" class="schema-docs"></div>
       </aside>
     </div>

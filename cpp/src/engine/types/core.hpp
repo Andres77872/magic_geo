@@ -184,6 +184,8 @@ struct Cell {
     double hillslope_sediment_net_m = 0.0;
     int hillslope_sediment_outgoing_edge_count = 0;
     int hillslope_sediment_incoming_edge_count = 0;
+    // Surface applicability, not a lake/sea-ice state or a time-integrated inventory.
+    bool grounded_ice_surface_applicable = false;
     double ice_thickness_m = 0.0;
     int ice_sheet_id = -1;
     int glacier_flow_to = -1;
@@ -201,6 +203,9 @@ struct Cell {
     double soil_depth_m = 0.0;
     double fertility = 0.0;
     double settlement_score = 0.0;
+    // Seasonal-only annual suitability applicability, independent of water
+    // exclusion. Legacy generation/serialization does not use this flag.
+    bool settlement_climate_supported = false;
 };
 
 // Canonical cumulative gross mobilization is the material partition sum.

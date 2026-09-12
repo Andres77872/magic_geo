@@ -28,6 +28,7 @@ from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.types import Scope
 
 from .config import (
     ConfigError,
@@ -144,6 +145,9 @@ class _DebugCache:
         }
         if len(self.layers) != len(raw_layers):
             raise ValueError(f"invalid debug cache {self.dir}: duplicate or malformed layer ids")
+        from .public_estimate_display import validate_layer_display_metadata
+        for layer in self.layers.values():
+            validate_layer_display_metadata(layer, cell_count)
         self._validate_manifest_files()
         try:
             self._con = duckdb.connect()
@@ -210,7 +214,14 @@ class _DebugCache:
                     self._required_file(family[key], f"{name} {key}")
                     present = True
             if not present:
-                raise ValueError(f"invalid debug cache {self.dir}: family {name} has no data file")
+                coverage = family.get("availability")
+                valid_empty = (family.get("kind") == "empty" and type(family.get("row_count")) is int
+                    and family["row_count"] == 0 and type(coverage) is dict
+                    and ((type(coverage.get("complete")) is bool
+                          and coverage.get("scope") == "complete_source_domain" and type(coverage.get("field")) is str)
+                         or (coverage == {"complete": None, "scope": "field_specific_availability"})))
+                if not valid_empty:
+                    raise ValueError(f"invalid debug cache {self.dir}: family {name} has no data file")
 
         section_names = self.manifest.get("sections", [])
         if not isinstance(section_names, list) or not all(
@@ -313,7 +324,34 @@ class _DebugCache:
             if not isinstance(cells, dict):
                 raise HTTPException(status_code=404, detail="cells table is unavailable")
             table = self._table_path(cells["parquet"])
-            _, rows = self.query(f"SELECT id, {quoted_name} FROM read_parquet(?)", [table])
+            availability = layer.get("availability")
+            applicability = layer.get("applicability")
+            if availability is None and applicability is None:
+                _, rows = self.query(f"SELECT id, {quoted_name} FROM read_parquet(?)", [table])
+            else:
+                from .public_estimate_display import applicability_fields, inapplicable
+                selected = []
+                if availability is not None:
+                    if not isinstance(availability, dict) or set(availability) != {"field", "unavailable_when"}:
+                        raise ValueError("invalid layer availability metadata")
+                    field = availability["field"]
+                    rule = availability["unavailable_when"]
+                    if not isinstance(field, str) or rule not in ("false", "zero"):
+                        raise ValueError("invalid layer availability rule")
+                    selected.append(field)
+                surface_fields = applicability_fields(applicability) if applicability is not None else ()
+                selected.extend(surface_fields)
+                extra = ", ".join(_quote_identifier(field) for field in selected)
+                _, source_rows = self.query(f"SELECT id, {quoted_name}, {extra} FROM read_parquet(?)", [table])
+                rows = []
+                for row in source_rows:
+                    cell_id, value, *flags = row
+                    unavailable = False
+                    if availability is not None:
+                        support = flags.pop(0)
+                        unavailable = support is False if rule == "false" else type(support) is int and support == 0
+                    excluded = inapplicable(applicability, tuple(flags)) if applicability is not None else False
+                    rows.append((cell_id, None if unavailable or excluded else value))
 
         if str(layer["kind"]).startswith("categorical"):
             code_of = {
@@ -458,7 +496,9 @@ class _DebugCache:
             raise HTTPException(status_code=404, detail=f"unknown family {family_name}")
 
         source = "full"
-        if detail == "full" and "jsonl" in family:
+        if family.get("kind") == "empty" and family.get("row_count") == 0:
+            records = []
+        elif detail == "full" and "jsonl" in family:
             records = self._jsonl_rows(family["jsonl"], limit, offset)
         elif "parquet" in family or "scalars_parquet" in family:
             source = "scalars" if "scalars_parquet" in family else "full"
@@ -469,6 +509,9 @@ class _DebugCache:
             records = [dict(zip(columns, row)) for row in rows]
         elif "jsonl" in family:
             records = self._jsonl_rows(family["jsonl"], limit, offset)
+            if detail == "scalars":
+                records = self._scalar_family_page(records)
+                source = "scalars"
         else:
             raise HTTPException(status_code=404, detail=f"family {family_name} has no readable data")
 
@@ -481,7 +524,37 @@ class _DebugCache:
             "next_offset": offset + len(records) if offset + len(records) < total else None,
             "detail": source,
             "rows": records,
+            "availability": family.get("availability", {"complete": None, "scope": "availability_undeclared"}),
         }
+
+    @staticmethod
+    def _scalar_family_page(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Project the requested JSONL page without scanning or rewriting it."""
+        raw_names = {name for record in records for name in record}
+        flag_columns: dict[str, tuple[str, str]] = {}
+        for record in records:
+            for map_name, flags in record.items():
+                if not map_name.endswith("availability") or not isinstance(flags, dict):
+                    continue
+                for field, flag in flags.items():
+                    if type(flag) is not bool:
+                        continue
+                    name = map_name + "." + field
+                    binding = (map_name, field)
+                    if name in raw_names or (name in flag_columns and flag_columns[name] != binding):
+                        raise HTTPException(status_code=500, detail="family scalar availability column collision")
+                    flag_columns[name] = binding
+
+        projected = []
+        for record in records:
+            row = {name: value for name, value in record.items()
+                   if isinstance(value, (str, int, float, bool, type(None)))}
+            for name, (map_name, field) in flag_columns.items():
+                flags = record.get(map_name)
+                flag = flags.get(field) if isinstance(flags, dict) else None
+                row[name] = flag if type(flag) is bool else None
+            projected.append(row)
+        return projected
 
     def plate_boundary_segments(self) -> list[list[float]]:
         adjacency = self.manifest.get("families", {}).get("cell_adjacency_edges")
@@ -568,18 +641,22 @@ class _CacheManager:
 
     def select(self, path: Path) -> None:
         selected = self._resolve_selected(path)
-        manifest = selected / "manifest.json"
-        if not manifest.is_file():
-            raise ValueError(f"no manifest.json in {selected}")
-        # Fully validate the replacement before changing any live selection.
-        candidate = _DebugCache(selected)
-        try:
-            stat = manifest.stat()
-            fingerprint = self._manifest_fingerprint(stat)
-        except OSError:
-            candidate.close()
-            raise
         with self._lock:
+            # Bind validation and revision capture to the same directory
+            # contents. A completed job publishes under this lock; otherwise
+            # it could replace the directory after the candidate loads but
+            # before stat(), giving old metadata the new revision identity.
+            manifest = selected / "manifest.json"
+            if not manifest.is_file():
+                raise ValueError(f"no manifest.json in {selected}")
+            # Fully validate before changing any live selection.
+            candidate = _DebugCache(selected)
+            try:
+                stat = manifest.stat()
+                fingerprint = self._manifest_fingerprint(stat)
+            except OSError:
+                candidate.close()
+                raise
             previous = self._cache
             self._selected = selected
             self._cache = candidate
@@ -825,6 +902,18 @@ def _arrow_response(values: list[float]) -> Response:
         media_type="application/vnd.apache.arrow.stream",
         headers={"Cache-Control": "no-store"},
     )
+
+
+class _WorkbenchStaticFiles(StaticFiles):
+    """Revalidate stable workbench URLs, retaining Starlette's ETag handling."""
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        # Apply after conditional handling so both 200 and 304 carry the same
+        # policy. This mount contains only UI assets; API and mesh routes keep
+        # their own scientific-data cache policies.
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 class _StrictRequest(BaseModel):
@@ -1119,7 +1208,7 @@ def create_app(
     def catalog(revision: str | None = None) -> dict[str, Any]:
         def build_catalog(cache: _DebugCache) -> dict[str, Any]:
             manifest_payload = cache.manifest
-            return {
+            payload = {
                 "world": manifest_payload.get("world", {}),
                 "scalars": manifest_payload.get("scalars", {}),
                 "layers": manifest_payload.get("layers", []),
@@ -1131,6 +1220,9 @@ def create_app(
                 "monthly": manifest_payload.get("monthly"),
                 "mesh": manifest_payload.get("mesh", {}),
             }
+            if "estimate_display" in manifest_payload:
+                payload["estimate_display"] = manifest_payload["estimate_display"]
+            return payload
 
         return caches.with_cache(build_catalog, revision)
 
@@ -1204,5 +1296,5 @@ def create_app(
 
     # StaticFiles must be last so /api and /mesh routes win.
     ui_dir = Path(__file__).parent / "debug_ui"
-    app.mount("/", StaticFiles(directory=ui_dir, html=True), name="ui")
+    app.mount("/", _WorkbenchStaticFiles(directory=ui_dir, html=True), name="ui")
     return app

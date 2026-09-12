@@ -396,7 +396,11 @@ and layer validation consume per-cell state
 
 (`src/magic_geo/api.py:296-300`, a `ValueError`.)
 
-The full-world path does **not** refuse it. Verified: `generate_world` with `output.include_cells: false` succeeds and returns a world whose `cells` key exists but is an empty list. Everything downstream then fails:
+The full-world path accepts it: `generate_world` enriches the complete native
+cell state before returning `cells: []`. All other records and summaries match
+the same generation with cells included. These cell-free exports retain links
+to omitted cells and cannot serve as standalone validation, rendering, or debug
+inputs:
 
 ```console
 $ magic-geo validate --world nocells.json

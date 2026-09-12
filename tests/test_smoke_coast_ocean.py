@@ -134,12 +134,17 @@ class SmokeCoastOceanTests(TestCase):
         self.assertEqual(summary["atoll_reef_system_count"], reef_type_counts.get("atoll_reef", 0))
         self.assertEqual(summary["patch_reef_system_count"], reef_type_counts.get("patch_reef", 0))
         self.assertEqual(summary["cold_water_reef_system_count"], reef_type_counts.get("cold_water_reef", 0))
+        self.assertEqual(world["reef_diagnostics_model"]["model"], "heuristic_coastal_reef_native_seasonal_v3")
+        # The native seasonal branch has no measured bleaching model. Missing
+        # estimates must not be reported as a known zero in cells or summaries.
+        self.assertNotIn("mean_reef_bleaching_risk_index", summary)
+        for cell in world["cells"]:
+            self.assertNotIn("reef_bleaching_risk_index", cell)
         for key in [
             "reef_growth_index",
             "reef_sediment_stress_index",
             "reef_wave_exposure_index",
             "reef_island_support_index",
-            "reef_bleaching_risk_index",
         ]:
             summary_key = f"mean_{key}"
             self.assertIn(summary_key, summary)
@@ -675,9 +680,17 @@ class SmokeCoastOceanTests(TestCase):
             world_path.write_text(json.dumps(world), encoding="utf-8")
             result = CliRunner().invoke(app, ["validate", "--world", str(world_path)])
             self.assertEqual(result.exit_code, 0, result.output)
-    def test_earthlike_reference_closes_ocean_and_snapshot_ledgers(self) -> None:
-        config = load_config(Path("configs/earthlike_seed.yaml"))
+    def test_legacy_earthlike_reference_closes_ocean_and_snapshot_ledgers(self) -> None:
+        # These exact terrain/climate/hydrology snapshots belong to the original
+        # equilibrium-climate reference. Preserve its explicit input contract;
+        # current seasonal ocean ledgers are covered by test_sea_level_model.
+        config = worlds.build_legacy_config(**{
+            "tectonics.plate_motion_scale_deg_per_step": 4.0,
+            "climate.precipitation_scale": 0.8,
+        })
         world = generate_world(config)
+        self.assertEqual(world["climate_model"]["model_type"],
+                         "equilibrium_latitude_circulation_climate_v5")
 
         coast_check = next(
             check

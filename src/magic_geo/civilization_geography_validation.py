@@ -799,6 +799,10 @@ def _replay_valid(payload: dict[str, Any]) -> bool:
 
 def validate_civilization_geography_replay(payload: dict[str, Any]) -> list[str]:
     try:
+        from .native_social_availability import uses_native_social_availability
+        if uses_native_social_availability(payload):
+            from .native_civilization_availability_validation import validate_native_civilization_availability
+            return validate_native_civilization_availability(payload)
         valid = _replay_valid(payload)
     except (IndexError, KeyError, TypeError, ValueError, ZeroDivisionError):
         valid = False

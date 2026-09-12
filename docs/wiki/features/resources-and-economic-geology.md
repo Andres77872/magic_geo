@@ -832,11 +832,20 @@ The occurrence-level `formation_evidence` (`commodity_resources.py:89-112`) alwa
 
 ## Land use zones and agricultural zoning
 
-`enrich_world_with_land_use_zones` (`src/magic_geo/land_use_zones.py:205`) is the only resource-layer enricher that is **not** run in geo-only mode. It writes four per-cell fields and produces two zone arrays.
+`enrich_world_with_land_use_zones` is the only resource-layer enricher that is **not** run in geo-only mode. Fresh full worlds publish v2: four numeric/id fields, four availability booleans and two zone arrays. Exact declared v1 archives retain their original behavior. Earlier source line numbers below identify the unchanged historical equations; [the v2 contract review](../../agricultural_availability_review.md) records current publication and validation.
+
+| Availability field | V2 meaning |
+|---|---|
+| `agricultural_habitat_applicable` | Exposed land: neither `is_water`, `is_lake`, nor an ocean/shelf/inland-sea/fresh-lake category |
+| `agricultural_climate_supported` | Finite nonboolean annual air temperature strictly in (-9, 43)°C, independently of habitat |
+| `agricultural_potential_supported` | Applicable habitat, supported own climate proxy and available typed consumed descriptors |
+| `mining_surface_applicable` | Exposed land only; no complete economic-access or mine-capacity claim |
+
+Unsupported agriculture carries numeric zero, support=false and zone ID -1. Supported zero remains a visible valid value. Surface-inapplicable mining also has no zone, while material resource labels and deposits remain intact. V2 requires explicit reciprocal neighbour lists, primary-resource categories, and deposit/settlement/route collections with valid links. Explicit empty collections are valid; omitted inputs cannot silently erase candidates or links.
 
 ### Agricultural potential
 
-`_agricultural_potential` (`land_use_zones.py:38-71`). Water cells return `0.0` immediately.
+`_agricultural_potential` retains the historical weighted equation below. The v2 wrapper evaluates it only on supported exposed land; unsupported cells receive zero with a false support flag. The retained fresh-lake term is inapplicable on aquatic v2 cells and is not transferred to neighbouring land.
 
 | Term | Definition | Weight |
 |---|---|---|
@@ -857,7 +866,7 @@ Inputs span the native engine plus four upstream enricher layers: native (`ferti
 
 ### Mining potential
 
-`_mining_potential` (`land_use_zones.py:74-103`). Returns `0.0` for water cells **and** for any cell whose `resource ∉ MINING_RESOURCES` — that set is the six non-bioproductive resources: `volcanic_arc_metals`, `craton_iron_gold`, `sedimentary_fuels`, `evaporites`, `placer_metals`, `geothermal` (`land_use_zones.py:10-17`). `fertile_alluvium` and `coastal_fisheries` are structurally excluded from mining.
+`_mining_potential` retains the equation below. The v2 wrapper first excludes standing water, independently of agricultural climate support. The equation also returns `0.0` for any cell whose `resource ∉ MINING_RESOURCES` — that set is the six non-bioproductive resources: `volcanic_arc_metals`, `craton_iron_gold`, `sedimentary_fuels`, `evaporites`, `placer_metals`, `geothermal` (`land_use_zones.py:10-17`). `fertile_alluvium` and `coastal_fisheries` are structurally excluded from mining.
 
 ```
 geology = clamp( convergent·0.26 + divergent·0.20 + volcanic_potential·0.18
@@ -907,7 +916,7 @@ The published model explicitly names the threshold semantics `raw_pre_serializat
 
 ### `world["land_use_zone_model"]`
 
-`land_use_zones.py:270-328` publishes the full parameter set as data — `model_type = causal_soil_climate_resource_connected_land_use_zones_v1`, `deterministic: True`, both thresholds, `threshold_semantics`, `cell_index_serialization_decimals: 6`, the 23-key `agricultural_parameters` block, the 14-key `mining_parameters` block, the sorted `agricultural_landforms`/`agricultural_biomes`/`mining_resources` lists, `component_model = candidate_induced_mesh_components_min_cell_breadth_first_v1`, `record_order = agricultural_then_mining_components_by_minimum_cell_id_v1`, `dominant_field_model = count_then_lexicographic_order_v1`, `record_link_model = member_cell_settlement_route_and_primary_resource_deposit_links_v1`, and
+`land_use_zones.py` publishes the full parameter set as data — fresh `model_type = causal_soil_climate_resource_connected_land_use_zones_v2` (exact historical v1 retained), `deterministic: True`, both thresholds, `threshold_semantics`, `cell_index_serialization_decimals: 6`, the 23-key `agricultural_parameters` block, the 14-key `mining_parameters` block, the sorted `agricultural_landforms`/`agricultural_biomes`/`mining_resources` lists, `component_model = candidate_induced_mesh_components_min_cell_breadth_first_v1`, `record_order = agricultural_then_mining_components_by_minimum_cell_id_v1`, `dominant_field_model = count_then_lexicographic_order_v1`, `record_link_model = member_cell_settlement_route_and_primary_resource_deposit_links_v1`, and
 
 ```
 model_limitation:
@@ -979,12 +988,12 @@ Cross-cutting: `ore_genesis` also assigns a five-value province type to metal- a
 | `petroleum_trap_integrity_index` | `petroleum_migration.py:294`, `:319` | as above | Every cell |
 | `petroleum_accumulation_index` | `petroleum_migration.py:295`, `:320` | as above | Every cell |
 | `petroleum_system_id` | `petroleum_migration.py:296`, `:496` | `-1` when outside every fairway | Every cell |
-| `agricultural_potential_index` | `land_use_zones.py:227` | `[0,1]`, 6 dp; `0.0` on water | Full world only |
-| `mining_potential_index` | `land_use_zones.py:228` | `[0,1]`, 6 dp; `0.0` on water or ineligible resource | Full world only |
+| `agricultural_potential_index` | `land_use_zones.py:227` | `[0,1]`, 6 dp; unsupported v2 zero has a false support flag | Full world only |
+| `mining_potential_index` | `land_use_zones.py:228` | `[0,1]`, 6 dp; `0.0` on surface-inapplicable cells or ineligible resources | Full world only |
 | `agricultural_zone_id` | `land_use_zones.py:229`, `:167` | `-1` when unassigned | Full world only |
 | `mining_zone_id` | `land_use_zones.py:230`, `:167` | `-1` when unassigned | Full world only |
 
-`resource_dynamics`, `sedimentary_resource_systems` and `commodity_resources` write **no** per-cell fields. None of these 16 fields are part of the 155-field native cell schema (`cpp/src/engine/entity_serialization.cpp:110`) — they exist only after Python enrichment.
+These derived numeric fields exist after Python enrichment. Current resource/commodity stages also publish biological availability flags, and land-use v2 appends the four booleans listed above. Their flags accompany the values in CSV and determine unavailable display values without erasing raw geological records.
 
 ---
 
@@ -1023,9 +1032,11 @@ All keys below are added to `world["summary"]` by the Python enrichers; none bel
 
 `commodity_occurrence_count`, `metallic_commodity_occurrence_count` (sum of `base_metal + ferrous_metal + precious_metal`), `fuel_commodity_occurrence_count`, `industrial_mineral_commodity_occurrence_count`, `gemstone_commodity_occurrence_count`, `geothermal_commodity_occurrence_count`, `bioproductive_commodity_occurrence_count` (`agricultural + fishery`), `high_potential_commodity_occurrence_count` (`>= 0.62`), `commodity_occurrence_total_area_km2`, `mean_commodity_occurrence_potential_index`, `mean_commodity_occurrence_confidence_index`, `commodity_occurrence_type_counts`, `commodity_occurrence_group_counts`. Note that `volcanic_material` (obsidian) is counted in neither the metallic, fuel, industrial-mineral, gemstone, geothermal, nor bioproductive rollups.
 
-### `land_use_zones` (9 keys, `land_use_zones.py:259-269`, `:329`)
+### `land_use_zones` (9 historical keys plus 6 v2 availability metrics)
 
 `agricultural_zone_count`, `agricultural_zone_cell_count`, `agricultural_zone_total_area_km2`, `mean_agricultural_potential_index` (mean over **all** cells, using the raw pre-rounding values), `mining_zone_count`, `mining_zone_cell_count`, `mining_zone_total_area_km2`, `mean_mining_potential_index`, `land_use_zone_model`.
+
+V2 also publishes the four availability-field `_cell_count` metrics, `agricultural_potential_supported_area_km2` and `unsupported_terrestrial_agricultural_cell_count`. The legacy means remain over all cells, including unavailable zero sentinels; the counts/area explain their coverage. Worldbuilding and the economy do not consume these zone scores: native regional agricultural capacity is a separate model.
 
 ---
 
@@ -1173,7 +1184,7 @@ The order above is mandatory — each stage reads the previous stage's arrays, a
 | Geo subsystem suite | `geologic_resources` / `commodity_occurrence_deposit_links` | Occurrences exactly mirror their deposit sources; summary aggregates match | `geo_validation_subsystems.py:2776+` |
 | World validation | `natural_resources` / `deposit_and_commodity_linkage` | Deposit `resource` equals the source cell's `resource`; `reserve_potential_index`, `extraction_hazard_index`, `renewability_index`, `geologic_confidence_index` are finite and in `[0,1]`; every occurrence links to a real deposit and cell | `src/magic_geo/geo_validation.py:2386-2441` |
 | Worldbuilding realism | `resource_geology_dependency` | Fraction of deposits with resource-specific geological support must fall in `[0.85, 1.0]` | `src/magic_geo/worldbuilding_realism.py:95-142`, `:304-329` |
-| Human geography replay | Land-use replay | Recomputes both potentials, both threshold sets, both component decompositions, both zone arrays and all nine summary keys and requires exact value equality | `src/magic_geo/human_geography_validation.py:255-350` |
+| Human geography replay | Land-use replay | Dispatches exact own versions; v2 independently replays required inputs, availability, both raw potentials/thresholds, components, links and all 15 summary keys before eager full-CLI consumers | `src/magic_geo/human_geography_validation.py:255-350` |
 
 The realism check's per-resource support predicate (`worldbuilding_realism.py:112-142`) is deliberately *looser* than the native cascade — e.g. `volcanic_arc_metals` is supported by `crust_type == volcanic_arc` **or** `landform == volcanic_arc` **or** `convergent >= 0.28`, while the native cascade required `> 0.38` — so a passing check is evidence of consistency, not of exact provenance.
 

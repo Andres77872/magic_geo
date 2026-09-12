@@ -285,6 +285,7 @@ struct GlacialSedimentTransportInputCell {
     int cell_id = -1;
     int glacier_flow_to_cell_id = -1;
     bool is_water = false;
+    bool is_lake = false;
     double elevation_m = 0.0;
     double ice_thickness_m = 0.0;
     double glacial_erosion_m = 0.0;

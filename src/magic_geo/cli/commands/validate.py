@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ...marine_distance_validation import validate_marine_distance
+
 import heapq
 import math
 from collections import Counter
@@ -12,6 +14,16 @@ import typer
 
 from .._app import _load_world_for_cli, app
 from ..validators import _validate_route_corridors
+from ...grounded_ice_validation import validate_grounded_ice
+from ...aquatic_climate_validation import validate_aquatic_climate_support
+from ...biological_resource_validation import (
+    biological_resource_parent_support,
+    uses_biological_resource_support,
+    validate_biological_resources,
+    resource_access_v5,
+)
+from ...ore_resource_availability_validation import validate_ore_resource_availability
+from ...wildfire_aquatic_validation import validate_wildfire_aquatic_exclusion
 from ...campaign_operations_validation import validate_campaign_operations_replay
 from ...civilization_geography_validation import validate_civilization_geography_replay
 from ...climate_dynamics import (
@@ -20,6 +32,10 @@ from ...climate_dynamics import (
     CLIMATE_CLASS_NAMES,
     classify_koppen_geiger,
 )
+from ...climate_energy_validation_dispatch import (
+    climate_energy_validation_mode,
+    validate_native_climate_energy_output,
+)
 from ...control_volume_geometry import CONTROL_VOLUME_AREA_MODELS, inspect_control_volume_geometry
 from ...crust_material_shadow_validation import validate_crust_material_shadow
 from ...crust_transport_validation import validate_crust_overlap_transport
@@ -27,6 +43,19 @@ from ...cultural_geography_validation import validate_cultural_geography_replay
 from ...demographic_agents_validation import validate_demographic_agents_replay
 from ...dynasty_genealogy_validation import validate_dynasty_genealogy_replay
 from ...historical_geography_validation import validate_historical_geography_replay
+from ...natural_water_validation_dispatch import validate_public_natural_water_chain
+from ...human_water_validation_dispatch import validate_public_human_water_transport
+from ...graph_corridor_validation import validate_trade_graph_corridor_links
+from ...native_social_public_validation import validate_public_native_social
+from ...public_social_tail_validation import validate_public_social_tail
+from ...land_use_validation_dispatch import validate_public_land_use
+from ..validators._legacy_land_use_block import _validate_legacy_land_use_block
+from ..validators._legacy_groundwater_records import _validate_legacy_groundwater_records
+from ..validators._legacy_river_records import _validate_legacy_river_records
+from ..validators._legacy_human_water_blocks import (
+    _validate_legacy_navigation_port_blocks,
+    _validate_legacy_corridor_block,
+)
 from ...history_economy_validation import validate_history_economy_replay
 from ...human_geography_validation import validate_human_geography_replay
 from ...initial_oceanic_crust_age_validation import validate_initial_oceanic_crust_age
@@ -39,9 +68,12 @@ from ...planet_parameters import (
     surface_gravity_m_s2,
 )
 from ...plate_boundary_edge_validation import validate_plate_boundary_edges
+from ...reef_thermal_validation import validate_reef_thermal_habitat
+from ...reef_port_links_validation import validate_reef_port_links, MODEL as REEF_PORT_LINK_MODEL
 from ...scaling import HACK_FIT_MINIMUM_BASIN_AREA_KM2, fit_power_law
 from ...sediment_interface_validation import validate_sediment_interfaces
 from ...serialization import CURRENT_WORLD_SCHEMA_VERSION, retired_world_schema_fields
+from ...species_habitat_validation import validate_species_habitat_support
 from ...territorial_geography_validation import validate_territorial_geography_replay
 from .._constants import (
     EROSION_TRANSITION_COUPLING_SEMANTICS,
@@ -88,14 +120,102 @@ from ..validators import (
 )
 
 
+def _ecology_contract_preflight(payload: dict[str, Any], *, native_climate: bool) -> tuple[dict[str, bool], dict[int, tuple[bool, bool]], list[str]]:
+    """Audit declared dependencies before the CLI consumes availability fields."""
+    errors: list[str] = []
+
+    def name(key: str) -> Any:
+        declaration = payload.get(key)
+        return declaration.get("model") if isinstance(declaration, dict) else None
+
+    modes = {
+        "ecosystem": name("ecosystem_dynamics_model") in (
+            "heuristic_ecosystem_climate_support_v4", "heuristic_ecosystem_climate_support_v5",
+        ),
+        "species": name("species_ranges_model") in (
+            "heuristic_species_parent_support_v3", "heuristic_species_parent_support_v4",
+        ),
+        "wildfire": name("wildfire_disturbance_model") in (
+            "heuristic_wildfire_parent_availability_v4", "heuristic_wildfire_native_seasonal_parent_availability_v5",
+            "heuristic_wildfire_prescribed_natural_parent_availability_v6",
+            "heuristic_wildfire_native_seasonal_prescribed_natural_parent_availability_v7",
+        ),
+        "resources": False,
+        "resource_access": False,
+    }
+    for helper in (validate_aquatic_climate_support, validate_species_habitat_support,
+                   validate_wildfire_aquatic_exclusion, validate_biological_resources):
+        try:
+            errors.extend(helper(payload))
+        except (TypeError, ValueError, KeyError, OverflowError) as exc:
+            errors.append(f"ecology contract {helper.__name__}: malformed inputs ({type(exc).__name__})")
+
+    # A complete world emits its matching consumers. Historical stage
+    # helper compatibility does not permit downgrading an individual child.
+    if modes["ecosystem"]:
+        natural = name("ecosystem_dynamics_model") == "heuristic_ecosystem_climate_support_v5"
+        expected_species = "heuristic_species_parent_support_v4" if natural else "heuristic_species_parent_support_v3"
+        if name("species_ranges_model") != expected_species:
+            errors.append("complete ecosystem v5 output requires species parent-support v4" if natural else "complete ecosystem v4 output requires species parent-support v3")
+        if natural:
+            expected_fire = "heuristic_wildfire_native_seasonal_prescribed_natural_parent_availability_v7" if native_climate else "heuristic_wildfire_prescribed_natural_parent_availability_v6"
+        else:
+            expected_fire = "heuristic_wildfire_native_seasonal_parent_availability_v5" if native_climate else "heuristic_wildfire_parent_availability_v4"
+        if name("wildfire_disturbance_model") != expected_fire:
+            errors.append("complete ecosystem v5 output requires its climate-matched prescribed-natural wildfire model" if natural else "complete ecosystem v4 output requires its climate-matched wildfire parent-availability model")
+
+    # New fields cannot acquire historical meaning by deleting declarations.
+    cells = payload.get("cells", [])
+    markers = {
+        "ecosystem": ("terrestrial_primary_climate_supported", "primary_productivity_supported"),
+        "species": ("species_guild_scores", "species_composition_status", "species_record_descriptors_supported"),
+        "wildfire": ("wildfire_fuel_continuity_supported", "wildfire_firebreak_supported", "wildfire_ignition_potential_supported"),
+    }
+    if isinstance(cells, list):
+        for domain, fields in markers.items():
+            if not modes[domain] and any(isinstance(cell, dict) and any(field in cell for field in fields) for cell in cells):
+                errors.append(f"{domain} availability fields require their exact declared current model")
+    support = {}
+    try:
+        modes["resources"] = uses_biological_resource_support(payload)
+        if modes["resources"] and not errors:
+            support = biological_resource_parent_support(payload)
+            modes["resource_access"] = resource_access_v5(payload)
+            if modes["resource_access"]:
+                errors.extend(validate_ore_resource_availability(payload))
+    except (TypeError, ValueError, KeyError, OverflowError) as exc:
+        errors.append(f"biological resource contract: {exc}")
+    return modes, support, errors
+
+
+def _resource_count_mismatches(summary: dict[str, Any], expected: dict[str, int], *, parent_support_verified: bool, records: str) -> list[str]:
+    """Keep structural counts; current threshold counts have a prior raw replay.
+
+    The independent biological-resource preflight has already checked the two
+    threshold totals, including bounded display uncertainty for material terms.
+    Recounting their six-decimal records would reject valid raw values just below
+    a threshold. Historical contracts retain the original displayed-count rule.
+    """
+    thresholds = {"high_viability_resource_deposit_count", "high_potential_commodity_occurrence_count"}
+    for key, count in expected.items():
+        if parent_support_verified and key in thresholds:
+            continue
+        if int(summary.get(key, -1)) != count:
+            return [f"{key} does not match {records}"]
+    return []
+
+
 @app.command("validate")
 def validate(
     world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated .json or .mgeo world.")]
 ) -> None:
     """Run the full world-consistency gate on a generated world file."""
     payload = _load_world_for_cli(world)
+    if not isinstance(payload, dict) or not isinstance(payload.get("summary", {}), dict):
+        typer.echo("FAIL world and summary must be objects", err=True)
+        raise typer.Exit(1)
     summary = payload.get("summary", {})
-    failures: list[str] = []
+    failures: list[str] = validate_grounded_ice(payload)
 
     schema_version = payload.get("schema_version")
     if (
@@ -116,6 +236,75 @@ def validate(
         surface_gravity_m_s2(payload)
     except ValueError as exc:
         failures.append(f"planet parameters invalid: {exc}")
+    # Reject partial/unknown native envelopes before eager legacy consumers.
+    # The physical audit runs once here and requires full canonical cell linkage.
+    native_climate_energy = False
+    try:
+        native_climate_energy = climate_energy_validation_mode(payload) == "native"
+    except ValueError as exc:
+        failures.append(f"climate model metadata invalid: {exc}")
+    else:
+        if native_climate_energy:
+            native_energy_errors, _ = validate_native_climate_energy_output(payload)
+            failures.extend(native_energy_errors)
+    # Current native social estimates may contain nulls. Audit their exact
+    # models, coverage and all seven numerical families before eager consumers.
+    native_social_availability, native_social_errors = validate_public_native_social(payload)
+    failures.extend(native_social_errors)
+    # Reef, ecosystem and species aggregates eagerly read these two shared
+    # inputs. Reject malformed present values before any consumer can coerce
+    # them or raise; absence retains the existing legacy/missing-field checks.
+    productivity_input_errors: list[str] = []
+    productivity_cells = payload.get("cells", [])
+    if isinstance(productivity_cells, list):
+        for index, cell in enumerate(productivity_cells):
+            if not isinstance(cell, dict):
+                continue
+            for field in ("primary_productivity_index", "fishery_productivity_index"):
+                if field not in cell:
+                    continue
+                value = cell[field]
+                try:
+                    valid_number = (
+                        isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        and math.isfinite(value)
+                    )
+                except OverflowError:
+                    valid_number = False
+                if not valid_number:
+                    productivity_input_errors.append(
+                        f"ecosystem productivity cell {cell.get('id', index)}: "
+                        f"{field} must be finite numeric input"
+                    )
+    if productivity_input_errors:
+        failures.append("ecosystem dynamic cell fields invalid")
+        failures.extend(productivity_input_errors)
+    ecology_modes, biological_resource_support, ecology_errors = _ecology_contract_preflight(payload, native_climate=native_climate_energy)
+    failures.extend(ecology_errors)
+    natural_groundwater, groundwater_errors = validate_public_natural_water_chain(payload)
+    failures.extend(groundwater_errors)
+    natural_human_transport = False
+    if not groundwater_errors:
+        natural_human_transport, human_water_errors = validate_public_human_water_transport(
+            payload, natural_water=natural_groundwater
+        )
+        failures.extend(human_water_errors)
+    if not failures:
+        failures.extend(validate_trade_graph_corridor_links(payload))
+    current_reef_port_links = payload.get("reef_port_links_model") == REEF_PORT_LINK_MODEL
+    if not failures:
+        failures.extend(validate_reef_port_links(payload))
+    # Audit declared land-use v2 before any eager agricultural/mining consumer.
+    # Earlier native, ecosystem and natural/human-water diagnostics keep priority.
+    land_use_availability = False
+    if not failures:
+        land_use_availability, land_use_errors = validate_public_land_use(payload)
+        failures.extend(land_use_errors)
+    social_tail_modes = dict.fromkeys(("phonology", "population", "economy", "genealogy", "logistics", "demographic", "market"), False)
+    if not failures:
+        social_tail_modes, social_tail_errors = validate_public_social_tail(payload)
+        failures.extend(social_tail_errors)
     if failures:
         for failure in failures:
             typer.echo(f"FAIL {failure}", err=True)
@@ -2728,303 +2917,304 @@ def validate(
     if numeric_correction_invalid:
         failures.append("numeric depression correction provenance invalid")
 
-    climate_model = payload.get("climate_model", {})
-    climate_model_keys = {
-        "model_type",
-        "temperature_model",
-        "precipitation_model",
-        "base_temperature_interpretation",
-        "base_temperature_c",
-        "latitude_temperature_gradient_c",
-        "latitude_temperature_exponent",
-        "latitude_temperature_area_mean_offset_c",
-        "lapse_rate_c_per_km",
-        "marine_annual_temperature_offset_c",
-        "precipitation_scale",
-        "negative_precipitation_behavior",
-        "zero_precipitation_scale_behavior",
-        "subtropical_drying_strength",
-        "subtropical_drying_min_factor",
-        "seasonal_monsoon_precipitation_strength",
-        "seasonal_monsoon_precipitation_min_factor",
-        "seasonal_monsoon_precipitation_max_factor",
-        "thermal_moisture_capacity_model",
-        "thermal_moisture_capacity_scope",
-        "thermal_moisture_capacity_temperature_anomaly_basis",
-        "thermal_moisture_capacity_reference_base_temperature_c",
-        "thermal_moisture_capacity_reference_stellar_luminosity",
-        "thermal_moisture_capacity_reference_greenhouse_factor",
-        "thermal_moisture_capacity_stellar_temperature_response_c",
-        "thermal_moisture_capacity_greenhouse_temperature_response_c",
-        "thermal_moisture_capacity_temperature_response_per_c",
-        "thermal_moisture_capacity_min_factor",
-        "thermal_moisture_capacity_max_factor",
-        "thermal_moisture_capacity_temperature_anomaly_c",
-        "thermal_moisture_capacity_factor",
-        "thermal_moisture_capacity_limitation",
-        "configured_month_count",
-        "latitude_temperature_area_normalized",
-        "local_temperature_adjustments_area_centered",
-        "local_temperature_centering_scope",
-        "mass_conserving_atmosphere",
-        "transient_climate_resolved",
-        "model_limitation",
-    }
-    climate_model_invalid = not isinstance(climate_model, dict) or not climate_model_keys.issubset(
-        climate_model
-    )
-    if not climate_model_invalid:
-        try:
-            base_temperature = float(climate_model["base_temperature_c"])
-            latitude_gradient = float(climate_model["latitude_temperature_gradient_c"])
-            latitude_exponent = float(climate_model["latitude_temperature_exponent"])
-            latitude_area_mean_offset = float(
-                climate_model["latitude_temperature_area_mean_offset_c"]
-            )
-            lapse_rate = float(climate_model["lapse_rate_c_per_km"])
-            marine_annual_temperature_offset = float(
-                climate_model["marine_annual_temperature_offset_c"]
-            )
-            precipitation_scale = float(climate_model["precipitation_scale"])
-            subtropical_drying_strength = float(climate_model["subtropical_drying_strength"])
-            subtropical_drying_min_factor = float(
-                climate_model["subtropical_drying_min_factor"]
-            )
-            seasonal_monsoon_strength = float(
-                climate_model["seasonal_monsoon_precipitation_strength"]
-            )
-            seasonal_monsoon_min_factor = float(
-                climate_model["seasonal_monsoon_precipitation_min_factor"]
-            )
-            seasonal_monsoon_max_factor = float(
-                climate_model["seasonal_monsoon_precipitation_max_factor"]
-            )
-            thermal_moisture_reference_base_temperature = float(
-                climate_model["thermal_moisture_capacity_reference_base_temperature_c"]
-            )
-            thermal_moisture_reference_stellar_luminosity = float(
-                climate_model["thermal_moisture_capacity_reference_stellar_luminosity"]
-            )
-            thermal_moisture_reference_greenhouse_factor = float(
-                climate_model["thermal_moisture_capacity_reference_greenhouse_factor"]
-            )
-            thermal_moisture_stellar_temperature_response = float(
-                climate_model["thermal_moisture_capacity_stellar_temperature_response_c"]
-            )
-            thermal_moisture_greenhouse_temperature_response = float(
-                climate_model["thermal_moisture_capacity_greenhouse_temperature_response_c"]
-            )
-            thermal_moisture_temperature_response_per_c = float(
-                climate_model["thermal_moisture_capacity_temperature_response_per_c"]
-            )
-            thermal_moisture_min_factor = float(
-                climate_model["thermal_moisture_capacity_min_factor"]
-            )
-            thermal_moisture_max_factor = float(
-                climate_model["thermal_moisture_capacity_max_factor"]
-            )
-            thermal_moisture_temperature_anomaly = float(
-                climate_model["thermal_moisture_capacity_temperature_anomaly_c"]
-            )
-            thermal_moisture_capacity_factor = float(
-                climate_model["thermal_moisture_capacity_factor"]
-            )
-            configured_month_count = int(climate_model["configured_month_count"])
-        except (TypeError, ValueError):
-            climate_model_invalid = True
-        else:
-            numeric_values = (
-                base_temperature,
-                latitude_gradient,
-                latitude_exponent,
-                latitude_area_mean_offset,
-                lapse_rate,
-                marine_annual_temperature_offset,
-                precipitation_scale,
-                subtropical_drying_strength,
-                subtropical_drying_min_factor,
-                seasonal_monsoon_strength,
-                seasonal_monsoon_min_factor,
-                seasonal_monsoon_max_factor,
-                thermal_moisture_reference_base_temperature,
-                thermal_moisture_reference_stellar_luminosity,
-                thermal_moisture_reference_greenhouse_factor,
-                thermal_moisture_stellar_temperature_response,
-                thermal_moisture_greenhouse_temperature_response,
-                thermal_moisture_temperature_response_per_c,
-                thermal_moisture_min_factor,
-                thermal_moisture_max_factor,
-                thermal_moisture_temperature_anomaly,
-                thermal_moisture_capacity_factor,
-            )
-            expected_area_mean_offset = latitude_gradient / (latitude_exponent + 1.0)
-            climate_model_invalid = (
-                climate_model.get("model_type")
-                != "equilibrium_latitude_circulation_climate_v5"
-                or climate_model.get("temperature_model")
-                != "area_mean_normalized_latitude_centered_local_adjustments_v3"
-                or climate_model.get("precipitation_model")
-                != "bounded_thermal_moisture_circulation_orography_wind_transport_v3"
-                or climate_model.get("negative_precipitation_behavior")
-                != "clamped_to_zero_before_thermal_moisture_multiplier"
-                or climate_model.get("zero_precipitation_scale_behavior")
-                != "exact_zero_monthly_and_annual_precipitation"
-                or climate_model.get("base_temperature_interpretation")
-                != "post_centered_local_adjustment_global_area_mean_c"
-                or climate_model.get("latitude_temperature_area_normalized") is not True
-                or climate_model.get("local_temperature_adjustments_area_centered") is not True
-                or climate_model.get("local_temperature_centering_scope")
-                != "elevation_lapse_ocean_current"
-                or climate_model.get("mass_conserving_atmosphere") is not False
-                or climate_model.get("transient_climate_resolved") is not False
-                or climate_model.get("model_limitation")
-                != "equilibrium_diagnostic_climate_without_mass_conserving_three_dimensional_atmosphere"
-                or climate_model.get("thermal_moisture_capacity_model")
-                != "bounded_exponential_global_temperature_anomaly_v1"
-                or climate_model.get("thermal_moisture_capacity_scope")
-                != "global_monthly_precipitation_multiplier"
-                or climate_model.get("thermal_moisture_capacity_temperature_anomaly_basis")
-                != "base_temperature_plus_stellar_and_greenhouse_forcing_relative_to_earth_reference"
-                or climate_model.get("thermal_moisture_capacity_limitation")
-                != "diagnostic_global_scaling_without_explicit_atmospheric_water_mass_or_energy_balance"
-                or any(not math.isfinite(value) for value in numeric_values)
-                or not -100.0 <= base_temperature <= 100.0
-                or abs(latitude_gradient - 47.0) > 0.000001
-                or abs(latitude_exponent - 3.0) > 0.000001
-                or abs(latitude_area_mean_offset - expected_area_mean_offset) > 0.00001
-                or not 0.0 <= lapse_rate <= 15.0
-                or abs(marine_annual_temperature_offset) > 0.000001
-                or not 0.0 <= precipitation_scale <= 10.0
-                or not 0.0 <= subtropical_drying_strength <= 0.9
-                or abs(subtropical_drying_min_factor - 0.25) > 0.000001
-                or abs(seasonal_monsoon_strength - 1.6) > 0.000001
-                or abs(seasonal_monsoon_min_factor - 0.08) > 0.000001
-                or abs(seasonal_monsoon_max_factor - 1.92) > 0.000001
-                or abs(thermal_moisture_reference_base_temperature - 15.0) > 0.000001
-                or abs(thermal_moisture_reference_stellar_luminosity - 1.0) > 0.000001
-                or abs(thermal_moisture_reference_greenhouse_factor - 1.0) > 0.000001
-                or abs(thermal_moisture_stellar_temperature_response - 38.0) > 0.000001
-                or abs(thermal_moisture_greenhouse_temperature_response - 11.0) > 0.000001
-                or abs(thermal_moisture_temperature_response_per_c - 0.04) > 0.000001
-                or abs(thermal_moisture_min_factor - 0.35) > 0.000001
-                or abs(thermal_moisture_max_factor - 2.25) > 0.000001
-                or not thermal_moisture_min_factor
-                <= thermal_moisture_capacity_factor
-                <= thermal_moisture_max_factor
-                or configured_month_count != 12
-            )
-    if not climate_model_invalid:
-        planet_parameters = payload.get("planet_parameters", {})
-        try:
-            stellar_luminosity = float(planet_parameters["stellar_luminosity"])
-            greenhouse_factor = float(planet_parameters["greenhouse_factor"])
-            atmosphere_pressure_bar = float(planet_parameters["atmosphere_pressure_bar"])
-            if (
-                not math.isfinite(stellar_luminosity)
-                or not math.isfinite(greenhouse_factor)
-                or not math.isfinite(atmosphere_pressure_bar)
-                or stellar_luminosity <= 0.0
-                or greenhouse_factor < 0.0
-                or atmosphere_pressure_bar < 0.0
-            ):
-                raise ValueError("invalid planet temperature controls")
-            total_temperature_area = sum(
-                max(0.0, float(cell["area_km2"])) for cell in cells_payload
-            )
-            generated_temperature_area_mean = sum(
-                float(cell["temperature_c"]) * max(0.0, float(cell["area_km2"]))
-                for cell in cells_payload
-            ) / total_temperature_area
-            discrete_latitude_area_mean = sum(
-                (
-                    latitude_area_mean_offset
-                    - latitude_gradient
-                    * math.sin(abs(math.radians(float(cell["lat_deg"]))))
-                    ** latitude_exponent
+    if not native_climate_energy:
+        climate_model = payload.get("climate_model", {})
+        climate_model_keys = {
+            "model_type",
+            "temperature_model",
+            "precipitation_model",
+            "base_temperature_interpretation",
+            "base_temperature_c",
+            "latitude_temperature_gradient_c",
+            "latitude_temperature_exponent",
+            "latitude_temperature_area_mean_offset_c",
+            "lapse_rate_c_per_km",
+            "marine_annual_temperature_offset_c",
+            "precipitation_scale",
+            "negative_precipitation_behavior",
+            "zero_precipitation_scale_behavior",
+            "subtropical_drying_strength",
+            "subtropical_drying_min_factor",
+            "seasonal_monsoon_precipitation_strength",
+            "seasonal_monsoon_precipitation_min_factor",
+            "seasonal_monsoon_precipitation_max_factor",
+            "thermal_moisture_capacity_model",
+            "thermal_moisture_capacity_scope",
+            "thermal_moisture_capacity_temperature_anomaly_basis",
+            "thermal_moisture_capacity_reference_base_temperature_c",
+            "thermal_moisture_capacity_reference_stellar_luminosity",
+            "thermal_moisture_capacity_reference_greenhouse_factor",
+            "thermal_moisture_capacity_stellar_temperature_response_c",
+            "thermal_moisture_capacity_greenhouse_temperature_response_c",
+            "thermal_moisture_capacity_temperature_response_per_c",
+            "thermal_moisture_capacity_min_factor",
+            "thermal_moisture_capacity_max_factor",
+            "thermal_moisture_capacity_temperature_anomaly_c",
+            "thermal_moisture_capacity_factor",
+            "thermal_moisture_capacity_limitation",
+            "configured_month_count",
+            "latitude_temperature_area_normalized",
+            "local_temperature_adjustments_area_centered",
+            "local_temperature_centering_scope",
+            "mass_conserving_atmosphere",
+            "transient_climate_resolved",
+            "model_limitation",
+        }
+        climate_model_invalid = not isinstance(climate_model, dict) or not climate_model_keys.issubset(
+            climate_model
+        )
+        if not climate_model_invalid:
+            try:
+                base_temperature = float(climate_model["base_temperature_c"])
+                latitude_gradient = float(climate_model["latitude_temperature_gradient_c"])
+                latitude_exponent = float(climate_model["latitude_temperature_exponent"])
+                latitude_area_mean_offset = float(
+                    climate_model["latitude_temperature_area_mean_offset_c"]
                 )
-                * max(0.0, float(cell["area_km2"]))
-                for cell in cells_payload
-            ) / total_temperature_area
-            expected_temperature_area_mean = (
-                base_temperature
-                + discrete_latitude_area_mean
-                + thermal_moisture_stellar_temperature_response
-                * (
-                    (stellar_luminosity / thermal_moisture_reference_stellar_luminosity)
-                    ** 0.25
-                    - 1.0
+                lapse_rate = float(climate_model["lapse_rate_c_per_km"])
+                marine_annual_temperature_offset = float(
+                    climate_model["marine_annual_temperature_offset_c"]
                 )
-                + thermal_moisture_greenhouse_temperature_response
-                * (greenhouse_factor - thermal_moisture_reference_greenhouse_factor)
-                + 4.5 * math.log(max(0.01, atmosphere_pressure_bar))
-            )
-            expected_thermal_moisture_temperature_anomaly = (
-                base_temperature
-                - thermal_moisture_reference_base_temperature
-                + thermal_moisture_stellar_temperature_response
-                * (
-                    (stellar_luminosity / thermal_moisture_reference_stellar_luminosity)
-                    ** 0.25
-                    - 1.0
+                precipitation_scale = float(climate_model["precipitation_scale"])
+                subtropical_drying_strength = float(climate_model["subtropical_drying_strength"])
+                subtropical_drying_min_factor = float(
+                    climate_model["subtropical_drying_min_factor"]
                 )
-                + thermal_moisture_greenhouse_temperature_response
-                * (greenhouse_factor - thermal_moisture_reference_greenhouse_factor)
-            )
-            expected_thermal_moisture_capacity_factor = min(
-                thermal_moisture_max_factor,
-                max(
-                    thermal_moisture_min_factor,
-                    math.exp(
-                        max(
-                            math.log(thermal_moisture_min_factor),
-                            min(
-                                math.log(thermal_moisture_max_factor),
-                                thermal_moisture_temperature_response_per_c
-                                * expected_thermal_moisture_temperature_anomaly,
-                            ),
-                        )
-                    ),
-                ),
-            )
-        except (KeyError, TypeError, ValueError, ZeroDivisionError):
-            climate_model_invalid = True
-        else:
-            if (
-                not all(
-                    math.isfinite(value)
-                    for value in (
-                        stellar_luminosity,
-                        greenhouse_factor,
-                        atmosphere_pressure_bar,
-                        generated_temperature_area_mean,
-                        discrete_latitude_area_mean,
-                        expected_temperature_area_mean,
-                        expected_thermal_moisture_temperature_anomaly,
-                        expected_thermal_moisture_capacity_factor,
-                    )
+                seasonal_monsoon_strength = float(
+                    climate_model["seasonal_monsoon_precipitation_strength"]
                 )
-                or stellar_luminosity <= 0.0
-                or greenhouse_factor < 0.0
-                or atmosphere_pressure_bar < 0.0
-                or not math.isclose(
-                    generated_temperature_area_mean,
-                    expected_temperature_area_mean,
-                    abs_tol=0.01,
+                seasonal_monsoon_min_factor = float(
+                    climate_model["seasonal_monsoon_precipitation_min_factor"]
                 )
-                or not math.isclose(
-                    thermal_moisture_temperature_anomaly,
-                    expected_thermal_moisture_temperature_anomaly,
-                    abs_tol=0.0001,
+                seasonal_monsoon_max_factor = float(
+                    climate_model["seasonal_monsoon_precipitation_max_factor"]
                 )
-                or not math.isclose(
-                    thermal_moisture_capacity_factor,
-                    expected_thermal_moisture_capacity_factor,
-                    abs_tol=0.000005,
+                thermal_moisture_reference_base_temperature = float(
+                    climate_model["thermal_moisture_capacity_reference_base_temperature_c"]
                 )
-            ):
+                thermal_moisture_reference_stellar_luminosity = float(
+                    climate_model["thermal_moisture_capacity_reference_stellar_luminosity"]
+                )
+                thermal_moisture_reference_greenhouse_factor = float(
+                    climate_model["thermal_moisture_capacity_reference_greenhouse_factor"]
+                )
+                thermal_moisture_stellar_temperature_response = float(
+                    climate_model["thermal_moisture_capacity_stellar_temperature_response_c"]
+                )
+                thermal_moisture_greenhouse_temperature_response = float(
+                    climate_model["thermal_moisture_capacity_greenhouse_temperature_response_c"]
+                )
+                thermal_moisture_temperature_response_per_c = float(
+                    climate_model["thermal_moisture_capacity_temperature_response_per_c"]
+                )
+                thermal_moisture_min_factor = float(
+                    climate_model["thermal_moisture_capacity_min_factor"]
+                )
+                thermal_moisture_max_factor = float(
+                    climate_model["thermal_moisture_capacity_max_factor"]
+                )
+                thermal_moisture_temperature_anomaly = float(
+                    climate_model["thermal_moisture_capacity_temperature_anomaly_c"]
+                )
+                thermal_moisture_capacity_factor = float(
+                    climate_model["thermal_moisture_capacity_factor"]
+                )
+                configured_month_count = int(climate_model["configured_month_count"])
+            except (TypeError, ValueError):
                 climate_model_invalid = True
-    if climate_model_invalid:
-        failures.append("climate model metadata invalid")
+            else:
+                numeric_values = (
+                    base_temperature,
+                    latitude_gradient,
+                    latitude_exponent,
+                    latitude_area_mean_offset,
+                    lapse_rate,
+                    marine_annual_temperature_offset,
+                    precipitation_scale,
+                    subtropical_drying_strength,
+                    subtropical_drying_min_factor,
+                    seasonal_monsoon_strength,
+                    seasonal_monsoon_min_factor,
+                    seasonal_monsoon_max_factor,
+                    thermal_moisture_reference_base_temperature,
+                    thermal_moisture_reference_stellar_luminosity,
+                    thermal_moisture_reference_greenhouse_factor,
+                    thermal_moisture_stellar_temperature_response,
+                    thermal_moisture_greenhouse_temperature_response,
+                    thermal_moisture_temperature_response_per_c,
+                    thermal_moisture_min_factor,
+                    thermal_moisture_max_factor,
+                    thermal_moisture_temperature_anomaly,
+                    thermal_moisture_capacity_factor,
+                )
+                expected_area_mean_offset = latitude_gradient / (latitude_exponent + 1.0)
+                climate_model_invalid = (
+                    climate_model.get("model_type")
+                    != "equilibrium_latitude_circulation_climate_v5"
+                    or climate_model.get("temperature_model")
+                    != "area_mean_normalized_latitude_centered_local_adjustments_v3"
+                    or climate_model.get("precipitation_model")
+                    != "bounded_thermal_moisture_circulation_orography_wind_transport_v3"
+                    or climate_model.get("negative_precipitation_behavior")
+                    != "clamped_to_zero_before_thermal_moisture_multiplier"
+                    or climate_model.get("zero_precipitation_scale_behavior")
+                    != "exact_zero_monthly_and_annual_precipitation"
+                    or climate_model.get("base_temperature_interpretation")
+                    != "post_centered_local_adjustment_global_area_mean_c"
+                    or climate_model.get("latitude_temperature_area_normalized") is not True
+                    or climate_model.get("local_temperature_adjustments_area_centered") is not True
+                    or climate_model.get("local_temperature_centering_scope")
+                    != "elevation_lapse_ocean_current"
+                    or climate_model.get("mass_conserving_atmosphere") is not False
+                    or climate_model.get("transient_climate_resolved") is not False
+                    or climate_model.get("model_limitation")
+                    != "equilibrium_diagnostic_climate_without_mass_conserving_three_dimensional_atmosphere"
+                    or climate_model.get("thermal_moisture_capacity_model")
+                    != "bounded_exponential_global_temperature_anomaly_v1"
+                    or climate_model.get("thermal_moisture_capacity_scope")
+                    != "global_monthly_precipitation_multiplier"
+                    or climate_model.get("thermal_moisture_capacity_temperature_anomaly_basis")
+                    != "base_temperature_plus_stellar_and_greenhouse_forcing_relative_to_earth_reference"
+                    or climate_model.get("thermal_moisture_capacity_limitation")
+                    != "diagnostic_global_scaling_without_explicit_atmospheric_water_mass_or_energy_balance"
+                    or any(not math.isfinite(value) for value in numeric_values)
+                    or not -100.0 <= base_temperature <= 100.0
+                    or abs(latitude_gradient - 47.0) > 0.000001
+                    or abs(latitude_exponent - 3.0) > 0.000001
+                    or abs(latitude_area_mean_offset - expected_area_mean_offset) > 0.00001
+                    or not 0.0 <= lapse_rate <= 15.0
+                    or abs(marine_annual_temperature_offset) > 0.000001
+                    or not 0.0 <= precipitation_scale <= 10.0
+                    or not 0.0 <= subtropical_drying_strength <= 0.9
+                    or abs(subtropical_drying_min_factor - 0.25) > 0.000001
+                    or abs(seasonal_monsoon_strength - 1.6) > 0.000001
+                    or abs(seasonal_monsoon_min_factor - 0.08) > 0.000001
+                    or abs(seasonal_monsoon_max_factor - 1.92) > 0.000001
+                    or abs(thermal_moisture_reference_base_temperature - 15.0) > 0.000001
+                    or abs(thermal_moisture_reference_stellar_luminosity - 1.0) > 0.000001
+                    or abs(thermal_moisture_reference_greenhouse_factor - 1.0) > 0.000001
+                    or abs(thermal_moisture_stellar_temperature_response - 38.0) > 0.000001
+                    or abs(thermal_moisture_greenhouse_temperature_response - 11.0) > 0.000001
+                    or abs(thermal_moisture_temperature_response_per_c - 0.04) > 0.000001
+                    or abs(thermal_moisture_min_factor - 0.35) > 0.000001
+                    or abs(thermal_moisture_max_factor - 2.25) > 0.000001
+                    or not thermal_moisture_min_factor
+                    <= thermal_moisture_capacity_factor
+                    <= thermal_moisture_max_factor
+                    or configured_month_count != 12
+                )
+        if not climate_model_invalid:
+            planet_parameters = payload.get("planet_parameters", {})
+            try:
+                stellar_luminosity = float(planet_parameters["stellar_luminosity"])
+                greenhouse_factor = float(planet_parameters["greenhouse_factor"])
+                atmosphere_pressure_bar = float(planet_parameters["atmosphere_pressure_bar"])
+                if (
+                    not math.isfinite(stellar_luminosity)
+                    or not math.isfinite(greenhouse_factor)
+                    or not math.isfinite(atmosphere_pressure_bar)
+                    or stellar_luminosity <= 0.0
+                    or greenhouse_factor < 0.0
+                    or atmosphere_pressure_bar < 0.0
+                ):
+                    raise ValueError("invalid planet temperature controls")
+                total_temperature_area = sum(
+                    max(0.0, float(cell["area_km2"])) for cell in cells_payload
+                )
+                generated_temperature_area_mean = sum(
+                    float(cell["temperature_c"]) * max(0.0, float(cell["area_km2"]))
+                    for cell in cells_payload
+                ) / total_temperature_area
+                discrete_latitude_area_mean = sum(
+                    (
+                        latitude_area_mean_offset
+                        - latitude_gradient
+                        * math.sin(abs(math.radians(float(cell["lat_deg"]))))
+                        ** latitude_exponent
+                    )
+                    * max(0.0, float(cell["area_km2"]))
+                    for cell in cells_payload
+                ) / total_temperature_area
+                expected_temperature_area_mean = (
+                    base_temperature
+                    + discrete_latitude_area_mean
+                    + thermal_moisture_stellar_temperature_response
+                    * (
+                        (stellar_luminosity / thermal_moisture_reference_stellar_luminosity)
+                        ** 0.25
+                        - 1.0
+                    )
+                    + thermal_moisture_greenhouse_temperature_response
+                    * (greenhouse_factor - thermal_moisture_reference_greenhouse_factor)
+                    + 4.5 * math.log(max(0.01, atmosphere_pressure_bar))
+                )
+                expected_thermal_moisture_temperature_anomaly = (
+                    base_temperature
+                    - thermal_moisture_reference_base_temperature
+                    + thermal_moisture_stellar_temperature_response
+                    * (
+                        (stellar_luminosity / thermal_moisture_reference_stellar_luminosity)
+                        ** 0.25
+                        - 1.0
+                    )
+                    + thermal_moisture_greenhouse_temperature_response
+                    * (greenhouse_factor - thermal_moisture_reference_greenhouse_factor)
+                )
+                expected_thermal_moisture_capacity_factor = min(
+                    thermal_moisture_max_factor,
+                    max(
+                        thermal_moisture_min_factor,
+                        math.exp(
+                            max(
+                                math.log(thermal_moisture_min_factor),
+                                min(
+                                    math.log(thermal_moisture_max_factor),
+                                    thermal_moisture_temperature_response_per_c
+                                    * expected_thermal_moisture_temperature_anomaly,
+                                ),
+                            )
+                        ),
+                    ),
+                )
+            except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                climate_model_invalid = True
+            else:
+                if (
+                    not all(
+                        math.isfinite(value)
+                        for value in (
+                            stellar_luminosity,
+                            greenhouse_factor,
+                            atmosphere_pressure_bar,
+                            generated_temperature_area_mean,
+                            discrete_latitude_area_mean,
+                            expected_temperature_area_mean,
+                            expected_thermal_moisture_temperature_anomaly,
+                            expected_thermal_moisture_capacity_factor,
+                        )
+                    )
+                    or stellar_luminosity <= 0.0
+                    or greenhouse_factor < 0.0
+                    or atmosphere_pressure_bar < 0.0
+                    or not math.isclose(
+                        generated_temperature_area_mean,
+                        expected_temperature_area_mean,
+                        abs_tol=0.01,
+                    )
+                    or not math.isclose(
+                        thermal_moisture_temperature_anomaly,
+                        expected_thermal_moisture_temperature_anomaly,
+                        abs_tol=0.0001,
+                    )
+                    or not math.isclose(
+                        thermal_moisture_capacity_factor,
+                        expected_thermal_moisture_capacity_factor,
+                        abs_tol=0.000005,
+                    )
+                ):
+                    climate_model_invalid = True
+        if climate_model_invalid:
+            failures.append("climate model metadata invalid")
 
     simulation_clock = payload.get("simulation_clock", {})
     feedback_history = payload.get("earth_system_feedback_history", [])
@@ -8830,6 +9020,14 @@ def validate(
     ):
         failures.append("coastal migration fields missing")
 
+    failures.extend(validate_reef_thermal_habitat(payload))
+    reef_model = payload.get("reef_diagnostics_model")
+    native_reef = (
+        isinstance(reef_model, dict)
+        and reef_model.get("model") == "heuristic_coastal_reef_native_seasonal_v3"
+    )
+    # The independent helper above validates the exact versioned declaration
+    # and rejects all bleaching aliases on native v3, including numeric zero.
     reef_systems = payload.get("reef_systems", [])
     if not isinstance(reef_systems, list):
         failures.append("reef_systems missing or invalid")
@@ -8841,8 +9039,7 @@ def validate(
         "reef_sediment_stress_index",
         "reef_wave_exposure_index",
         "reef_island_support_index",
-        "reef_bleaching_risk_index",
-    )
+    ) + (() if native_reef else ("reef_bleaching_risk_index",))
     reef_cell_invalid = False
     reef_cell_ids: set[int] = set()
     reef_growth_sum = 0.0
@@ -8873,7 +9070,8 @@ def validate(
         reef_sediment_sum += float(cell.get("reef_sediment_stress_index", 0.0))
         reef_wave_sum += float(cell.get("reef_wave_exposure_index", 0.0))
         reef_island_sum += float(cell.get("reef_island_support_index", 0.0))
-        reef_bleaching_sum += float(cell.get("reef_bleaching_risk_index", 0.0))
+        if not native_reef:
+            reef_bleaching_sum += float(cell.get("reef_bleaching_risk_index", 0.0))
     if reef_cell_invalid:
         failures.append("reef cell fields invalid")
 
@@ -8889,7 +9087,6 @@ def validate(
         "mean_reef_sediment_stress_index",
         "mean_reef_wave_exposure_index",
         "mean_reef_island_support_index",
-        "mean_reef_bleaching_risk_index",
         "mean_water_depth_m",
         "mean_temperature_c",
         "mean_fishery_productivity_index",
@@ -8902,6 +9099,8 @@ def validate(
         "adjacent_volcanic_land_cell_count",
         "reef_type_counts",
     }
+    if not native_reef:
+        reef_required_fields.add("mean_reef_bleaching_risk_index")
     if reef_systems and not reef_required_fields.issubset(reef_systems[0]):
         failures.append("reef system fields missing")
     coastal_feature_by_cell_for_reef = {
@@ -9003,7 +9202,9 @@ def validate(
             {
                 int(cells_by_id[cell_id].get("port_site_id", -1))
                 for cell_id in nearby_reef_cell_ids
-                if cell_id in cells_by_id and int(cells_by_id[cell_id].get("port_site_id", -1)) >= 0
+                if cell_id in cells_by_id
+                and (not current_reef_port_links or cells_by_id[cell_id]["port_site_selection_supported"])
+                and int(cells_by_id[cell_id].get("port_site_id", -1)) >= 0
             }
         )
         expected_fishery_record_ids = sorted(
@@ -9027,7 +9228,8 @@ def validate(
         sediment_mean = sum(float(cell.get("reef_sediment_stress_index", 0.0)) for cell in valid_reef_cells) / len(valid_reef_cells)
         wave_mean = sum(float(cell.get("reef_wave_exposure_index", 0.0)) for cell in valid_reef_cells) / len(valid_reef_cells)
         island_mean = sum(float(cell.get("reef_island_support_index", 0.0)) for cell in valid_reef_cells) / len(valid_reef_cells)
-        bleaching_mean = sum(float(cell.get("reef_bleaching_risk_index", 0.0)) for cell in valid_reef_cells) / len(valid_reef_cells)
+        if not native_reef:
+            bleaching_mean = sum(float(cell.get("reef_bleaching_risk_index", 0.0)) for cell in valid_reef_cells) / len(valid_reef_cells)
         depth_mean = sum(float(cell.get("water_depth_m", 0.0)) for cell in valid_reef_cells) / len(valid_reef_cells)
         temperature_mean = sum(float(cell.get("temperature_c", 0.0)) for cell in valid_reef_cells) / len(valid_reef_cells)
         fishery_mean = sum(float(cell.get("fishery_productivity_index", 0.0)) for cell in valid_reef_cells) / len(valid_reef_cells)
@@ -9039,7 +9241,7 @@ def validate(
             or abs(float(reef.get("mean_reef_sediment_stress_index", 0.0)) - sediment_mean) > 0.001
             or abs(float(reef.get("mean_reef_wave_exposure_index", 0.0)) - wave_mean) > 0.001
             or abs(float(reef.get("mean_reef_island_support_index", 0.0)) - island_mean) > 0.001
-            or abs(float(reef.get("mean_reef_bleaching_risk_index", 0.0)) - bleaching_mean) > 0.001
+            or (not native_reef and abs(float(reef.get("mean_reef_bleaching_risk_index", 0.0)) - bleaching_mean) > 0.001)
             or abs(float(reef.get("mean_water_depth_m", 0.0)) - depth_mean) > 0.001
             or abs(float(reef.get("mean_temperature_c", 0.0)) - temperature_mean) > 0.001
             or abs(float(reef.get("mean_fishery_productivity_index", 0.0)) - fishery_mean) > 0.001
@@ -9069,8 +9271,9 @@ def validate(
         "mean_reef_sediment_stress_index": reef_sediment_sum / reef_cell_count_divisor,
         "mean_reef_wave_exposure_index": reef_wave_sum / reef_cell_count_divisor,
         "mean_reef_island_support_index": reef_island_sum / reef_cell_count_divisor,
-        "mean_reef_bleaching_risk_index": reef_bleaching_sum / reef_cell_count_divisor,
     }
+    if not native_reef:
+        reef_summary_means["mean_reef_bleaching_risk_index"] = reef_bleaching_sum / reef_cell_count_divisor
     for key, expected in reef_summary_means.items():
         if abs(float(summary.get(key, 0.0)) - expected) > 0.001:
             failures.append(f"{key} does not match reef cells")
@@ -10123,463 +10326,13 @@ def validate(
     if abs(float(summary.get("mean_marine_chokepoint_constriction_index", 0.0)) - expected_mean_chokepoint_constriction) > 0.001:
         failures.append("mean_marine_chokepoint_constriction_index does not match marine chokepoints")
 
-    failures.extend(
-        _validate_river_channel_morphology(payload, summary, cells_by_id)
-    )
-    failures.extend(_validate_river_hydraulics(payload, summary, cells_by_id))
+    if not natural_groundwater:
+        failures.extend(
+            _validate_river_channel_morphology(payload, summary, cells_by_id)
+        )
+        failures.extend(_validate_river_hydraulics(payload, summary, cells_by_id))
 
-    river_channel_systems = payload.get("river_channel_systems", [])
-    river_channel_summary_keys = {
-        "river_channel_morphology_model",
-        "river_channel_cell_count",
-        "river_channel_system_count",
-        "navigable_channel_depth_cell_count",
-        "floodplain_connected_channel_cell_count",
-        "high_stream_power_channel_cell_count",
-        "total_river_channel_length_km",
-        "mean_river_channel_width_m",
-        "mean_river_channel_depth_m",
-        "mean_bankfull_discharge_m3_s",
-        "mean_stream_power_index",
-        "mean_channel_slope_index",
-        "channel_morphology_class_counts",
-    }
-    if not river_channel_summary_keys.issubset(summary):
-        failures.append("river channel summary metrics missing")
-    if not isinstance(river_channel_systems, list):
-        failures.append("river_channel_systems missing")
-        river_channel_systems = []
-    river_channel_cell_keys = {
-        "river_channel_width_m",
-        "river_channel_depth_m",
-        "bankfull_discharge_m3_s",
-        "channel_slope_index",
-        "stream_power_index",
-        "floodplain_connectivity_index",
-        "channel_morphology_class",
-        "river_channel_system_id",
-    }
-    if cells_payload and not river_channel_cell_keys.issubset(cells_payload[0]):
-        failures.append("river channel cell fields missing")
-    allowed_channel_classes = {
-        "non_channel",
-        "small_headwater",
-        "incised_bedrock_channel",
-        "braided_sediment_rich_channel",
-        "deep_alluvial_channel",
-        "navigable_lowland_channel",
-        "ephemeral_wadi",
-        "glacial_outwash_channel",
-    }
-    river_channel_class_counts: dict[str, int] = {}
-    river_channel_candidate_ids: set[int] = set()
-    river_channel_assigned_ids: set[int] = set()
-    river_channel_width_sum = 0.0
-    river_channel_depth_sum = 0.0
-    bankfull_discharge_sum = 0.0
-    stream_power_sum = 0.0
-    channel_slope_sum = 0.0
-    navigable_channel_depth_count = 0
-    floodplain_connected_channel_count = 0
-    high_stream_power_channel_count = 0
-    river_channel_cell_invalid = False
-    for cell in cells_payload:
-        cell_id = int(cell.get("id", -1))
-        width = float(cell.get("river_channel_width_m", -1.0))
-        depth = float(cell.get("river_channel_depth_m", -1.0))
-        discharge = float(cell.get("bankfull_discharge_m3_s", -1.0))
-        slope = float(cell.get("channel_slope_index", -1.0))
-        stream_power = float(cell.get("stream_power_index", -1.0))
-        floodplain = float(cell.get("floodplain_connectivity_index", -1.0))
-        channel_class = str(cell.get("channel_morphology_class", ""))
-        channel_system_id = int(cell.get("river_channel_system_id", -2))
-        channel_candidate = bool(cell.get("is_river", False)) and not bool(cell.get("is_water", False))
-        river_channel_class_counts[channel_class] = river_channel_class_counts.get(channel_class, 0) + 1
-        if (
-            width < 0.0
-            or depth < 0.0
-            or discharge < 0.0
-            or not 0.0 <= slope <= 1.0
-            or not 0.0 <= stream_power <= 1.0
-            or not 0.0 <= floodplain <= 1.0
-            or channel_class not in allowed_channel_classes
-            or channel_system_id < -1
-            or (not channel_candidate and (width != 0.0 or depth != 0.0 or discharge != 0.0 or slope != 0.0 or stream_power != 0.0 or floodplain != 0.0 or channel_class != "non_channel" or channel_system_id != -1))
-            or (channel_candidate and channel_class == "non_channel")
-        ):
-            river_channel_cell_invalid = True
-            break
-        if channel_candidate:
-            river_channel_candidate_ids.add(cell_id)
-            river_channel_width_sum += width
-            river_channel_depth_sum += depth
-            bankfull_discharge_sum += discharge
-            stream_power_sum += stream_power
-            channel_slope_sum += slope
-            navigable_channel_depth_count += 1 if depth >= 1.8 and width >= 35.0 else 0
-            floodplain_connected_channel_count += 1 if floodplain >= 0.45 else 0
-            high_stream_power_channel_count += 1 if stream_power >= 0.62 else 0
-        if channel_system_id >= 0:
-            river_channel_assigned_ids.add(cell_id)
-    if river_channel_cell_invalid:
-        failures.append("river channel cell fields invalid")
-    if river_channel_class_counts != {str(key): int(value) for key, value in summary.get("channel_morphology_class_counts", {}).items()}:
-        failures.append("channel_morphology_class_counts does not match cells")
-    if int(summary.get("river_channel_cell_count", -1)) != len(river_channel_candidate_ids):
-        failures.append("river_channel_cell_count does not match cells")
-    if int(summary.get("river_channel_system_count", -1)) != len(river_channel_systems):
-        failures.append("river_channel_system_count does not match systems")
-    expected_channel_counts = {
-        "navigable_channel_depth_cell_count": navigable_channel_depth_count,
-        "floodplain_connected_channel_cell_count": floodplain_connected_channel_count,
-        "high_stream_power_channel_cell_count": high_stream_power_channel_count,
-    }
-    for key, expected in expected_channel_counts.items():
-        if int(summary.get(key, -1)) != expected:
-            failures.append(f"{key} does not match cells")
-            break
-    river_channel_divisor = float(len(river_channel_candidate_ids)) if river_channel_candidate_ids else 1.0
-    expected_channel_means = {
-        "mean_river_channel_width_m": river_channel_width_sum / river_channel_divisor if river_channel_candidate_ids else 0.0,
-        "mean_river_channel_depth_m": river_channel_depth_sum / river_channel_divisor if river_channel_candidate_ids else 0.0,
-        "mean_bankfull_discharge_m3_s": bankfull_discharge_sum / river_channel_divisor if river_channel_candidate_ids else 0.0,
-        "mean_stream_power_index": stream_power_sum / river_channel_divisor if river_channel_candidate_ids else 0.0,
-        "mean_channel_slope_index": channel_slope_sum / river_channel_divisor if river_channel_candidate_ids else 0.0,
-    }
-    for key, expected in expected_channel_means.items():
-        if abs(float(summary.get(key, 0.0)) - expected) > 0.001:
-            failures.append(f"{key} does not match cells")
-            break
-    river_channel_system_keys = {
-        "id",
-        "channel_type",
-        "cell_count",
-        "cell_ids",
-        "basin_ids",
-        "source_cell_id",
-        "outlet_cell_id",
-        "length_km",
-        "area_km2",
-        "mean_channel_width_m",
-        "mean_channel_depth_m",
-        "mean_bankfull_discharge_m3_s",
-        "mean_stream_power_index",
-        "mean_channel_slope_index",
-        "mean_floodplain_connectivity_index",
-        "navigable_depth_cell_count",
-        "floodplain_connected_cell_count",
-        "high_stream_power_cell_count",
-        "channel_morphology_class_counts",
-    }
-    if river_channel_systems and not river_channel_system_keys.issubset(river_channel_systems[0]):
-        failures.append("river channel system fields missing")
-    river_channel_system_ids_seen: set[int] = set()
-    river_channel_system_member_ids: set[int] = set()
-    river_channel_total_length = 0.0
-    river_channel_system_invalid = False
-    for index, system in enumerate(river_channel_systems):
-        system_id = int(system.get("id", -1))
-        cell_ids_for_system = system.get("cell_ids", [])
-        basin_ids_for_system = system.get("basin_ids", [])
-        if not isinstance(cell_ids_for_system, list) or not isinstance(basin_ids_for_system, list):
-            river_channel_system_invalid = True
-            break
-        group_cells = [cells_by_id.get(int(cell_id)) for cell_id in cell_ids_for_system]
-        if any(cell is None for cell in group_cells):
-            river_channel_system_invalid = True
-            break
-        valid_group_cells = [cell for cell in group_cells if cell is not None]
-        group_count = len(valid_group_cells)
-        group_ids = {int(cell.get("id", -1)) for cell in valid_group_cells}
-        river_channel_system_member_ids.update(group_ids)
-        system_class_counts: dict[str, int] = {}
-        for cell in valid_group_cells:
-            class_name = str(cell.get("channel_morphology_class", ""))
-            system_class_counts[class_name] = system_class_counts.get(class_name, 0) + 1
-        expected_basin_ids = sorted({int(cell.get("basin_id", -1)) for cell in valid_group_cells if int(cell.get("basin_id", -1)) >= 0})
-        area_sum = sum(max(0.0, float(cell.get("area_km2", 0.0))) for cell in valid_group_cells)
-        width_sum = sum(float(cell.get("river_channel_width_m", 0.0)) for cell in valid_group_cells)
-        depth_sum = sum(float(cell.get("river_channel_depth_m", 0.0)) for cell in valid_group_cells)
-        discharge_sum = sum(float(cell.get("bankfull_discharge_m3_s", 0.0)) for cell in valid_group_cells)
-        stream_power_group_sum = sum(float(cell.get("stream_power_index", 0.0)) for cell in valid_group_cells)
-        slope_group_sum = sum(float(cell.get("channel_slope_index", 0.0)) for cell in valid_group_cells)
-        floodplain_group_sum = sum(float(cell.get("floodplain_connectivity_index", 0.0)) for cell in valid_group_cells)
-        river_channel_total_length += float(system.get("length_km", 0.0))
-        river_channel_system_ids_seen.add(system_id)
-        if (
-            system_id != index
-            or group_count <= 0
-            or int(system.get("cell_count", -1)) != group_count
-            or len(group_ids) != len(cell_ids_for_system)
-            or not group_ids.issubset(river_channel_candidate_ids)
-            or any(int(cell.get("river_channel_system_id", -1)) != system_id for cell in valid_group_cells)
-            or str(system.get("channel_type", "")) not in allowed_channel_classes
-            or int(system.get("source_cell_id", -1)) not in group_ids
-            or int(system.get("outlet_cell_id", -1)) not in group_ids
-            or [int(basin_id) for basin_id in basin_ids_for_system] != expected_basin_ids
-            or float(system.get("length_km", -1.0)) < 0.0
-            or abs(float(system.get("area_km2", 0.0)) - area_sum) > max(0.001, area_sum * 0.0001)
-            or abs(float(system.get("mean_channel_width_m", 0.0)) - width_sum / group_count) > 0.001
-            or abs(float(system.get("mean_channel_depth_m", 0.0)) - depth_sum / group_count) > 0.001
-            or abs(float(system.get("mean_bankfull_discharge_m3_s", 0.0)) - discharge_sum / group_count) > 0.001
-            or abs(float(system.get("mean_stream_power_index", 0.0)) - stream_power_group_sum / group_count) > 0.001
-            or abs(float(system.get("mean_channel_slope_index", 0.0)) - slope_group_sum / group_count) > 0.001
-            or abs(float(system.get("mean_floodplain_connectivity_index", 0.0)) - floodplain_group_sum / group_count) > 0.001
-            or int(system.get("navigable_depth_cell_count", -1)) != sum(1 for cell in valid_group_cells if float(cell.get("river_channel_depth_m", 0.0)) >= 1.8 and float(cell.get("river_channel_width_m", 0.0)) >= 35.0)
-            or int(system.get("floodplain_connected_cell_count", -1)) != sum(1 for cell in valid_group_cells if float(cell.get("floodplain_connectivity_index", 0.0)) >= 0.45)
-            or int(system.get("high_stream_power_cell_count", -1)) != sum(1 for cell in valid_group_cells if float(cell.get("stream_power_index", 0.0)) >= 0.62)
-            or system_class_counts != {str(key): int(value) for key, value in system.get("channel_morphology_class_counts", {}).items()}
-        ):
-            river_channel_system_invalid = True
-            break
-    if river_channel_system_invalid:
-        failures.append("river channel system records invalid")
-    if len(river_channel_system_ids_seen) != len(river_channel_systems):
-        failures.append("river channel system ids are not unique")
-    if river_channel_system_member_ids != river_channel_assigned_ids or river_channel_assigned_ids != river_channel_candidate_ids:
-        failures.append("river channel system membership does not match cells")
-    if abs(float(summary.get("total_river_channel_length_km", 0.0)) - river_channel_total_length) > max(
-        0.001,
-        river_channel_total_length * 0.0001,
-    ):
-        failures.append("total_river_channel_length_km does not match systems")
-
-    river_hydraulic_reaches = payload.get("river_hydraulic_reaches", [])
-    river_hydraulic_summary_keys = {
-        "river_hydraulics_model",
-        "river_hydraulic_cell_count",
-        "river_hydraulic_reach_count",
-        "mean_hydraulic_radius_m",
-        "mean_flow_velocity_m_s",
-        "mean_froude_number",
-        "mean_bed_shear_stress_pa",
-        "mean_manning_roughness_n",
-        "mean_channel_capacity_index",
-        "mean_hydraulic_navigability_index",
-        "hydraulically_navigable_cell_count",
-        "supercritical_flow_cell_count",
-        "high_shear_stress_cell_count",
-        "hydraulic_flow_regime_counts",
-    }
-    if not river_hydraulic_summary_keys.issubset(summary):
-        failures.append("river hydraulic summary metrics missing")
-    if not isinstance(river_hydraulic_reaches, list):
-        failures.append("river_hydraulic_reaches missing")
-        river_hydraulic_reaches = []
-    river_hydraulic_cell_keys = {
-        "hydraulic_radius_m",
-        "flow_velocity_m_s",
-        "froude_number",
-        "bed_shear_stress_pa",
-        "manning_roughness_n",
-        "channel_capacity_index",
-        "hydraulic_navigability_index",
-        "hydraulic_flow_regime",
-        "river_hydraulic_reach_id",
-    }
-    if cells_payload and not river_hydraulic_cell_keys.issubset(cells_payload[0]):
-        failures.append("river hydraulic cell fields missing")
-    allowed_hydraulic_regimes = {
-        "non_channel",
-        "subcritical",
-        "swift_subcritical",
-        "transitional",
-        "supercritical",
-    }
-    hydraulic_regime_counts: dict[str, int] = {}
-    hydraulic_candidate_ids: set[int] = set()
-    hydraulic_reach_assigned_ids: set[int] = set()
-    hydraulic_radius_sum = 0.0
-    velocity_sum = 0.0
-    froude_sum = 0.0
-    shear_sum = 0.0
-    roughness_sum = 0.0
-    capacity_sum = 0.0
-    hydraulic_nav_sum = 0.0
-    hydraulically_navigable_count = 0
-    supercritical_flow_count = 0
-    high_shear_count = 0
-    hydraulic_cell_invalid = False
-    for cell in cells_payload:
-        cell_id = int(cell.get("id", -1))
-        radius = float(cell.get("hydraulic_radius_m", -1.0))
-        velocity = float(cell.get("flow_velocity_m_s", -1.0))
-        froude = float(cell.get("froude_number", -1.0))
-        shear = float(cell.get("bed_shear_stress_pa", -1.0))
-        roughness = float(cell.get("manning_roughness_n", -1.0))
-        capacity = float(cell.get("channel_capacity_index", -1.0))
-        hydraulic_nav = float(cell.get("hydraulic_navigability_index", -1.0))
-        regime = str(cell.get("hydraulic_flow_regime", ""))
-        reach_id = int(cell.get("river_hydraulic_reach_id", -2))
-        channel_candidate = bool(cell.get("is_river", False)) and not bool(cell.get("is_water", False))
-        hydraulic_regime_counts[regime] = hydraulic_regime_counts.get(regime, 0) + 1
-        if (
-            radius < 0.0
-            or velocity < 0.0
-            or froude < 0.0
-            or shear < 0.0
-            or roughness < 0.0
-            or not 0.0 <= capacity <= 1.0
-            or not 0.0 <= hydraulic_nav <= 1.0
-            or regime not in allowed_hydraulic_regimes
-            or reach_id < -1
-            or (
-                not channel_candidate
-                and (
-                    radius != 0.0
-                    or velocity != 0.0
-                    or froude != 0.0
-                    or shear != 0.0
-                    or roughness != 0.0
-                    or capacity != 0.0
-                    or hydraulic_nav != 0.0
-                    or regime != "non_channel"
-                    or reach_id != -1
-                )
-            )
-            or (channel_candidate and (regime == "non_channel" or reach_id != int(cell.get("river_channel_system_id", -1))))
-        ):
-            hydraulic_cell_invalid = True
-            break
-        if channel_candidate:
-            hydraulic_candidate_ids.add(cell_id)
-            hydraulic_radius_sum += radius
-            velocity_sum += velocity
-            froude_sum += froude
-            shear_sum += shear
-            roughness_sum += roughness
-            capacity_sum += capacity
-            hydraulic_nav_sum += hydraulic_nav
-            hydraulically_navigable_count += 1 if hydraulic_nav >= 0.55 else 0
-            supercritical_flow_count += 1 if regime == "supercritical" else 0
-            high_shear_count += 1 if shear >= 120.0 else 0
-        if reach_id >= 0:
-            hydraulic_reach_assigned_ids.add(cell_id)
-    if hydraulic_cell_invalid:
-        failures.append("river hydraulic cell fields invalid")
-    if hydraulic_regime_counts != {str(key): int(value) for key, value in summary.get("hydraulic_flow_regime_counts", {}).items()}:
-        failures.append("hydraulic_flow_regime_counts does not match cells")
-    if int(summary.get("river_hydraulic_cell_count", -1)) != len(hydraulic_candidate_ids):
-        failures.append("river_hydraulic_cell_count does not match cells")
-    if int(summary.get("river_hydraulic_reach_count", -1)) != len(river_hydraulic_reaches):
-        failures.append("river_hydraulic_reach_count does not match reaches")
-    if len(hydraulic_candidate_ids) != len(river_channel_candidate_ids):
-        failures.append("river hydraulic cell set does not match river channel cells")
-    hydraulic_divisor = float(len(hydraulic_candidate_ids)) if hydraulic_candidate_ids else 1.0
-    expected_hydraulic_means = {
-        "mean_hydraulic_radius_m": hydraulic_radius_sum / hydraulic_divisor if hydraulic_candidate_ids else 0.0,
-        "mean_flow_velocity_m_s": velocity_sum / hydraulic_divisor if hydraulic_candidate_ids else 0.0,
-        "mean_froude_number": froude_sum / hydraulic_divisor if hydraulic_candidate_ids else 0.0,
-        "mean_bed_shear_stress_pa": shear_sum / hydraulic_divisor if hydraulic_candidate_ids else 0.0,
-        "mean_manning_roughness_n": roughness_sum / hydraulic_divisor if hydraulic_candidate_ids else 0.0,
-        "mean_channel_capacity_index": capacity_sum / hydraulic_divisor if hydraulic_candidate_ids else 0.0,
-        "mean_hydraulic_navigability_index": hydraulic_nav_sum / hydraulic_divisor if hydraulic_candidate_ids else 0.0,
-    }
-    for key, expected in expected_hydraulic_means.items():
-        if abs(float(summary.get(key, 0.0)) - expected) > 0.001:
-            failures.append(f"{key} does not match cells")
-            break
-    expected_hydraulic_counts = {
-        "hydraulically_navigable_cell_count": hydraulically_navigable_count,
-        "supercritical_flow_cell_count": supercritical_flow_count,
-        "high_shear_stress_cell_count": high_shear_count,
-    }
-    for key, expected in expected_hydraulic_counts.items():
-        if int(summary.get(key, -1)) != expected:
-            failures.append(f"{key} does not match cells")
-            break
-    river_channel_system_by_id = {int(system.get("id", -1)): system for system in river_channel_systems if isinstance(system, dict)}
-    river_hydraulic_reach_keys = {
-        "id",
-        "river_channel_system_id",
-        "cell_count",
-        "cell_ids",
-        "basin_ids",
-        "source_cell_id",
-        "outlet_cell_id",
-        "length_km",
-        "area_km2",
-        "dominant_hydraulic_flow_regime",
-        "mean_hydraulic_radius_m",
-        "mean_flow_velocity_m_s",
-        "mean_froude_number",
-        "mean_bed_shear_stress_pa",
-        "mean_manning_roughness_n",
-        "mean_channel_capacity_index",
-        "mean_hydraulic_navigability_index",
-        "hydraulically_navigable_cell_count",
-        "supercritical_flow_cell_count",
-        "high_shear_stress_cell_count",
-        "hydraulic_flow_regime_counts",
-    }
-    if river_hydraulic_reaches and not river_hydraulic_reach_keys.issubset(river_hydraulic_reaches[0]):
-        failures.append("river hydraulic reach fields missing")
-    reach_ids_seen: set[int] = set()
-    reach_member_ids: set[int] = set()
-    hydraulic_reach_invalid = False
-    for index, reach in enumerate(river_hydraulic_reaches):
-        reach_id = int(reach.get("id", -1))
-        system_id = int(reach.get("river_channel_system_id", -1))
-        system = river_channel_system_by_id.get(system_id)
-        cell_ids_for_reach = reach.get("cell_ids", [])
-        basin_ids_for_reach = reach.get("basin_ids", [])
-        if system is None or not isinstance(cell_ids_for_reach, list) or not isinstance(basin_ids_for_reach, list):
-            hydraulic_reach_invalid = True
-            break
-        valid_reach_cells = [cells_by_id.get(int(cell_id)) for cell_id in cell_ids_for_reach]
-        if any(cell is None for cell in valid_reach_cells):
-            hydraulic_reach_invalid = True
-            break
-        reach_cells = [cell for cell in valid_reach_cells if cell is not None]
-        group_count = len(reach_cells)
-        group_ids = {int(cell.get("id", -1)) for cell in reach_cells}
-        reach_member_ids.update(group_ids)
-        reach_ids_seen.add(reach_id)
-        regime_counts_for_reach: dict[str, int] = {}
-        for cell in reach_cells:
-            regime = str(cell.get("hydraulic_flow_regime", ""))
-            regime_counts_for_reach[regime] = regime_counts_for_reach.get(regime, 0) + 1
-        dominant_regime = sorted(regime_counts_for_reach.items(), key=lambda item: (-item[1], item[0]))[0][0] if regime_counts_for_reach else "non_channel"
-        radius_sum = sum(float(cell.get("hydraulic_radius_m", 0.0)) for cell in reach_cells)
-        reach_velocity_sum = sum(float(cell.get("flow_velocity_m_s", 0.0)) for cell in reach_cells)
-        reach_froude_sum = sum(float(cell.get("froude_number", 0.0)) for cell in reach_cells)
-        reach_shear_sum = sum(float(cell.get("bed_shear_stress_pa", 0.0)) for cell in reach_cells)
-        reach_roughness_sum = sum(float(cell.get("manning_roughness_n", 0.0)) for cell in reach_cells)
-        reach_capacity_sum = sum(float(cell.get("channel_capacity_index", 0.0)) for cell in reach_cells)
-        reach_nav_sum = sum(float(cell.get("hydraulic_navigability_index", 0.0)) for cell in reach_cells)
-        if (
-            reach_id != index
-            or system_id != reach_id
-            or group_count <= 0
-            or int(reach.get("cell_count", -1)) != group_count
-            or group_ids != {int(cell_id) for cell_id in system.get("cell_ids", [])}
-            or any(int(cell.get("river_hydraulic_reach_id", -1)) != reach_id for cell in reach_cells)
-            or [int(value) for value in basin_ids_for_reach] != [int(value) for value in system.get("basin_ids", [])]
-            or int(reach.get("source_cell_id", -1)) != int(system.get("source_cell_id", -1))
-            or int(reach.get("outlet_cell_id", -1)) != int(system.get("outlet_cell_id", -1))
-            or abs(float(reach.get("length_km", 0.0)) - float(system.get("length_km", 0.0))) > max(0.001, float(system.get("length_km", 0.0)) * 0.0001)
-            or abs(float(reach.get("area_km2", 0.0)) - float(system.get("area_km2", 0.0))) > max(0.001, float(system.get("area_km2", 0.0)) * 0.0001)
-            or str(reach.get("dominant_hydraulic_flow_regime", "")) != dominant_regime
-            or abs(float(reach.get("mean_hydraulic_radius_m", 0.0)) - radius_sum / group_count) > 0.001
-            or abs(float(reach.get("mean_flow_velocity_m_s", 0.0)) - reach_velocity_sum / group_count) > 0.001
-            or abs(float(reach.get("mean_froude_number", 0.0)) - reach_froude_sum / group_count) > 0.001
-            or abs(float(reach.get("mean_bed_shear_stress_pa", 0.0)) - reach_shear_sum / group_count) > 0.001
-            or abs(float(reach.get("mean_manning_roughness_n", 0.0)) - reach_roughness_sum / group_count) > 0.001
-            or abs(float(reach.get("mean_channel_capacity_index", 0.0)) - reach_capacity_sum / group_count) > 0.001
-            or abs(float(reach.get("mean_hydraulic_navigability_index", 0.0)) - reach_nav_sum / group_count) > 0.001
-            or int(reach.get("hydraulically_navigable_cell_count", -1)) != sum(1 for cell in reach_cells if float(cell.get("hydraulic_navigability_index", 0.0)) >= 0.55)
-            or int(reach.get("supercritical_flow_cell_count", -1)) != sum(1 for cell in reach_cells if str(cell.get("hydraulic_flow_regime", "")) == "supercritical")
-            or int(reach.get("high_shear_stress_cell_count", -1)) != sum(1 for cell in reach_cells if float(cell.get("bed_shear_stress_pa", 0.0)) >= 120.0)
-            or regime_counts_for_reach != {str(key): int(value) for key, value in reach.get("hydraulic_flow_regime_counts", {}).items()}
-        ):
-            hydraulic_reach_invalid = True
-            break
-    if hydraulic_reach_invalid:
-        failures.append("river hydraulic reach records invalid")
-    if len(reach_ids_seen) != len(river_hydraulic_reaches):
-        failures.append("river hydraulic reach ids are not unique")
-    if reach_member_ids != hydraulic_reach_assigned_ids or hydraulic_reach_assigned_ids != hydraulic_candidate_ids:
-        failures.append("river hydraulic reach membership does not match cells")
+        failures.extend(_validate_legacy_river_records(payload, summary, cells_payload, cells_by_id))
 
     failures.extend(_validate_settlement_selection(payload, summary, cells_by_id))
     failures.extend(_validate_route_network(payload, summary, cells_by_id))
@@ -10587,550 +10340,33 @@ def validate(
     failures.extend(_validate_political_borders(payload, summary, cells_by_id))
     failures.extend(_validate_trade_flows(payload, summary, cells_by_id))
     failures.extend(validate_human_geography_replay(payload))
-    failures.extend(validate_cultural_geography_replay(payload))
-    failures.extend(validate_historical_geography_replay(payload))
-    failures.extend(validate_civilization_geography_replay(payload))
-    failures.extend(validate_territorial_geography_replay(payload))
-    failures.extend(validate_history_economy_replay(payload))
-    failures.extend(validate_demographic_agents_replay(payload))
-    failures.extend(validate_dynasty_genealogy_replay(payload))
-    failures.extend(validate_logistics_exchange_replay(payload))
-    failures.extend(validate_campaign_operations_replay(payload))
-    failures.extend(validate_market_clearing_replay(payload))
-    failures.extend(validate_phonology_history_replay(payload))
-    failures.extend(_validate_navigability(payload, summary, cells_by_id))
-
-    navigable_waterways = payload.get("navigable_waterways", [])
-    navigability_summary_keys = {
-        "navigability_model",
-        "navigable_cell_count",
-        "navigable_waterway_count",
-        "navigable_waterway_total_area_km2",
-        "mean_navigability_index",
-        "mean_river_navigability_index",
-        "mean_coastal_navigability_index",
-        "mean_harbor_suitability_index",
-        "mean_transport_chokepoint_index",
-        "high_harbor_suitability_cell_count",
-        "transport_chokepoint_cell_count",
-        "navigability_class_counts",
-    }
-    if not navigability_summary_keys.issubset(summary):
-        failures.append("navigability summary metrics missing")
-    if not isinstance(navigable_waterways, list):
-        failures.append("navigable_waterways missing")
-        navigable_waterways = []
-    navigability_cell_keys = {
-        "river_navigability_index",
-        "coastal_navigability_index",
-        "harbor_suitability_index",
-        "transport_chokepoint_index",
-        "navigability_index",
-        "navigability_class",
-        "navigable_waterway_id",
-    }
-    if cells_payload and not navigability_cell_keys.issubset(cells_payload[0]):
-        failures.append("navigability cell fields missing")
-    allowed_navigability_classes = {
-        "non_navigable",
-        "river_corridor",
-        "coastal_corridor",
-        "river_mouth",
-        "harbor",
-        "transport_chokepoint",
-    }
-    navigable_candidate_ids: set[int] = set()
-    navigability_class_counts: dict[str, int] = {}
-    navigability_sum = 0.0
-    river_navigability_sum = 0.0
-    coastal_navigability_sum = 0.0
-    harbor_suitability_sum = 0.0
-    transport_chokepoint_sum = 0.0
-    navigable_candidate_area = 0.0
-    high_harbor_count = 0
-    transport_chokepoint_count = 0
-    navigability_cell_invalid = False
-    for cell in cells_payload:
-        cell_id = int(cell.get("id", -1))
-        river = float(cell.get("river_navigability_index", -1.0))
-        coastal = float(cell.get("coastal_navigability_index", -1.0))
-        harbor = float(cell.get("harbor_suitability_index", -1.0))
-        chokepoint = float(cell.get("transport_chokepoint_index", -1.0))
-        navigability = float(cell.get("navigability_index", -1.0))
-        nav_class = str(cell.get("navigability_class", ""))
-        waterway_id = int(cell.get("navigable_waterway_id", -2))
-        if navigability >= 0.52:
-            navigable_candidate_ids.add(cell_id)
-            navigable_candidate_area += max(0.0, float(cell.get("area_km2", 0.0)))
-        if harbor >= 0.62:
-            high_harbor_count += 1
-        if chokepoint >= 0.55:
-            transport_chokepoint_count += 1
-        navigability_class_counts[nav_class] = navigability_class_counts.get(nav_class, 0) + 1
-        navigability_sum += navigability
-        river_navigability_sum += river
-        coastal_navigability_sum += coastal
-        harbor_suitability_sum += harbor
-        transport_chokepoint_sum += chokepoint
-        if (
-            not 0.0 <= river <= 1.0
-            or not 0.0 <= coastal <= 1.0
-            or not 0.0 <= harbor <= 1.0
-            or not 0.0 <= chokepoint <= 1.0
-            or not 0.0 <= navigability <= 1.0
-            or abs(navigability - max(river, coastal, harbor, chokepoint)) > 0.001
-            or nav_class not in allowed_navigability_classes
-            or waterway_id < -1
-            or (bool(cell.get("is_water", False)) and harbor != 0.0)
-        ):
-            navigability_cell_invalid = True
-            break
-    if navigability_cell_invalid:
-        failures.append("navigability cell fields invalid")
-    if int(summary.get("navigable_waterway_count", -1)) != len(navigable_waterways):
-        failures.append("navigable_waterway_count does not match navigable_waterways length")
-    if int(summary.get("navigable_cell_count", -1)) != len(navigable_candidate_ids):
-        failures.append("navigable_cell_count does not match candidate cells")
-    if int(summary.get("high_harbor_suitability_cell_count", -1)) != high_harbor_count:
-        failures.append("high_harbor_suitability_cell_count does not match cells")
-    if int(summary.get("transport_chokepoint_cell_count", -1)) != transport_chokepoint_count:
-        failures.append("transport_chokepoint_cell_count does not match cells")
-    if navigability_class_counts != {str(key): int(value) for key, value in summary.get("navigability_class_counts", {}).items()}:
-        failures.append("navigability_class_counts does not match cells")
-    cell_count_divisor = float(len(cells_payload)) if cells_payload else 1.0
-    expected_navigability_means = {
-        "mean_navigability_index": navigability_sum / cell_count_divisor,
-        "mean_river_navigability_index": river_navigability_sum / cell_count_divisor,
-        "mean_coastal_navigability_index": coastal_navigability_sum / cell_count_divisor,
-        "mean_harbor_suitability_index": harbor_suitability_sum / cell_count_divisor,
-        "mean_transport_chokepoint_index": transport_chokepoint_sum / cell_count_divisor,
-    }
-    for key, expected in expected_navigability_means.items():
-        if abs(float(summary.get(key, 0.0)) - expected) > 0.001:
-            failures.append(f"{key} does not match cells")
-            break
-    if abs(float(summary.get("navigable_waterway_total_area_km2", 0.0)) - navigable_candidate_area) > max(
-        0.001,
-        navigable_candidate_area * 0.0001,
-    ):
-        failures.append("navigable_waterway_total_area_km2 does not match candidate cells")
-
-    local_settlements_for_navigation = payload.get("settlements", [])
-    local_routes_for_navigation = payload.get("routes", [])
-    local_settlements_for_navigation = (
-        local_settlements_for_navigation if isinstance(local_settlements_for_navigation, list) else []
-    )
-    local_routes_for_navigation = local_routes_for_navigation if isinstance(local_routes_for_navigation, list) else []
-    settlement_by_id_for_navigation = {
-        int(settlement.get("id", -1)): settlement
-        for settlement in local_settlements_for_navigation
-        if isinstance(settlement, dict)
-    }
-    route_by_id_for_navigation = {
-        int(route.get("id", -1)): route for route in local_routes_for_navigation if isinstance(route, dict)
-    }
-    navigable_waterway_keys = {
-        "id",
-        "waterway_type",
-        "cell_count",
-        "cell_ids",
-        "area_km2",
-        "mean_navigability_index",
-        "mean_river_navigability_index",
-        "mean_coastal_navigability_index",
-        "max_harbor_suitability_index",
-        "transport_chokepoint_cell_count",
-        "settlement_ids",
-        "route_ids",
-        "marine_region_ids",
-        "watershed_ids",
-    }
-    if navigable_waterways and not navigable_waterway_keys.issubset(navigable_waterways[0]):
-        failures.append("navigable waterway fields missing")
-    allowed_waterway_types = {
-        "transport_chokepoint",
-        "river_mouth_corridor",
-        "harbor_cluster",
-        "river_corridor",
-        "coastal_corridor",
-    }
-    navigable_waterway_invalid = False
-    assigned_navigable_ids: set[int] = set()
-    navigable_waterway_area = 0.0
-    waterway_ids_seen: set[int] = set()
-    for index, waterway in enumerate(navigable_waterways):
-        waterway_id = int(waterway.get("id", -1))
-        waterway_ids_seen.add(waterway_id)
-        cell_ids_for_waterway = waterway.get("cell_ids", [])
-        settlement_ids_for_waterway = waterway.get("settlement_ids", [])
-        route_ids_for_waterway = waterway.get("route_ids", [])
-        marine_region_ids_for_waterway = waterway.get("marine_region_ids", [])
-        watershed_ids_for_waterway = waterway.get("watershed_ids", [])
-        if (
-            not isinstance(cell_ids_for_waterway, list)
-            or not isinstance(settlement_ids_for_waterway, list)
-            or not isinstance(route_ids_for_waterway, list)
-            or not isinstance(marine_region_ids_for_waterway, list)
-            or not isinstance(watershed_ids_for_waterway, list)
-        ):
-            navigable_waterway_invalid = True
-            break
-        member_ids = [int(cell_id) for cell_id in cell_ids_for_waterway]
-        group_cells = [cells_by_id.get(cell_id) for cell_id in member_ids]
-        if any(cell is None for cell in group_cells) or not group_cells:
-            navigable_waterway_invalid = True
-            break
-        valid_group_cells = [cell for cell in group_cells if cell is not None]
-        member_id_set = {int(cell.get("id", -1)) for cell in valid_group_cells}
-        assigned_navigable_ids.update(member_id_set)
-        area_sum = sum(max(0.0, float(cell.get("area_km2", 0.0))) for cell in valid_group_cells)
-        navigability_group_sum = sum(float(cell.get("navigability_index", 0.0)) for cell in valid_group_cells)
-        river_group_sum = sum(float(cell.get("river_navigability_index", 0.0)) for cell in valid_group_cells)
-        coastal_group_sum = sum(float(cell.get("coastal_navigability_index", 0.0)) for cell in valid_group_cells)
-        harbor_group_max = max((float(cell.get("harbor_suitability_index", 0.0)) for cell in valid_group_cells), default=0.0)
-        chokepoint_group_count = sum(
-            1 for cell in valid_group_cells if float(cell.get("transport_chokepoint_index", 0.0)) >= 0.55
+    if not native_social_availability:
+        failures.extend(validate_cultural_geography_replay(payload))
+        failures.extend(validate_historical_geography_replay(payload))
+        failures.extend(validate_civilization_geography_replay(payload))
+        failures.extend(validate_territorial_geography_replay(payload))
+    if not (social_tail_modes["population"] and social_tail_modes["economy"]):
+        failures.extend(validate_history_economy_replay(payload))
+    if not (social_tail_modes["demographic"]):
+        failures.extend(validate_demographic_agents_replay(payload))
+    if not (social_tail_modes["genealogy"]):
+        failures.extend(validate_dynasty_genealogy_replay(payload))
+    if not (social_tail_modes["logistics"]):
+        failures.extend(validate_logistics_exchange_replay(payload))
+    if not (social_tail_modes["logistics"]):
+        failures.extend(validate_campaign_operations_replay(payload))
+    if not (social_tail_modes["market"]):
+        failures.extend(validate_market_clearing_replay(payload))
+    if not (social_tail_modes["phonology"]):
+        failures.extend(validate_phonology_history_replay(payload))
+    if not natural_human_transport:
+        _validate_legacy_navigation_port_blocks(
+            payload=payload, summary=summary, cells_payload=cells_payload,
+            cells_by_id=cells_by_id, failures=failures,
+            marine_water_types=marine_water_types,
+            marine_region_by_id=marine_region_by_id,
+            marine_chokepoint_by_id=marine_chokepoint_by_id,
         )
-        settlement_ids = [int(settlement_id) for settlement_id in settlement_ids_for_waterway]
-        route_ids = [int(route_id) for route_id in route_ids_for_waterway]
-        marine_region_ids_for_record = [int(region_id) for region_id in marine_region_ids_for_waterway]
-        watershed_ids_for_record = [int(watershed_id) for watershed_id in watershed_ids_for_waterway]
-        expected_marine_region_ids = sorted(
-            {
-                int(cell.get("marine_region_id", -1))
-                for cell in valid_group_cells
-                if int(cell.get("marine_region_id", -1)) >= 0
-            }
-        )
-        expected_watershed_ids = sorted(
-            {int(cell.get("basin_id", -1)) for cell in valid_group_cells if int(cell.get("basin_id", -1)) >= 0}
-        )
-        settlement_links_valid = all(
-            settlement_id in settlement_by_id_for_navigation
-            and int(settlement_by_id_for_navigation[settlement_id].get("cell_id", -1)) in member_id_set
-            for settlement_id in settlement_ids
-        )
-        route_links_valid = all(
-            route_id in route_by_id_for_navigation
-            and (
-                int(route_by_id_for_navigation[route_id].get("from", -1)) in settlement_ids
-                or int(route_by_id_for_navigation[route_id].get("to", -1)) in settlement_ids
-            )
-            for route_id in route_ids
-        )
-        navigable_waterway_area += float(waterway.get("area_km2", 0.0))
-        group_count = len(valid_group_cells)
-        if (
-            waterway_id != index
-            or waterway_id < 0
-            or str(waterway.get("waterway_type", "")) not in allowed_waterway_types
-            or int(waterway.get("cell_count", -1)) != group_count
-            or len(member_ids) != len(member_id_set)
-            or not member_id_set.issubset(navigable_candidate_ids)
-            or any(int(cell.get("navigable_waterway_id", -1)) != waterway_id for cell in valid_group_cells)
-            or abs(float(waterway.get("area_km2", 0.0)) - area_sum) > max(0.001, area_sum * 0.0001)
-            or abs(float(waterway.get("mean_navigability_index", 0.0)) - navigability_group_sum / group_count) > 0.001
-            or abs(float(waterway.get("mean_river_navigability_index", 0.0)) - river_group_sum / group_count) > 0.001
-            or abs(float(waterway.get("mean_coastal_navigability_index", 0.0)) - coastal_group_sum / group_count) > 0.001
-            or abs(float(waterway.get("max_harbor_suitability_index", 0.0)) - harbor_group_max) > 0.001
-            or int(waterway.get("transport_chokepoint_cell_count", -1)) != chokepoint_group_count
-            or marine_region_ids_for_record != expected_marine_region_ids
-            or watershed_ids_for_record != expected_watershed_ids
-            or not settlement_links_valid
-            or not route_links_valid
-        ):
-            navigable_waterway_invalid = True
-            break
-    if len(waterway_ids_seen) != len(navigable_waterways):
-        failures.append("navigable waterway ids are not unique")
-    if navigable_waterway_invalid:
-        failures.append("navigable waterway records invalid")
-    if assigned_navigable_ids != navigable_candidate_ids:
-        failures.append("navigable waterway membership does not match cells")
-    if abs(float(summary.get("navigable_waterway_total_area_km2", 0.0)) - navigable_waterway_area) > max(
-        0.001,
-        navigable_waterway_area * 0.0001,
-    ):
-        failures.append("navigable_waterway_total_area_km2 does not match waterways")
-
-    failures.extend(_validate_port_sites(payload, summary, cells_by_id))
-
-    port_sites = payload.get("port_sites", [])
-    port_site_summary_keys = {
-        "port_site_model",
-        "port_site_count",
-        "port_candidate_cell_count",
-        "port_site_total_area_km2",
-        "mean_port_suitability_index",
-        "mean_protected_bay_index",
-        "mean_river_mouth_port_index",
-        "mean_strait_access_index",
-        "port_settlement_count",
-        "port_settlement_with_site_count",
-        "protected_bay_port_site_count",
-        "river_mouth_port_site_count",
-        "strait_port_site_count",
-        "port_site_type_counts",
-    }
-    if not port_site_summary_keys.issubset(summary):
-        failures.append("port site summary metrics missing")
-    if not isinstance(port_sites, list):
-        failures.append("port_sites missing")
-        port_sites = []
-    port_site_cell_keys = {
-        "protected_bay_index",
-        "river_mouth_port_index",
-        "strait_access_index",
-        "port_suitability_index",
-        "port_site_type",
-        "port_site_id",
-    }
-    if cells_payload and not port_site_cell_keys.issubset(cells_payload[0]):
-        failures.append("port site cell fields missing")
-    allowed_port_site_types = {
-        "none",
-        "protected_bay_port",
-        "river_mouth_port",
-        "strait_port",
-        "harbor_port",
-        "coastal_port",
-        "port_settlement",
-    }
-    port_settlement_cell_ids = {
-        int(settlement.get("cell_id", -1))
-        for settlement in settlement_by_id_for_navigation.values()
-        if str(settlement.get("type", "")) == "port"
-    }
-    port_candidate_ids: set[int] = set()
-    assigned_port_ids: set[int] = set()
-    protected_bay_sum = 0.0
-    river_mouth_port_sum = 0.0
-    strait_access_sum = 0.0
-    port_suitability_sum = 0.0
-    port_site_cell_invalid = False
-    for cell in cells_payload:
-        cell_id = int(cell.get("id", -1))
-        protected_bay = float(cell.get("protected_bay_index", -1.0))
-        river_mouth_port = float(cell.get("river_mouth_port_index", -1.0))
-        strait_access = float(cell.get("strait_access_index", -1.0))
-        port_suitability = float(cell.get("port_suitability_index", -1.0))
-        site_type = str(cell.get("port_site_type", ""))
-        site_id = int(cell.get("port_site_id", -2))
-        is_water = bool(cell.get("is_water", False))
-        severe_ice = float(cell.get("ice_thickness_m", 0.0)) >= 80.0 or str(cell.get("biome", "")) == "ice_cap"
-        if not is_water and ((port_suitability >= 0.58 and not severe_ice) or cell_id in port_settlement_cell_ids):
-            port_candidate_ids.add(cell_id)
-        if site_id >= 0:
-            assigned_port_ids.add(cell_id)
-        protected_bay_sum += protected_bay
-        river_mouth_port_sum += river_mouth_port
-        strait_access_sum += strait_access
-        port_suitability_sum += port_suitability
-        if (
-            not 0.0 <= protected_bay <= 1.0
-            or not 0.0 <= river_mouth_port <= 1.0
-            or not 0.0 <= strait_access <= 1.0
-            or not 0.0 <= port_suitability <= 1.0
-            or site_id < -1
-            or site_type not in allowed_port_site_types
-            or (is_water and (protected_bay != 0.0 or river_mouth_port != 0.0 or strait_access != 0.0 or port_suitability != 0.0))
-            or (is_water and (site_type != "none" or site_id != -1))
-            or (site_id == -1 and site_type != "none")
-            or (site_id >= 0 and site_type == "none")
-        ):
-            port_site_cell_invalid = True
-            break
-    if port_site_cell_invalid:
-        failures.append("port site cell fields invalid")
-    if int(summary.get("port_site_count", -1)) != len(port_sites):
-        failures.append("port_site_count does not match port_sites length")
-    if int(summary.get("port_candidate_cell_count", -1)) != len(port_candidate_ids):
-        failures.append("port_candidate_cell_count does not match candidate cells")
-    expected_port_means = {
-        "mean_port_suitability_index": port_suitability_sum / cell_count_divisor,
-        "mean_protected_bay_index": protected_bay_sum / cell_count_divisor,
-        "mean_river_mouth_port_index": river_mouth_port_sum / cell_count_divisor,
-        "mean_strait_access_index": strait_access_sum / cell_count_divisor,
-    }
-    for key, expected in expected_port_means.items():
-        if abs(float(summary.get(key, 0.0)) - expected) > 0.001:
-            failures.append(f"{key} does not match cells")
-            break
-
-    port_site_keys = {
-        "id",
-        "cell_id",
-        "site_type",
-        "area_km2",
-        "latitude_deg",
-        "longitude_deg",
-        "port_suitability_index",
-        "protected_bay_index",
-        "river_mouth_port_index",
-        "strait_access_index",
-        "harbor_suitability_index",
-        "navigability_index",
-        "settlement_ids",
-        "port_settlement_ids",
-        "route_ids",
-        "marine_region_ids",
-        "marine_chokepoint_ids",
-        "navigable_waterway_ids",
-        "landform",
-        "biome",
-        "water_body_type",
-        "is_river",
-        "selected_by_port_settlement",
-        "selected_by_suitability",
-    }
-    if port_sites and not port_site_keys.issubset(port_sites[0]):
-        failures.append("port site fields missing")
-    port_site_invalid = False
-    port_site_ids_seen: set[int] = set()
-    duplicate_port_site_id = False
-    port_type_counts: Counter[str] = Counter()
-    port_site_area = 0.0
-    port_settlement_count = 0
-    port_settlement_with_site_count = 0
-    for settlement in settlement_by_id_for_navigation.values():
-        if str(settlement.get("type", "")) == "port":
-            port_settlement_count += 1
-            if int(settlement.get("cell_id", -1)) in port_candidate_ids:
-                port_settlement_with_site_count += 1
-    for index, site in enumerate(port_sites):
-        site_id = int(site.get("id", -1))
-        cell_id = int(site.get("cell_id", -1))
-        cell = cells_by_id.get(cell_id)
-        if site_id in port_site_ids_seen:
-            duplicate_port_site_id = True
-        port_site_ids_seen.add(site_id)
-        if cell is None:
-            port_site_invalid = True
-            break
-        settlement_ids = [int(settlement_id) for settlement_id in site.get("settlement_ids", [])]
-        port_settlement_ids = [int(settlement_id) for settlement_id in site.get("port_settlement_ids", [])]
-        route_ids = [int(route_id) for route_id in site.get("route_ids", [])]
-        marine_region_ids_for_site = [int(region_id) for region_id in site.get("marine_region_ids", [])]
-        marine_chokepoint_ids_for_site = [int(chokepoint_id) for chokepoint_id in site.get("marine_chokepoint_ids", [])]
-        waterway_ids_for_site = [int(waterway_id) for waterway_id in site.get("navigable_waterway_ids", [])]
-        neighbor_cells = [
-            cells_by_id.get(int(neighbor_id))
-            for neighbor_id in cell.get("neighbors", [])
-            if cells_by_id.get(int(neighbor_id)) is not None
-        ]
-        expected_marine_region_ids = sorted(
-            {
-                int(neighbor.get("marine_region_id", -1))
-                for neighbor in neighbor_cells
-                if str(neighbor.get("water_body_type", "land")) in marine_water_types
-                and int(neighbor.get("marine_region_id", -1)) >= 0
-            }
-        )
-        expected_marine_chokepoint_ids = sorted(
-            {
-                int(neighbor.get("marine_chokepoint_id", -1))
-                for neighbor in neighbor_cells
-                if int(neighbor.get("marine_chokepoint_id", -1)) >= 0
-            }
-        )
-        expected_waterway_ids = sorted(
-            {
-                int(candidate.get("navigable_waterway_id", -1))
-                for candidate in [cell, *neighbor_cells]
-                if int(candidate.get("navigable_waterway_id", -1)) >= 0
-            }
-        )
-        settlement_links_valid = all(
-            settlement_id in settlement_by_id_for_navigation
-            and int(settlement_by_id_for_navigation[settlement_id].get("cell_id", -1)) == cell_id
-            for settlement_id in settlement_ids
-        )
-        port_settlement_links_valid = all(
-            settlement_id in settlement_by_id_for_navigation
-            and int(settlement_by_id_for_navigation[settlement_id].get("cell_id", -1)) == cell_id
-            and str(settlement_by_id_for_navigation[settlement_id].get("type", "")) == "port"
-            for settlement_id in port_settlement_ids
-        )
-        route_links_valid = all(
-            route_id in route_by_id_for_navigation
-            and (
-                int(route_by_id_for_navigation[route_id].get("from", -1)) in settlement_ids
-                or int(route_by_id_for_navigation[route_id].get("to", -1)) in settlement_ids
-            )
-            for route_id in route_ids
-        )
-        marine_region_links_valid = all(region_id in marine_region_by_id for region_id in marine_region_ids_for_site)
-        marine_chokepoint_links_valid = all(
-            chokepoint_id in marine_chokepoint_by_id for chokepoint_id in marine_chokepoint_ids_for_site
-        )
-        waterway_links_valid = all(waterway_id in waterway_ids_seen for waterway_id in waterway_ids_for_site)
-        site_type = str(site.get("site_type", ""))
-        port_type_counts[site_type] += 1
-        port_site_area += float(site.get("area_km2", 0.0))
-        severe_ice = float(cell.get("ice_thickness_m", 0.0)) >= 80.0 or str(cell.get("biome", "")) == "ice_cap"
-        selected_by_suitability = (
-            (
-                float(cell.get("port_suitability_index", 0.0)) >= 0.58
-                or float(cell.get("harbor_suitability_index", 0.0)) >= 0.62
-            )
-            and not severe_ice
-        )
-        if (
-            site_id != index
-            or site_id < 0
-            or cell_id not in port_candidate_ids
-            or int(cell.get("port_site_id", -1)) != site_id
-            or str(cell.get("port_site_type", "")) != site_type
-            or site_type not in allowed_port_site_types
-            or site_type == "none"
-            or bool(cell.get("is_water", False))
-            or abs(float(site.get("area_km2", 0.0)) - max(0.0, float(cell.get("area_km2", 0.0)))) > 0.001
-            or abs(float(site.get("latitude_deg", 0.0)) - float(cell.get("lat_deg", 0.0))) > 0.001
-            or abs(float(site.get("longitude_deg", 0.0)) - float(cell.get("lon_deg", 0.0))) > 0.001
-            or abs(float(site.get("port_suitability_index", 0.0)) - float(cell.get("port_suitability_index", 0.0))) > 0.001
-            or abs(float(site.get("protected_bay_index", 0.0)) - float(cell.get("protected_bay_index", 0.0))) > 0.001
-            or abs(float(site.get("river_mouth_port_index", 0.0)) - float(cell.get("river_mouth_port_index", 0.0))) > 0.001
-            or abs(float(site.get("strait_access_index", 0.0)) - float(cell.get("strait_access_index", 0.0))) > 0.001
-            or abs(float(site.get("harbor_suitability_index", 0.0)) - float(cell.get("harbor_suitability_index", 0.0))) > 0.001
-            or abs(float(site.get("navigability_index", 0.0)) - float(cell.get("navigability_index", 0.0))) > 0.001
-            or marine_region_ids_for_site != expected_marine_region_ids
-            or marine_chokepoint_ids_for_site != expected_marine_chokepoint_ids
-            or waterway_ids_for_site != expected_waterway_ids
-            or bool(site.get("selected_by_port_settlement", False)) != bool(port_settlement_ids)
-            or bool(site.get("selected_by_suitability", False)) != selected_by_suitability
-            or not settlement_links_valid
-            or not port_settlement_links_valid
-            or not route_links_valid
-            or not marine_region_links_valid
-            or not marine_chokepoint_links_valid
-            or not waterway_links_valid
-        ):
-            port_site_invalid = True
-            break
-    if duplicate_port_site_id:
-        failures.append("port site ids are not unique")
-    if port_site_invalid:
-        failures.append("port site records invalid")
-    if assigned_port_ids != port_candidate_ids:
-        failures.append("port site membership does not match cells")
-    if int(summary.get("port_settlement_count", -1)) != port_settlement_count:
-        failures.append("port_settlement_count does not match settlements")
-    if int(summary.get("port_settlement_with_site_count", -1)) != port_settlement_with_site_count:
-        failures.append("port_settlement_with_site_count does not match settlements")
-    if abs(float(summary.get("port_site_total_area_km2", 0.0)) - port_site_area) > max(0.001, port_site_area * 0.0001):
-        failures.append("port_site_total_area_km2 does not match records")
-    if {str(key): int(value) for key, value in summary.get("port_site_type_counts", {}).items()} != dict(
-        sorted(port_type_counts.items())
-    ):
-        failures.append("port_site_type_counts does not match records")
-    for site_type, summary_key in (
-        ("protected_bay_port", "protected_bay_port_site_count"),
-        ("river_mouth_port", "river_mouth_port_site_count"),
-        ("strait_port", "strait_port_site_count"),
-    ):
-        if int(summary.get(summary_key, -1)) != port_type_counts.get(site_type, 0):
-            failures.append(f"{summary_key} does not match records")
-            break
 
     if not summary.get("landform_counts"):
         failures.append("landform_counts missing")
@@ -11836,200 +11072,203 @@ def validate(
     ):
         failures.append("ocean_current_system_class_counts does not match systems")
 
-    climate_continentality_regions = payload.get("climate_continentality_regions", [])
-    continentality_summary_keys = {
-        "mean_distance_to_marine_water_km",
-        "mean_continentality_index",
-        "max_continentality_index",
-        "high_continentality_cell_count",
-        "mean_oceanic_humidity_availability_index",
-        "low_oceanic_humidity_availability_cell_count",
-        "marine_influence_class_counts",
-        "climate_continentality_region_count",
-        "continental_core_region_count",
-        "maritime_influence_region_count",
-    }
-    if not continentality_summary_keys.issubset(summary):
-        failures.append("climate continentality summary metrics missing")
-    if not isinstance(climate_continentality_regions, list):
-        failures.append("climate_continentality_regions missing")
-        climate_continentality_regions = []
-    marine_water_types_for_climate = {"ocean", "continental_shelf", "inland_sea"}
-    allowed_marine_influence_classes = {"marine", "coastal", "maritime_influenced", "interior", "continental_core"}
-    climate_graph: dict[int, list[tuple[int, float]]] = {cell_id: [] for cell_id in cell_ids}
-    for edge in cell_adjacency_edges:
-        try:
-            cell_a = int(edge.get("cell_a_id", -1))
-            cell_b = int(edge.get("cell_b_id", -1))
-            length = max(0.001, float(edge.get("great_circle_distance_km", 0.0)))
-        except (TypeError, ValueError):
-            continue
-        if cell_a in climate_graph and cell_b in climate_graph:
-            climate_graph[cell_a].append((cell_b, length))
-            climate_graph[cell_b].append((cell_a, length))
-    expected_distance = {cell_id: float("inf") for cell_id in cell_ids}
-    distance_heap: list[tuple[float, int]] = []
-    marine_source_ids = [
-        cell_id
-        for cell_id, cell in cells_by_id.items()
-        if str(cell.get("water_body_type", "land")) in marine_water_types_for_climate
-    ]
-    if not marine_source_ids:
-        marine_source_ids = [cell_id for cell_id, cell in cells_by_id.items() if bool(cell.get("is_water", False))]
-    for cell_id in marine_source_ids:
-        expected_distance[cell_id] = 0.0
-        heapq.heappush(distance_heap, (0.0, cell_id))
-    while distance_heap:
-        distance, cell_id = heapq.heappop(distance_heap)
-        if distance > expected_distance[cell_id]:
-            continue
-        for neighbor_id, length in climate_graph.get(cell_id, []):
-            next_distance = distance + length
-            if next_distance < expected_distance[neighbor_id]:
-                expected_distance[neighbor_id] = next_distance
-                heapq.heappush(distance_heap, (next_distance, neighbor_id))
-    finite_distance = max((value for value in expected_distance.values() if math.isfinite(value)), default=0.0)
-    continentality_invalid = False
-    distance_sum = 0.0
-    continentality_sum = 0.0
-    max_continentality = 0.0
-    high_continentality_cells = 0
-    humidity_sum = 0.0
-    low_humidity_cells = 0
-    class_counts: Counter[str] = Counter()
-    for cell_id, cell in cells_by_id.items():
-        try:
-            distance = float(cell.get("distance_to_marine_water_km", -1.0))
-            continentality = float(cell.get("continentality_index", -1.0))
-            humidity = float(cell.get("oceanic_humidity_availability_index", -1.0))
-            influence_class = str(cell.get("marine_influence_class", ""))
-            region_id = int(cell.get("climate_continentality_region_id", -2))
-        except (TypeError, ValueError):
-            continentality_invalid = True
-            break
-        expected = expected_distance.get(cell_id, finite_distance)
-        if not math.isfinite(expected):
-            expected = finite_distance
-        is_marine_cell = str(cell.get("water_body_type", "land")) in marine_water_types_for_climate
-        if (
-            distance < 0.0
-            or abs(distance - expected) > max(0.01, expected * 0.0001)
-            or not 0.0 <= continentality <= 1.0
-            or not 0.0 <= humidity <= 1.0
-            or influence_class not in allowed_marine_influence_classes
-            or region_id < -1
-            or (is_marine_cell and (distance > 0.001 or influence_class != "marine" or humidity < 0.75 or continentality > 0.181))
-        ):
-            continentality_invalid = True
-            break
-        distance_sum += distance
-        continentality_sum += continentality
-        max_continentality = max(max_continentality, continentality)
-        high_continentality_cells += 1 if continentality >= 0.65 else 0
-        humidity_sum += humidity
-        low_humidity_cells += 1 if humidity <= 0.25 else 0
-        class_counts[influence_class] += 1
-    if continentality_invalid:
-        failures.append("climate continentality cell fields invalid")
-    climate_divisor = float(len(cells_by_id)) if cells_by_id else 1.0
-    continentality_expected_summary = {
-        "mean_distance_to_marine_water_km": distance_sum / climate_divisor,
-        "mean_continentality_index": continentality_sum / climate_divisor,
-        "max_continentality_index": max_continentality,
-        "mean_oceanic_humidity_availability_index": humidity_sum / climate_divisor,
-    }
-    for key, expected in continentality_expected_summary.items():
-        if abs(float(summary.get(key, 0.0)) - expected) > max(0.001, abs(expected) * 0.0001):
-            failures.append(f"{key} does not match climate continentality cells")
-            break
-    if int(summary.get("high_continentality_cell_count", -1)) != high_continentality_cells:
-        failures.append("high_continentality_cell_count does not match cells")
-    if int(summary.get("low_oceanic_humidity_availability_cell_count", -1)) != low_humidity_cells:
-        failures.append("low_oceanic_humidity_availability_cell_count does not match cells")
-    if {str(key): int(value) for key, value in summary.get("marine_influence_class_counts", {}).items()} != dict(sorted(class_counts.items())):
-        failures.append("marine_influence_class_counts does not match cells")
-
-    region_invalid = False
-    assigned_continentality_cells: set[int] = set()
-    continental_core_regions = 0
-    maritime_regions = 0
-    for index, region in enumerate(climate_continentality_regions):
-        if not isinstance(region, dict):
-            region_invalid = True
-            break
-        try:
-            region_id = int(region.get("id", -1))
-            region_class = str(region.get("region_class", ""))
-            region_cell_ids = [int(cell_id) for cell_id in region.get("cell_ids", [])]
-            region_area = float(region.get("area_km2", -1.0))
-        except (TypeError, ValueError):
-            region_invalid = True
-            break
-        if (
-            region_id != index
-            or region_class not in allowed_marine_influence_classes
-            or int(region.get("cell_count", -1)) != len(region_cell_ids)
-            or len(set(region_cell_ids)) != len(region_cell_ids)
-            or region_area < 0.0
-        ):
-            region_invalid = True
-            break
-        area_sum = 0.0
-        region_distance_sum = 0.0
-        region_continentality_sum = 0.0
-        region_humidity_sum = 0.0
-        region_temperature_range_sum = 0.0
-        region_precipitation_sum = 0.0
-        land_count = 0
-        marine_count = 0
-        for cell_id in region_cell_ids:
-            cell = cells_by_id.get(cell_id)
+    if "climate_continentality_model" in payload or validate_marine_distance(payload):
+        failures.extend(validate_marine_distance(payload))
+    else:
+        climate_continentality_regions = payload.get("climate_continentality_regions", [])
+        continentality_summary_keys = {
+            "mean_distance_to_marine_water_km",
+            "mean_continentality_index",
+            "max_continentality_index",
+            "high_continentality_cell_count",
+            "mean_oceanic_humidity_availability_index",
+            "low_oceanic_humidity_availability_cell_count",
+            "marine_influence_class_counts",
+            "climate_continentality_region_count",
+            "continental_core_region_count",
+            "maritime_influence_region_count",
+        }
+        if not continentality_summary_keys.issubset(summary):
+            failures.append("climate continentality summary metrics missing")
+        if not isinstance(climate_continentality_regions, list):
+            failures.append("climate_continentality_regions missing")
+            climate_continentality_regions = []
+        marine_water_types_for_climate = {"ocean", "continental_shelf", "inland_sea"}
+        allowed_marine_influence_classes = {"marine", "coastal", "maritime_influenced", "interior", "continental_core"}
+        climate_graph: dict[int, list[tuple[int, float]]] = {cell_id: [] for cell_id in cell_ids}
+        for edge in cell_adjacency_edges:
+            try:
+                cell_a = int(edge.get("cell_a_id", -1))
+                cell_b = int(edge.get("cell_b_id", -1))
+                length = max(0.001, float(edge.get("great_circle_distance_km", 0.0)))
+            except (TypeError, ValueError):
+                continue
+            if cell_a in climate_graph and cell_b in climate_graph:
+                climate_graph[cell_a].append((cell_b, length))
+                climate_graph[cell_b].append((cell_a, length))
+        expected_distance = {cell_id: float("inf") for cell_id in cell_ids}
+        distance_heap: list[tuple[float, int]] = []
+        marine_source_ids = [
+            cell_id
+            for cell_id, cell in cells_by_id.items()
+            if str(cell.get("water_body_type", "land")) in marine_water_types_for_climate
+        ]
+        if not marine_source_ids:
+            marine_source_ids = [cell_id for cell_id, cell in cells_by_id.items() if bool(cell.get("is_water", False))]
+        for cell_id in marine_source_ids:
+            expected_distance[cell_id] = 0.0
+            heapq.heappush(distance_heap, (0.0, cell_id))
+        while distance_heap:
+            distance, cell_id = heapq.heappop(distance_heap)
+            if distance > expected_distance[cell_id]:
+                continue
+            for neighbor_id, length in climate_graph.get(cell_id, []):
+                next_distance = distance + length
+                if next_distance < expected_distance[neighbor_id]:
+                    expected_distance[neighbor_id] = next_distance
+                    heapq.heappush(distance_heap, (next_distance, neighbor_id))
+        finite_distance = max((value for value in expected_distance.values() if math.isfinite(value)), default=0.0)
+        continentality_invalid = False
+        distance_sum = 0.0
+        continentality_sum = 0.0
+        max_continentality = 0.0
+        high_continentality_cells = 0
+        humidity_sum = 0.0
+        low_humidity_cells = 0
+        class_counts: Counter[str] = Counter()
+        for cell_id, cell in cells_by_id.items():
+            try:
+                distance = float(cell.get("distance_to_marine_water_km", -1.0))
+                continentality = float(cell.get("continentality_index", -1.0))
+                humidity = float(cell.get("oceanic_humidity_availability_index", -1.0))
+                influence_class = str(cell.get("marine_influence_class", ""))
+                region_id = int(cell.get("climate_continentality_region_id", -2))
+            except (TypeError, ValueError):
+                continentality_invalid = True
+                break
+            expected = expected_distance.get(cell_id, finite_distance)
+            if not math.isfinite(expected):
+                expected = finite_distance
+            is_marine_cell = str(cell.get("water_body_type", "land")) in marine_water_types_for_climate
             if (
-                cell is None
-                or int(cell.get("climate_continentality_region_id", -1)) != region_id
-                or str(cell.get("marine_influence_class", "")) != region_class
+                distance < 0.0
+                or abs(distance - expected) > max(0.01, expected * 0.0001)
+                or not 0.0 <= continentality <= 1.0
+                or not 0.0 <= humidity <= 1.0
+                or influence_class not in allowed_marine_influence_classes
+                or region_id < -1
+                or (is_marine_cell and (distance > 0.001 or influence_class != "marine" or humidity < 0.75 or continentality > 0.181))
+            ):
+                continentality_invalid = True
+                break
+            distance_sum += distance
+            continentality_sum += continentality
+            max_continentality = max(max_continentality, continentality)
+            high_continentality_cells += 1 if continentality >= 0.65 else 0
+            humidity_sum += humidity
+            low_humidity_cells += 1 if humidity <= 0.25 else 0
+            class_counts[influence_class] += 1
+        if continentality_invalid:
+            failures.append("climate continentality cell fields invalid")
+        climate_divisor = float(len(cells_by_id)) if cells_by_id else 1.0
+        continentality_expected_summary = {
+            "mean_distance_to_marine_water_km": distance_sum / climate_divisor,
+            "mean_continentality_index": continentality_sum / climate_divisor,
+            "max_continentality_index": max_continentality,
+            "mean_oceanic_humidity_availability_index": humidity_sum / climate_divisor,
+        }
+        for key, expected in continentality_expected_summary.items():
+            if abs(float(summary.get(key, 0.0)) - expected) > max(0.001, abs(expected) * 0.0001):
+                failures.append(f"{key} does not match climate continentality cells")
+                break
+        if int(summary.get("high_continentality_cell_count", -1)) != high_continentality_cells:
+            failures.append("high_continentality_cell_count does not match cells")
+        if int(summary.get("low_oceanic_humidity_availability_cell_count", -1)) != low_humidity_cells:
+            failures.append("low_oceanic_humidity_availability_cell_count does not match cells")
+        if {str(key): int(value) for key, value in summary.get("marine_influence_class_counts", {}).items()} != dict(sorted(class_counts.items())):
+            failures.append("marine_influence_class_counts does not match cells")
+
+        region_invalid = False
+        assigned_continentality_cells: set[int] = set()
+        continental_core_regions = 0
+        maritime_regions = 0
+        for index, region in enumerate(climate_continentality_regions):
+            if not isinstance(region, dict):
+                region_invalid = True
+                break
+            try:
+                region_id = int(region.get("id", -1))
+                region_class = str(region.get("region_class", ""))
+                region_cell_ids = [int(cell_id) for cell_id in region.get("cell_ids", [])]
+                region_area = float(region.get("area_km2", -1.0))
+            except (TypeError, ValueError):
+                region_invalid = True
+                break
+            if (
+                region_id != index
+                or region_class not in allowed_marine_influence_classes
+                or int(region.get("cell_count", -1)) != len(region_cell_ids)
+                or len(set(region_cell_ids)) != len(region_cell_ids)
+                or region_area < 0.0
             ):
                 region_invalid = True
                 break
-            area_sum += float(cell.get("area_km2", 0.0))
-            region_distance_sum += float(cell.get("distance_to_marine_water_km", 0.0))
-            region_continentality_sum += float(cell.get("continentality_index", 0.0))
-            region_humidity_sum += float(cell.get("oceanic_humidity_availability_index", 0.0))
-            temperature_values = cell.get("temperature_monthly_c", [])
-            if isinstance(temperature_values, list) and temperature_values:
-                temps = [float(value) for value in temperature_values]
-                region_temperature_range_sum += max(temps) - min(temps)
-            region_precipitation_sum += float(cell.get("precipitation_mm_y", 0.0))
-            land_count += 1 if not bool(cell.get("is_water", False)) else 0
-            marine_count += 1 if str(cell.get("water_body_type", "land")) in marine_water_types_for_climate else 0
-            assigned_continentality_cells.add(cell_id)
-        if region_invalid:
-            break
-        region_divisor = float(len(region_cell_ids)) if region_cell_ids else 1.0
-        if (
-            abs(region_area - area_sum) > max(0.001, area_sum * 0.0001)
-            or abs(float(region.get("mean_distance_to_marine_water_km", 0.0)) - region_distance_sum / region_divisor) > 0.001
-            or abs(float(region.get("mean_continentality_index", 0.0)) - region_continentality_sum / region_divisor) > 0.001
-            or abs(float(region.get("mean_oceanic_humidity_availability_index", 0.0)) - region_humidity_sum / region_divisor) > 0.001
-            or abs(float(region.get("mean_temperature_range_c", 0.0)) - region_temperature_range_sum / region_divisor) > 0.001
-            or abs(float(region.get("mean_precipitation_mm_y", 0.0)) - region_precipitation_sum / region_divisor) > 0.001
-            or int(region.get("land_cell_count", -1)) != land_count
-            or int(region.get("marine_cell_count", -1)) != marine_count
-        ):
+            area_sum = 0.0
+            region_distance_sum = 0.0
+            region_continentality_sum = 0.0
+            region_humidity_sum = 0.0
+            region_temperature_range_sum = 0.0
+            region_precipitation_sum = 0.0
+            land_count = 0
+            marine_count = 0
+            for cell_id in region_cell_ids:
+                cell = cells_by_id.get(cell_id)
+                if (
+                    cell is None
+                    or int(cell.get("climate_continentality_region_id", -1)) != region_id
+                    or str(cell.get("marine_influence_class", "")) != region_class
+                ):
+                    region_invalid = True
+                    break
+                area_sum += float(cell.get("area_km2", 0.0))
+                region_distance_sum += float(cell.get("distance_to_marine_water_km", 0.0))
+                region_continentality_sum += float(cell.get("continentality_index", 0.0))
+                region_humidity_sum += float(cell.get("oceanic_humidity_availability_index", 0.0))
+                temperature_values = cell.get("temperature_monthly_c", [])
+                if isinstance(temperature_values, list) and temperature_values:
+                    temps = [float(value) for value in temperature_values]
+                    region_temperature_range_sum += max(temps) - min(temps)
+                region_precipitation_sum += float(cell.get("precipitation_mm_y", 0.0))
+                land_count += 1 if not bool(cell.get("is_water", False)) else 0
+                marine_count += 1 if str(cell.get("water_body_type", "land")) in marine_water_types_for_climate else 0
+                assigned_continentality_cells.add(cell_id)
+            if region_invalid:
+                break
+            region_divisor = float(len(region_cell_ids)) if region_cell_ids else 1.0
+            if (
+                abs(region_area - area_sum) > max(0.001, area_sum * 0.0001)
+                or abs(float(region.get("mean_distance_to_marine_water_km", 0.0)) - region_distance_sum / region_divisor) > 0.001
+                or abs(float(region.get("mean_continentality_index", 0.0)) - region_continentality_sum / region_divisor) > 0.001
+                or abs(float(region.get("mean_oceanic_humidity_availability_index", 0.0)) - region_humidity_sum / region_divisor) > 0.001
+                or abs(float(region.get("mean_temperature_range_c", 0.0)) - region_temperature_range_sum / region_divisor) > 0.001
+                or abs(float(region.get("mean_precipitation_mm_y", 0.0)) - region_precipitation_sum / region_divisor) > 0.001
+                or int(region.get("land_cell_count", -1)) != land_count
+                or int(region.get("marine_cell_count", -1)) != marine_count
+            ):
+                region_invalid = True
+                break
+            continental_core_regions += 1 if region_class == "continental_core" else 0
+            maritime_regions += 1 if region_class in {"marine", "coastal", "maritime_influenced"} else 0
+        if assigned_continentality_cells != set(cells_by_id):
             region_invalid = True
-            break
-        continental_core_regions += 1 if region_class == "continental_core" else 0
-        maritime_regions += 1 if region_class in {"marine", "coastal", "maritime_influenced"} else 0
-    if assigned_continentality_cells != set(cells_by_id):
-        region_invalid = True
-    if region_invalid:
-        failures.append("climate continentality region records invalid")
-    if int(summary.get("climate_continentality_region_count", -1)) != len(climate_continentality_regions):
-        failures.append("climate_continentality_region_count does not match records")
-    if int(summary.get("continental_core_region_count", -1)) != continental_core_regions:
-        failures.append("continental_core_region_count does not match records")
-    if int(summary.get("maritime_influence_region_count", -1)) != maritime_regions:
-        failures.append("maritime_influence_region_count does not match records")
+        if region_invalid:
+            failures.append("climate continentality region records invalid")
+        if int(summary.get("climate_continentality_region_count", -1)) != len(climate_continentality_regions):
+            failures.append("climate_continentality_region_count does not match records")
+        if int(summary.get("continental_core_region_count", -1)) != continental_core_regions:
+            failures.append("continental_core_region_count does not match records")
+        if int(summary.get("maritime_influence_region_count", -1)) != maritime_regions:
+            failures.append("maritime_influence_region_count does not match records")
 
     climate_histories = payload.get("climate_seasonal_histories", [])
     if int(summary.get("climate_seasonal_history_count", -1)) != len(climate_histories):
@@ -12253,219 +11492,220 @@ def validate(
     if abs(float(summary.get("max_climate_monsoon_index", 0.0)) - max_climate_monsoon) > 0.001:
         failures.append("max_climate_monsoon_index does not match histories")
 
-    climate_energy_records = payload.get("climate_energy_balance_records", [])
-    climate_energy_summary_keys = {
-        "climate_energy_balance_record_count",
-        "mean_top_of_atmosphere_insolation_w_m2",
-        "mean_seasonal_insolation_range_w_m2",
-        "mean_orbital_insolation_variability_index",
-        "mean_peak_seasonal_insolation_w_m2",
-        "mean_low_seasonal_insolation_w_m2",
-        "mean_orbital_distance_factor",
-        "orbital_eccentricity",
-        "mean_surface_albedo_index",
-        "mean_absorbed_shortwave_w_m2",
-        "mean_outgoing_longwave_w_m2",
-        "mean_greenhouse_trapping_w_m2",
-        "mean_net_radiative_balance_w_m2",
-        "mean_abs_energy_balance_residual_c",
-        "mean_climate_energy_stress_index",
-        "high_climate_energy_stress_cell_count",
-        "surface_albedo_regime_counts",
-    }
-    if not climate_energy_summary_keys.issubset(summary):
-        failures.append("climate energy summary metrics missing")
-    if not isinstance(climate_energy_records, list):
-        failures.append("climate_energy_balance_records missing")
-        climate_energy_records = []
-    if int(summary.get("climate_energy_balance_record_count", -1)) != len(climate_energy_records):
-        failures.append("climate_energy_balance_record_count does not match records length")
-    if len(climate_energy_records) != len(cells_payload):
-        failures.append("climate_energy_balance_records length does not match cells")
-    climate_energy_record_keys = {
-        "id",
-        "cell_id",
-        "latitude_deg",
-        "biome",
-        "water_body_type",
-        "surface_albedo_regime",
-        "stellar_luminosity_factor",
-        "planetary_greenhouse_factor",
-        "atmosphere_pressure_bar",
-        "orbital_eccentricity",
-        "mean_orbital_distance_factor",
-        "temperature_c",
-        "monthly_top_of_atmosphere_insolation_w_m2",
-        "top_of_atmosphere_insolation_w_m2",
-        "seasonal_insolation_range_w_m2",
-        "orbital_insolation_variability_index",
-        "peak_seasonal_insolation_w_m2",
-        "low_seasonal_insolation_w_m2",
-        "surface_albedo_index",
-        "absorbed_shortwave_w_m2",
-        "outgoing_longwave_w_m2",
-        "greenhouse_trapping_w_m2",
-        "net_radiative_balance_w_m2",
-        "no_greenhouse_equilibrium_temperature_c",
-        "radiative_equilibrium_temperature_c",
-        "energy_balance_residual_c",
-        "climate_energy_stress_index",
-    }
-    if climate_energy_records and not climate_energy_record_keys.issubset(climate_energy_records[0]):
-        failures.append("climate energy record fields missing")
-    climate_energy_ids: set[int] = set()
-    climate_energy_cell_ids: set[int] = set()
-    albedo_regime_counts: dict[str, int] = {}
-    climate_insolation_sum = 0.0
-    climate_albedo_sum = 0.0
-    climate_absorbed_sum = 0.0
-    climate_outgoing_sum = 0.0
-    climate_greenhouse_sum = 0.0
-    climate_net_sum = 0.0
-    climate_residual_abs_sum = 0.0
-    climate_stress_sum = 0.0
-    climate_seasonal_insolation_range_sum = 0.0
-    climate_orbital_variability_sum = 0.0
-    climate_peak_insolation_sum = 0.0
-    climate_low_insolation_sum = 0.0
-    climate_orbital_distance_factor_sum = 0.0
-    high_climate_stress_count = 0
-    climate_energy_invalid = False
-    for index, record in enumerate(climate_energy_records):
-        record_id = int(record.get("id", -1))
-        cell_id = int(record.get("cell_id", -1))
-        cell = cells_by_id.get(cell_id)
-        regime = str(record.get("surface_albedo_regime", ""))
-        temperature = float(record.get("temperature_c", 0.0))
-        top_of_atmosphere = float(record.get("top_of_atmosphere_insolation_w_m2", -1.0))
-        monthly_insolation_raw = record.get("monthly_top_of_atmosphere_insolation_w_m2", [])
-        monthly_insolation = [float(value) for value in monthly_insolation_raw] if isinstance(monthly_insolation_raw, list) else []
-        cell_monthly_temperature = cell.get("temperature_monthly_c", []) if cell is not None else []
-        expected_month_count = len(cell_monthly_temperature) if isinstance(cell_monthly_temperature, list) else len(monthly_insolation)
-        monthly_insolation_valid = (
-            bool(monthly_insolation)
-            and all(value >= 0.0 for value in monthly_insolation)
-            and (expected_month_count <= 0 or len(monthly_insolation) == expected_month_count)
-        )
-        monthly_insolation_mean = sum(monthly_insolation) / len(monthly_insolation) if monthly_insolation else -1.0
-        monthly_peak_insolation = max(monthly_insolation) if monthly_insolation else -1.0
-        monthly_low_insolation = min(monthly_insolation) if monthly_insolation else -1.0
-        seasonal_insolation_range = float(record.get("seasonal_insolation_range_w_m2", -1.0))
-        orbital_variability = float(record.get("orbital_insolation_variability_index", -1.0))
-        peak_insolation = float(record.get("peak_seasonal_insolation_w_m2", -1.0))
-        low_insolation = float(record.get("low_seasonal_insolation_w_m2", -1.0))
-        expected_orbital_variability = max(0.0, min(1.0, seasonal_insolation_range / max(1.0, top_of_atmosphere)))
-        orbital_eccentricity = float(record.get("orbital_eccentricity", -1.0))
-        mean_orbital_distance_factor = float(record.get("mean_orbital_distance_factor", -1.0))
-        albedo = float(record.get("surface_albedo_index", -1.0))
-        absorbed = float(record.get("absorbed_shortwave_w_m2", -1.0))
-        outgoing = float(record.get("outgoing_longwave_w_m2", -1.0))
-        greenhouse = float(record.get("greenhouse_trapping_w_m2", -1.0))
-        net_balance = float(record.get("net_radiative_balance_w_m2", 0.0))
-        no_greenhouse_temperature = float(record.get("no_greenhouse_equilibrium_temperature_c", -300.0))
-        equilibrium_temperature = float(record.get("radiative_equilibrium_temperature_c", -300.0))
-        residual_temperature = float(record.get("energy_balance_residual_c", 0.0))
-        stress = float(record.get("climate_energy_stress_index", -1.0))
-        climate_energy_ids.add(record_id)
-        climate_energy_cell_ids.add(cell_id)
-        albedo_regime_counts[regime] = albedo_regime_counts.get(regime, 0) + 1
-        climate_insolation_sum += top_of_atmosphere
-        climate_albedo_sum += albedo
-        climate_absorbed_sum += absorbed
-        climate_outgoing_sum += outgoing
-        climate_greenhouse_sum += greenhouse
-        climate_net_sum += net_balance
-        climate_residual_abs_sum += abs(residual_temperature)
-        climate_stress_sum += stress
-        climate_seasonal_insolation_range_sum += seasonal_insolation_range
-        climate_orbital_variability_sum += orbital_variability
-        climate_peak_insolation_sum += peak_insolation
-        climate_low_insolation_sum += low_insolation
-        climate_orbital_distance_factor_sum += mean_orbital_distance_factor
-        if stress >= 0.65:
-            high_climate_stress_count += 1
-        if (
-            record_id != index
-            or cell is None
-            or not regime
-            or str(record.get("biome", "")) != str(cell.get("biome", ""))
-            or str(record.get("water_body_type", "")) != str(cell.get("water_body_type", "land"))
-            or abs(float(record.get("latitude_deg", 0.0)) - float(cell.get("lat_deg", 0.0))) > 0.001
-            or abs(temperature - float(cell.get("temperature_c", 0.0))) > 0.001
-            or float(record.get("stellar_luminosity_factor", -1.0)) <= 0.0
-            or float(record.get("planetary_greenhouse_factor", -1.0)) < 0.0
-            or float(record.get("atmosphere_pressure_bar", -1.0)) < 0.0
-            or not 0.0 <= orbital_eccentricity < 1.0
-            or abs(float(summary.get("orbital_eccentricity", -1.0)) - orbital_eccentricity) > 0.001
-            or mean_orbital_distance_factor <= 0.0
-            or not monthly_insolation_valid
-            or top_of_atmosphere <= 0.0
-            or abs(top_of_atmosphere - monthly_insolation_mean) > max(0.001, top_of_atmosphere * 0.0001)
-            or abs(peak_insolation - monthly_peak_insolation) > max(0.001, peak_insolation * 0.0001)
-            or abs(low_insolation - monthly_low_insolation) > max(0.001, low_insolation * 0.0001)
-            or abs(seasonal_insolation_range - (peak_insolation - low_insolation)) > max(0.001, seasonal_insolation_range * 0.0001)
-            or abs(orbital_variability - expected_orbital_variability) > 0.001
-            or seasonal_insolation_range < 0.0
-            or peak_insolation < low_insolation
-            or not 0.0 <= orbital_variability <= 1.0
-            or not 0.0 <= albedo <= 1.0
-            or absorbed < 0.0
-            or outgoing <= 0.0
-            or greenhouse < 0.0
-            or no_greenhouse_temperature < -273.15
-            or equilibrium_temperature < -273.15
-            or not 0.0 <= stress <= 1.0
-            or abs(absorbed - top_of_atmosphere * (1.0 - albedo)) > max(0.001, absorbed * 0.0001)
-            or abs(net_balance - (absorbed + greenhouse - outgoing)) > max(0.001, abs(net_balance) * 0.0001)
-            or abs(residual_temperature - (temperature - equilibrium_temperature)) > 0.001
-            or abs(float(cell.get("top_of_atmosphere_insolation_w_m2", -1.0)) - top_of_atmosphere) > max(0.001, top_of_atmosphere * 0.0001)
-            or abs(float(cell.get("seasonal_insolation_range_w_m2", -1.0)) - seasonal_insolation_range) > max(0.001, seasonal_insolation_range * 0.0001)
-            or abs(float(cell.get("orbital_insolation_variability_index", -1.0)) - orbital_variability) > 0.001
-            or abs(float(cell.get("peak_seasonal_insolation_w_m2", -1.0)) - peak_insolation) > max(0.001, peak_insolation * 0.0001)
-            or abs(float(cell.get("low_seasonal_insolation_w_m2", -1.0)) - low_insolation) > max(0.001, low_insolation * 0.0001)
-            or abs(float(cell.get("surface_albedo_index", -1.0)) - albedo) > 0.001
-            or str(cell.get("surface_albedo_regime", "")) != regime
-            or abs(float(cell.get("absorbed_shortwave_w_m2", -1.0)) - absorbed) > max(0.001, absorbed * 0.0001)
-            or abs(float(cell.get("outgoing_longwave_w_m2", -1.0)) - outgoing) > max(0.001, outgoing * 0.0001)
-            or abs(float(cell.get("greenhouse_trapping_w_m2", -1.0)) - greenhouse) > max(0.001, greenhouse * 0.0001)
-            or abs(float(cell.get("net_radiative_balance_w_m2", 0.0)) - net_balance) > max(0.001, abs(net_balance) * 0.0001)
-            or abs(float(cell.get("no_greenhouse_equilibrium_temperature_c", -300.0)) - no_greenhouse_temperature) > 0.001
-            or abs(float(cell.get("radiative_equilibrium_temperature_c", -300.0)) - equilibrium_temperature) > 0.001
-            or abs(float(cell.get("energy_balance_residual_c", 0.0)) - residual_temperature) > 0.001
-            or abs(float(cell.get("climate_energy_stress_index", -1.0)) - stress) > 0.001
-        ):
-            climate_energy_invalid = True
-            break
-    if climate_energy_invalid:
-        failures.append("climate energy records invalid")
-    if len(climate_energy_ids) != len(climate_energy_records):
-        failures.append("climate energy record ids are not unique")
-    if climate_energy_cell_ids != cell_ids:
-        failures.append("climate energy records do not match cells")
-    if albedo_regime_counts != {str(key): int(value) for key, value in summary.get("surface_albedo_regime_counts", {}).items()}:
-        failures.append("surface_albedo_regime_counts does not match climate energy records")
-    climate_energy_divisor = float(len(climate_energy_records)) if climate_energy_records else 1.0
-    expected_climate_energy_means = {
-        "mean_top_of_atmosphere_insolation_w_m2": climate_insolation_sum / climate_energy_divisor if climate_energy_records else 0.0,
-        "mean_surface_albedo_index": climate_albedo_sum / climate_energy_divisor if climate_energy_records else 0.0,
-        "mean_absorbed_shortwave_w_m2": climate_absorbed_sum / climate_energy_divisor if climate_energy_records else 0.0,
-        "mean_outgoing_longwave_w_m2": climate_outgoing_sum / climate_energy_divisor if climate_energy_records else 0.0,
-        "mean_greenhouse_trapping_w_m2": climate_greenhouse_sum / climate_energy_divisor if climate_energy_records else 0.0,
-        "mean_net_radiative_balance_w_m2": climate_net_sum / climate_energy_divisor if climate_energy_records else 0.0,
-        "mean_abs_energy_balance_residual_c": climate_residual_abs_sum / climate_energy_divisor if climate_energy_records else 0.0,
-        "mean_climate_energy_stress_index": climate_stress_sum / climate_energy_divisor if climate_energy_records else 0.0,
-        "mean_seasonal_insolation_range_w_m2": climate_seasonal_insolation_range_sum / climate_energy_divisor if climate_energy_records else 0.0,
-        "mean_orbital_insolation_variability_index": climate_orbital_variability_sum / climate_energy_divisor if climate_energy_records else 0.0,
-        "mean_peak_seasonal_insolation_w_m2": climate_peak_insolation_sum / climate_energy_divisor if climate_energy_records else 0.0,
-        "mean_low_seasonal_insolation_w_m2": climate_low_insolation_sum / climate_energy_divisor if climate_energy_records else 0.0,
-        "mean_orbital_distance_factor": climate_orbital_distance_factor_sum / climate_energy_divisor if climate_energy_records else 0.0,
-    }
-    for key, expected in expected_climate_energy_means.items():
-        if abs(float(summary.get(key, 0.0)) - expected) > 0.001:
-            failures.append(f"{key} does not match climate energy records")
-            break
-    if int(summary.get("high_climate_energy_stress_cell_count", -1)) != high_climate_stress_count:
-        failures.append("high_climate_energy_stress_cell_count does not match records")
+    if not native_climate_energy:
+        climate_energy_records = payload.get("climate_energy_balance_records", [])
+        climate_energy_summary_keys = {
+            "climate_energy_balance_record_count",
+            "mean_top_of_atmosphere_insolation_w_m2",
+            "mean_seasonal_insolation_range_w_m2",
+            "mean_orbital_insolation_variability_index",
+            "mean_peak_seasonal_insolation_w_m2",
+            "mean_low_seasonal_insolation_w_m2",
+            "mean_orbital_distance_factor",
+            "orbital_eccentricity",
+            "mean_surface_albedo_index",
+            "mean_absorbed_shortwave_w_m2",
+            "mean_outgoing_longwave_w_m2",
+            "mean_greenhouse_trapping_w_m2",
+            "mean_net_radiative_balance_w_m2",
+            "mean_abs_energy_balance_residual_c",
+            "mean_climate_energy_stress_index",
+            "high_climate_energy_stress_cell_count",
+            "surface_albedo_regime_counts",
+        }
+        if not climate_energy_summary_keys.issubset(summary):
+            failures.append("climate energy summary metrics missing")
+        if not isinstance(climate_energy_records, list):
+            failures.append("climate_energy_balance_records missing")
+            climate_energy_records = []
+        if int(summary.get("climate_energy_balance_record_count", -1)) != len(climate_energy_records):
+            failures.append("climate_energy_balance_record_count does not match records length")
+        if len(climate_energy_records) != len(cells_payload):
+            failures.append("climate_energy_balance_records length does not match cells")
+        climate_energy_record_keys = {
+            "id",
+            "cell_id",
+            "latitude_deg",
+            "biome",
+            "water_body_type",
+            "surface_albedo_regime",
+            "stellar_luminosity_factor",
+            "planetary_greenhouse_factor",
+            "atmosphere_pressure_bar",
+            "orbital_eccentricity",
+            "mean_orbital_distance_factor",
+            "temperature_c",
+            "monthly_top_of_atmosphere_insolation_w_m2",
+            "top_of_atmosphere_insolation_w_m2",
+            "seasonal_insolation_range_w_m2",
+            "orbital_insolation_variability_index",
+            "peak_seasonal_insolation_w_m2",
+            "low_seasonal_insolation_w_m2",
+            "surface_albedo_index",
+            "absorbed_shortwave_w_m2",
+            "outgoing_longwave_w_m2",
+            "greenhouse_trapping_w_m2",
+            "net_radiative_balance_w_m2",
+            "no_greenhouse_equilibrium_temperature_c",
+            "radiative_equilibrium_temperature_c",
+            "energy_balance_residual_c",
+            "climate_energy_stress_index",
+        }
+        if climate_energy_records and not climate_energy_record_keys.issubset(climate_energy_records[0]):
+            failures.append("climate energy record fields missing")
+        climate_energy_ids: set[int] = set()
+        climate_energy_cell_ids: set[int] = set()
+        albedo_regime_counts: dict[str, int] = {}
+        climate_insolation_sum = 0.0
+        climate_albedo_sum = 0.0
+        climate_absorbed_sum = 0.0
+        climate_outgoing_sum = 0.0
+        climate_greenhouse_sum = 0.0
+        climate_net_sum = 0.0
+        climate_residual_abs_sum = 0.0
+        climate_stress_sum = 0.0
+        climate_seasonal_insolation_range_sum = 0.0
+        climate_orbital_variability_sum = 0.0
+        climate_peak_insolation_sum = 0.0
+        climate_low_insolation_sum = 0.0
+        climate_orbital_distance_factor_sum = 0.0
+        high_climate_stress_count = 0
+        climate_energy_invalid = False
+        for index, record in enumerate(climate_energy_records):
+            record_id = int(record.get("id", -1))
+            cell_id = int(record.get("cell_id", -1))
+            cell = cells_by_id.get(cell_id)
+            regime = str(record.get("surface_albedo_regime", ""))
+            temperature = float(record.get("temperature_c", 0.0))
+            top_of_atmosphere = float(record.get("top_of_atmosphere_insolation_w_m2", -1.0))
+            monthly_insolation_raw = record.get("monthly_top_of_atmosphere_insolation_w_m2", [])
+            monthly_insolation = [float(value) for value in monthly_insolation_raw] if isinstance(monthly_insolation_raw, list) else []
+            cell_monthly_temperature = cell.get("temperature_monthly_c", []) if cell is not None else []
+            expected_month_count = len(cell_monthly_temperature) if isinstance(cell_monthly_temperature, list) else len(monthly_insolation)
+            monthly_insolation_valid = (
+                bool(monthly_insolation)
+                and all(value >= 0.0 for value in monthly_insolation)
+                and (expected_month_count <= 0 or len(monthly_insolation) == expected_month_count)
+            )
+            monthly_insolation_mean = sum(monthly_insolation) / len(monthly_insolation) if monthly_insolation else -1.0
+            monthly_peak_insolation = max(monthly_insolation) if monthly_insolation else -1.0
+            monthly_low_insolation = min(monthly_insolation) if monthly_insolation else -1.0
+            seasonal_insolation_range = float(record.get("seasonal_insolation_range_w_m2", -1.0))
+            orbital_variability = float(record.get("orbital_insolation_variability_index", -1.0))
+            peak_insolation = float(record.get("peak_seasonal_insolation_w_m2", -1.0))
+            low_insolation = float(record.get("low_seasonal_insolation_w_m2", -1.0))
+            expected_orbital_variability = max(0.0, min(1.0, seasonal_insolation_range / max(1.0, top_of_atmosphere)))
+            orbital_eccentricity = float(record.get("orbital_eccentricity", -1.0))
+            mean_orbital_distance_factor = float(record.get("mean_orbital_distance_factor", -1.0))
+            albedo = float(record.get("surface_albedo_index", -1.0))
+            absorbed = float(record.get("absorbed_shortwave_w_m2", -1.0))
+            outgoing = float(record.get("outgoing_longwave_w_m2", -1.0))
+            greenhouse = float(record.get("greenhouse_trapping_w_m2", -1.0))
+            net_balance = float(record.get("net_radiative_balance_w_m2", 0.0))
+            no_greenhouse_temperature = float(record.get("no_greenhouse_equilibrium_temperature_c", -300.0))
+            equilibrium_temperature = float(record.get("radiative_equilibrium_temperature_c", -300.0))
+            residual_temperature = float(record.get("energy_balance_residual_c", 0.0))
+            stress = float(record.get("climate_energy_stress_index", -1.0))
+            climate_energy_ids.add(record_id)
+            climate_energy_cell_ids.add(cell_id)
+            albedo_regime_counts[regime] = albedo_regime_counts.get(regime, 0) + 1
+            climate_insolation_sum += top_of_atmosphere
+            climate_albedo_sum += albedo
+            climate_absorbed_sum += absorbed
+            climate_outgoing_sum += outgoing
+            climate_greenhouse_sum += greenhouse
+            climate_net_sum += net_balance
+            climate_residual_abs_sum += abs(residual_temperature)
+            climate_stress_sum += stress
+            climate_seasonal_insolation_range_sum += seasonal_insolation_range
+            climate_orbital_variability_sum += orbital_variability
+            climate_peak_insolation_sum += peak_insolation
+            climate_low_insolation_sum += low_insolation
+            climate_orbital_distance_factor_sum += mean_orbital_distance_factor
+            if stress >= 0.65:
+                high_climate_stress_count += 1
+            if (
+                record_id != index
+                or cell is None
+                or not regime
+                or str(record.get("biome", "")) != str(cell.get("biome", ""))
+                or str(record.get("water_body_type", "")) != str(cell.get("water_body_type", "land"))
+                or abs(float(record.get("latitude_deg", 0.0)) - float(cell.get("lat_deg", 0.0))) > 0.001
+                or abs(temperature - float(cell.get("temperature_c", 0.0))) > 0.001
+                or float(record.get("stellar_luminosity_factor", -1.0)) <= 0.0
+                or float(record.get("planetary_greenhouse_factor", -1.0)) < 0.0
+                or float(record.get("atmosphere_pressure_bar", -1.0)) < 0.0
+                or not 0.0 <= orbital_eccentricity < 1.0
+                or abs(float(summary.get("orbital_eccentricity", -1.0)) - orbital_eccentricity) > 0.001
+                or mean_orbital_distance_factor <= 0.0
+                or not monthly_insolation_valid
+                or top_of_atmosphere <= 0.0
+                or abs(top_of_atmosphere - monthly_insolation_mean) > max(0.001, top_of_atmosphere * 0.0001)
+                or abs(peak_insolation - monthly_peak_insolation) > max(0.001, peak_insolation * 0.0001)
+                or abs(low_insolation - monthly_low_insolation) > max(0.001, low_insolation * 0.0001)
+                or abs(seasonal_insolation_range - (peak_insolation - low_insolation)) > max(0.001, seasonal_insolation_range * 0.0001)
+                or abs(orbital_variability - expected_orbital_variability) > 0.001
+                or seasonal_insolation_range < 0.0
+                or peak_insolation < low_insolation
+                or not 0.0 <= orbital_variability <= 1.0
+                or not 0.0 <= albedo <= 1.0
+                or absorbed < 0.0
+                or outgoing <= 0.0
+                or greenhouse < 0.0
+                or no_greenhouse_temperature < -273.15
+                or equilibrium_temperature < -273.15
+                or not 0.0 <= stress <= 1.0
+                or abs(absorbed - top_of_atmosphere * (1.0 - albedo)) > max(0.001, absorbed * 0.0001)
+                or abs(net_balance - (absorbed + greenhouse - outgoing)) > max(0.001, abs(net_balance) * 0.0001)
+                or abs(residual_temperature - (temperature - equilibrium_temperature)) > 0.001
+                or abs(float(cell.get("top_of_atmosphere_insolation_w_m2", -1.0)) - top_of_atmosphere) > max(0.001, top_of_atmosphere * 0.0001)
+                or abs(float(cell.get("seasonal_insolation_range_w_m2", -1.0)) - seasonal_insolation_range) > max(0.001, seasonal_insolation_range * 0.0001)
+                or abs(float(cell.get("orbital_insolation_variability_index", -1.0)) - orbital_variability) > 0.001
+                or abs(float(cell.get("peak_seasonal_insolation_w_m2", -1.0)) - peak_insolation) > max(0.001, peak_insolation * 0.0001)
+                or abs(float(cell.get("low_seasonal_insolation_w_m2", -1.0)) - low_insolation) > max(0.001, low_insolation * 0.0001)
+                or abs(float(cell.get("surface_albedo_index", -1.0)) - albedo) > 0.001
+                or str(cell.get("surface_albedo_regime", "")) != regime
+                or abs(float(cell.get("absorbed_shortwave_w_m2", -1.0)) - absorbed) > max(0.001, absorbed * 0.0001)
+                or abs(float(cell.get("outgoing_longwave_w_m2", -1.0)) - outgoing) > max(0.001, outgoing * 0.0001)
+                or abs(float(cell.get("greenhouse_trapping_w_m2", -1.0)) - greenhouse) > max(0.001, greenhouse * 0.0001)
+                or abs(float(cell.get("net_radiative_balance_w_m2", 0.0)) - net_balance) > max(0.001, abs(net_balance) * 0.0001)
+                or abs(float(cell.get("no_greenhouse_equilibrium_temperature_c", -300.0)) - no_greenhouse_temperature) > 0.001
+                or abs(float(cell.get("radiative_equilibrium_temperature_c", -300.0)) - equilibrium_temperature) > 0.001
+                or abs(float(cell.get("energy_balance_residual_c", 0.0)) - residual_temperature) > 0.001
+                or abs(float(cell.get("climate_energy_stress_index", -1.0)) - stress) > 0.001
+            ):
+                climate_energy_invalid = True
+                break
+        if climate_energy_invalid:
+            failures.append("climate energy records invalid")
+        if len(climate_energy_ids) != len(climate_energy_records):
+            failures.append("climate energy record ids are not unique")
+        if climate_energy_cell_ids != cell_ids:
+            failures.append("climate energy records do not match cells")
+        if albedo_regime_counts != {str(key): int(value) for key, value in summary.get("surface_albedo_regime_counts", {}).items()}:
+            failures.append("surface_albedo_regime_counts does not match climate energy records")
+        climate_energy_divisor = float(len(climate_energy_records)) if climate_energy_records else 1.0
+        expected_climate_energy_means = {
+            "mean_top_of_atmosphere_insolation_w_m2": climate_insolation_sum / climate_energy_divisor if climate_energy_records else 0.0,
+            "mean_surface_albedo_index": climate_albedo_sum / climate_energy_divisor if climate_energy_records else 0.0,
+            "mean_absorbed_shortwave_w_m2": climate_absorbed_sum / climate_energy_divisor if climate_energy_records else 0.0,
+            "mean_outgoing_longwave_w_m2": climate_outgoing_sum / climate_energy_divisor if climate_energy_records else 0.0,
+            "mean_greenhouse_trapping_w_m2": climate_greenhouse_sum / climate_energy_divisor if climate_energy_records else 0.0,
+            "mean_net_radiative_balance_w_m2": climate_net_sum / climate_energy_divisor if climate_energy_records else 0.0,
+            "mean_abs_energy_balance_residual_c": climate_residual_abs_sum / climate_energy_divisor if climate_energy_records else 0.0,
+            "mean_climate_energy_stress_index": climate_stress_sum / climate_energy_divisor if climate_energy_records else 0.0,
+            "mean_seasonal_insolation_range_w_m2": climate_seasonal_insolation_range_sum / climate_energy_divisor if climate_energy_records else 0.0,
+            "mean_orbital_insolation_variability_index": climate_orbital_variability_sum / climate_energy_divisor if climate_energy_records else 0.0,
+            "mean_peak_seasonal_insolation_w_m2": climate_peak_insolation_sum / climate_energy_divisor if climate_energy_records else 0.0,
+            "mean_low_seasonal_insolation_w_m2": climate_low_insolation_sum / climate_energy_divisor if climate_energy_records else 0.0,
+            "mean_orbital_distance_factor": climate_orbital_distance_factor_sum / climate_energy_divisor if climate_energy_records else 0.0,
+        }
+        for key, expected in expected_climate_energy_means.items():
+            if abs(float(summary.get(key, 0.0)) - expected) > 0.001:
+                failures.append(f"{key} does not match climate energy records")
+                break
+        if int(summary.get("high_climate_energy_stress_cell_count", -1)) != high_climate_stress_count:
+            failures.append("high_climate_energy_stress_cell_count does not match records")
 
     planet_parameters = payload.get("planet_parameters", {})
     planet_parameter_keys = {
@@ -12493,7 +11733,8 @@ def validate(
                 or float(planet_parameters.get("day_length_hours", 0.0)) <= 0.0
                 or not 0.0 <= float(planet_parameters.get("axial_tilt_deg", -1.0)) <= 90.0
                 or not 0.0 <= float(planet_parameters.get("orbital_eccentricity", -1.0)) < 1.0
-                or float(planet_parameters.get("stellar_luminosity", 0.0)) <= 0.0
+                or float(planet_parameters.get("stellar_luminosity", 0.0)) < 0.0
+                or (not native_climate_energy and float(planet_parameters.get("stellar_luminosity", 0.0)) == 0.0)
                 or float(planet_parameters.get("atmosphere_pressure_bar", -1.0)) < 0.0
                 or float(planet_parameters.get("greenhouse_factor", -1.0)) < 0.0
                 or not 0.0 <= float(planet_parameters.get("ocean_fraction_target", -1.0)) <= 0.98
@@ -13481,7 +12722,11 @@ def validate(
         deglaciation_sum = sum(float(cell.get("deglaciation_age_ka", 0.0)) for cell in valid_group_cells)
         runoff_sum = sum(float(cell.get("runoff_mm_y", 0.0)) for cell in valid_group_cells)
         permafrost_extent_sum = sum(float(cell.get("permafrost_extent_index", 0.0)) for cell in valid_group_cells)
-        ice_covered_count = sum(1 for cell in valid_group_cells if float(cell.get("ice_thickness_m", 0.0)) > 25.0)
+        ice_covered_count = (
+            sum(1 for cell in valid_group_cells if cell.get("grounded_ice_surface_applicable") is True and float(cell.get("grounded_ice_diagnostic_thickness_m", 0.0)) > 25.0)
+            if "grounded_ice_model" in payload else
+            sum(1 for cell in valid_group_cells if float(cell.get("ice_thickness_m", 0.0)) > 25.0)
+        )
         river_count = sum(1 for cell in valid_group_cells if bool(cell.get("is_river", False)))
         lake_count = sum(
             1
@@ -14589,514 +13834,11 @@ def validate(
         if check_name in biome_realism_by_name and abs(float(summary.get(summary_key, 0.0)) - biome_realism_by_name[check_name]) > 0.001:
             failures.append(f"{summary_key} does not match biome realism check")
 
-    failures.extend(_validate_groundwater_recharge(payload, summary, cells_by_id))
-    failures.extend(_validate_aquifer_resources(payload, summary, cells_by_id))
-    failures.extend(_validate_groundwater_flow(payload, summary, cells_by_id))
-    aquifer_systems = payload.get("aquifer_systems", [])
-    aquifer_summary_keys = {
-        "aquifer_resource_model",
-        "aquifer_cell_count",
-        "aquifer_system_count",
-        "groundwater_recharge_cell_count",
-        "high_productivity_aquifer_cell_count",
-        "groundwater_stressed_cell_count",
-        "total_groundwater_recharge_km3_y",
-        "total_groundwater_recharge_source_infiltration_km3_y",
-        "total_vadose_zone_retention_km3_y",
-        "groundwater_recharge_mass_balance_residual_km3_y",
-        "mean_groundwater_recharge_mm_y",
-        "mean_aquifer_storage_index",
-        "mean_aquifer_quality_index",
-        "mean_aquifer_productivity_index",
-        "mean_aquifer_extraction_risk_index",
-        "aquifer_class_counts",
-    }
-    if not aquifer_summary_keys.issubset(summary):
-        failures.append("aquifer summary metrics missing")
-    if not isinstance(aquifer_systems, list):
-        failures.append("aquifer_systems missing")
-        aquifer_systems = []
-    aquifer_cell_keys = {
-        "groundwater_recharge_source_infiltration_mm_y",
-        "groundwater_recharge_fraction",
-        "groundwater_recharge_mm_y",
-        "groundwater_recharge_km3_y",
-        "vadose_zone_retention_mm_y",
-        "vadose_zone_retention_km3_y",
-        "groundwater_recharge_mass_balance_residual_mm_y",
-        "aquifer_storage_index",
-        "aquifer_quality_index",
-        "aquifer_productivity_index",
-        "aquifer_extraction_risk_index",
-        "aquifer_class",
-        "aquifer_system_id",
-    }
-    if cells_payload and not aquifer_cell_keys.issubset(cells_payload[0]):
-        failures.append("aquifer cell fields missing")
-    aquifer_class_counts: dict[str, int] = {}
-    aquifer_cell_count = 0
-    groundwater_recharge_cell_count = 0
-    high_productivity_aquifer_count = 0
-    groundwater_stressed_count = 0
-    groundwater_recharge_sum_mm = 0.0
-    groundwater_recharge_sum_km3 = 0.0
-    aquifer_storage_sum = 0.0
-    aquifer_quality_sum = 0.0
-    aquifer_productivity_sum = 0.0
-    aquifer_risk_sum = 0.0
-    aquifer_assigned_cell_ids: set[int] = set()
-    aquifer_cell_invalid = False
-    for cell in cells_payload:
-        cell_id = int(cell.get("id", -1))
-        aquifer_class = str(cell.get("aquifer_class", ""))
-        recharge_mm = float(cell.get("groundwater_recharge_mm_y", -1.0))
-        recharge_km3 = float(cell.get("groundwater_recharge_km3_y", -1.0))
-        storage = float(cell.get("aquifer_storage_index", -1.0))
-        quality = float(cell.get("aquifer_quality_index", -1.0))
-        productivity = float(cell.get("aquifer_productivity_index", -1.0))
-        risk = float(cell.get("aquifer_extraction_risk_index", -1.0))
-        system_id = int(cell.get("aquifer_system_id", -2))
-        area = max(0.0, float(cell.get("area_km2", 0.0)))
-        water_body = str(cell.get("water_body_type", "land"))
-        aquifer_class_counts[aquifer_class] = aquifer_class_counts.get(aquifer_class, 0) + 1
-        if (
-            not aquifer_class
-            or recharge_mm < 0.0
-            or recharge_km3 < 0.0
-            or abs(recharge_km3 - recharge_mm * area * 0.000001) > max(0.001, recharge_km3 * 0.0001)
-            or not 0.0 <= storage <= 1.0
-            or not 0.0 <= quality <= 1.0
-            or not 0.0 <= productivity <= 1.0
-            or not 0.0 <= risk <= 1.0
-            or system_id < -1
-            or (water_body in {"ocean", "continental_shelf", "inland_sea"} and aquifer_class != "marine_excluded")
-        ):
-            aquifer_cell_invalid = True
-            break
-        if aquifer_class != "marine_excluded":
-            aquifer_cell_count += 1
-            groundwater_recharge_sum_mm += recharge_mm
-            groundwater_recharge_sum_km3 += recharge_km3
-            aquifer_storage_sum += storage
-            aquifer_quality_sum += quality
-            aquifer_productivity_sum += productivity
-            aquifer_risk_sum += risk
-            groundwater_recharge_cell_count += 1 if recharge_mm >= 50.0 else 0
-            high_productivity_aquifer_count += 1 if productivity >= 0.65 else 0
-            groundwater_stressed_count += 1 if risk >= 0.65 else 0
-        if system_id >= 0:
-            aquifer_assigned_cell_ids.add(cell_id)
-    if aquifer_cell_invalid:
-        failures.append("aquifer cell fields invalid")
-    if aquifer_class_counts != {str(key): int(value) for key, value in summary.get("aquifer_class_counts", {}).items()}:
-        failures.append("aquifer_class_counts does not match cells")
-    if int(summary.get("aquifer_cell_count", -1)) != aquifer_cell_count:
-        failures.append("aquifer_cell_count does not match cells")
-    aquifer_divisor = float(aquifer_cell_count) if aquifer_cell_count else 1.0
-    expected_aquifer_counts = {
-        "aquifer_system_count": len(aquifer_systems),
-        "groundwater_recharge_cell_count": groundwater_recharge_cell_count,
-        "high_productivity_aquifer_cell_count": high_productivity_aquifer_count,
-        "groundwater_stressed_cell_count": groundwater_stressed_count,
-    }
-    for key, expected in expected_aquifer_counts.items():
-        if int(summary.get(key, -1)) != expected:
-            failures.append(f"{key} does not match aquifer cells")
-            break
-    expected_aquifer_means = {
-        "mean_groundwater_recharge_mm_y": groundwater_recharge_sum_mm / aquifer_divisor if aquifer_cell_count else 0.0,
-        "mean_aquifer_storage_index": aquifer_storage_sum / aquifer_divisor if aquifer_cell_count else 0.0,
-        "mean_aquifer_quality_index": aquifer_quality_sum / aquifer_divisor if aquifer_cell_count else 0.0,
-        "mean_aquifer_productivity_index": aquifer_productivity_sum / aquifer_divisor if aquifer_cell_count else 0.0,
-        "mean_aquifer_extraction_risk_index": aquifer_risk_sum / aquifer_divisor if aquifer_cell_count else 0.0,
-    }
-    for key, expected in expected_aquifer_means.items():
-        if abs(float(summary.get(key, 0.0)) - expected) > 0.001:
-            failures.append(f"{key} does not match aquifer cells")
-            break
-    if abs(float(summary.get("total_groundwater_recharge_km3_y", 0.0)) - groundwater_recharge_sum_km3) > max(0.001, groundwater_recharge_sum_km3 * 0.0001):
-        failures.append("total_groundwater_recharge_km3_y does not match cells")
-    aquifer_system_keys = {
-        "id",
-        "basin_id",
-        "aquifer_class",
-        "primary_lithology",
-        "dominant_landform",
-        "cell_count",
-        "cell_ids",
-        "area_km2",
-        "mean_groundwater_recharge_mm_y",
-        "total_groundwater_recharge_km3_y",
-        "mean_aquifer_storage_index",
-        "mean_aquifer_quality_index",
-        "mean_aquifer_productivity_index",
-        "mean_aquifer_extraction_risk_index",
-        "recharge_cell_count",
-        "high_productivity_cell_count",
-        "stressed_cell_count",
-        "closed_basin_fraction",
-        "aquifer_class_counts",
-    }
-    if aquifer_systems and not aquifer_system_keys.issubset(aquifer_systems[0]):
-        failures.append("aquifer system fields missing")
-    aquifer_system_ids: set[int] = set()
-    aquifer_system_cell_ids: set[int] = set()
-    aquifer_system_invalid = False
-    for index, system in enumerate(aquifer_systems):
-        system_id = int(system.get("id", -1))
-        cell_ids_for_system = system.get("cell_ids", [])
-        if not isinstance(cell_ids_for_system, list):
-            aquifer_system_invalid = True
-            break
-        group_cells = [cells_by_id.get(int(cell_id)) for cell_id in cell_ids_for_system]
-        if any(cell is None for cell in group_cells):
-            aquifer_system_invalid = True
-            break
-        valid_group_cells = [cell for cell in group_cells if cell is not None]
-        basin_id = int(system.get("basin_id", -1))
-        group_count = len(valid_group_cells)
-        area_sum = sum(max(0.0, float(cell.get("area_km2", 0.0))) for cell in valid_group_cells)
-        recharge_mm_sum = sum(float(cell.get("groundwater_recharge_mm_y", 0.0)) for cell in valid_group_cells)
-        recharge_km3_sum = sum(float(cell.get("groundwater_recharge_km3_y", 0.0)) for cell in valid_group_cells)
-        storage_group_sum = sum(float(cell.get("aquifer_storage_index", 0.0)) for cell in valid_group_cells)
-        quality_group_sum = sum(float(cell.get("aquifer_quality_index", 0.0)) for cell in valid_group_cells)
-        productivity_group_sum = sum(float(cell.get("aquifer_productivity_index", 0.0)) for cell in valid_group_cells)
-        risk_group_sum = sum(float(cell.get("aquifer_extraction_risk_index", 0.0)) for cell in valid_group_cells)
-        system_class_counts: dict[str, int] = {}
-        for cell in valid_group_cells:
-            aquifer_system_cell_ids.add(int(cell.get("id", -1)))
-            class_name = str(cell.get("aquifer_class", ""))
-            system_class_counts[class_name] = system_class_counts.get(class_name, 0) + 1
-        aquifer_system_ids.add(system_id)
-        if (
-            system_id != index
-            or group_count <= 0
-            or int(system.get("cell_count", -1)) != group_count
-            or any(int(cell.get("aquifer_system_id", -1)) != system_id for cell in valid_group_cells)
-            or any(int(cell.get("basin_id", -2)) != basin_id for cell in valid_group_cells)
-            or any(str(cell.get("aquifer_class", "")) == "marine_excluded" for cell in valid_group_cells)
-            or not str(system.get("aquifer_class", "")).strip()
-            or not str(system.get("primary_lithology", "")).strip()
-            or not str(system.get("dominant_landform", "")).strip()
-            or abs(float(system.get("area_km2", 0.0)) - area_sum) > max(0.001, area_sum * 0.0001)
-            or abs(float(system.get("mean_groundwater_recharge_mm_y", 0.0)) - recharge_mm_sum / group_count) > 0.001
-            or abs(float(system.get("total_groundwater_recharge_km3_y", 0.0)) - recharge_km3_sum) > max(0.001, recharge_km3_sum * 0.0001)
-            or abs(float(system.get("mean_aquifer_storage_index", 0.0)) - storage_group_sum / group_count) > 0.001
-            or abs(float(system.get("mean_aquifer_quality_index", 0.0)) - quality_group_sum / group_count) > 0.001
-            or abs(float(system.get("mean_aquifer_productivity_index", 0.0)) - productivity_group_sum / group_count) > 0.001
-            or abs(float(system.get("mean_aquifer_extraction_risk_index", 0.0)) - risk_group_sum / group_count) > 0.001
-            or int(system.get("recharge_cell_count", -1)) != sum(1 for cell in valid_group_cells if float(cell.get("groundwater_recharge_mm_y", 0.0)) >= 50.0)
-            or int(system.get("high_productivity_cell_count", -1)) != sum(1 for cell in valid_group_cells if float(cell.get("aquifer_productivity_index", 0.0)) >= 0.65)
-            or int(system.get("stressed_cell_count", -1)) != sum(1 for cell in valid_group_cells if float(cell.get("aquifer_extraction_risk_index", 0.0)) >= 0.65)
-            or not 0.0 <= float(system.get("closed_basin_fraction", -1.0)) <= 1.0
-            or system_class_counts != {str(key): int(value) for key, value in system.get("aquifer_class_counts", {}).items()}
-        ):
-            aquifer_system_invalid = True
-            break
-    if aquifer_system_invalid:
-        failures.append("aquifer system records invalid")
-    if len(aquifer_system_ids) != len(aquifer_systems):
-        failures.append("aquifer system ids are not unique")
-    if aquifer_system_cell_ids != aquifer_assigned_cell_ids:
-        failures.append("aquifer system membership does not match cells")
-
-    groundwater_flow_systems = payload.get("groundwater_flow_systems", [])
-    groundwater_flow_summary_keys = {
-        "groundwater_flow_cell_count",
-        "groundwater_flow_system_count",
-        "groundwater_discharge_cell_count",
-        "spring_candidate_cell_count",
-        "baseflow_supported_river_cell_count",
-        "total_groundwater_discharge_km3_y",
-        "total_groundwater_lateral_flow_km3_y",
-        "total_groundwater_internal_lateral_flow_km3_y",
-        "total_groundwater_retained_storage_km3_y",
-        "groundwater_flow_mass_balance_residual_km3_y",
-        "total_groundwater_flow_balance_residual_km3_y",
-        "mean_groundwater_gradient_index",
-        "mean_groundwater_discharge_mm_y",
-        "mean_spring_discharge_index",
-        "mean_baseflow_support_index",
-        "groundwater_flow_regime_counts",
-    }
-    if not groundwater_flow_summary_keys.issubset(summary):
-        failures.append("groundwater flow summary metrics missing")
-    if not isinstance(groundwater_flow_systems, list):
-        failures.append("groundwater_flow_systems missing")
-        groundwater_flow_systems = []
-    groundwater_flow_cell_keys = {
-        "groundwater_hydraulic_head_m",
-        "groundwater_gradient_index",
-        "groundwater_lateral_flow_km3_y",
-        "groundwater_lateral_inflow_km3_y",
-        "groundwater_available_volume_km3_y",
-        "groundwater_internal_lateral_outflow_km3_y",
-        "groundwater_discharge_mm_y",
-        "groundwater_discharge_km3_y",
-        "groundwater_retained_storage_km3_y",
-        "groundwater_flow_mass_balance_residual_km3_y",
-        "groundwater_flow_to_cell_id",
-        "spring_discharge_index",
-        "baseflow_support_index",
-        "groundwater_flow_regime",
-        "groundwater_flow_system_id",
-    }
-    if cells_payload and not groundwater_flow_cell_keys.issubset(cells_payload[0]):
-        failures.append("groundwater flow cell fields missing")
-    groundwater_flow_regimes = {
-        "excluded",
-        "recharge_mound",
-        "recharge_throughflow",
-        "throughflow",
-        "discharge_zone",
-        "lowland_discharge",
-        "stagnant_or_low_yield",
-    }
-    groundwater_flow_regime_counts: dict[str, int] = {}
-    groundwater_flow_cells: list[dict[str, Any]] = []
-    groundwater_flow_assigned_cell_ids: set[int] = set()
-    groundwater_flow_cell_count = 0
-    groundwater_discharge_cell_count = 0
-    spring_candidate_cell_count = 0
-    baseflow_supported_river_cell_count = 0
-    groundwater_discharge_sum_km3 = 0.0
-    groundwater_lateral_sum_km3 = 0.0
-    groundwater_recharge_sum_km3 = 0.0
-    groundwater_gradient_sum = 0.0
-    groundwater_discharge_sum_mm = 0.0
-    spring_sum = 0.0
-    baseflow_sum = 0.0
-    groundwater_flow_cell_invalid = False
-    for cell in cells_payload:
-        cell_id = int(cell.get("id", -1))
-        area = max(0.0, float(cell.get("area_km2", 0.0)))
-        aquifer_class = str(cell.get("aquifer_class", ""))
-        gradient = float(cell.get("groundwater_gradient_index", -1.0))
-        lateral_km3 = float(cell.get("groundwater_lateral_flow_km3_y", -1.0))
-        discharge_mm = float(cell.get("groundwater_discharge_mm_y", -1.0))
-        discharge_km3 = float(cell.get("groundwater_discharge_km3_y", -1.0))
-        flow_to = int(cell.get("groundwater_flow_to_cell_id", -2))
-        spring_index = float(cell.get("spring_discharge_index", -1.0))
-        baseflow_index = float(cell.get("baseflow_support_index", -1.0))
-        flow_regime = str(cell.get("groundwater_flow_regime", ""))
-        flow_system_id = int(cell.get("groundwater_flow_system_id", -2))
-        groundwater_flow_regime_counts[flow_regime] = groundwater_flow_regime_counts.get(flow_regime, 0) + 1
-        flow_to_valid = flow_to == -1 or (flow_to in cells_by_id and flow_to in {int(neighbor_id) for neighbor_id in cell.get("neighbors", [])})
-        discharge_volume_valid = abs(discharge_km3 - discharge_mm * area * 0.000001) <= max(0.001, discharge_km3 * 0.0001)
-        if (
-            flow_regime not in groundwater_flow_regimes
-            or not 0.0 <= gradient <= 1.0
-            or lateral_km3 < 0.0
-            or discharge_mm < 0.0
-            or discharge_km3 < 0.0
-            or not discharge_volume_valid
-            or flow_system_id < -1
-            or not 0.0 <= spring_index <= 1.0
-            or not 0.0 <= baseflow_index <= 1.0
-            or not flow_to_valid
-            or (aquifer_class == "marine_excluded" and flow_regime != "excluded")
-        ):
-            groundwater_flow_cell_invalid = True
-            break
-        if aquifer_class != "marine_excluded":
-            groundwater_flow_cells.append(cell)
-            groundwater_recharge_sum_km3 += float(cell.get("groundwater_recharge_km3_y", 0.0))
-            groundwater_discharge_sum_km3 += discharge_km3
-            groundwater_lateral_sum_km3 += lateral_km3
-            groundwater_gradient_sum += gradient
-            groundwater_discharge_sum_mm += discharge_mm
-            spring_sum += spring_index
-            baseflow_sum += baseflow_index
-            groundwater_discharge_cell_count += 1 if discharge_mm >= 25.0 else 0
-            spring_candidate_cell_count += 1 if spring_index >= 0.45 else 0
-            baseflow_supported_river_cell_count += 1 if bool(cell.get("is_river", False)) and baseflow_index >= 0.35 else 0
-        if flow_system_id >= 0:
-            groundwater_flow_assigned_cell_ids.add(cell_id)
-            groundwater_flow_cell_count += 1
-    if groundwater_flow_cell_invalid:
-        failures.append("groundwater flow cell fields invalid")
-    if groundwater_flow_regime_counts != {str(key): int(value) for key, value in summary.get("groundwater_flow_regime_counts", {}).items()}:
-        failures.append("groundwater_flow_regime_counts does not match cells")
-    expected_groundwater_flow_counts = {
-        "groundwater_flow_cell_count": groundwater_flow_cell_count,
-        "groundwater_flow_system_count": len(groundwater_flow_systems),
-        "groundwater_discharge_cell_count": groundwater_discharge_cell_count,
-        "spring_candidate_cell_count": spring_candidate_cell_count,
-        "baseflow_supported_river_cell_count": baseflow_supported_river_cell_count,
-    }
-    for key, expected in expected_groundwater_flow_counts.items():
-        if int(summary.get(key, -1)) != expected:
-            failures.append(f"{key} does not match groundwater flow cells")
-            break
-    groundwater_flow_divisor = float(len(groundwater_flow_cells)) if groundwater_flow_cells else 1.0
-    expected_groundwater_flow_means = {
-        "mean_groundwater_gradient_index": groundwater_gradient_sum / groundwater_flow_divisor if groundwater_flow_cells else 0.0,
-        "mean_groundwater_discharge_mm_y": groundwater_discharge_sum_mm / groundwater_flow_divisor if groundwater_flow_cells else 0.0,
-        "mean_spring_discharge_index": spring_sum / groundwater_flow_divisor if groundwater_flow_cells else 0.0,
-        "mean_baseflow_support_index": baseflow_sum / groundwater_flow_divisor if groundwater_flow_cells else 0.0,
-    }
-    for key, expected in expected_groundwater_flow_means.items():
-        if abs(float(summary.get(key, 0.0)) - expected) > 0.001:
-            failures.append(f"{key} does not match groundwater flow cells")
-            break
-    if abs(float(summary.get("total_groundwater_discharge_km3_y", 0.0)) - groundwater_discharge_sum_km3) > max(0.001, groundwater_discharge_sum_km3 * 0.0001):
-        failures.append("total_groundwater_discharge_km3_y does not match cells")
-    if abs(float(summary.get("total_groundwater_lateral_flow_km3_y", 0.0)) - groundwater_lateral_sum_km3) > max(0.001, groundwater_lateral_sum_km3 * 0.0001):
-        failures.append("total_groundwater_lateral_flow_km3_y does not match cells")
-    expected_groundwater_residual = groundwater_recharge_sum_km3 - groundwater_discharge_sum_km3
-    if groundwater_discharge_sum_km3 > groundwater_recharge_sum_km3 + max(
-        0.001, groundwater_recharge_sum_km3 * 0.0001
-    ):
-        failures.append("groundwater discharge exceeds finite recharge source")
-    if abs(float(summary.get("total_groundwater_flow_balance_residual_km3_y", 0.0)) - expected_groundwater_residual) > max(0.001, abs(expected_groundwater_residual) * 0.0001):
-        failures.append("total_groundwater_flow_balance_residual_km3_y does not match cells")
-
-    groundwater_flow_system_keys = {
-        "id",
-        "aquifer_system_id",
-        "basin_id",
-        "flow_regime",
-        "cell_count",
-        "cell_ids",
-        "recharge_cell_ids",
-        "discharge_cell_ids",
-        "terminal_cell_ids",
-        "outlet_cell_id",
-        "area_km2",
-        "total_groundwater_recharge_km3_y",
-        "total_groundwater_lateral_inflow_km3_y",
-        "total_groundwater_internal_lateral_outflow_km3_y",
-        "total_groundwater_discharge_km3_y",
-        "total_groundwater_lateral_flow_km3_y",
-        "total_groundwater_retained_storage_km3_y",
-        "groundwater_flow_mass_balance_residual_km3_y",
-        "groundwater_balance_residual_km3_y",
-        "discharge_to_recharge_ratio",
-        "mean_hydraulic_head_m",
-        "mean_groundwater_gradient_index",
-        "mean_groundwater_discharge_mm_y",
-        "mean_spring_discharge_index",
-        "mean_baseflow_support_index",
-        "mean_aquifer_extraction_risk_index",
-        "river_cell_count",
-        "lake_cell_count",
-        "wetland_cell_count",
-        "closed_basin_cell_count",
-        "flow_regime_counts",
-    }
-    if groundwater_flow_systems and not groundwater_flow_system_keys.issubset(groundwater_flow_systems[0]):
-        failures.append("groundwater flow system fields missing")
-    groundwater_flow_system_ids: set[int] = set()
-    groundwater_flow_system_cell_ids: set[int] = set()
-    groundwater_flow_system_invalid = False
-    aquifer_system_ids_by_id = {int(system.get("id", -1)) for system in aquifer_systems}
-    for index, system in enumerate(groundwater_flow_systems):
-        system_id = int(system.get("id", -1))
-        aquifer_system_id = int(system.get("aquifer_system_id", -1))
-        cell_ids_for_system = system.get("cell_ids", [])
-        recharge_cell_ids = system.get("recharge_cell_ids", [])
-        discharge_cell_ids = system.get("discharge_cell_ids", [])
-        terminal_cell_ids = system.get("terminal_cell_ids", [])
-        if (
-            not isinstance(cell_ids_for_system, list)
-            or not isinstance(recharge_cell_ids, list)
-            or not isinstance(discharge_cell_ids, list)
-            or not isinstance(terminal_cell_ids, list)
-        ):
-            groundwater_flow_system_invalid = True
-            break
-        group_cells = [cells_by_id.get(int(cell_id)) for cell_id in cell_ids_for_system]
-        if any(cell is None for cell in group_cells):
-            groundwater_flow_system_invalid = True
-            break
-        valid_group_cells = [cell for cell in group_cells if cell is not None]
-        group_count = len(valid_group_cells)
-        group_ids = {int(cell.get("id", -1)) for cell in valid_group_cells}
-        groundwater_flow_system_cell_ids.update(group_ids)
-        area_sum = sum(max(0.0, float(cell.get("area_km2", 0.0))) for cell in valid_group_cells)
-        recharge_sum = sum(float(cell.get("groundwater_recharge_km3_y", 0.0)) for cell in valid_group_cells)
-        lateral_inflow_sum = sum(float(cell.get("groundwater_lateral_inflow_km3_y", 0.0)) for cell in valid_group_cells)
-        internal_lateral_outflow_sum = sum(
-            float(cell.get("groundwater_internal_lateral_outflow_km3_y", 0.0))
-            for cell in valid_group_cells
-        )
-        discharge_sum = sum(float(cell.get("groundwater_discharge_km3_y", 0.0)) for cell in valid_group_cells)
-        lateral_sum = sum(float(cell.get("groundwater_lateral_flow_km3_y", 0.0)) for cell in valid_group_cells)
-        retained_storage_sum = sum(float(cell.get("groundwater_retained_storage_km3_y", 0.0)) for cell in valid_group_cells)
-        flow_mass_balance_residual_sum = sum(
-            float(cell.get("groundwater_flow_mass_balance_residual_km3_y", 0.0))
-            for cell in valid_group_cells
-        )
-        head_sum = sum(float(cell.get("groundwater_hydraulic_head_m", 0.0)) for cell in valid_group_cells)
-        gradient_sum = sum(float(cell.get("groundwater_gradient_index", 0.0)) for cell in valid_group_cells)
-        discharge_mm_sum = sum(float(cell.get("groundwater_discharge_mm_y", 0.0)) for cell in valid_group_cells)
-        spring_group_sum = sum(float(cell.get("spring_discharge_index", 0.0)) for cell in valid_group_cells)
-        baseflow_group_sum = sum(float(cell.get("baseflow_support_index", 0.0)) for cell in valid_group_cells)
-        extraction_group_sum = sum(float(cell.get("aquifer_extraction_risk_index", 0.0)) for cell in valid_group_cells)
-        system_regime_counts: dict[str, int] = {}
-        for cell in valid_group_cells:
-            regime_name = str(cell.get("groundwater_flow_regime", ""))
-            system_regime_counts[regime_name] = system_regime_counts.get(regime_name, 0) + 1
-        groundwater_flow_system_ids.add(system_id)
-        expected_discharge_ids = {
-            int(cell.get("id", -1))
-            for cell in valid_group_cells
-            if float(cell.get("groundwater_discharge_mm_y", 0.0)) >= 25.0 or float(cell.get("spring_discharge_index", 0.0)) >= 0.45
-        }
-        expected_recharge_ids = {
-            int(cell.get("id", -1)) for cell in valid_group_cells if float(cell.get("groundwater_recharge_mm_y", 0.0)) >= 50.0
-        }
-        expected_terminal_ids = {
-            int(cell.get("id", -1))
-            for cell in valid_group_cells
-            if int(cell.get("groundwater_flow_to_cell_id", -1)) < 0 or int(cell.get("groundwater_flow_to_cell_id", -1)) not in group_ids
-        }
-        expected_residual = recharge_sum - discharge_sum
-        expected_ratio = discharge_sum / recharge_sum if recharge_sum > 0.0 else 0.0
-        group_divisor = float(group_count) if group_count else 1.0
-        if (
-            system_id != index
-            or group_count <= 0
-            or aquifer_system_id not in aquifer_system_ids_by_id
-            or int(system.get("cell_count", -1)) != group_count
-            or any(int(cell.get("groundwater_flow_system_id", -1)) != system_id for cell in valid_group_cells)
-            or any(int(cell.get("aquifer_system_id", -1)) != aquifer_system_id for cell in valid_group_cells)
-            or str(system.get("flow_regime", "")) not in groundwater_flow_regimes
-            or int(system.get("outlet_cell_id", -1)) not in group_ids
-            or set(map(int, recharge_cell_ids)) != expected_recharge_ids
-            or set(map(int, discharge_cell_ids)) != expected_discharge_ids
-            or set(map(int, terminal_cell_ids)) != expected_terminal_ids
-            or abs(float(system.get("area_km2", 0.0)) - area_sum) > max(0.001, area_sum * 0.0001)
-            or abs(float(system.get("total_groundwater_recharge_km3_y", 0.0)) - recharge_sum) > max(0.001, recharge_sum * 0.0001)
-            or abs(float(system.get("total_groundwater_lateral_inflow_km3_y", 0.0)) - lateral_inflow_sum) > max(0.001, lateral_inflow_sum * 0.0001)
-            or abs(float(system.get("total_groundwater_internal_lateral_outflow_km3_y", 0.0)) - internal_lateral_outflow_sum) > max(0.001, internal_lateral_outflow_sum * 0.0001)
-            or abs(float(system.get("total_groundwater_discharge_km3_y", 0.0)) - discharge_sum) > max(0.001, discharge_sum * 0.0001)
-            or abs(float(system.get("total_groundwater_lateral_flow_km3_y", 0.0)) - lateral_sum) > max(0.001, lateral_sum * 0.0001)
-            or abs(float(system.get("total_groundwater_retained_storage_km3_y", 0.0)) - retained_storage_sum) > max(0.001, retained_storage_sum * 0.0001)
-            or abs(float(system.get("groundwater_flow_mass_balance_residual_km3_y", 0.0)) - flow_mass_balance_residual_sum) > 0.000001
-            or abs(recharge_sum + lateral_inflow_sum - internal_lateral_outflow_sum - discharge_sum - retained_storage_sum - flow_mass_balance_residual_sum) > 0.001
-            or abs(float(system.get("groundwater_balance_residual_km3_y", 0.0)) - expected_residual) > max(0.001, abs(expected_residual) * 0.0001)
-            or abs(float(system.get("discharge_to_recharge_ratio", 0.0)) - expected_ratio) > 0.001
-            or abs(float(system.get("mean_hydraulic_head_m", 0.0)) - head_sum / group_divisor) > 0.001
-            or abs(float(system.get("mean_groundwater_gradient_index", 0.0)) - gradient_sum / group_divisor) > 0.001
-            or abs(float(system.get("mean_groundwater_discharge_mm_y", 0.0)) - discharge_mm_sum / group_divisor) > 0.001
-            or abs(float(system.get("mean_spring_discharge_index", 0.0)) - spring_group_sum / group_divisor) > 0.001
-            or abs(float(system.get("mean_baseflow_support_index", 0.0)) - baseflow_group_sum / group_divisor) > 0.001
-            or abs(float(system.get("mean_aquifer_extraction_risk_index", 0.0)) - extraction_group_sum / group_divisor) > 0.001
-            or int(system.get("river_cell_count", -1)) != sum(1 for cell in valid_group_cells if bool(cell.get("is_river", False)))
-            or int(system.get("lake_cell_count", -1)) != sum(1 for cell in valid_group_cells if bool(cell.get("is_lake", False)))
-            or int(system.get("wetland_cell_count", -1)) != sum(1 for cell in valid_group_cells if float(cell.get("wetland_extent_index", 0.0)) >= 0.35)
-            or int(system.get("closed_basin_cell_count", -1)) != sum(1 for cell in valid_group_cells if bool(cell.get("is_closed_basin", False)))
-            or system_regime_counts != {str(key): int(value) for key, value in system.get("flow_regime_counts", {}).items()}
-        ):
-            groundwater_flow_system_invalid = True
-            break
-    if groundwater_flow_system_invalid:
-        failures.append("groundwater flow system records invalid")
-    if len(groundwater_flow_system_ids) != len(groundwater_flow_systems):
-        failures.append("groundwater flow system ids are not unique")
-    if groundwater_flow_system_cell_ids != groundwater_flow_assigned_cell_ids:
-        failures.append("groundwater flow system membership does not match cells")
+    if not natural_groundwater:
+        failures.extend(_validate_groundwater_recharge(payload, summary, cells_by_id))
+        failures.extend(_validate_aquifer_resources(payload, summary, cells_by_id))
+        failures.extend(_validate_groundwater_flow(payload, summary, cells_by_id))
+        failures.extend(_validate_legacy_groundwater_records(payload, summary, cells_payload, cells_by_id))
 
     karst_systems = payload.get("karst_systems", [])
     karst_summary_keys = {
@@ -15247,6 +13989,7 @@ def validate(
     if karst_system_cell_ids != karst_assigned_cell_ids or karst_assigned_cell_ids != karst_candidate_ids:
         failures.append("karst system membership does not match cells")
 
+    # The independent ecosystem contract audit ran before eager consumers.
     vegetation_histories = payload.get("vegetation_succession_histories", [])
     renewable_records = payload.get("renewable_resource_records", [])
     ecosystem_summary_keys = {
@@ -15319,7 +14062,9 @@ def validate(
             or not 0.0 <= wildfire <= 1.0
             or not 0.0 <= disturbance <= 1.0
             or not stage
-            or recovery_years < 1
+            or (recovery_years < 1 and not (
+                ecology_modes["ecosystem"] and cell["vegetation_recovery_supported"] is False and recovery_years == 0
+            ))
             or not 0.0 <= forest_growth <= 1.0
             or not 0.0 <= fishery <= 1.0
             or (bool(cell.get("is_water", False)) and biomass != 0.0)
@@ -15336,14 +14081,14 @@ def validate(
         fishery_productivity_sum += fishery
         high_wildfire_spread_count += 1 if wildfire >= 0.65 else 0
         mature_vegetation_count += 1 if stage == "mature_closed_canopy" else 0
-        if not bool(cell.get("is_water", False)) and stage not in {"barren_ice", "pioneer_sparse_cover"} and biomass > 0.06:
+        if (not ecology_modes["ecosystem"] or cell["vegetation_succession_supported"] is True) and not bool(cell.get("is_water", False)) and stage not in {"barren_ice", "pioneer_sparse_cover"} and biomass > 0.06:
             expected_vegetation_history_cell_ids.add(cell_id)
         expected_type = ""
         expected_productivity = 0.0
-        if forest_growth >= 0.25:
+        if (not ecology_modes["ecosystem"] or (cell["forest_growth_supported"] is True and cell["vegetation_recovery_supported"] is True)) and forest_growth >= 0.25:
             expected_type = "forest_growth"
             expected_productivity = forest_growth
-        if fishery >= 0.35 and fishery >= expected_productivity:
+        if (not ecology_modes["ecosystem"] or (cell["fishery_productivity_supported"] is True and cell["vegetation_recovery_supported"] is True)) and fishery >= 0.35 and fishery >= expected_productivity:
             expected_type = "fishery_productivity"
             expected_productivity = fishery
         if expected_type:
@@ -15544,6 +14289,7 @@ def validate(
     if int(summary.get("fishery_productivity_resource_count", -1)) != renewable_type_counts.get("fishery_productivity", 0):
         failures.append("fishery_productivity_resource_count does not match records")
 
+    # Exact v3 score/support/conditional evidence coverage was audited above.
     species_range_records = payload.get("species_range_records", [])
     species_summary_keys = {
         "species_range_record_count",
@@ -15807,7 +14553,7 @@ def validate(
             or not isinstance(habitat_evidence, dict)
             or abs(float(habitat_evidence.get("mean_wetland_extent_index", 0.0)) - sum(float(cell.get("wetland_extent_index", 0.0)) for cell in valid_record_cells) / divisor) > 0.001
             or abs(float(habitat_evidence.get("mean_reef_growth_index", 0.0)) - sum(float(cell.get("reef_growth_index", 0.0)) for cell in valid_record_cells) / divisor) > 0.001
-            or abs(float(habitat_evidence.get("mean_fishery_productivity_index", 0.0)) - sum(float(cell.get("fishery_productivity_index", 0.0)) for cell in valid_record_cells) / divisor) > 0.001
+            or (not ecology_modes["species"] and abs(float(habitat_evidence.get("mean_fishery_productivity_index", 0.0)) - sum(float(cell.get("fishery_productivity_index", 0.0)) for cell in valid_record_cells) / divisor) > 0.001)
             or [int(value) for value in record.get("wetland_system_ids", [])] != expected_wetland_ids
             or [int(value) for value in record.get("reef_system_ids", [])] != expected_reef_ids
             or [int(value) for value in record.get("aquifer_system_ids", [])] != expected_aquifer_ids
@@ -15844,6 +14590,7 @@ def validate(
     ):
         failures.append("species_range_total_area_km2 does not match records")
 
+    # New fuel/ignition/front coverage has already passed independent replay.
     wildfire_histories = payload.get("wildfire_spread_histories", [])
     wildfire_summary_keys = {
         "wildfire_spread_history_count",
@@ -15921,9 +14668,9 @@ def validate(
         wildfire_fuel_sum += fuel
         wildfire_wind_sum += wind_alignment
         wildfire_firebreak_sum += firebreak
-        high_wildfire_ignition_count += 1 if ignition >= 0.28 else 0
-        high_wildfire_fuel_count += 1 if fuel >= 0.35 else 0
-        high_wildfire_firebreak_count += 1 if firebreak >= 0.55 else 0
+        high_wildfire_ignition_count += 1 if ignition >= 0.28 and (not ecology_modes["wildfire"] or cell["wildfire_ignition_potential_supported"] is True) else 0
+        high_wildfire_fuel_count += 1 if fuel >= 0.35 and (not ecology_modes["wildfire"] or cell["wildfire_fuel_continuity_supported"] is True) else 0
+        high_wildfire_firebreak_count += 1 if firebreak >= 0.55 and (not ecology_modes["wildfire"] or cell["wildfire_firebreak_supported"] is True) else 0
         if history_ids:
             wildfire_history_ids_by_cell_from_cells[cell_id] = history_ids
     if wildfire_cell_invalid:
@@ -16115,7 +14862,12 @@ def validate(
     if not isinstance(resource_deposits, list):
         failures.append("resource_deposits missing")
         resource_deposits = []
-    resource_cells = [cell for cell in cells_payload if str(cell.get("resource", "none")) != "none"]
+    resource_cells = [
+        cell for cell in cells_payload
+        if str(cell.get("resource", "none")) != "none"
+        and (not ecology_modes["resources"] or cell["resource"] != "coastal_fisheries"
+             or biological_resource_support[cell["id"]][1])
+    ]
     if int(summary.get("resource_deposit_count", -1)) != len(resource_deposits):
         failures.append("resource_deposit_count does not match resource_deposits length")
     if len(resource_deposits) != len(resource_cells):
@@ -16165,9 +14917,9 @@ def validate(
         deposit_class = str(deposit.get("deposit_class", ""))
         evidence = deposit.get("formation_evidence", {})
         reserve = float(deposit.get("reserve_potential_index", -1.0))
-        accessibility = float(deposit.get("accessibility_index", -1.0))
+        accessibility = deposit["accessibility_index"] if ecology_modes["resource_access"] else float(deposit.get("accessibility_index", -1.0))
         hazard = float(deposit.get("extraction_hazard_index", -1.0))
-        viability = float(deposit.get("economic_viability_index", -1.0))
+        viability = deposit["economic_viability_index"] if ecology_modes["resource_access"] else float(deposit.get("economic_viability_index", -1.0))
         renewability = float(deposit.get("renewability_index", -1.0))
         confidence = float(deposit.get("geologic_confidence_index", -1.0))
         area = float(deposit.get("area_km2", -1.0))
@@ -16175,7 +14927,8 @@ def validate(
         resource_deposit_cell_ids.add(cell_id)
         resource_deposit_class_counts[deposit_class] = resource_deposit_class_counts.get(deposit_class, 0) + 1
         reserve_sum += reserve
-        viability_sum += viability
+        if viability is not None:
+            viability_sum += viability
         confidence_sum += confidence
         resource_area_sum += area
         if deposit_class == "metal":
@@ -16184,7 +14937,7 @@ def validate(
             energy_deposits += 1
         if deposit_class == "bioproductive":
             agricultural_deposits += 1
-        if viability >= 0.65:
+        if viability is not None and viability >= 0.65:
             high_viability_deposits += 1
         if (
             deposit_id != index
@@ -16204,9 +14957,9 @@ def validate(
             or area < 0.0
             or abs(area - max(0.0, float(cell.get("area_km2", 0.0)))) > max(0.001, area * 0.0001)
             or not 0.0 <= reserve <= 1.0
-            or not 0.0 <= accessibility <= 1.0
+            or (accessibility is not None and not 0.0 <= accessibility <= 1.0)
             or not 0.0 <= hazard <= 1.0
-            or not 0.0 <= viability <= 1.0
+            or (viability is not None and not 0.0 <= viability <= 1.0)
             or not 0.0 <= renewability <= 1.0
             or not 0.0 <= confidence <= 1.0
             or not isinstance(evidence, dict)
@@ -16233,16 +14986,20 @@ def validate(
         "agricultural_resource_deposit_count": agricultural_deposits,
         "high_viability_resource_deposit_count": high_viability_deposits,
     }
-    for key, expected in expected_resource_metrics.items():
-        if int(summary.get(key, -1)) != expected:
-            failures.append(f"{key} does not match resource deposits")
-            break
+    failures.extend(_resource_count_mismatches(
+        summary, expected_resource_metrics,
+        parent_support_verified=ecology_modes["resources"], records="resource deposits",
+    ))
     expected_resource_means = {
         "mean_resource_reserve_potential_index": reserve_sum / resource_deposit_divisor if resource_deposits else 0.0,
         "mean_resource_economic_viability_index": viability_sum / resource_deposit_divisor if resource_deposits else 0.0,
         "mean_resource_geologic_confidence_index": confidence_sum / resource_deposit_divisor if resource_deposits else 0.0,
     }
     for key, expected in expected_resource_means.items():
+        if ecology_modes["resource_access"] and key == "mean_resource_economic_viability_index":
+            # Full-precision access replay above checks complete coverage and
+            # the nullable whole-domain mean; no supported-only mean is inferred.
+            continue
         if abs(float(summary.get(key, 0.0)) - expected) > 0.001:
             failures.append(f"{key} does not match resource deposits")
             break
@@ -16513,7 +15270,7 @@ def validate(
             or plate_ids != expected_plate_ids
             or tectonic_zone_ids != expected_zone_ids
             or fault_system_ids != expected_fault_ids
-            or not 0.0 <= float(system.get("mean_resource_viability_index", -1.0)) <= 1.0
+            or (not ecology_modes["resource_access"] and not 0.0 <= float(system.get("mean_resource_viability_index", -1.0)) <= 1.0)
             or not 0.0 <= float(system.get("ore_genesis_confidence_index", -1.0)) <= 1.0
             or int(system.get("formation_step_count", -1)) != len(steps)
             or not steps
@@ -16548,15 +15305,16 @@ def validate(
                 break
         if ore_system_invalid:
             break
-        expected_viability = (
-            sum(float(deposit.get("economic_viability_index", 0.0)) for deposit in deposit_records if isinstance(deposit, dict))
-            / float(len(deposit_ids))
-            if deposit_ids
-            else 0.0
-        )
-        if abs(float(system.get("mean_resource_viability_index", 0.0)) - expected_viability) > 0.001:
-            ore_system_invalid = True
-            break
+        if not ecology_modes["resource_access"]:
+            expected_viability = (
+                sum(float(deposit.get("economic_viability_index", 0.0)) for deposit in deposit_records if isinstance(deposit, dict))
+                / float(len(deposit_ids))
+                if deposit_ids
+                else 0.0
+            )
+            if abs(float(system.get("mean_resource_viability_index", 0.0)) - expected_viability) > 0.001:
+                ore_system_invalid = True
+                break
         for step_index, step in enumerate(steps):
             if not isinstance(step, dict) or not ore_step_keys.issubset(step):
                 ore_system_invalid = True
@@ -17360,7 +16118,7 @@ def validate(
             or abs(area - float((deposit or {}).get("area_km2", 0.0))) > max(0.001, area * 0.0001)
             or not 0.0 <= potential <= 1.0
             or not 0.0 <= float(occurrence.get("market_value_index", -1.0)) <= 1.0
-            or not 0.0 <= float(occurrence.get("accessibility_index", -1.0)) <= 1.0
+            or (not ecology_modes["resource_access"] and not 0.0 <= float(occurrence.get("accessibility_index", -1.0)) <= 1.0)
             or not 0.0 <= float(occurrence.get("extraction_hazard_index", -1.0)) <= 1.0
             or not 0.0 <= confidence <= 1.0
             or not isinstance(evidence, dict)
@@ -17409,10 +16167,10 @@ def validate(
         + commodity_group_counts.get("fishery", 0),
         "high_potential_commodity_occurrence_count": high_potential_commodity_count,
     }
-    for key, expected in expected_commodity_counts.items():
-        if int(summary.get(key, -1)) != expected:
-            failures.append(f"{key} does not match commodity occurrences")
-            break
+    failures.extend(_resource_count_mismatches(
+        summary, expected_commodity_counts,
+        parent_support_verified=ecology_modes["resources"], records="commodity occurrences",
+    ))
     commodity_divisor = float(len(commodity_occurrences)) if commodity_occurrences else 1.0
     expected_commodity_means = {
         "mean_commodity_occurrence_potential_index": commodity_potential_sum / commodity_divisor
@@ -17427,236 +16185,19 @@ def validate(
             failures.append(f"{key} does not match commodity occurrences")
             break
 
-    agricultural_zones = payload.get("agricultural_zones", [])
-    mining_zones = payload.get("mining_zones", [])
-    land_use_summary_keys = {
-        "agricultural_zone_count",
-        "agricultural_zone_cell_count",
-        "agricultural_zone_total_area_km2",
-        "mean_agricultural_potential_index",
-        "mining_zone_count",
-        "mining_zone_cell_count",
-        "mining_zone_total_area_km2",
-        "mean_mining_potential_index",
-    }
-    if not land_use_summary_keys.issubset(summary):
-        failures.append("land use zone summary metrics missing")
-    if not isinstance(agricultural_zones, list):
-        failures.append("agricultural_zones missing")
-        agricultural_zones = []
-    if not isinstance(mining_zones, list):
-        failures.append("mining_zones missing")
-        mining_zones = []
-    land_use_cell_keys = {
-        "agricultural_potential_index",
-        "mining_potential_index",
-        "agricultural_zone_id",
-        "mining_zone_id",
-    }
-    if cells_payload and not land_use_cell_keys.issubset(cells_payload[0]):
-        failures.append("land use zone cell fields missing")
-    agricultural_candidate_ids: set[int] = set()
-    mining_candidate_ids: set[int] = set()
-    agricultural_potential_sum = 0.0
-    mining_potential_sum = 0.0
-    agricultural_candidate_area = 0.0
-    mining_candidate_area = 0.0
-    land_use_cell_invalid = False
-    for cell in cells_payload:
-        cell_id = int(cell.get("id", -1))
-        agricultural_potential = float(cell.get("agricultural_potential_index", -1.0))
-        mining_potential = float(cell.get("mining_potential_index", -1.0))
-        agricultural_zone_id = int(cell.get("agricultural_zone_id", -2))
-        mining_zone_id = int(cell.get("mining_zone_id", -2))
-        is_water = bool(cell.get("is_water", False))
-        area = max(0.0, float(cell.get("area_km2", 0.0)))
-        agricultural_potential_sum += agricultural_potential
-        mining_potential_sum += mining_potential
-        if agricultural_potential >= 0.58:
-            agricultural_candidate_ids.add(cell_id)
-            agricultural_candidate_area += area
-        if mining_potential >= 0.52:
-            mining_candidate_ids.add(cell_id)
-            mining_candidate_area += area
-        if (
-            not 0.0 <= agricultural_potential <= 1.0
-            or not 0.0 <= mining_potential <= 1.0
-            or agricultural_zone_id < -1
-            or mining_zone_id < -1
-            or (is_water and (agricultural_potential != 0.0 or mining_potential != 0.0))
-            or (is_water and (agricultural_zone_id != -1 or mining_zone_id != -1))
-        ):
-            land_use_cell_invalid = True
-            break
-    if land_use_cell_invalid:
-        failures.append("land use zone cell fields invalid")
-    if int(summary.get("agricultural_zone_count", -1)) != len(agricultural_zones):
-        failures.append("agricultural_zone_count does not match agricultural_zones length")
-    if int(summary.get("mining_zone_count", -1)) != len(mining_zones):
-        failures.append("mining_zone_count does not match mining_zones length")
-    if int(summary.get("agricultural_zone_cell_count", -1)) != len(agricultural_candidate_ids):
-        failures.append("agricultural_zone_cell_count does not match candidate cells")
-    if int(summary.get("mining_zone_cell_count", -1)) != len(mining_candidate_ids):
-        failures.append("mining_zone_cell_count does not match candidate cells")
+    # Natural-frontier checks below use these generic source lookups in both
+    # land-use versions. V2 land-use outputs were already independently replayed.
     cell_count_divisor = float(len(cells_payload)) if cells_payload else 1.0
-    if abs(float(summary.get("mean_agricultural_potential_index", 0.0)) - agricultural_potential_sum / cell_count_divisor) > 0.001:
-        failures.append("mean_agricultural_potential_index does not match cells")
-    if abs(float(summary.get("mean_mining_potential_index", 0.0)) - mining_potential_sum / cell_count_divisor) > 0.001:
-        failures.append("mean_mining_potential_index does not match cells")
-    if abs(float(summary.get("agricultural_zone_total_area_km2", 0.0)) - agricultural_candidate_area) > max(
-        0.001,
-        agricultural_candidate_area * 0.0001,
-    ):
-        failures.append("agricultural_zone_total_area_km2 does not match candidate cells")
-    if abs(float(summary.get("mining_zone_total_area_km2", 0.0)) - mining_candidate_area) > max(
-        0.001,
-        mining_candidate_area * 0.0001,
-    ):
-        failures.append("mining_zone_total_area_km2 does not match candidate cells")
-
     local_settlements = payload.get("settlements", [])
     local_routes = payload.get("routes", [])
     local_settlements = local_settlements if isinstance(local_settlements, list) else []
     local_routes = local_routes if isinstance(local_routes, list) else []
     settlement_by_id = {int(settlement.get("id", -1)): settlement for settlement in local_settlements if isinstance(settlement, dict)}
     route_by_id = {int(route.get("id", -1)): route for route in local_routes if isinstance(route, dict)}
-    resource_deposit_by_id = {
-        int(deposit.get("id", -1)): deposit for deposit in resource_deposits if isinstance(deposit, dict)
-    }
-    land_use_zone_keys = {
-        "id",
-        "zone_type",
-        "cell_count",
-        "cell_ids",
-        "area_km2",
-        "mean_potential_index",
-        "mean_fertility_index",
-        "dominant_resource",
-        "dominant_landform",
-        "dominant_biome",
-        "settlement_ids",
-        "route_ids",
-        "resource_deposit_ids",
-    }
-    for zones, label in ((agricultural_zones, "agricultural"), (mining_zones, "mining")):
-        if zones and not land_use_zone_keys.issubset(zones[0]):
-            failures.append(f"{label} zone fields missing")
-    land_use_zone_invalid = False
-    assigned_agricultural_ids: set[int] = set()
-    assigned_mining_ids: set[int] = set()
-    agricultural_zone_area = 0.0
-    mining_zone_area = 0.0
-    for zones, label, potential_key, zone_id_key, candidate_ids, assigned_ids in (
-        (
-            agricultural_zones,
-            "agricultural",
-            "agricultural_potential_index",
-            "agricultural_zone_id",
-            agricultural_candidate_ids,
-            assigned_agricultural_ids,
-        ),
-        (
-            mining_zones,
-            "mining",
-            "mining_potential_index",
-            "mining_zone_id",
-            mining_candidate_ids,
-            assigned_mining_ids,
-        ),
-    ):
-        zone_ids: set[int] = set()
-        for index, zone in enumerate(zones):
-            zone_id = int(zone.get("id", -1))
-            zone_ids.add(zone_id)
-            cell_ids_for_zone = zone.get("cell_ids", [])
-            settlement_ids_for_zone = zone.get("settlement_ids", [])
-            route_ids_for_zone = zone.get("route_ids", [])
-            deposit_ids_for_zone = zone.get("resource_deposit_ids", [])
-            if (
-                not isinstance(cell_ids_for_zone, list)
-                or not isinstance(settlement_ids_for_zone, list)
-                or not isinstance(route_ids_for_zone, list)
-                or not isinstance(deposit_ids_for_zone, list)
-            ):
-                land_use_zone_invalid = True
-                break
-            member_ids = [int(cell_id) for cell_id in cell_ids_for_zone]
-            group_cells = [cells_by_id.get(cell_id) for cell_id in member_ids]
-            if any(cell is None for cell in group_cells) or not group_cells:
-                land_use_zone_invalid = True
-                break
-            valid_group_cells: list[dict[str, Any]] = [cell for cell in group_cells if cell is not None]
-            group_count = len(valid_group_cells)
-            area_sum = sum(max(0.0, float(cell.get("area_km2", 0.0))) for cell in valid_group_cells)
-            potential_sum = sum(float(cell.get(potential_key, 0.0)) for cell in valid_group_cells)
-            fertility_sum = sum(max(0.0, min(1.0, float(cell.get("fertility", 0.0)))) for cell in valid_group_cells)
-            member_id_set = {int(cell.get("id", -1)) for cell in valid_group_cells}
-            assigned_ids.update(member_id_set)
-            if label == "agricultural":
-                agricultural_zone_area += float(zone.get("area_km2", 0.0))
-            else:
-                mining_zone_area += float(zone.get("area_km2", 0.0))
-            settlement_ids = [int(settlement_id) for settlement_id in settlement_ids_for_zone]
-            route_ids = [int(route_id) for route_id in route_ids_for_zone]
-            deposit_ids = [int(deposit_id) for deposit_id in deposit_ids_for_zone]
-            settlement_links_valid = all(
-                settlement_id in settlement_by_id
-                and int(settlement_by_id[settlement_id].get("cell_id", -1)) in member_id_set
-                for settlement_id in settlement_ids
-            )
-            route_links_valid = all(
-                route_id in route_by_id
-                and (
-                    int(route_by_id[route_id].get("from", -1)) in settlement_ids
-                    or int(route_by_id[route_id].get("to", -1)) in settlement_ids
-                )
-                for route_id in route_ids
-            )
-            deposit_links_valid = all(
-                deposit_id in resource_deposit_by_id
-                and int(resource_deposit_by_id[deposit_id].get("cell_id", -1)) in member_id_set
-                for deposit_id in deposit_ids
-            )
-            if (
-                zone_id != index
-                or str(zone.get("zone_type", "")) != label
-                or zone_id < 0
-                or int(zone.get("cell_count", -1)) != group_count
-                or len(member_ids) != len(member_id_set)
-                or not member_id_set.issubset(candidate_ids)
-                or any(int(cell.get(zone_id_key, -1)) != zone_id for cell in valid_group_cells)
-                or abs(float(zone.get("area_km2", 0.0)) - area_sum) > max(0.001, area_sum * 0.0001)
-                or abs(float(zone.get("mean_potential_index", 0.0)) - potential_sum / group_count) > 0.001
-                or abs(float(zone.get("mean_fertility_index", 0.0)) - fertility_sum / group_count) > 0.001
-                or not str(zone.get("dominant_resource", "")).strip()
-                or not str(zone.get("dominant_landform", "")).strip()
-                or not str(zone.get("dominant_biome", "")).strip()
-                or not settlement_links_valid
-                or not route_links_valid
-                or not deposit_links_valid
-            ):
-                land_use_zone_invalid = True
-                break
-        if len(zone_ids) != len(zones):
-            failures.append(f"{label} zone ids are not unique")
-        if land_use_zone_invalid:
-            break
-    if land_use_zone_invalid:
-        failures.append("land use zone records invalid")
-    if assigned_agricultural_ids != agricultural_candidate_ids:
-        failures.append("agricultural zone membership does not match cells")
-    if assigned_mining_ids != mining_candidate_ids:
-        failures.append("mining zone membership does not match cells")
-    if abs(float(summary.get("agricultural_zone_total_area_km2", 0.0)) - agricultural_zone_area) > max(
-        0.001,
-        agricultural_zone_area * 0.0001,
-    ):
-        failures.append("agricultural_zone_total_area_km2 does not match zones")
-    if abs(float(summary.get("mining_zone_total_area_km2", 0.0)) - mining_zone_area) > max(
-        0.001,
-        mining_zone_area * 0.0001,
-    ):
-        failures.append("mining_zone_total_area_km2 does not match zones")
+    if not land_use_availability:
+        _validate_legacy_land_use_block(
+            payload, summary, cells_payload, cells_by_id, resource_deposits, failures
+        )
 
     natural_frontiers = payload.get("natural_frontiers", [])
     natural_frontier_summary_keys = {
@@ -17974,283 +16515,12 @@ def validate(
     routes = payload.get("routes", [])
     if int(summary.get("route_count", -1)) != len(routes):
         failures.append("route_count does not match routes length")
-    route_radius_km = configured_planet_radius_km(payload)
-
-    def _validator_route_distance_km(first: dict[str, Any], second: dict[str, Any]) -> float:
-        first_lat = math.radians(float(first.get("lat_deg", 0.0)))
-        first_lon = math.radians(float(first.get("lon_deg", 0.0)))
-        second_lat = math.radians(float(second.get("lat_deg", 0.0)))
-        second_lon = math.radians(float(second.get("lon_deg", 0.0)))
-        delta_lat = second_lat - first_lat
-        delta_lon = second_lon - first_lon
-        sin_lat = math.sin(delta_lat * 0.5)
-        sin_lon = math.sin(delta_lon * 0.5)
-        haversine = sin_lat * sin_lat + math.cos(first_lat) * math.cos(second_lat) * sin_lon * sin_lon
-        return max(
-            0.001,
-            route_radius_km
-            * 2.0
-            * math.asin(min(1.0, math.sqrt(max(0.0, haversine)))),
+    if not natural_human_transport:
+        _validate_legacy_corridor_block(
+            payload=payload, summary=summary, cells_payload=cells_payload,
+            cells_by_id=cells_by_id, failures=failures,
+            routes=routes, settlements=settlements,
         )
-
-    failures.extend(_validate_route_corridors(payload, summary, cells_by_id))
-
-    route_corridors = payload.get("route_corridors", [])
-    if not isinstance(route_corridors, list):
-        failures.append("route_corridors missing or invalid")
-        route_corridors = []
-    if int(summary.get("route_corridor_count", -1)) != len(route_corridors):
-        failures.append("route_corridor_count does not match route_corridors length")
-    if int(summary.get("route_corridor_count", -1)) != len(routes):
-        failures.append("route_corridor_count should match route count")
-
-    route_corridor_cell_fields = (
-        "mountain_pass_route_index",
-        "river_valley_route_index",
-        "coastal_route_index",
-        "oasis_route_index",
-        "route_corridor_index",
-    )
-    route_corridor_cell_invalid = False
-    for cell in cells_payload:
-        try:
-            route_corridor_id = int(cell.get("route_corridor_id", -1))
-            route_corridor_type = str(cell.get("route_corridor_type", "none"))
-            route_corridor_index = float(cell.get("route_corridor_index", -1.0))
-            ranges_valid = all(0.0 <= float(cell.get(field, -1.0)) <= 1.0 for field in route_corridor_cell_fields)
-        except (TypeError, ValueError):
-            route_corridor_cell_invalid = True
-            break
-        if (
-            not ranges_valid
-            or (route_corridor_id < 0 and (route_corridor_type != "none" or abs(route_corridor_index) > 0.001))
-            or (route_corridor_id >= 0 and (route_corridor_type == "none" or route_corridor_index <= 0.0))
-        ):
-            route_corridor_cell_invalid = True
-            break
-    if route_corridor_cell_invalid:
-        failures.append("route corridor cell fields invalid")
-
-    route_corridor_required_fields = {
-        "id",
-        "route_id",
-        "route_type",
-        "corridor_type",
-        "from_settlement_id",
-        "to_settlement_id",
-        "start_cell_id",
-        "end_cell_id",
-        "cell_count",
-        "cell_ids",
-        "path_length_km",
-        "straight_distance_km",
-        "detour_ratio",
-        "mean_route_corridor_index",
-        "max_route_corridor_index",
-        "mean_mountain_pass_route_index",
-        "mean_river_valley_route_index",
-        "mean_coastal_route_index",
-        "mean_oasis_route_index",
-        "mountain_pass_cell_count",
-        "river_valley_cell_count",
-        "coastal_cell_count",
-        "oasis_cell_count",
-        "named_feature_cell_count",
-        "settlement_ids",
-        "region_ids",
-        "route_ids",
-        "navigable_waterway_ids",
-        "port_site_ids",
-    }
-    if route_corridors and not route_corridor_required_fields.issubset(route_corridors[0]):
-        failures.append("route corridor fields missing")
-    route_by_id_for_corridors = {
-        int(route.get("id", -1)): route for route in routes if isinstance(route, dict) and int(route.get("id", -1)) >= 0
-    }
-    settlements_by_id_for_corridors = {
-        int(settlement.get("id", -1)): settlement
-        for settlement in settlements
-        if isinstance(settlement, dict) and int(settlement.get("id", -1)) >= 0
-    }
-    corridor_by_id = {
-        int(corridor.get("id", -1)): corridor
-        for corridor in route_corridors
-        if isinstance(corridor, dict) and int(corridor.get("id", -1)) >= 0
-    }
-    route_corridor_invalid = False
-    route_corridor_cells: set[int] = set()
-    route_corridor_total_path_length = 0.0
-    route_feature_covered_count = 0
-    route_corridor_type_counter: Counter[str] = Counter()
-    for expected_id, corridor in enumerate(route_corridors):
-        try:
-            corridor_id = int(corridor.get("id", -1))
-            route_id = int(corridor.get("route_id", -1))
-            route_type = str(corridor.get("route_type", ""))
-            corridor_type = str(corridor.get("corridor_type", ""))
-            cell_ids_for_corridor = [int(cell_id) for cell_id in corridor.get("cell_ids", [])]
-        except (TypeError, ValueError):
-            route_corridor_invalid = True
-            break
-        route = route_by_id_for_corridors.get(route_id)
-        source = settlements_by_id_for_corridors.get(int(corridor.get("from_settlement_id", -1)))
-        target = settlements_by_id_for_corridors.get(int(corridor.get("to_settlement_id", -1)))
-        path_cells = [cells_by_id.get(cell_id) for cell_id in cell_ids_for_corridor]
-        if (
-            corridor_id != expected_id
-            or corridor_id not in corridor_by_id
-            or route is None
-            or source is None
-            or target is None
-            or int(route.get("route_corridor_id", -1)) != corridor_id
-            or str(route.get("route_corridor_type", "")) != corridor_type
-            or [int(cell_id) for cell_id in route.get("path_cell_ids", [])] != cell_ids_for_corridor
-            or route_type != str(route.get("type", ""))
-            or int(corridor.get("cell_count", -1)) != len(cell_ids_for_corridor)
-            or not cell_ids_for_corridor
-            or cell_ids_for_corridor[0] != int(corridor.get("start_cell_id", -1))
-            or cell_ids_for_corridor[-1] != int(corridor.get("end_cell_id", -1))
-            or int(source.get("cell_id", -1)) != int(corridor.get("start_cell_id", -1))
-            or int(target.get("cell_id", -1)) != int(corridor.get("end_cell_id", -1))
-            or any(cell is None for cell in path_cells)
-        ):
-            route_corridor_invalid = True
-            break
-        valid_path_cells = [cell for cell in path_cells if cell is not None]
-        adjacent_valid = True
-        path_length = 0.0
-        for first_id, second_id in zip(cell_ids_for_corridor, cell_ids_for_corridor[1:]):
-            first_cell = cells_by_id.get(first_id, {})
-            second_cell = cells_by_id.get(second_id, {})
-            if second_id not in {int(neighbor_id) for neighbor_id in first_cell.get("neighbors", [])}:
-                adjacent_valid = False
-                break
-            path_length += _validator_route_distance_km(first_cell, second_cell)
-        straight_distance = max(0.001, float(route.get("distance_km", 0.0)))
-        mountain_count = sum(1 for cell in valid_path_cells if float(cell.get("mountain_pass_route_index", 0.0)) >= 0.45)
-        river_count = sum(1 for cell in valid_path_cells if float(cell.get("river_valley_route_index", 0.0)) >= 0.45)
-        coastal_count = sum(1 for cell in valid_path_cells if float(cell.get("coastal_route_index", 0.0)) >= 0.45)
-        oasis_count = sum(1 for cell in valid_path_cells if float(cell.get("oasis_route_index", 0.0)) >= 0.45)
-        feature_counts = {
-            "mountain_pass_corridor": mountain_count,
-            "river_valley_corridor": river_count,
-            "coastal_corridor": coastal_count,
-            "oasis_corridor": oasis_count,
-        }
-        if route_type == "coastal_sea" and coastal_count > 0:
-            expected_corridor_type = "coastal_corridor"
-        elif route_type == "river_corridor" and river_count > 0:
-            expected_corridor_type = "river_valley_corridor"
-        elif route_type == "mountain_pass" and mountain_count > 0:
-            expected_corridor_type = "mountain_pass_corridor"
-        else:
-            best_type, best_count = sorted(feature_counts.items(), key=lambda item: (-item[1], item[0]))[0]
-            expected_corridor_type = best_type if best_count > 0 else "overland_corridor"
-        named_count = sum(
-            1
-            for cell in valid_path_cells
-            if (
-                float(cell.get("mountain_pass_route_index", 0.0)) >= 0.45
-                or float(cell.get("river_valley_route_index", 0.0)) >= 0.45
-                or float(cell.get("coastal_route_index", 0.0)) >= 0.45
-                or float(cell.get("oasis_route_index", 0.0)) >= 0.45
-            )
-        )
-        route_corridor_values = [float(cell.get("route_corridor_index", 0.0)) for cell in valid_path_cells]
-        mountain_values = [float(cell.get("mountain_pass_route_index", 0.0)) for cell in valid_path_cells]
-        river_values = [float(cell.get("river_valley_route_index", 0.0)) for cell in valid_path_cells]
-        coastal_values = [float(cell.get("coastal_route_index", 0.0)) for cell in valid_path_cells]
-        oasis_values = [float(cell.get("oasis_route_index", 0.0)) for cell in valid_path_cells]
-        expected_region_ids = sorted(
-            {
-                int(source.get("region_id", -1)),
-                int(target.get("region_id", -1)),
-            }
-            - {-1}
-        )
-        expected_waterway_ids = sorted(
-            {
-                int(cell.get("navigable_waterway_id", -1))
-                for cell in valid_path_cells
-                if int(cell.get("navigable_waterway_id", -1)) >= 0
-            }
-        )
-        expected_port_site_ids = sorted(
-            {
-                int(cell.get("port_site_id", -1))
-                for cell in valid_path_cells
-                if int(cell.get("port_site_id", -1)) >= 0
-            }
-        )
-        if (
-            not adjacent_valid
-            or corridor_type != expected_corridor_type
-            or abs(float(corridor.get("path_length_km", 0.0)) - path_length) > max(0.001, path_length * 0.0001)
-            or abs(float(corridor.get("straight_distance_km", 0.0)) - straight_distance) > max(0.001, straight_distance * 0.0001)
-            or abs(float(corridor.get("detour_ratio", 0.0)) - path_length / straight_distance) > 0.001
-            or abs(float(corridor.get("mean_route_corridor_index", 0.0)) - sum(route_corridor_values) / len(route_corridor_values)) > 0.001
-            or abs(float(corridor.get("max_route_corridor_index", 0.0)) - max(route_corridor_values)) > 0.001
-            or abs(float(corridor.get("mean_mountain_pass_route_index", 0.0)) - sum(mountain_values) / len(mountain_values)) > 0.001
-            or abs(float(corridor.get("mean_river_valley_route_index", 0.0)) - sum(river_values) / len(river_values)) > 0.001
-            or abs(float(corridor.get("mean_coastal_route_index", 0.0)) - sum(coastal_values) / len(coastal_values)) > 0.001
-            or abs(float(corridor.get("mean_oasis_route_index", 0.0)) - sum(oasis_values) / len(oasis_values)) > 0.001
-            or int(corridor.get("mountain_pass_cell_count", -1)) != mountain_count
-            or int(corridor.get("river_valley_cell_count", -1)) != river_count
-            or int(corridor.get("coastal_cell_count", -1)) != coastal_count
-            or int(corridor.get("oasis_cell_count", -1)) != oasis_count
-            or int(corridor.get("named_feature_cell_count", -1)) != named_count
-            or [int(value) for value in corridor.get("settlement_ids", [])] != sorted(
-                {int(corridor.get("from_settlement_id", -1)), int(corridor.get("to_settlement_id", -1))} - {-1}
-            )
-            or [int(value) for value in corridor.get("region_ids", [])] != expected_region_ids
-            or [int(value) for value in corridor.get("route_ids", [])] != [route_id]
-            or [int(value) for value in corridor.get("navigable_waterway_ids", [])] != expected_waterway_ids
-            or [int(value) for value in corridor.get("port_site_ids", [])] != expected_port_site_ids
-        ):
-            route_corridor_invalid = True
-            break
-        route_corridor_cells.update(cell_ids_for_corridor)
-        route_corridor_total_path_length += path_length
-        route_feature_covered_count += 1 if named_count > 0 else 0
-        route_corridor_type_counter[corridor_type] += 1
-    if route_corridor_invalid:
-        failures.append("route corridor records invalid")
-
-    for cell in cells_payload:
-        route_corridor_id = int(cell.get("route_corridor_id", -1))
-        if route_corridor_id >= 0:
-            corridor = corridor_by_id.get(route_corridor_id)
-            if corridor is None or int(cell.get("id", -1)) not in {int(value) for value in corridor.get("cell_ids", [])}:
-                failures.append("route corridor cell id references invalid")
-                break
-    if int(summary.get("route_corridor_cell_count", -1)) != len(route_corridor_cells):
-        failures.append("route_corridor_cell_count does not match exported route paths")
-    if abs(float(summary.get("route_corridor_total_path_length_km", 0.0)) - route_corridor_total_path_length) > max(0.001, route_corridor_total_path_length * 0.0001):
-        failures.append("route_corridor_total_path_length_km does not match corridor records")
-    route_corridor_expected_means = {
-        "mean_route_corridor_index": sum(float(cell.get("route_corridor_index", 0.0)) for cell in cells_payload) / len(cells_payload) if cells_payload else 0.0,
-        "mean_mountain_pass_route_index": sum(float(cell.get("mountain_pass_route_index", 0.0)) for cell in cells_payload) / len(cells_payload) if cells_payload else 0.0,
-        "mean_river_valley_route_index": sum(float(cell.get("river_valley_route_index", 0.0)) for cell in cells_payload) / len(cells_payload) if cells_payload else 0.0,
-        "mean_coastal_route_index": sum(float(cell.get("coastal_route_index", 0.0)) for cell in cells_payload) / len(cells_payload) if cells_payload else 0.0,
-        "mean_oasis_route_index": sum(float(cell.get("oasis_route_index", 0.0)) for cell in cells_payload) / len(cells_payload) if cells_payload else 0.0,
-    }
-    for key, expected in route_corridor_expected_means.items():
-        if abs(float(summary.get(key, 0.0)) - expected) > 0.001:
-            failures.append(f"{key} does not match route corridor cells")
-    expected_route_feature_coverage = route_feature_covered_count / len(route_corridors) if route_corridors else 1.0
-    if abs(float(summary.get("route_feature_coverage_index", 0.0)) - expected_route_feature_coverage) > 0.001:
-        failures.append("route_feature_coverage_index does not match corridor records")
-    if summary.get("route_corridor_type_counts", {}) != dict(sorted(route_corridor_type_counter.items())):
-        failures.append("route_corridor_type_counts does not match route corridors")
-    route_corridor_specific_counts = {
-        "mountain_pass_route_corridor_count": route_corridor_type_counter.get("mountain_pass_corridor", 0),
-        "river_valley_route_corridor_count": route_corridor_type_counter.get("river_valley_corridor", 0),
-        "coastal_route_corridor_count": route_corridor_type_counter.get("coastal_corridor", 0),
-        "oasis_route_corridor_count": route_corridor_type_counter.get("oasis_corridor", 0),
-    }
-    for key, expected in route_corridor_specific_counts.items():
-        if int(summary.get(key, -1)) != expected:
-            failures.append(f"{key} does not match route corridor type counts")
 
     trade_flows = payload.get("trade_flows", [])
     if int(summary.get("trade_flow_count", -1)) != len(trade_flows):
@@ -18301,13 +16571,13 @@ def validate(
     if int(summary.get("historical_era_count", -1)) != len(historical_eras):
         failures.append("historical_era_count does not match historical_eras length")
     historical_events = payload.get("historical_events", [])
-    if int(summary.get("historical_event_count", -1)) != len(historical_events):
+    if not native_social_availability and int(summary.get("historical_event_count", -1)) != len(historical_events):
         failures.append("historical_event_count does not match historical_events length")
     migration_events = sum(1 for event in historical_events if event.get("type") == "migration")
     if int(summary.get("migration_event_count", -1)) != migration_events:
         failures.append("migration_event_count does not match historical events")
     dynastic_changes = sum(1 for event in historical_events if event.get("type") == "dynastic_change")
-    if int(summary.get("dynastic_change_count", -1)) != dynastic_changes:
+    if not native_social_availability and int(summary.get("dynastic_change_count", -1)) != dynastic_changes:
         failures.append("dynastic_change_count does not match historical events")
     if historical_eras and (
         "dominant_process" not in historical_eras[0]
@@ -18323,460 +16593,633 @@ def validate(
     ):
         failures.append("historical event fields missing")
 
-    phonological_rules = payload.get("phonological_rules", [])
-    phonological_histories = payload.get("phonological_histories", [])
-    lexical_correspondences = payload.get("lexical_correspondences", [])
-    lexical_diffusion_histories = payload.get("lexical_diffusion_histories", [])
-    speaker_population_histories = payload.get("speaker_population_histories", [])
-    if int(summary.get("phonological_rule_count", -1)) != len(phonological_rules):
-        failures.append("phonological_rule_count does not match phonological_rules length")
-    if int(summary.get("phonological_history_count", -1)) != len(phonological_histories):
-        failures.append("phonological_history_count does not match phonological_histories length")
-    if int(summary.get("lexical_correspondence_count", -1)) != len(lexical_correspondences):
-        failures.append("lexical_correspondence_count does not match lexical_correspondences length")
-    if int(summary.get("lexical_diffusion_history_count", -1)) != len(lexical_diffusion_histories):
-        failures.append("lexical_diffusion_history_count does not match lexical_diffusion_histories length")
-    if int(summary.get("speaker_population_history_count", -1)) != len(speaker_population_histories):
-        failures.append("speaker_population_history_count does not match speaker_population_histories length")
-    if len(speaker_population_histories) != len(language_regions):
-        failures.append("speaker_population_histories length does not match language_regions length")
-    phonological_history_step_count = sum(int(history.get("step_count", 0)) for history in phonological_histories)
-    if int(summary.get("phonological_history_step_count", -1)) != phonological_history_step_count:
-        failures.append("phonological_history_step_count does not match phonological histories")
-    lexical_diffusion_step_count = sum(int(history.get("step_count", 0)) for history in lexical_diffusion_histories)
-    if int(summary.get("lexical_diffusion_step_count", -1)) != lexical_diffusion_step_count:
-        failures.append("lexical_diffusion_step_count does not match lexical diffusion histories")
-    speaker_population_step_count = sum(int(history.get("step_count", 0)) for history in speaker_population_histories)
-    if int(summary.get("speaker_population_step_count", -1)) != speaker_population_step_count:
-        failures.append("speaker_population_step_count does not match speaker population histories")
-    phonological_rule_language_count = sum(1 for language in language_regions if int(language.get("sound_change_rule_count", 0)) > 0)
-    if int(summary.get("phonological_rule_language_count", -1)) != phonological_rule_language_count:
-        failures.append("phonological_rule_language_count does not match languages")
-    max_phonological_stage = max((int(rule.get("stage_index", 0)) for rule in phonological_rules), default=0)
-    if int(summary.get("max_phonological_shift_stage", -1)) != max_phonological_stage:
-        failures.append("max_phonological_shift_stage does not match phonological rules")
-    phonological_summary_keys = {
-        "mean_phonological_rule_probability_index",
-        "mean_phonological_rule_regularity_index",
-        "mean_lexical_replacement_index",
-        "mean_phonological_contact_influence_index",
-        "mean_phonological_drift_index",
-        "mean_language_prosodic_complexity_index",
-        "mean_phonotactic_complexity_index",
-        "lexical_correspondence_count",
-        "lexical_correspondence_language_count",
-        "lexical_diffusion_history_count",
-        "lexical_diffusion_step_count",
-        "lexical_diffusion_language_count",
-        "mean_regular_correspondence_fraction",
-        "mean_lexical_correspondence_replacement_index",
-        "mean_lexical_prosodic_weight_index",
-        "mean_lexical_diffusion_adoption_index",
-        "mean_lexical_innovation_index",
-        "mean_semantic_shift_index",
-        "speaker_population_history_count",
-        "speaker_population_step_count",
-        "total_estimated_speaker_population",
-        "mean_speaker_allophonic_variation_index",
-        "mean_speaker_syllable_pressure_index",
-        "mean_speaker_contact_index",
-        "mean_speaker_population_adoption_index",
-        "mean_speaker_phonetic_reduction_index",
-        "mean_speaker_lexical_diffusion_pressure_index",
-        "high_contact_speaker_history_count",
-    }
-    if not phonological_summary_keys.issubset(summary):
-        failures.append("phonological rule summary metrics missing")
-    phonological_rule_keys = {
-        "id",
-        "language_region_id",
-        "parent_language_region_id",
-        "era_id",
-        "stage_index",
-        "rule_type",
-        "source_segment",
-        "target_segment",
-        "source_features",
-        "target_features",
-        "articulatory_shift",
-        "environment",
-        "conditioned_by",
-        "prosodic_domain",
-        "start_year_bp",
-        "end_year_bp",
-        "probability_index",
-        "regularity_index",
-        "lexical_replacement_index",
-        "contact_influence_index",
-        "inventory_delta",
-    }
-    phonological_history_keys = {
-        "id",
-        "language_region_id",
-        "parent_language_region_id",
-        "initial_phoneme_inventory_size",
-        "final_phoneme_inventory_size",
-        "sound_change_rule_ids",
-        "sound_change_rule_count",
-        "step_count",
-        "cumulative_sound_shift_index",
-        "phonological_drift_index",
-        "syllable_template",
-        "stress_system",
-        "allowed_coda_count",
-        "prosodic_complexity_index",
-        "phonotactic_complexity_index",
-        "steps",
-    }
-    lexical_correspondence_keys = {
-        "id",
-        "language_region_id",
-        "parent_language_region_id",
-        "meaning",
-        "semantic_domain",
-        "proto_form",
-        "inherited_form",
-        "derived_form",
-        "applied_rule_ids",
-        "applied_rule_count",
-        "replacement_count",
-        "regular_correspondence_fraction",
-        "lexical_replacement_index",
-        "stress_pattern",
-        "syllable_count",
-        "syllable_pattern",
-        "mora_count",
-        "prosodic_weight_index",
-        "diffusion_stage_index",
-        "diffusion_adoption_index",
-        "semantic_shift_index",
-        "borrowed",
-    }
-    lexical_diffusion_history_keys = {
-        "id",
-        "language_region_id",
-        "parent_language_region_id",
-        "phonological_history_id",
-        "lexical_correspondence_ids",
-        "lexical_correspondence_count",
-        "step_count",
-        "syllable_template",
-        "stress_system",
-        "mean_diffusion_adoption_index",
-        "mean_lexical_innovation_index",
-        "mean_semantic_shift_index",
-        "contact_borrowing_index",
-        "steps",
-    }
-    speaker_population_history_keys = {
-        "id",
-        "language_region_id",
-        "parent_language_region_id",
-        "population_region_id",
-        "population_region_ids",
-        "population_region_count",
-        "phonological_history_id",
-        "lexical_diffusion_history_id",
-        "initial_speaker_population",
-        "final_speaker_population",
-        "estimated_speaker_population",
-        "mean_allophonic_variation_index",
-        "mean_syllable_pressure_index",
-        "mean_speaker_contact_index",
-        "mean_population_adoption_index",
-        "mean_phonetic_reduction_index",
-        "mean_lexical_diffusion_pressure_index",
-        "high_contact_speaker_history",
-        "step_count",
-        "steps",
-    }
-    if phonological_rules and not phonological_rule_keys.issubset(phonological_rules[0]):
-        failures.append("phonological rule fields missing")
-    if phonological_histories and not phonological_history_keys.issubset(phonological_histories[0]):
-        failures.append("phonological history fields missing")
-    if lexical_correspondences and not lexical_correspondence_keys.issubset(lexical_correspondences[0]):
-        failures.append("lexical correspondence fields missing")
-    if lexical_diffusion_histories and not lexical_diffusion_history_keys.issubset(lexical_diffusion_histories[0]):
-        failures.append("lexical diffusion history fields missing")
-    if speaker_population_histories and not speaker_population_history_keys.issubset(speaker_population_histories[0]):
-        failures.append("speaker population history fields missing")
-    language_by_id = {int(language.get("id", -1)): language for language in language_regions}
-    phonological_rule_by_id = {int(rule.get("id", -1)): rule for rule in phonological_rules}
-    phonological_history_by_id = {int(history.get("id", -1)): history for history in phonological_histories}
-    lexical_correspondence_by_id = {int(record.get("id", -1)): record for record in lexical_correspondences}
-    lexical_diffusion_by_id = {int(history.get("id", -1)): history for history in lexical_diffusion_histories}
-    speaker_population_history_by_id = {int(history.get("id", -1)): history for history in speaker_population_histories}
-    historical_era_ids = {int(era.get("id", -1)) for era in historical_eras}
-    population_region_ids_for_speakers = {
-        int(region.get("id", -1)) for region in payload.get("population_regions", []) if isinstance(region, dict)
-    }
-    phonology_invalid = (
-        len(phonological_rule_by_id) != len(phonological_rules)
-        or len(phonological_history_by_id) != len(phonological_histories)
-        or len(lexical_correspondence_by_id) != len(lexical_correspondences)
-        or len(lexical_diffusion_by_id) != len(lexical_diffusion_histories)
-        or len(speaker_population_history_by_id) != len(speaker_population_histories)
-        or any(record_id < 0 for record_id in phonological_rule_by_id)
-        or any(record_id < 0 for record_id in phonological_history_by_id)
-        or any(record_id < 0 for record_id in lexical_correspondence_by_id)
-        or any(record_id < 0 for record_id in lexical_diffusion_by_id)
-        or any(record_id < 0 for record_id in speaker_population_history_by_id)
-    )
-    phonological_probability_sum = 0.0
-    phonological_regularity_sum = 0.0
-    lexical_replacement_sum = 0.0
-    phonological_contact_sum = 0.0
-    rules_by_language: dict[int, list[int]] = {}
-    for rule in phonological_rules:
-        rule_id = int(rule.get("id", -1))
-        language_id = int(rule.get("language_region_id", -1))
-        parent_id = int(rule.get("parent_language_region_id", -1))
-        era_id = int(rule.get("era_id", -1))
-        probability = float(rule.get("probability_index", -1.0))
-        regularity = float(rule.get("regularity_index", -1.0))
-        lexical = float(rule.get("lexical_replacement_index", -1.0))
-        contact = float(rule.get("contact_influence_index", -1.0))
-        phonological_probability_sum += probability
-        phonological_regularity_sum += regularity
-        lexical_replacement_sum += lexical
-        phonological_contact_sum += contact
-        rules_by_language.setdefault(language_id, []).append(rule_id)
-        if (
-            rule_id not in phonological_rule_by_id
-            or language_id not in language_by_id
-            or (parent_id >= 0 and parent_id not in language_by_id)
-            or (historical_eras and era_id not in historical_era_ids)
-            or int(rule.get("stage_index", 0)) <= 0
-            or not str(rule.get("rule_type", "")).strip()
-            or not str(rule.get("source_segment", "")).strip()
-            or not str(rule.get("target_segment", "")).strip()
-            or not isinstance(rule.get("source_features", {}), dict)
-            or not isinstance(rule.get("target_features", {}), dict)
-            or not str(rule.get("articulatory_shift", "")).strip()
-            or str(rule.get("source_segment", "")) == str(rule.get("target_segment", ""))
-            or not str(rule.get("environment", "")).strip()
-            or not str(rule.get("conditioned_by", "")).strip()
-            or not str(rule.get("prosodic_domain", "")).strip()
-            or float(rule.get("start_year_bp", -1.0)) < float(rule.get("end_year_bp", -1.0))
-            or not 0.0 <= probability <= 1.0
-            or not 0.0 <= regularity <= 1.0
-            or not 0.0 <= lexical <= 1.0
-            or not 0.0 <= contact <= 1.0
-            or not -4 <= int(rule.get("inventory_delta", 0)) <= 4
-        ):
-            phonology_invalid = True
-            break
-    lexical_correspondence_language_ids: set[int] = set()
-    regular_correspondence_sum = 0.0
-    lexical_correspondence_replacement_sum = 0.0
-    lexical_prosodic_weight_sum = 0.0
-    correspondences_by_language: dict[int, list[int]] = {}
-    diffusion_stage_by_record: dict[int, int] = {}
-    for record in lexical_correspondences:
-        record_id = int(record.get("id", -1))
-        language_id = int(record.get("language_region_id", -1))
-        parent_id = int(record.get("parent_language_region_id", -1))
-        applied_rule_ids = record.get("applied_rule_ids", [])
-        regular = float(record.get("regular_correspondence_fraction", -1.0))
-        replacement = float(record.get("lexical_replacement_index", -1.0))
-        prosodic_weight = float(record.get("prosodic_weight_index", -1.0))
-        diffusion_adoption = float(record.get("diffusion_adoption_index", -1.0))
-        semantic_shift = float(record.get("semantic_shift_index", -1.0))
-        regular_correspondence_sum += regular
-        lexical_correspondence_replacement_sum += replacement
-        lexical_prosodic_weight_sum += prosodic_weight
-        lexical_correspondence_language_ids.add(language_id)
-        correspondences_by_language.setdefault(language_id, []).append(record_id)
-        diffusion_stage_by_record[record_id] = int(record.get("diffusion_stage_index", -1))
-        if (
-            record_id not in lexical_correspondence_by_id
-            or language_id not in language_by_id
-            or (parent_id >= 0 and parent_id not in language_by_id)
-            or not str(record.get("meaning", "")).strip()
-            or not str(record.get("semantic_domain", "")).strip()
-            or not str(record.get("proto_form", "")).strip()
-            or not str(record.get("inherited_form", "")).strip()
-            or not str(record.get("derived_form", "")).strip()
-            or not isinstance(applied_rule_ids, list)
-            or int(record.get("applied_rule_count", -1)) != len(applied_rule_ids)
-            or int(record.get("replacement_count", -1)) < 0
-            or int(record.get("syllable_count", 0)) <= 0
-            or int(record.get("mora_count", 0)) <= 0
-            or int(record.get("diffusion_stage_index", 0)) <= 0
-            or not str(record.get("stress_pattern", "")).strip()
-            or not str(record.get("syllable_pattern", "")).strip()
-            or not 0.0 <= regular <= 1.0
-            or not 0.0 <= replacement <= 1.0
-            or abs((regular + replacement) - 1.0) > 0.001
-            or not 0.0 <= prosodic_weight <= 1.0
-            or not 0.0 <= diffusion_adoption <= 1.0
-            or not 0.0 <= semantic_shift <= 1.0
-            or not isinstance(record.get("borrowed", False), bool)
-        ):
-            phonology_invalid = True
-            break
-        for rule_id_raw in applied_rule_ids:
-            rule_id = int(rule_id_raw)
-            if rule_id not in phonological_rule_by_id or int(phonological_rule_by_id[rule_id].get("language_region_id", -1)) != language_id:
-                phonology_invalid = True
-                break
-        if phonology_invalid:
-            break
-    phonological_drift_sum = 0.0
-    prosodic_complexity_sum = 0.0
-    phonotactic_complexity_sum = 0.0
-    for history in phonological_histories:
-        history_id = int(history.get("id", -1))
-        language_id = int(history.get("language_region_id", -1))
-        parent_id = int(history.get("parent_language_region_id", -1))
-        rule_ids = history.get("sound_change_rule_ids", [])
-        steps = history.get("steps", [])
-        phonological_drift = float(history.get("phonological_drift_index", -1.0))
-        prosodic_complexity = float(history.get("prosodic_complexity_index", -1.0))
-        phonotactic_complexity = float(history.get("phonotactic_complexity_index", -1.0))
-        phonological_drift_sum += phonological_drift
-        prosodic_complexity_sum += prosodic_complexity
-        phonotactic_complexity_sum += phonotactic_complexity
-        if (
-            history_id not in phonological_history_by_id
-            or language_id not in language_by_id
-            or (parent_id >= 0 and parent_id not in language_by_id)
-            or not isinstance(rule_ids, list)
-            or not isinstance(steps, list)
-            or int(history.get("sound_change_rule_count", -1)) != len(rule_ids)
-            or int(history.get("step_count", -1)) != len(steps)
-            or int(history.get("initial_phoneme_inventory_size", 0)) <= 0
-            or int(history.get("final_phoneme_inventory_size", 0)) <= 0
-            or not 0.0 <= float(history.get("cumulative_sound_shift_index", -1.0)) <= 1.0
-            or not 0.0 <= phonological_drift <= 1.0
-            or int(history.get("allowed_coda_count", 0)) <= 0
-            or not str(history.get("syllable_template", "")).strip()
-            or not str(history.get("stress_system", "")).strip()
-            or not 0.0 <= prosodic_complexity <= 1.0
-            or not 0.0 <= phonotactic_complexity <= 1.0
-        ):
-            phonology_invalid = True
-            break
-        if set(int(rule_id) for rule_id in rule_ids) != set(rules_by_language.get(language_id, [])):
-            phonology_invalid = True
-            break
-        for rule_id_raw in rule_ids:
-            rule_id = int(rule_id_raw)
-            if rule_id not in phonological_rule_by_id or int(phonological_rule_by_id[rule_id].get("language_region_id", -1)) != language_id:
-                phonology_invalid = True
-                break
-        if phonology_invalid:
-            break
-        for index, step in enumerate(steps):
-            step_rule_ids = step.get("rule_ids", [])
-            era_id = int(step.get("era_id", -1))
+    if not (social_tail_modes["phonology"]):
+        phonological_rules = payload.get("phonological_rules", [])
+        phonological_histories = payload.get("phonological_histories", [])
+        lexical_correspondences = payload.get("lexical_correspondences", [])
+        lexical_diffusion_histories = payload.get("lexical_diffusion_histories", [])
+        speaker_population_histories = payload.get("speaker_population_histories", [])
+        if int(summary.get("phonological_rule_count", -1)) != len(phonological_rules):
+            failures.append("phonological_rule_count does not match phonological_rules length")
+        if int(summary.get("phonological_history_count", -1)) != len(phonological_histories):
+            failures.append("phonological_history_count does not match phonological_histories length")
+        if int(summary.get("lexical_correspondence_count", -1)) != len(lexical_correspondences):
+            failures.append("lexical_correspondence_count does not match lexical_correspondences length")
+        if int(summary.get("lexical_diffusion_history_count", -1)) != len(lexical_diffusion_histories):
+            failures.append("lexical_diffusion_history_count does not match lexical_diffusion_histories length")
+        if int(summary.get("speaker_population_history_count", -1)) != len(speaker_population_histories):
+            failures.append("speaker_population_history_count does not match speaker_population_histories length")
+        if len(speaker_population_histories) != len(language_regions):
+            failures.append("speaker_population_histories length does not match language_regions length")
+        phonological_history_step_count = sum(int(history.get("step_count", 0)) for history in phonological_histories)
+        if int(summary.get("phonological_history_step_count", -1)) != phonological_history_step_count:
+            failures.append("phonological_history_step_count does not match phonological histories")
+        lexical_diffusion_step_count = sum(int(history.get("step_count", 0)) for history in lexical_diffusion_histories)
+        if int(summary.get("lexical_diffusion_step_count", -1)) != lexical_diffusion_step_count:
+            failures.append("lexical_diffusion_step_count does not match lexical diffusion histories")
+        speaker_population_step_count = sum(int(history.get("step_count", 0)) for history in speaker_population_histories)
+        if int(summary.get("speaker_population_step_count", -1)) != speaker_population_step_count:
+            failures.append("speaker_population_step_count does not match speaker population histories")
+        phonological_rule_language_count = sum(1 for language in language_regions if int(language.get("sound_change_rule_count", 0)) > 0)
+        if int(summary.get("phonological_rule_language_count", -1)) != phonological_rule_language_count:
+            failures.append("phonological_rule_language_count does not match languages")
+        max_phonological_stage = max((int(rule.get("stage_index", 0)) for rule in phonological_rules), default=0)
+        if int(summary.get("max_phonological_shift_stage", -1)) != max_phonological_stage:
+            failures.append("max_phonological_shift_stage does not match phonological rules")
+        phonological_summary_keys = {
+            "mean_phonological_rule_probability_index",
+            "mean_phonological_rule_regularity_index",
+            "mean_lexical_replacement_index",
+            "mean_phonological_contact_influence_index",
+            "mean_phonological_drift_index",
+            "mean_language_prosodic_complexity_index",
+            "mean_phonotactic_complexity_index",
+            "lexical_correspondence_count",
+            "lexical_correspondence_language_count",
+            "lexical_diffusion_history_count",
+            "lexical_diffusion_step_count",
+            "lexical_diffusion_language_count",
+            "mean_regular_correspondence_fraction",
+            "mean_lexical_correspondence_replacement_index",
+            "mean_lexical_prosodic_weight_index",
+            "mean_lexical_diffusion_adoption_index",
+            "mean_lexical_innovation_index",
+            "mean_semantic_shift_index",
+            "speaker_population_history_count",
+            "speaker_population_step_count",
+            "total_estimated_speaker_population",
+            "mean_speaker_allophonic_variation_index",
+            "mean_speaker_syllable_pressure_index",
+            "mean_speaker_contact_index",
+            "mean_speaker_population_adoption_index",
+            "mean_speaker_phonetic_reduction_index",
+            "mean_speaker_lexical_diffusion_pressure_index",
+            "high_contact_speaker_history_count",
+        }
+        if not phonological_summary_keys.issubset(summary):
+            failures.append("phonological rule summary metrics missing")
+        phonological_rule_keys = {
+            "id",
+            "language_region_id",
+            "parent_language_region_id",
+            "era_id",
+            "stage_index",
+            "rule_type",
+            "source_segment",
+            "target_segment",
+            "source_features",
+            "target_features",
+            "articulatory_shift",
+            "environment",
+            "conditioned_by",
+            "prosodic_domain",
+            "start_year_bp",
+            "end_year_bp",
+            "probability_index",
+            "regularity_index",
+            "lexical_replacement_index",
+            "contact_influence_index",
+            "inventory_delta",
+        }
+        phonological_history_keys = {
+            "id",
+            "language_region_id",
+            "parent_language_region_id",
+            "initial_phoneme_inventory_size",
+            "final_phoneme_inventory_size",
+            "sound_change_rule_ids",
+            "sound_change_rule_count",
+            "step_count",
+            "cumulative_sound_shift_index",
+            "phonological_drift_index",
+            "syllable_template",
+            "stress_system",
+            "allowed_coda_count",
+            "prosodic_complexity_index",
+            "phonotactic_complexity_index",
+            "steps",
+        }
+        lexical_correspondence_keys = {
+            "id",
+            "language_region_id",
+            "parent_language_region_id",
+            "meaning",
+            "semantic_domain",
+            "proto_form",
+            "inherited_form",
+            "derived_form",
+            "applied_rule_ids",
+            "applied_rule_count",
+            "replacement_count",
+            "regular_correspondence_fraction",
+            "lexical_replacement_index",
+            "stress_pattern",
+            "syllable_count",
+            "syllable_pattern",
+            "mora_count",
+            "prosodic_weight_index",
+            "diffusion_stage_index",
+            "diffusion_adoption_index",
+            "semantic_shift_index",
+            "borrowed",
+        }
+        lexical_diffusion_history_keys = {
+            "id",
+            "language_region_id",
+            "parent_language_region_id",
+            "phonological_history_id",
+            "lexical_correspondence_ids",
+            "lexical_correspondence_count",
+            "step_count",
+            "syllable_template",
+            "stress_system",
+            "mean_diffusion_adoption_index",
+            "mean_lexical_innovation_index",
+            "mean_semantic_shift_index",
+            "contact_borrowing_index",
+            "steps",
+        }
+        speaker_population_history_keys = {
+            "id",
+            "language_region_id",
+            "parent_language_region_id",
+            "population_region_id",
+            "population_region_ids",
+            "population_region_count",
+            "phonological_history_id",
+            "lexical_diffusion_history_id",
+            "initial_speaker_population",
+            "final_speaker_population",
+            "estimated_speaker_population",
+            "mean_allophonic_variation_index",
+            "mean_syllable_pressure_index",
+            "mean_speaker_contact_index",
+            "mean_population_adoption_index",
+            "mean_phonetic_reduction_index",
+            "mean_lexical_diffusion_pressure_index",
+            "high_contact_speaker_history",
+            "step_count",
+            "steps",
+        }
+        if phonological_rules and not phonological_rule_keys.issubset(phonological_rules[0]):
+            failures.append("phonological rule fields missing")
+        if phonological_histories and not phonological_history_keys.issubset(phonological_histories[0]):
+            failures.append("phonological history fields missing")
+        if lexical_correspondences and not lexical_correspondence_keys.issubset(lexical_correspondences[0]):
+            failures.append("lexical correspondence fields missing")
+        if lexical_diffusion_histories and not lexical_diffusion_history_keys.issubset(lexical_diffusion_histories[0]):
+            failures.append("lexical diffusion history fields missing")
+        if speaker_population_histories and not speaker_population_history_keys.issubset(speaker_population_histories[0]):
+            failures.append("speaker population history fields missing")
+        language_by_id = {int(language.get("id", -1)): language for language in language_regions}
+        phonological_rule_by_id = {int(rule.get("id", -1)): rule for rule in phonological_rules}
+        phonological_history_by_id = {int(history.get("id", -1)): history for history in phonological_histories}
+        lexical_correspondence_by_id = {int(record.get("id", -1)): record for record in lexical_correspondences}
+        lexical_diffusion_by_id = {int(history.get("id", -1)): history for history in lexical_diffusion_histories}
+        speaker_population_history_by_id = {int(history.get("id", -1)): history for history in speaker_population_histories}
+        historical_era_ids = {int(era.get("id", -1)) for era in historical_eras}
+        population_region_ids_for_speakers = {
+            int(region.get("id", -1)) for region in payload.get("population_regions", []) if isinstance(region, dict)
+        }
+        phonology_invalid = (
+            len(phonological_rule_by_id) != len(phonological_rules)
+            or len(phonological_history_by_id) != len(phonological_histories)
+            or len(lexical_correspondence_by_id) != len(lexical_correspondences)
+            or len(lexical_diffusion_by_id) != len(lexical_diffusion_histories)
+            or len(speaker_population_history_by_id) != len(speaker_population_histories)
+            or any(record_id < 0 for record_id in phonological_rule_by_id)
+            or any(record_id < 0 for record_id in phonological_history_by_id)
+            or any(record_id < 0 for record_id in lexical_correspondence_by_id)
+            or any(record_id < 0 for record_id in lexical_diffusion_by_id)
+            or any(record_id < 0 for record_id in speaker_population_history_by_id)
+        )
+        phonological_probability_sum = 0.0
+        phonological_regularity_sum = 0.0
+        lexical_replacement_sum = 0.0
+        phonological_contact_sum = 0.0
+        rules_by_language: dict[int, list[int]] = {}
+        for rule in phonological_rules:
+            rule_id = int(rule.get("id", -1))
+            language_id = int(rule.get("language_region_id", -1))
+            parent_id = int(rule.get("parent_language_region_id", -1))
+            era_id = int(rule.get("era_id", -1))
+            probability = float(rule.get("probability_index", -1.0))
+            regularity = float(rule.get("regularity_index", -1.0))
+            lexical = float(rule.get("lexical_replacement_index", -1.0))
+            contact = float(rule.get("contact_influence_index", -1.0))
+            phonological_probability_sum += probability
+            phonological_regularity_sum += regularity
+            lexical_replacement_sum += lexical
+            phonological_contact_sum += contact
+            rules_by_language.setdefault(language_id, []).append(rule_id)
             if (
-                not isinstance(step_rule_ids, list)
-                or int(step.get("stage_index", -1)) != index + 1
+                rule_id not in phonological_rule_by_id
+                or language_id not in language_by_id
+                or (parent_id >= 0 and parent_id not in language_by_id)
                 or (historical_eras and era_id not in historical_era_ids)
-                or int(step.get("rule_count", -1)) != len(step_rule_ids)
-                or int(step.get("inventory_size", 0)) <= 0
-                or float(step.get("start_year_bp", -1.0)) < float(step.get("end_year_bp", -1.0))
-                or not str(step.get("syllable_template", "")).strip()
-                or not str(step.get("stress_system", "")).strip()
-                or not 0.0 <= float(step.get("cumulative_sound_shift_index", -1.0)) <= 1.0
-                or not 0.0 <= float(step.get("inherited_phonology_fraction", -1.0)) <= 1.0
-                or not 0.0 <= float(step.get("contact_influence_index", -1.0)) <= 1.0
-                or not 0.0 <= float(step.get("phonotactic_complexity_index", -1.0)) <= 1.0
-                or not 0.0 <= float(step.get("prosodic_weight_index", -1.0)) <= 1.0
+                or int(rule.get("stage_index", 0)) <= 0
+                or not str(rule.get("rule_type", "")).strip()
+                or not str(rule.get("source_segment", "")).strip()
+                or not str(rule.get("target_segment", "")).strip()
+                or not isinstance(rule.get("source_features", {}), dict)
+                or not isinstance(rule.get("target_features", {}), dict)
+                or not str(rule.get("articulatory_shift", "")).strip()
+                or str(rule.get("source_segment", "")) == str(rule.get("target_segment", ""))
+                or not str(rule.get("environment", "")).strip()
+                or not str(rule.get("conditioned_by", "")).strip()
+                or not str(rule.get("prosodic_domain", "")).strip()
+                or float(rule.get("start_year_bp", -1.0)) < float(rule.get("end_year_bp", -1.0))
+                or not 0.0 <= probability <= 1.0
+                or not 0.0 <= regularity <= 1.0
+                or not 0.0 <= lexical <= 1.0
+                or not 0.0 <= contact <= 1.0
+                or not -4 <= int(rule.get("inventory_delta", 0)) <= 4
             ):
                 phonology_invalid = True
                 break
-            for rule_id_raw in step_rule_ids:
+        lexical_correspondence_language_ids: set[int] = set()
+        regular_correspondence_sum = 0.0
+        lexical_correspondence_replacement_sum = 0.0
+        lexical_prosodic_weight_sum = 0.0
+        correspondences_by_language: dict[int, list[int]] = {}
+        diffusion_stage_by_record: dict[int, int] = {}
+        for record in lexical_correspondences:
+            record_id = int(record.get("id", -1))
+            language_id = int(record.get("language_region_id", -1))
+            parent_id = int(record.get("parent_language_region_id", -1))
+            applied_rule_ids = record.get("applied_rule_ids", [])
+            regular = float(record.get("regular_correspondence_fraction", -1.0))
+            replacement = float(record.get("lexical_replacement_index", -1.0))
+            prosodic_weight = float(record.get("prosodic_weight_index", -1.0))
+            diffusion_adoption = float(record.get("diffusion_adoption_index", -1.0))
+            semantic_shift = float(record.get("semantic_shift_index", -1.0))
+            regular_correspondence_sum += regular
+            lexical_correspondence_replacement_sum += replacement
+            lexical_prosodic_weight_sum += prosodic_weight
+            lexical_correspondence_language_ids.add(language_id)
+            correspondences_by_language.setdefault(language_id, []).append(record_id)
+            diffusion_stage_by_record[record_id] = int(record.get("diffusion_stage_index", -1))
+            if (
+                record_id not in lexical_correspondence_by_id
+                or language_id not in language_by_id
+                or (parent_id >= 0 and parent_id not in language_by_id)
+                or not str(record.get("meaning", "")).strip()
+                or not str(record.get("semantic_domain", "")).strip()
+                or not str(record.get("proto_form", "")).strip()
+                or not str(record.get("inherited_form", "")).strip()
+                or not str(record.get("derived_form", "")).strip()
+                or not isinstance(applied_rule_ids, list)
+                or int(record.get("applied_rule_count", -1)) != len(applied_rule_ids)
+                or int(record.get("replacement_count", -1)) < 0
+                or int(record.get("syllable_count", 0)) <= 0
+                or int(record.get("mora_count", 0)) <= 0
+                or int(record.get("diffusion_stage_index", 0)) <= 0
+                or not str(record.get("stress_pattern", "")).strip()
+                or not str(record.get("syllable_pattern", "")).strip()
+                or not 0.0 <= regular <= 1.0
+                or not 0.0 <= replacement <= 1.0
+                or abs((regular + replacement) - 1.0) > 0.001
+                or not 0.0 <= prosodic_weight <= 1.0
+                or not 0.0 <= diffusion_adoption <= 1.0
+                or not 0.0 <= semantic_shift <= 1.0
+                or not isinstance(record.get("borrowed", False), bool)
+            ):
+                phonology_invalid = True
+                break
+            for rule_id_raw in applied_rule_ids:
                 rule_id = int(rule_id_raw)
-                if rule_id not in rule_ids:
+                if rule_id not in phonological_rule_by_id or int(phonological_rule_by_id[rule_id].get("language_region_id", -1)) != language_id:
                     phonology_invalid = True
                     break
             if phonology_invalid:
                 break
-        if phonology_invalid:
-            break
-        if steps and int(steps[-1].get("inventory_size", -1)) != int(history.get("final_phoneme_inventory_size", -2)):
-            phonology_invalid = True
-            break
-    lexical_diffusion_language_ids: set[int] = set()
-    diffusion_histories_by_language: dict[int, int] = {}
-    lexical_diffusion_adoption_sum = 0.0
-    lexical_innovation_sum = 0.0
-    semantic_shift_sum = 0.0
-    for diffusion_history in lexical_diffusion_histories:
-        diffusion_id = int(diffusion_history.get("id", -1))
-        language_id = int(diffusion_history.get("language_region_id", -1))
-        parent_id = int(diffusion_history.get("parent_language_region_id", -1))
-        history_id = int(diffusion_history.get("phonological_history_id", -1))
-        correspondence_ids = diffusion_history.get("lexical_correspondence_ids", [])
-        steps = diffusion_history.get("steps", [])
-        mean_adoption = float(diffusion_history.get("mean_diffusion_adoption_index", -1.0))
-        mean_innovation = float(diffusion_history.get("mean_lexical_innovation_index", -1.0))
-        mean_semantic_shift = float(diffusion_history.get("mean_semantic_shift_index", -1.0))
-        lexical_diffusion_adoption_sum += mean_adoption
-        lexical_innovation_sum += mean_innovation
-        semantic_shift_sum += mean_semantic_shift
-        lexical_diffusion_language_ids.add(language_id)
-        diffusion_histories_by_language[language_id] = diffusion_id
-        if (
-            diffusion_id not in lexical_diffusion_by_id
-            or language_id not in language_by_id
-            or (parent_id >= 0 and parent_id not in language_by_id)
-            or history_id not in phonological_history_by_id
-            or int(language_by_id[language_id].get("phonological_history_id", -1)) != history_id
-            or not isinstance(correspondence_ids, list)
-            or not isinstance(steps, list)
-            or int(diffusion_history.get("lexical_correspondence_count", -1)) != len(correspondence_ids)
-            or int(diffusion_history.get("step_count", -1)) != len(steps)
-            or set(int(record_id) for record_id in correspondence_ids) != set(correspondences_by_language.get(language_id, []))
-            or not str(diffusion_history.get("syllable_template", "")).strip()
-            or not str(diffusion_history.get("stress_system", "")).strip()
-            or not 0.0 <= mean_adoption <= 1.0
-            or not 0.0 <= mean_innovation <= 1.0
-            or not 0.0 <= mean_semantic_shift <= 1.0
-            or not 0.0 <= float(diffusion_history.get("contact_borrowing_index", -1.0)) <= 1.0
-        ):
-            phonology_invalid = True
-            break
-        step_adoption_sum = 0.0
-        step_innovation_sum = 0.0
-        step_semantic_sum = 0.0
-        for index, step in enumerate(steps):
-            stage_index = int(step.get("stage_index", -1))
-            era_id = int(step.get("era_id", -1))
-            affected_ids = step.get("affected_correspondence_ids", [])
-            affected_meanings = step.get("affected_meanings", [])
-            expected_affected_ids = [
-                int(record_id)
-                for record_id in correspondence_ids
-                if diffusion_stage_by_record.get(int(record_id), 0) <= stage_index
-            ]
-            adoption = float(step.get("adoption_fraction", -1.0))
-            innovation = float(step.get("innovation_fraction", -1.0))
-            semantic = float(step.get("semantic_shift_index", -1.0))
-            step_adoption_sum += adoption
-            step_innovation_sum += innovation
-            step_semantic_sum += semantic
+        phonological_drift_sum = 0.0
+        prosodic_complexity_sum = 0.0
+        phonotactic_complexity_sum = 0.0
+        for history in phonological_histories:
+            history_id = int(history.get("id", -1))
+            language_id = int(history.get("language_region_id", -1))
+            parent_id = int(history.get("parent_language_region_id", -1))
+            rule_ids = history.get("sound_change_rule_ids", [])
+            steps = history.get("steps", [])
+            phonological_drift = float(history.get("phonological_drift_index", -1.0))
+            prosodic_complexity = float(history.get("prosodic_complexity_index", -1.0))
+            phonotactic_complexity = float(history.get("phonotactic_complexity_index", -1.0))
+            phonological_drift_sum += phonological_drift
+            prosodic_complexity_sum += prosodic_complexity
+            phonotactic_complexity_sum += phonotactic_complexity
             if (
-                not isinstance(affected_ids, list)
-                or not isinstance(affected_meanings, list)
-                or stage_index != index + 1
-                or (historical_eras and era_id not in historical_era_ids)
-                or float(step.get("start_year_bp", -1.0)) < float(step.get("end_year_bp", -1.0))
-                or int(step.get("affected_correspondence_count", -1)) != len(affected_ids)
-                or len(affected_meanings) != len(affected_ids)
-                or set(int(record_id) for record_id in affected_ids) != set(expected_affected_ids)
-                or int(step.get("affected_domain_count", -1)) < 0
-                or not 0.0 <= adoption <= 1.0
-                or not 0.0 <= innovation <= 1.0
-                or not 0.0 <= float(step.get("contact_borrowing_index", -1.0)) <= 1.0
-                or not 0.0 <= float(step.get("regularization_index", -1.0)) <= 1.0
-                or not 0.0 <= semantic <= 1.0
+                history_id not in phonological_history_by_id
+                or language_id not in language_by_id
+                or (parent_id >= 0 and parent_id not in language_by_id)
+                or not isinstance(rule_ids, list)
+                or not isinstance(steps, list)
+                or int(history.get("sound_change_rule_count", -1)) != len(rule_ids)
+                or int(history.get("step_count", -1)) != len(steps)
+                or int(history.get("initial_phoneme_inventory_size", 0)) <= 0
+                or int(history.get("final_phoneme_inventory_size", 0)) <= 0
+                or not 0.0 <= float(history.get("cumulative_sound_shift_index", -1.0)) <= 1.0
+                or not 0.0 <= phonological_drift <= 1.0
+                or int(history.get("allowed_coda_count", 0)) <= 0
+                or not str(history.get("syllable_template", "")).strip()
+                or not str(history.get("stress_system", "")).strip()
+                or not 0.0 <= prosodic_complexity <= 1.0
+                or not 0.0 <= phonotactic_complexity <= 1.0
             ):
                 phonology_invalid = True
                 break
-            for record_id_raw in affected_ids:
+            if set(int(rule_id) for rule_id in rule_ids) != set(rules_by_language.get(language_id, [])):
+                phonology_invalid = True
+                break
+            for rule_id_raw in rule_ids:
+                rule_id = int(rule_id_raw)
+                if rule_id not in phonological_rule_by_id or int(phonological_rule_by_id[rule_id].get("language_region_id", -1)) != language_id:
+                    phonology_invalid = True
+                    break
+            if phonology_invalid:
+                break
+            for index, step in enumerate(steps):
+                step_rule_ids = step.get("rule_ids", [])
+                era_id = int(step.get("era_id", -1))
+                if (
+                    not isinstance(step_rule_ids, list)
+                    or int(step.get("stage_index", -1)) != index + 1
+                    or (historical_eras and era_id not in historical_era_ids)
+                    or int(step.get("rule_count", -1)) != len(step_rule_ids)
+                    or int(step.get("inventory_size", 0)) <= 0
+                    or float(step.get("start_year_bp", -1.0)) < float(step.get("end_year_bp", -1.0))
+                    or not str(step.get("syllable_template", "")).strip()
+                    or not str(step.get("stress_system", "")).strip()
+                    or not 0.0 <= float(step.get("cumulative_sound_shift_index", -1.0)) <= 1.0
+                    or not 0.0 <= float(step.get("inherited_phonology_fraction", -1.0)) <= 1.0
+                    or not 0.0 <= float(step.get("contact_influence_index", -1.0)) <= 1.0
+                    or not 0.0 <= float(step.get("phonotactic_complexity_index", -1.0)) <= 1.0
+                    or not 0.0 <= float(step.get("prosodic_weight_index", -1.0)) <= 1.0
+                ):
+                    phonology_invalid = True
+                    break
+                for rule_id_raw in step_rule_ids:
+                    rule_id = int(rule_id_raw)
+                    if rule_id not in rule_ids:
+                        phonology_invalid = True
+                        break
+                if phonology_invalid:
+                    break
+            if phonology_invalid:
+                break
+            if steps and int(steps[-1].get("inventory_size", -1)) != int(history.get("final_phoneme_inventory_size", -2)):
+                phonology_invalid = True
+                break
+        lexical_diffusion_language_ids: set[int] = set()
+        diffusion_histories_by_language: dict[int, int] = {}
+        lexical_diffusion_adoption_sum = 0.0
+        lexical_innovation_sum = 0.0
+        semantic_shift_sum = 0.0
+        for diffusion_history in lexical_diffusion_histories:
+            diffusion_id = int(diffusion_history.get("id", -1))
+            language_id = int(diffusion_history.get("language_region_id", -1))
+            parent_id = int(diffusion_history.get("parent_language_region_id", -1))
+            history_id = int(diffusion_history.get("phonological_history_id", -1))
+            correspondence_ids = diffusion_history.get("lexical_correspondence_ids", [])
+            steps = diffusion_history.get("steps", [])
+            mean_adoption = float(diffusion_history.get("mean_diffusion_adoption_index", -1.0))
+            mean_innovation = float(diffusion_history.get("mean_lexical_innovation_index", -1.0))
+            mean_semantic_shift = float(diffusion_history.get("mean_semantic_shift_index", -1.0))
+            lexical_diffusion_adoption_sum += mean_adoption
+            lexical_innovation_sum += mean_innovation
+            semantic_shift_sum += mean_semantic_shift
+            lexical_diffusion_language_ids.add(language_id)
+            diffusion_histories_by_language[language_id] = diffusion_id
+            if (
+                diffusion_id not in lexical_diffusion_by_id
+                or language_id not in language_by_id
+                or (parent_id >= 0 and parent_id not in language_by_id)
+                or history_id not in phonological_history_by_id
+                or int(language_by_id[language_id].get("phonological_history_id", -1)) != history_id
+                or not isinstance(correspondence_ids, list)
+                or not isinstance(steps, list)
+                or int(diffusion_history.get("lexical_correspondence_count", -1)) != len(correspondence_ids)
+                or int(diffusion_history.get("step_count", -1)) != len(steps)
+                or set(int(record_id) for record_id in correspondence_ids) != set(correspondences_by_language.get(language_id, []))
+                or not str(diffusion_history.get("syllable_template", "")).strip()
+                or not str(diffusion_history.get("stress_system", "")).strip()
+                or not 0.0 <= mean_adoption <= 1.0
+                or not 0.0 <= mean_innovation <= 1.0
+                or not 0.0 <= mean_semantic_shift <= 1.0
+                or not 0.0 <= float(diffusion_history.get("contact_borrowing_index", -1.0)) <= 1.0
+            ):
+                phonology_invalid = True
+                break
+            step_adoption_sum = 0.0
+            step_innovation_sum = 0.0
+            step_semantic_sum = 0.0
+            for index, step in enumerate(steps):
+                stage_index = int(step.get("stage_index", -1))
+                era_id = int(step.get("era_id", -1))
+                affected_ids = step.get("affected_correspondence_ids", [])
+                affected_meanings = step.get("affected_meanings", [])
+                expected_affected_ids = [
+                    int(record_id)
+                    for record_id in correspondence_ids
+                    if diffusion_stage_by_record.get(int(record_id), 0) <= stage_index
+                ]
+                adoption = float(step.get("adoption_fraction", -1.0))
+                innovation = float(step.get("innovation_fraction", -1.0))
+                semantic = float(step.get("semantic_shift_index", -1.0))
+                step_adoption_sum += adoption
+                step_innovation_sum += innovation
+                step_semantic_sum += semantic
+                if (
+                    not isinstance(affected_ids, list)
+                    or not isinstance(affected_meanings, list)
+                    or stage_index != index + 1
+                    or (historical_eras and era_id not in historical_era_ids)
+                    or float(step.get("start_year_bp", -1.0)) < float(step.get("end_year_bp", -1.0))
+                    or int(step.get("affected_correspondence_count", -1)) != len(affected_ids)
+                    or len(affected_meanings) != len(affected_ids)
+                    or set(int(record_id) for record_id in affected_ids) != set(expected_affected_ids)
+                    or int(step.get("affected_domain_count", -1)) < 0
+                    or not 0.0 <= adoption <= 1.0
+                    or not 0.0 <= innovation <= 1.0
+                    or not 0.0 <= float(step.get("contact_borrowing_index", -1.0)) <= 1.0
+                    or not 0.0 <= float(step.get("regularization_index", -1.0)) <= 1.0
+                    or not 0.0 <= semantic <= 1.0
+                ):
+                    phonology_invalid = True
+                    break
+                for record_id_raw in affected_ids:
+                    record_id = int(record_id_raw)
+                    if record_id not in lexical_correspondence_by_id or int(lexical_correspondence_by_id[record_id].get("language_region_id", -1)) != language_id:
+                        phonology_invalid = True
+                        break
+                if phonology_invalid:
+                    break
+            if phonology_invalid:
+                break
+            step_divisor = len(steps) if steps else 1
+            if (
+                abs(mean_adoption - (step_adoption_sum / step_divisor if steps else 0.0)) > 0.001
+                or abs(mean_innovation - (step_innovation_sum / step_divisor if steps else 0.0)) > 0.001
+                or abs(mean_semantic_shift - (step_semantic_sum / step_divisor if steps else 0.0)) > 0.001
+            ):
+                phonology_invalid = True
+                break
+        speaker_histories_by_language: dict[int, int] = {}
+        total_estimated_speaker_population = 0.0
+        high_contact_speaker_history_count = 0
+        speaker_allophonic_sum = 0.0
+        speaker_syllable_sum = 0.0
+        speaker_contact_sum = 0.0
+        speaker_adoption_sum = 0.0
+        speaker_reduction_sum = 0.0
+        speaker_lexical_pressure_sum = 0.0
+        for speaker_history in speaker_population_histories:
+            speaker_history_id = int(speaker_history.get("id", -1))
+            language_id = int(speaker_history.get("language_region_id", -1))
+            parent_id = int(speaker_history.get("parent_language_region_id", -1))
+            population_region_id = int(speaker_history.get("population_region_id", -1))
+            population_region_ids = speaker_history.get("population_region_ids", [])
+            phonological_history_id = int(speaker_history.get("phonological_history_id", -1))
+            lexical_diffusion_id = int(speaker_history.get("lexical_diffusion_history_id", -1))
+            steps = speaker_history.get("steps", [])
+            initial_population = float(speaker_history.get("initial_speaker_population", -1.0))
+            final_population = float(speaker_history.get("final_speaker_population", -1.0))
+            estimated_population = float(speaker_history.get("estimated_speaker_population", -1.0))
+            mean_allophony = float(speaker_history.get("mean_allophonic_variation_index", -1.0))
+            mean_syllable = float(speaker_history.get("mean_syllable_pressure_index", -1.0))
+            mean_contact = float(speaker_history.get("mean_speaker_contact_index", -1.0))
+            mean_adoption = float(speaker_history.get("mean_population_adoption_index", -1.0))
+            mean_reduction = float(speaker_history.get("mean_phonetic_reduction_index", -1.0))
+            mean_lexical_pressure = float(speaker_history.get("mean_lexical_diffusion_pressure_index", -1.0))
+            total_estimated_speaker_population += estimated_population
+            speaker_allophonic_sum += mean_allophony
+            speaker_syllable_sum += mean_syllable
+            speaker_contact_sum += mean_contact
+            speaker_adoption_sum += mean_adoption
+            speaker_reduction_sum += mean_reduction
+            speaker_lexical_pressure_sum += mean_lexical_pressure
+            if bool(speaker_history.get("high_contact_speaker_history", False)):
+                high_contact_speaker_history_count += 1
+            speaker_histories_by_language[language_id] = speaker_history_id
+            if (
+                speaker_history_id not in speaker_population_history_by_id
+                or language_id not in language_by_id
+                or (parent_id >= 0 and parent_id not in language_by_id)
+                or not isinstance(population_region_ids, list)
+                or int(speaker_history.get("population_region_count", -1)) != len(population_region_ids)
+                or (population_region_id >= 0 and population_region_id not in population_region_ids)
+                or any(int(region_id) not in population_region_ids_for_speakers for region_id in population_region_ids)
+                or phonological_history_id not in phonological_history_by_id
+                or lexical_diffusion_id not in lexical_diffusion_by_id
+                or int(phonological_history_by_id[phonological_history_id].get("language_region_id", -1)) != language_id
+                or int(lexical_diffusion_by_id[lexical_diffusion_id].get("language_region_id", -1)) != language_id
+                or int(language_by_id[language_id].get("phonological_history_id", -1)) != phonological_history_id
+                or int(language_by_id[language_id].get("lexical_diffusion_history_id", -1)) != lexical_diffusion_id
+                or not isinstance(steps, list)
+                or int(speaker_history.get("step_count", -1)) != len(steps)
+                or initial_population < 0.0
+                or final_population < 0.0
+                or estimated_population < 0.0
+                or abs(final_population - estimated_population) > max(0.001, estimated_population * 0.000001)
+                or not 0.0 <= mean_allophony <= 1.0
+                or not 0.0 <= mean_syllable <= 1.0
+                or not 0.0 <= mean_contact <= 1.0
+                or not 0.0 <= mean_adoption <= 1.0
+                or not 0.0 <= mean_reduction <= 1.0
+                or not 0.0 <= mean_lexical_pressure <= 1.0
+                or not isinstance(speaker_history.get("high_contact_speaker_history", False), bool)
+            ):
+                phonology_invalid = True
+                break
+            step_allophony_sum = 0.0
+            step_syllable_sum = 0.0
+            step_contact_sum = 0.0
+            step_adoption_sum = 0.0
+            step_reduction_sum = 0.0
+            step_lexical_pressure_sum = 0.0
+            step_high_contact = False
+            for index, step in enumerate(steps):
+                era_id = int(step.get("era_id", -1))
+                allophony = float(step.get("allophonic_variation_index", -1.0))
+                syllable = float(step.get("syllable_pressure_index", -1.0))
+                contact = float(step.get("contact_pressure_index", -1.0))
+                adoption = float(step.get("population_adoption_index", -1.0))
+                reduction = float(step.get("phonetic_reduction_index", -1.0))
+                lexical_pressure = float(step.get("lexical_diffusion_pressure_index", -1.0))
+                step_allophony_sum += allophony
+                step_syllable_sum += syllable
+                step_contact_sum += contact
+                step_adoption_sum += adoption
+                step_reduction_sum += reduction
+                step_lexical_pressure_sum += lexical_pressure
+                if contact >= 0.75:
+                    step_high_contact = True
+                if (
+                    int(step.get("stage_index", -1)) != index + 1
+                    or (historical_eras and era_id not in historical_era_ids)
+                    or float(step.get("start_year_bp", -1.0)) < float(step.get("end_year_bp", -1.0))
+                    or float(step.get("speaker_population", -1.0)) < 0.0
+                    or not 0.0 <= float(step.get("speaker_fraction_index", -1.0)) <= 1.0
+                    or not 0.0 <= allophony <= 1.0
+                    or not 0.0 <= syllable <= 1.0
+                    or not 0.0 <= reduction <= 1.0
+                    or not 0.0 <= contact <= 1.0
+                    or not 0.0 <= lexical_pressure <= 1.0
+                    or not 0.0 <= adoption <= 1.0
+                    or not 0.0 <= float(step.get("register_divergence_index", -1.0)) <= 1.0
+                    or not 0.0 <= float(step.get("pronunciation_regularization_index", -1.0)) <= 1.0
+                ):
+                    phonology_invalid = True
+                    break
+            if phonology_invalid:
+                break
+            step_divisor = len(steps) if steps else 1
+            if (
+                abs(mean_allophony - (step_allophony_sum / step_divisor if steps else 0.0)) > 0.001
+                or abs(mean_syllable - (step_syllable_sum / step_divisor if steps else 0.0)) > 0.001
+                or abs(mean_contact - (step_contact_sum / step_divisor if steps else 0.0)) > 0.001
+                or abs(mean_adoption - (step_adoption_sum / step_divisor if steps else 0.0)) > 0.001
+                or abs(mean_reduction - (step_reduction_sum / step_divisor if steps else 0.0)) > 0.001
+                or abs(mean_lexical_pressure - (step_lexical_pressure_sum / step_divisor if steps else 0.0)) > 0.001
+                or bool(speaker_history.get("high_contact_speaker_history", False)) != (mean_contact >= 0.65 or step_high_contact)
+                or (
+                    steps
+                    and abs(float(steps[-1].get("speaker_population", 0.0)) - final_population)
+                    > max(0.001, final_population * 0.000001)
+                )
+            ):
+                phonology_invalid = True
+                break
+        for language in language_regions:
+            language_id = int(language.get("id", -1))
+            history_id = int(language.get("phonological_history_id", -1))
+            diffusion_history_id = int(language.get("lexical_diffusion_history_id", -1))
+            speaker_history_id = int(language.get("speaker_population_history_id", -1))
+            rule_ids = language.get("sound_change_rule_ids", [])
+            correspondence_ids = language.get("lexical_correspondence_ids", [])
+            if (
+                history_id not in phonological_history_by_id
+                or diffusion_history_id not in lexical_diffusion_by_id
+                or speaker_history_id not in speaker_population_history_by_id
+                or not isinstance(rule_ids, list)
+                or not isinstance(correspondence_ids, list)
+                or int(language.get("sound_change_rule_count", -1)) != len(rule_ids)
+                or int(language.get("lexical_correspondence_count", -1)) != len(correspondence_ids)
+                or set(int(rule_id) for rule_id in rule_ids) != set(rules_by_language.get(language_id, []))
+                or set(int(record_id) for record_id in correspondence_ids) != set(correspondences_by_language.get(language_id, []))
+                or diffusion_histories_by_language.get(language_id, -1) != diffusion_history_id
+                or speaker_histories_by_language.get(language_id, -1) != speaker_history_id
+                or int(language.get("final_phoneme_inventory_size", -1)) != int(language.get("phoneme_inventory_size", -2))
+                or not 0.0 <= float(language.get("phonological_drift_index", -1.0)) <= 1.0
+                or int(language.get("allowed_coda_count", 0)) <= 0
+                or not str(language.get("syllable_template", "")).strip()
+                or not str(language.get("stress_system", "")).strip()
+                or not 0.0 <= float(language.get("prosodic_complexity_index", -1.0)) <= 1.0
+                or not 0.0 <= float(language.get("phonotactic_complexity_index", -1.0)) <= 1.0
+            ):
+                phonology_invalid = True
+                break
+            for record_id_raw in correspondence_ids:
                 record_id = int(record_id_raw)
                 if record_id not in lexical_correspondence_by_id or int(lexical_correspondence_by_id[record_id].get("language_region_id", -1)) != language_id:
                     phonology_invalid = True
@@ -18784,219 +17227,47 @@ def validate(
             if phonology_invalid:
                 break
         if phonology_invalid:
-            break
-        step_divisor = len(steps) if steps else 1
-        if (
-            abs(mean_adoption - (step_adoption_sum / step_divisor if steps else 0.0)) > 0.001
-            or abs(mean_innovation - (step_innovation_sum / step_divisor if steps else 0.0)) > 0.001
-            or abs(mean_semantic_shift - (step_semantic_sum / step_divisor if steps else 0.0)) > 0.001
-        ):
-            phonology_invalid = True
-            break
-    speaker_histories_by_language: dict[int, int] = {}
-    total_estimated_speaker_population = 0.0
-    high_contact_speaker_history_count = 0
-    speaker_allophonic_sum = 0.0
-    speaker_syllable_sum = 0.0
-    speaker_contact_sum = 0.0
-    speaker_adoption_sum = 0.0
-    speaker_reduction_sum = 0.0
-    speaker_lexical_pressure_sum = 0.0
-    for speaker_history in speaker_population_histories:
-        speaker_history_id = int(speaker_history.get("id", -1))
-        language_id = int(speaker_history.get("language_region_id", -1))
-        parent_id = int(speaker_history.get("parent_language_region_id", -1))
-        population_region_id = int(speaker_history.get("population_region_id", -1))
-        population_region_ids = speaker_history.get("population_region_ids", [])
-        phonological_history_id = int(speaker_history.get("phonological_history_id", -1))
-        lexical_diffusion_id = int(speaker_history.get("lexical_diffusion_history_id", -1))
-        steps = speaker_history.get("steps", [])
-        initial_population = float(speaker_history.get("initial_speaker_population", -1.0))
-        final_population = float(speaker_history.get("final_speaker_population", -1.0))
-        estimated_population = float(speaker_history.get("estimated_speaker_population", -1.0))
-        mean_allophony = float(speaker_history.get("mean_allophonic_variation_index", -1.0))
-        mean_syllable = float(speaker_history.get("mean_syllable_pressure_index", -1.0))
-        mean_contact = float(speaker_history.get("mean_speaker_contact_index", -1.0))
-        mean_adoption = float(speaker_history.get("mean_population_adoption_index", -1.0))
-        mean_reduction = float(speaker_history.get("mean_phonetic_reduction_index", -1.0))
-        mean_lexical_pressure = float(speaker_history.get("mean_lexical_diffusion_pressure_index", -1.0))
-        total_estimated_speaker_population += estimated_population
-        speaker_allophonic_sum += mean_allophony
-        speaker_syllable_sum += mean_syllable
-        speaker_contact_sum += mean_contact
-        speaker_adoption_sum += mean_adoption
-        speaker_reduction_sum += mean_reduction
-        speaker_lexical_pressure_sum += mean_lexical_pressure
-        if bool(speaker_history.get("high_contact_speaker_history", False)):
-            high_contact_speaker_history_count += 1
-        speaker_histories_by_language[language_id] = speaker_history_id
-        if (
-            speaker_history_id not in speaker_population_history_by_id
-            or language_id not in language_by_id
-            or (parent_id >= 0 and parent_id not in language_by_id)
-            or not isinstance(population_region_ids, list)
-            or int(speaker_history.get("population_region_count", -1)) != len(population_region_ids)
-            or (population_region_id >= 0 and population_region_id not in population_region_ids)
-            or any(int(region_id) not in population_region_ids_for_speakers for region_id in population_region_ids)
-            or phonological_history_id not in phonological_history_by_id
-            or lexical_diffusion_id not in lexical_diffusion_by_id
-            or int(phonological_history_by_id[phonological_history_id].get("language_region_id", -1)) != language_id
-            or int(lexical_diffusion_by_id[lexical_diffusion_id].get("language_region_id", -1)) != language_id
-            or int(language_by_id[language_id].get("phonological_history_id", -1)) != phonological_history_id
-            or int(language_by_id[language_id].get("lexical_diffusion_history_id", -1)) != lexical_diffusion_id
-            or not isinstance(steps, list)
-            or int(speaker_history.get("step_count", -1)) != len(steps)
-            or initial_population < 0.0
-            or final_population < 0.0
-            or estimated_population < 0.0
-            or abs(final_population - estimated_population) > max(0.001, estimated_population * 0.000001)
-            or not 0.0 <= mean_allophony <= 1.0
-            or not 0.0 <= mean_syllable <= 1.0
-            or not 0.0 <= mean_contact <= 1.0
-            or not 0.0 <= mean_adoption <= 1.0
-            or not 0.0 <= mean_reduction <= 1.0
-            or not 0.0 <= mean_lexical_pressure <= 1.0
-            or not isinstance(speaker_history.get("high_contact_speaker_history", False), bool)
-        ):
-            phonology_invalid = True
-            break
-        step_allophony_sum = 0.0
-        step_syllable_sum = 0.0
-        step_contact_sum = 0.0
-        step_adoption_sum = 0.0
-        step_reduction_sum = 0.0
-        step_lexical_pressure_sum = 0.0
-        step_high_contact = False
-        for index, step in enumerate(steps):
-            era_id = int(step.get("era_id", -1))
-            allophony = float(step.get("allophonic_variation_index", -1.0))
-            syllable = float(step.get("syllable_pressure_index", -1.0))
-            contact = float(step.get("contact_pressure_index", -1.0))
-            adoption = float(step.get("population_adoption_index", -1.0))
-            reduction = float(step.get("phonetic_reduction_index", -1.0))
-            lexical_pressure = float(step.get("lexical_diffusion_pressure_index", -1.0))
-            step_allophony_sum += allophony
-            step_syllable_sum += syllable
-            step_contact_sum += contact
-            step_adoption_sum += adoption
-            step_reduction_sum += reduction
-            step_lexical_pressure_sum += lexical_pressure
-            if contact >= 0.75:
-                step_high_contact = True
-            if (
-                int(step.get("stage_index", -1)) != index + 1
-                or (historical_eras and era_id not in historical_era_ids)
-                or float(step.get("start_year_bp", -1.0)) < float(step.get("end_year_bp", -1.0))
-                or float(step.get("speaker_population", -1.0)) < 0.0
-                or not 0.0 <= float(step.get("speaker_fraction_index", -1.0)) <= 1.0
-                or not 0.0 <= allophony <= 1.0
-                or not 0.0 <= syllable <= 1.0
-                or not 0.0 <= reduction <= 1.0
-                or not 0.0 <= contact <= 1.0
-                or not 0.0 <= lexical_pressure <= 1.0
-                or not 0.0 <= adoption <= 1.0
-                or not 0.0 <= float(step.get("register_divergence_index", -1.0)) <= 1.0
-                or not 0.0 <= float(step.get("pronunciation_regularization_index", -1.0)) <= 1.0
-            ):
-                phonology_invalid = True
+            failures.append("phonological history records invalid")
+        lexical_correspondence_language_count = len(lexical_correspondence_language_ids)
+        if int(summary.get("lexical_correspondence_language_count", -1)) != lexical_correspondence_language_count:
+            failures.append("lexical_correspondence_language_count does not match lexical correspondences")
+        lexical_diffusion_language_count = len(lexical_diffusion_language_ids)
+        if int(summary.get("lexical_diffusion_language_count", -1)) != lexical_diffusion_language_count:
+            failures.append("lexical_diffusion_language_count does not match lexical diffusion histories")
+        phonological_rule_divisor = len(phonological_rules) if phonological_rules else 1
+        phonological_history_divisor = len(phonological_histories) if phonological_histories else 1
+        lexical_correspondence_divisor = len(lexical_correspondences) if lexical_correspondences else 1
+        lexical_diffusion_divisor = len(lexical_diffusion_histories) if lexical_diffusion_histories else 1
+        speaker_population_divisor = len(speaker_population_histories) if speaker_population_histories else 1
+        expected_phonology_means = {
+            "mean_phonological_rule_probability_index": phonological_probability_sum / phonological_rule_divisor if phonological_rules else 0.0,
+            "mean_phonological_rule_regularity_index": phonological_regularity_sum / phonological_rule_divisor if phonological_rules else 0.0,
+            "mean_lexical_replacement_index": lexical_replacement_sum / phonological_rule_divisor if phonological_rules else 0.0,
+            "mean_phonological_contact_influence_index": phonological_contact_sum / phonological_rule_divisor if phonological_rules else 0.0,
+            "mean_phonological_drift_index": phonological_drift_sum / phonological_history_divisor if phonological_histories else 0.0,
+            "mean_language_prosodic_complexity_index": prosodic_complexity_sum / phonological_history_divisor if phonological_histories else 0.0,
+            "mean_phonotactic_complexity_index": phonotactic_complexity_sum / phonological_history_divisor if phonological_histories else 0.0,
+            "mean_regular_correspondence_fraction": regular_correspondence_sum / lexical_correspondence_divisor if lexical_correspondences else 0.0,
+            "mean_lexical_correspondence_replacement_index": lexical_correspondence_replacement_sum / lexical_correspondence_divisor if lexical_correspondences else 0.0,
+            "mean_lexical_prosodic_weight_index": lexical_prosodic_weight_sum / lexical_correspondence_divisor if lexical_correspondences else 0.0,
+            "mean_lexical_diffusion_adoption_index": lexical_diffusion_adoption_sum / lexical_diffusion_divisor if lexical_diffusion_histories else 0.0,
+            "mean_lexical_innovation_index": lexical_innovation_sum / lexical_diffusion_divisor if lexical_diffusion_histories else 0.0,
+            "mean_semantic_shift_index": semantic_shift_sum / lexical_diffusion_divisor if lexical_diffusion_histories else 0.0,
+            "mean_speaker_allophonic_variation_index": speaker_allophonic_sum / speaker_population_divisor if speaker_population_histories else 0.0,
+            "mean_speaker_syllable_pressure_index": speaker_syllable_sum / speaker_population_divisor if speaker_population_histories else 0.0,
+            "mean_speaker_contact_index": speaker_contact_sum / speaker_population_divisor if speaker_population_histories else 0.0,
+            "mean_speaker_population_adoption_index": speaker_adoption_sum / speaker_population_divisor if speaker_population_histories else 0.0,
+            "mean_speaker_phonetic_reduction_index": speaker_reduction_sum / speaker_population_divisor if speaker_population_histories else 0.0,
+            "mean_speaker_lexical_diffusion_pressure_index": speaker_lexical_pressure_sum / speaker_population_divisor if speaker_population_histories else 0.0,
+        }
+        for key, expected in expected_phonology_means.items():
+            if abs(float(summary.get(key, 0.0)) - expected) > 0.001:
+                failures.append(f"{key} does not match phonological history")
                 break
-        if phonology_invalid:
-            break
-        step_divisor = len(steps) if steps else 1
-        if (
-            abs(mean_allophony - (step_allophony_sum / step_divisor if steps else 0.0)) > 0.001
-            or abs(mean_syllable - (step_syllable_sum / step_divisor if steps else 0.0)) > 0.001
-            or abs(mean_contact - (step_contact_sum / step_divisor if steps else 0.0)) > 0.001
-            or abs(mean_adoption - (step_adoption_sum / step_divisor if steps else 0.0)) > 0.001
-            or abs(mean_reduction - (step_reduction_sum / step_divisor if steps else 0.0)) > 0.001
-            or abs(mean_lexical_pressure - (step_lexical_pressure_sum / step_divisor if steps else 0.0)) > 0.001
-            or bool(speaker_history.get("high_contact_speaker_history", False)) != (mean_contact >= 0.65 or step_high_contact)
-            or (
-                steps
-                and abs(float(steps[-1].get("speaker_population", 0.0)) - final_population)
-                > max(0.001, final_population * 0.000001)
-            )
-        ):
-            phonology_invalid = True
-            break
-    for language in language_regions:
-        language_id = int(language.get("id", -1))
-        history_id = int(language.get("phonological_history_id", -1))
-        diffusion_history_id = int(language.get("lexical_diffusion_history_id", -1))
-        speaker_history_id = int(language.get("speaker_population_history_id", -1))
-        rule_ids = language.get("sound_change_rule_ids", [])
-        correspondence_ids = language.get("lexical_correspondence_ids", [])
-        if (
-            history_id not in phonological_history_by_id
-            or diffusion_history_id not in lexical_diffusion_by_id
-            or speaker_history_id not in speaker_population_history_by_id
-            or not isinstance(rule_ids, list)
-            or not isinstance(correspondence_ids, list)
-            or int(language.get("sound_change_rule_count", -1)) != len(rule_ids)
-            or int(language.get("lexical_correspondence_count", -1)) != len(correspondence_ids)
-            or set(int(rule_id) for rule_id in rule_ids) != set(rules_by_language.get(language_id, []))
-            or set(int(record_id) for record_id in correspondence_ids) != set(correspondences_by_language.get(language_id, []))
-            or diffusion_histories_by_language.get(language_id, -1) != diffusion_history_id
-            or speaker_histories_by_language.get(language_id, -1) != speaker_history_id
-            or int(language.get("final_phoneme_inventory_size", -1)) != int(language.get("phoneme_inventory_size", -2))
-            or not 0.0 <= float(language.get("phonological_drift_index", -1.0)) <= 1.0
-            or int(language.get("allowed_coda_count", 0)) <= 0
-            or not str(language.get("syllable_template", "")).strip()
-            or not str(language.get("stress_system", "")).strip()
-            or not 0.0 <= float(language.get("prosodic_complexity_index", -1.0)) <= 1.0
-            or not 0.0 <= float(language.get("phonotactic_complexity_index", -1.0)) <= 1.0
-        ):
-            phonology_invalid = True
-            break
-        for record_id_raw in correspondence_ids:
-            record_id = int(record_id_raw)
-            if record_id not in lexical_correspondence_by_id or int(lexical_correspondence_by_id[record_id].get("language_region_id", -1)) != language_id:
-                phonology_invalid = True
-                break
-        if phonology_invalid:
-            break
-    if phonology_invalid:
-        failures.append("phonological history records invalid")
-    lexical_correspondence_language_count = len(lexical_correspondence_language_ids)
-    if int(summary.get("lexical_correspondence_language_count", -1)) != lexical_correspondence_language_count:
-        failures.append("lexical_correspondence_language_count does not match lexical correspondences")
-    lexical_diffusion_language_count = len(lexical_diffusion_language_ids)
-    if int(summary.get("lexical_diffusion_language_count", -1)) != lexical_diffusion_language_count:
-        failures.append("lexical_diffusion_language_count does not match lexical diffusion histories")
-    phonological_rule_divisor = len(phonological_rules) if phonological_rules else 1
-    phonological_history_divisor = len(phonological_histories) if phonological_histories else 1
-    lexical_correspondence_divisor = len(lexical_correspondences) if lexical_correspondences else 1
-    lexical_diffusion_divisor = len(lexical_diffusion_histories) if lexical_diffusion_histories else 1
-    speaker_population_divisor = len(speaker_population_histories) if speaker_population_histories else 1
-    expected_phonology_means = {
-        "mean_phonological_rule_probability_index": phonological_probability_sum / phonological_rule_divisor if phonological_rules else 0.0,
-        "mean_phonological_rule_regularity_index": phonological_regularity_sum / phonological_rule_divisor if phonological_rules else 0.0,
-        "mean_lexical_replacement_index": lexical_replacement_sum / phonological_rule_divisor if phonological_rules else 0.0,
-        "mean_phonological_contact_influence_index": phonological_contact_sum / phonological_rule_divisor if phonological_rules else 0.0,
-        "mean_phonological_drift_index": phonological_drift_sum / phonological_history_divisor if phonological_histories else 0.0,
-        "mean_language_prosodic_complexity_index": prosodic_complexity_sum / phonological_history_divisor if phonological_histories else 0.0,
-        "mean_phonotactic_complexity_index": phonotactic_complexity_sum / phonological_history_divisor if phonological_histories else 0.0,
-        "mean_regular_correspondence_fraction": regular_correspondence_sum / lexical_correspondence_divisor if lexical_correspondences else 0.0,
-        "mean_lexical_correspondence_replacement_index": lexical_correspondence_replacement_sum / lexical_correspondence_divisor if lexical_correspondences else 0.0,
-        "mean_lexical_prosodic_weight_index": lexical_prosodic_weight_sum / lexical_correspondence_divisor if lexical_correspondences else 0.0,
-        "mean_lexical_diffusion_adoption_index": lexical_diffusion_adoption_sum / lexical_diffusion_divisor if lexical_diffusion_histories else 0.0,
-        "mean_lexical_innovation_index": lexical_innovation_sum / lexical_diffusion_divisor if lexical_diffusion_histories else 0.0,
-        "mean_semantic_shift_index": semantic_shift_sum / lexical_diffusion_divisor if lexical_diffusion_histories else 0.0,
-        "mean_speaker_allophonic_variation_index": speaker_allophonic_sum / speaker_population_divisor if speaker_population_histories else 0.0,
-        "mean_speaker_syllable_pressure_index": speaker_syllable_sum / speaker_population_divisor if speaker_population_histories else 0.0,
-        "mean_speaker_contact_index": speaker_contact_sum / speaker_population_divisor if speaker_population_histories else 0.0,
-        "mean_speaker_population_adoption_index": speaker_adoption_sum / speaker_population_divisor if speaker_population_histories else 0.0,
-        "mean_speaker_phonetic_reduction_index": speaker_reduction_sum / speaker_population_divisor if speaker_population_histories else 0.0,
-        "mean_speaker_lexical_diffusion_pressure_index": speaker_lexical_pressure_sum / speaker_population_divisor if speaker_population_histories else 0.0,
-    }
-    for key, expected in expected_phonology_means.items():
-        if abs(float(summary.get(key, 0.0)) - expected) > 0.001:
-            failures.append(f"{key} does not match phonological history")
-            break
-    if abs(float(summary.get("total_estimated_speaker_population", 0.0)) - total_estimated_speaker_population) > 0.001:
-        failures.append("total_estimated_speaker_population does not match speaker population histories")
-    if int(summary.get("high_contact_speaker_history_count", -1)) != high_contact_speaker_history_count:
-        failures.append("high_contact_speaker_history_count does not match speaker population histories")
+        if abs(float(summary.get("total_estimated_speaker_population", 0.0)) - total_estimated_speaker_population) > 0.001:
+            failures.append("total_estimated_speaker_population does not match speaker population histories")
+        if int(summary.get("high_contact_speaker_history_count", -1)) != high_contact_speaker_history_count:
+            failures.append("high_contact_speaker_history_count does not match speaker population histories")
 
     population_regions = payload.get("population_regions", [])
     if int(summary.get("population_region_count", -1)) != len(population_regions):
@@ -19012,110 +17283,118 @@ def validate(
         failures.append("population region fields missing")
 
     population_histories = payload.get("population_histories", [])
-    if int(summary.get("population_history_count", -1)) != len(population_histories):
-        failures.append("population_history_count does not match population_histories length")
-    if len(population_histories) != len(population_regions):
-        failures.append("population_histories length does not match population_regions length")
-    population_history_step_count = sum(int(history.get("time_step_count", 0)) for history in population_histories)
-    if int(summary.get("population_history_step_count", -1)) != population_history_step_count:
-        failures.append("population_history_step_count does not match history steps")
-    expected_history_steps = len(historical_eras)
-    final_population_sum = 0.0
-    peak_population_pressure = 0.0
-    max_population_decline_fraction = 0.0
-    history_invalid = False
-    political_region_ids = {int(region.get("id", -1)) for region in political_regions}
-    population_region_ids = {int(region.get("id", -1)) for region in population_regions}
-    era_ids = [int(era.get("id", -1)) for era in historical_eras]
-    for history in population_histories:
-        steps = history.get("steps", [])
-        if (
-            not isinstance(steps, list)
-            or int(history.get("population_region_id", -1)) not in population_region_ids
-            or int(history.get("time_step_count", -1)) != len(steps)
-            or len(steps) != expected_history_steps
-        ):
-            history_invalid = True
-            break
-        previous_end: float | None = None
-        for index, step in enumerate(steps):
-            if int(step.get("era_id", -1)) != era_ids[index]:
-                history_invalid = True
-                break
-            start_population = float(step.get("start_population", -1.0))
-            end_population = float(step.get("end_population", -1.0))
-            population_change = float(step.get("population_change", 0.0))
-            carrying_capacity = float(step.get("carrying_capacity", 0.0))
-            pressure_index = float(step.get("pressure_index", -1.0))
+    if social_tail_modes["population"]:
+        era_ids = [era["id"] for era in historical_eras]
+        expected_history_steps = len(historical_eras)
+        political_region_ids = {region["id"] for region in political_regions}
+        population_region_ids = {region["id"] for region in population_regions}
+    if not (social_tail_modes["population"]):
+        population_histories = payload.get("population_histories", [])
+        if int(summary.get("population_history_count", -1)) != len(population_histories):
+            failures.append("population_history_count does not match population_histories length")
+        if len(population_histories) != len(population_regions):
+            failures.append("population_histories length does not match population_regions length")
+        population_history_step_count = sum(int(history.get("time_step_count", 0)) for history in population_histories)
+        if int(summary.get("population_history_step_count", -1)) != population_history_step_count:
+            failures.append("population_history_step_count does not match history steps")
+        expected_history_steps = len(historical_eras)
+        final_population_sum = 0.0
+        peak_population_pressure = 0.0
+        max_population_decline_fraction = 0.0
+        history_invalid = False
+        political_region_ids = {int(region.get("id", -1)) for region in political_regions}
+        population_region_ids = {int(region.get("id", -1)) for region in population_regions}
+        era_ids = [int(era.get("id", -1)) for era in historical_eras]
+        for history in population_histories:
+            steps = history.get("steps", [])
             if (
-                start_population < 0.0
-                or end_population < 0.0
-                or carrying_capacity <= 0.0
-                or pressure_index < 0.0
-                or abs((end_population - start_population) - population_change) > max(1.0, abs(end_population) * 0.0001)
+                not isinstance(steps, list)
+                or int(history.get("population_region_id", -1)) not in population_region_ids
+                or int(history.get("time_step_count", -1)) != len(steps)
+                or len(steps) != expected_history_steps
             ):
                 history_invalid = True
                 break
-            if previous_end is not None and abs(start_population - previous_end) > max(1.0, previous_end * 0.0001):
-                history_invalid = True
+            previous_end: float | None = None
+            for index, step in enumerate(steps):
+                if int(step.get("era_id", -1)) != era_ids[index]:
+                    history_invalid = True
+                    break
+                start_population = float(step.get("start_population", -1.0))
+                end_population = float(step.get("end_population", -1.0))
+                population_change = float(step.get("population_change", 0.0))
+                carrying_capacity = float(step.get("carrying_capacity", 0.0))
+                pressure_index = float(step.get("pressure_index", -1.0))
+                if (
+                    start_population < 0.0
+                    or end_population < 0.0
+                    or carrying_capacity <= 0.0
+                    or pressure_index < 0.0
+                    or abs((end_population - start_population) - population_change) > max(1.0, abs(end_population) * 0.0001)
+                ):
+                    history_invalid = True
+                    break
+                if previous_end is not None and abs(start_population - previous_end) > max(1.0, previous_end * 0.0001):
+                    history_invalid = True
+                    break
+                peak_population_pressure = max(peak_population_pressure, pressure_index)
+                max_population_decline_fraction = max(
+                    max_population_decline_fraction,
+                    max(0.0, -population_change / max(1.0, start_population)),
+                )
+                previous_end = end_population
+            if history_invalid:
                 break
-            peak_population_pressure = max(peak_population_pressure, pressure_index)
-            max_population_decline_fraction = max(
-                max_population_decline_fraction,
-                max(0.0, -population_change / max(1.0, start_population)),
-            )
-            previous_end = end_population
+            if steps:
+                final_population = float(history.get("final_population", -1.0))
+                if abs(final_population - float(steps[-1].get("end_population", 0.0))) > max(1.0, final_population * 0.0001):
+                    history_invalid = True
+                    break
+                final_population_sum += final_population
         if history_invalid:
-            break
-        if steps:
-            final_population = float(history.get("final_population", -1.0))
-            if abs(final_population - float(steps[-1].get("end_population", 0.0))) > max(1.0, final_population * 0.0001):
-                history_invalid = True
-                break
-            final_population_sum += final_population
-    if history_invalid:
-        failures.append("population history fields invalid")
-    if abs(float(summary.get("historical_final_population", 0.0)) - final_population_sum) > max(1.0, final_population_sum * 0.0001):
-        failures.append("historical_final_population does not match population histories")
-    if abs(float(summary.get("historical_peak_population_pressure", 0.0)) - peak_population_pressure) > 0.0001:
-        failures.append("historical_peak_population_pressure does not match population histories")
-    if abs(float(summary.get("max_population_decline_fraction", 0.0)) - max_population_decline_fraction) > 0.0001:
-        failures.append("max_population_decline_fraction does not match population histories")
+            failures.append("population history fields invalid")
+        if abs(float(summary.get("historical_final_population", 0.0)) - final_population_sum) > max(1.0, final_population_sum * 0.0001):
+            failures.append("historical_final_population does not match population histories")
+        if abs(float(summary.get("historical_peak_population_pressure", 0.0)) - peak_population_pressure) > 0.0001:
+            failures.append("historical_peak_population_pressure does not match population histories")
+        if abs(float(summary.get("max_population_decline_fraction", 0.0)) - max_population_decline_fraction) > 0.0001:
+            failures.append("max_population_decline_fraction does not match population histories")
 
     conflicts = payload.get("conflicts", [])
-    if int(summary.get("conflict_count", -1)) != len(conflicts):
-        failures.append("conflict_count does not match conflicts length")
-    high_intensity_conflicts = sum(1 for conflict in conflicts if float(conflict.get("intensity", 0.0)) >= 0.65)
-    if int(summary.get("high_intensity_conflict_count", -1)) != high_intensity_conflicts:
-        failures.append("high_intensity_conflict_count does not match conflicts")
-    high_economic_disruption_conflicts = sum(
-        1 for conflict in conflicts if float(conflict.get("economic_disruption_index", 0.0)) >= 0.65
-    )
-    if int(summary.get("high_economic_disruption_conflict_count", -1)) != high_economic_disruption_conflicts:
-        failures.append("high_economic_disruption_conflict_count does not match conflicts")
-    conflict_war_summary_keys = {
-        "mean_war_duration_years",
-        "total_mobilized_population",
-        "mean_conflict_logistics_strain_index",
-        "mean_conflict_economic_disruption_index",
-        "mean_conflict_casualty_rate",
-        "max_conflict_casualty_rate",
-    }
-    if not conflict_war_summary_keys.issubset(summary):
-        failures.append("conflict war summary metrics missing")
-    else:
-        if float(summary.get("mean_war_duration_years", 0.0)) < 0.0:
-            failures.append("mean_war_duration_years out of range")
-        if float(summary.get("total_mobilized_population", 0.0)) < 0.0:
-            failures.append("total_mobilized_population out of range")
-        for key in (
+    if not native_social_availability:
+        if int(summary.get("conflict_count", -1)) != len(conflicts):
+            failures.append("conflict_count does not match conflicts length")
+        high_intensity_conflicts = sum(1 for conflict in conflicts if float(conflict.get("intensity", 0.0)) >= 0.65)
+        if int(summary.get("high_intensity_conflict_count", -1)) != high_intensity_conflicts:
+            failures.append("high_intensity_conflict_count does not match conflicts")
+        high_economic_disruption_conflicts = sum(
+            1 for conflict in conflicts if float(conflict.get("economic_disruption_index", 0.0)) >= 0.65
+        )
+        if int(summary.get("high_economic_disruption_conflict_count", -1)) != high_economic_disruption_conflicts:
+            failures.append("high_economic_disruption_conflict_count does not match conflicts")
+        conflict_war_summary_keys = {
+            "mean_war_duration_years",
+            "total_mobilized_population",
             "mean_conflict_logistics_strain_index",
             "mean_conflict_economic_disruption_index",
             "mean_conflict_casualty_rate",
             "max_conflict_casualty_rate",
-        ):
-            if not 0.0 <= float(summary.get(key, 0.0)) <= 1.0:
-                failures.append(f"{key} out of range")
+        }
+        if not conflict_war_summary_keys.issubset(summary):
+            failures.append("conflict war summary metrics missing")
+        else:
+            if float(summary.get("mean_war_duration_years", 0.0)) < 0.0:
+                failures.append("mean_war_duration_years out of range")
+            if float(summary.get("total_mobilized_population", 0.0)) < 0.0:
+                failures.append("total_mobilized_population out of range")
+            for key in (
+                "mean_conflict_logistics_strain_index",
+                "mean_conflict_economic_disruption_index",
+                "mean_conflict_casualty_rate",
+                "max_conflict_casualty_rate",
+            ):
+                if not 0.0 <= float(summary.get(key, 0.0)) <= 1.0:
+                    failures.append(f"{key} out of range")
     if conflicts and (
         "cause" not in conflicts[0]
         or "outcome" not in conflicts[0]
@@ -19155,1089 +17434,400 @@ def validate(
     if conflict_war_invalid:
         failures.append("conflict war diagnostics invalid")
 
-    economy_histories = payload.get("economy_histories", [])
-    if int(summary.get("economy_history_count", -1)) != len(economy_histories):
-        failures.append("economy_history_count does not match economy_histories length")
-    if len(economy_histories) != len(population_histories):
-        failures.append("economy_histories length does not match population_histories length")
-    economy_step_count = sum(int(history.get("time_step_count", 0)) for history in economy_histories)
-    if int(summary.get("economy_history_step_count", -1)) != economy_step_count:
-        failures.append("economy_history_step_count does not match economy history steps")
-    economy_summary_keys = {
-        "historical_final_gross_output_index",
-        "historical_final_treasury_index",
-        "historical_total_tax_revenue_index",
-        "historical_total_trade_revenue_index",
-        "historical_total_war_cost_index",
-        "historical_peak_army_capacity_population",
-        "mean_historical_prosperity_index",
-        "mean_historical_trade_dependency_index",
-        "mean_historical_military_burden_index",
-        "high_military_burden_economy_step_count",
-    }
-    if not economy_summary_keys.issubset(summary):
-        failures.append("economy history summary metrics missing")
-    economy_invalid = False
-    economy_final_gdp = 0.0
-    economy_final_treasury = 0.0
-    economy_tax_revenue = 0.0
-    economy_trade_revenue = 0.0
-    economy_war_cost = 0.0
-    economy_peak_army = 0.0
-    economy_prosperity_sum = 0.0
-    economy_trade_dependency_sum = 0.0
-    economy_military_burden_sum = 0.0
-    economy_high_burden_steps = 0
-    economy_valid_step_count = 0
-    for history in economy_histories:
-        steps = history.get("steps", [])
-        if (
-            not isinstance(steps, list)
-            or int(history.get("population_region_id", -1)) not in population_region_ids
-            or int(history.get("region_id", -1)) not in political_region_ids
-            or int(history.get("time_step_count", -1)) != len(steps)
-            or len(steps) != expected_history_steps
-        ):
-            economy_invalid = True
-            break
-        previous_treasury: float | None = None
-        history_peak_gdp = 0.0
-        history_peak_treasury = 0.0
-        history_peak_army = 0.0
-        for index, step in enumerate(steps):
-            if int(step.get("era_id", -1)) != era_ids[index]:
-                economy_invalid = True
-                break
-            population = float(step.get("population", -1.0))
-            gross_output = float(step.get("gross_output_index", -1.0))
-            agricultural_output = float(step.get("agricultural_output_index", -1.0))
-            resource_output = float(step.get("resource_output_index", -1.0))
-            trade_output = float(step.get("trade_output_index", -1.0))
-            urban_services = float(step.get("urban_services_index", -1.0))
-            treasury_start = float(step.get("treasury_start_index", -1.0))
-            tax_revenue = float(step.get("tax_revenue_index", -1.0))
-            trade_revenue = float(step.get("trade_revenue_index", -1.0))
-            administration_cost = float(step.get("administration_cost_index", -1.0))
-            army_cost = float(step.get("army_maintenance_cost_index", -1.0))
-            war_cost = float(step.get("war_cost_index", -1.0))
-            insolvency_adjustment = float(step.get("insolvency_adjustment_index", -1.0))
-            treasury_end = float(step.get("treasury_end_index", -1.0))
-            balance_residual = float(step.get("balance_residual_index", 0.0))
-            army_capacity = float(step.get("army_capacity_population", -1.0))
-            mobilized_force = float(step.get("mobilized_force_population", -1.0))
-            prosperity = float(step.get("prosperity_index", -1.0))
-            food_security = float(step.get("food_security_index", -1.0))
-            trade_dependency = float(step.get("trade_dependency_index", -1.0))
-            military_burden = float(step.get("military_burden_index", -1.0))
-            stability = float(step.get("stability_index", -1.0))
+    if not (social_tail_modes["economy"]):
+        economy_histories = payload.get("economy_histories", [])
+        if int(summary.get("economy_history_count", -1)) != len(economy_histories):
+            failures.append("economy_history_count does not match economy_histories length")
+        if len(economy_histories) != len(population_histories):
+            failures.append("economy_histories length does not match population_histories length")
+        economy_step_count = sum(int(history.get("time_step_count", 0)) for history in economy_histories)
+        if int(summary.get("economy_history_step_count", -1)) != economy_step_count:
+            failures.append("economy_history_step_count does not match economy history steps")
+        economy_summary_keys = {
+            "historical_final_gross_output_index",
+            "historical_final_treasury_index",
+            "historical_total_tax_revenue_index",
+            "historical_total_trade_revenue_index",
+            "historical_total_war_cost_index",
+            "historical_peak_army_capacity_population",
+            "mean_historical_prosperity_index",
+            "mean_historical_trade_dependency_index",
+            "mean_historical_military_burden_index",
+            "high_military_burden_economy_step_count",
+        }
+        if not economy_summary_keys.issubset(summary):
+            failures.append("economy history summary metrics missing")
+        economy_invalid = False
+        economy_final_gdp = 0.0
+        economy_final_treasury = 0.0
+        economy_tax_revenue = 0.0
+        economy_trade_revenue = 0.0
+        economy_war_cost = 0.0
+        economy_peak_army = 0.0
+        economy_prosperity_sum = 0.0
+        economy_trade_dependency_sum = 0.0
+        economy_military_burden_sum = 0.0
+        economy_high_burden_steps = 0
+        economy_valid_step_count = 0
+        for history in economy_histories:
+            steps = history.get("steps", [])
             if (
-                population < 0.0
-                or gross_output < 0.0
-                or agricultural_output < 0.0
-                or resource_output < 0.0
-                or trade_output < 0.0
-                or urban_services < 0.0
-                or treasury_start < 0.0
-                or tax_revenue < 0.0
-                or trade_revenue < 0.0
-                or administration_cost < 0.0
-                or army_cost < 0.0
-                or war_cost < 0.0
-                or insolvency_adjustment < 0.0
-                or treasury_end < 0.0
-                or army_capacity < 0.0
-                or mobilized_force < 0.0
-                or not 0.0 <= prosperity <= 1.0
-                or not 0.0 <= food_security <= 1.0
-                or not 0.0 <= trade_dependency <= 1.0
-                or not 0.0 <= military_burden <= 1.0
-                or not 0.0 <= stability <= 1.0
-                or abs((treasury_start + tax_revenue + trade_revenue + insolvency_adjustment - administration_cost - army_cost - war_cost - treasury_end) - balance_residual) > 0.001
-                or abs(balance_residual) > 0.001
+                not isinstance(steps, list)
+                or int(history.get("population_region_id", -1)) not in population_region_ids
+                or int(history.get("region_id", -1)) not in political_region_ids
+                or int(history.get("time_step_count", -1)) != len(steps)
+                or len(steps) != expected_history_steps
             ):
                 economy_invalid = True
                 break
-            if previous_treasury is not None and abs(treasury_start - previous_treasury) > max(0.001, previous_treasury * 0.0001):
-                economy_invalid = True
+            previous_treasury: float | None = None
+            history_peak_gdp = 0.0
+            history_peak_treasury = 0.0
+            history_peak_army = 0.0
+            for index, step in enumerate(steps):
+                if int(step.get("era_id", -1)) != era_ids[index]:
+                    economy_invalid = True
+                    break
+                population = float(step.get("population", -1.0))
+                gross_output = float(step.get("gross_output_index", -1.0))
+                agricultural_output = float(step.get("agricultural_output_index", -1.0))
+                resource_output = float(step.get("resource_output_index", -1.0))
+                trade_output = float(step.get("trade_output_index", -1.0))
+                urban_services = float(step.get("urban_services_index", -1.0))
+                treasury_start = float(step.get("treasury_start_index", -1.0))
+                tax_revenue = float(step.get("tax_revenue_index", -1.0))
+                trade_revenue = float(step.get("trade_revenue_index", -1.0))
+                administration_cost = float(step.get("administration_cost_index", -1.0))
+                army_cost = float(step.get("army_maintenance_cost_index", -1.0))
+                war_cost = float(step.get("war_cost_index", -1.0))
+                insolvency_adjustment = float(step.get("insolvency_adjustment_index", -1.0))
+                treasury_end = float(step.get("treasury_end_index", -1.0))
+                balance_residual = float(step.get("balance_residual_index", 0.0))
+                army_capacity = float(step.get("army_capacity_population", -1.0))
+                mobilized_force = float(step.get("mobilized_force_population", -1.0))
+                prosperity = float(step.get("prosperity_index", -1.0))
+                food_security = float(step.get("food_security_index", -1.0))
+                trade_dependency = float(step.get("trade_dependency_index", -1.0))
+                military_burden = float(step.get("military_burden_index", -1.0))
+                stability = float(step.get("stability_index", -1.0))
+                if (
+                    population < 0.0
+                    or gross_output < 0.0
+                    or agricultural_output < 0.0
+                    or resource_output < 0.0
+                    or trade_output < 0.0
+                    or urban_services < 0.0
+                    or treasury_start < 0.0
+                    or tax_revenue < 0.0
+                    or trade_revenue < 0.0
+                    or administration_cost < 0.0
+                    or army_cost < 0.0
+                    or war_cost < 0.0
+                    or insolvency_adjustment < 0.0
+                    or treasury_end < 0.0
+                    or army_capacity < 0.0
+                    or mobilized_force < 0.0
+                    or not 0.0 <= prosperity <= 1.0
+                    or not 0.0 <= food_security <= 1.0
+                    or not 0.0 <= trade_dependency <= 1.0
+                    or not 0.0 <= military_burden <= 1.0
+                    or not 0.0 <= stability <= 1.0
+                    or abs((treasury_start + tax_revenue + trade_revenue + insolvency_adjustment - administration_cost - army_cost - war_cost - treasury_end) - balance_residual) > 0.001
+                    or abs(balance_residual) > 0.001
+                ):
+                    economy_invalid = True
+                    break
+                if previous_treasury is not None and abs(treasury_start - previous_treasury) > max(0.001, previous_treasury * 0.0001):
+                    economy_invalid = True
+                    break
+                history_peak_gdp = max(history_peak_gdp, gross_output)
+                # The opening balance is part of the history, including histories
+                # whose treasury declines at every step.
+                history_peak_treasury = max(history_peak_treasury, treasury_start, treasury_end)
+                history_peak_army = max(history_peak_army, army_capacity)
+                economy_tax_revenue += tax_revenue
+                economy_trade_revenue += trade_revenue
+                economy_war_cost += war_cost
+                economy_peak_army = max(economy_peak_army, army_capacity)
+                economy_prosperity_sum += prosperity
+                economy_trade_dependency_sum += trade_dependency
+                economy_military_burden_sum += military_burden
+                economy_high_burden_steps += 1 if military_burden >= 0.65 else 0
+                economy_valid_step_count += 1
+                previous_treasury = treasury_end
+            if economy_invalid:
                 break
-            history_peak_gdp = max(history_peak_gdp, gross_output)
-            history_peak_treasury = max(history_peak_treasury, treasury_end)
-            history_peak_army = max(history_peak_army, army_capacity)
-            economy_tax_revenue += tax_revenue
-            economy_trade_revenue += trade_revenue
-            economy_war_cost += war_cost
-            economy_peak_army = max(economy_peak_army, army_capacity)
-            economy_prosperity_sum += prosperity
-            economy_trade_dependency_sum += trade_dependency
-            economy_military_burden_sum += military_burden
-            economy_high_burden_steps += 1 if military_burden >= 0.65 else 0
-            economy_valid_step_count += 1
-            previous_treasury = treasury_end
+            if steps:
+                final_gdp = float(history.get("final_gross_output_index", -1.0))
+                final_treasury = float(history.get("final_treasury_index", -1.0))
+                if (
+                    abs(final_gdp - float(steps[-1].get("gross_output_index", 0.0))) > max(0.001, final_gdp * 0.0001)
+                    or abs(final_treasury - float(steps[-1].get("treasury_end_index", 0.0))) > max(0.001, final_treasury * 0.0001)
+                    or abs(float(history.get("peak_gross_output_index", 0.0)) - history_peak_gdp) > max(0.001, history_peak_gdp * 0.0001)
+                    or abs(float(history.get("peak_treasury_index", 0.0)) - history_peak_treasury) > max(0.001, history_peak_treasury * 0.0001)
+                    or abs(float(history.get("max_army_capacity_population", 0.0)) - history_peak_army) > max(1.0, history_peak_army * 0.0001)
+                ):
+                    economy_invalid = True
+                    break
+                economy_final_gdp += final_gdp
+                economy_final_treasury += final_treasury
         if economy_invalid:
-            break
-        if steps:
-            final_gdp = float(history.get("final_gross_output_index", -1.0))
-            final_treasury = float(history.get("final_treasury_index", -1.0))
-            if (
-                abs(final_gdp - float(steps[-1].get("gross_output_index", 0.0))) > max(0.001, final_gdp * 0.0001)
-                or abs(final_treasury - float(steps[-1].get("treasury_end_index", 0.0))) > max(0.001, final_treasury * 0.0001)
-                or abs(float(history.get("peak_gross_output_index", 0.0)) - history_peak_gdp) > max(0.001, history_peak_gdp * 0.0001)
-                or abs(float(history.get("peak_treasury_index", 0.0)) - history_peak_treasury) > max(0.001, history_peak_treasury * 0.0001)
-                or abs(float(history.get("max_army_capacity_population", 0.0)) - history_peak_army) > max(1.0, history_peak_army * 0.0001)
-            ):
-                economy_invalid = True
-                break
-            economy_final_gdp += final_gdp
-            economy_final_treasury += final_treasury
-    if economy_invalid:
-        failures.append("economy history fields invalid")
-    if abs(float(summary.get("historical_final_gross_output_index", 0.0)) - economy_final_gdp) > max(0.001, economy_final_gdp * 0.0001):
-        failures.append("historical_final_gross_output_index does not match economy histories")
-    if abs(float(summary.get("historical_final_treasury_index", 0.0)) - economy_final_treasury) > max(0.001, economy_final_treasury * 0.0001):
-        failures.append("historical_final_treasury_index does not match economy histories")
-    if abs(float(summary.get("historical_total_tax_revenue_index", 0.0)) - economy_tax_revenue) > max(0.001, economy_tax_revenue * 0.0001):
-        failures.append("historical_total_tax_revenue_index does not match economy histories")
-    if abs(float(summary.get("historical_total_trade_revenue_index", 0.0)) - economy_trade_revenue) > max(0.001, economy_trade_revenue * 0.0001):
-        failures.append("historical_total_trade_revenue_index does not match economy histories")
-    if abs(float(summary.get("historical_total_war_cost_index", 0.0)) - economy_war_cost) > max(0.001, economy_war_cost * 0.0001):
-        failures.append("historical_total_war_cost_index does not match economy histories")
-    if abs(float(summary.get("historical_peak_army_capacity_population", 0.0)) - economy_peak_army) > max(1.0, economy_peak_army * 0.0001):
-        failures.append("historical_peak_army_capacity_population does not match economy histories")
-    if economy_valid_step_count:
-        if abs(float(summary.get("mean_historical_prosperity_index", 0.0)) - economy_prosperity_sum / economy_valid_step_count) > 0.001:
-            failures.append("mean_historical_prosperity_index does not match economy histories")
-        if abs(float(summary.get("mean_historical_trade_dependency_index", 0.0)) - economy_trade_dependency_sum / economy_valid_step_count) > 0.001:
-            failures.append("mean_historical_trade_dependency_index does not match economy histories")
-        if abs(float(summary.get("mean_historical_military_burden_index", 0.0)) - economy_military_burden_sum / economy_valid_step_count) > 0.001:
-            failures.append("mean_historical_military_burden_index does not match economy histories")
-    if int(summary.get("high_military_burden_economy_step_count", -1)) != economy_high_burden_steps:
-        failures.append("high_military_burden_economy_step_count does not match economy histories")
+            failures.append("economy history fields invalid")
+        if abs(float(summary.get("historical_final_gross_output_index", 0.0)) - economy_final_gdp) > max(0.001, economy_final_gdp * 0.0001):
+            failures.append("historical_final_gross_output_index does not match economy histories")
+        if abs(float(summary.get("historical_final_treasury_index", 0.0)) - economy_final_treasury) > max(0.001, economy_final_treasury * 0.0001):
+            failures.append("historical_final_treasury_index does not match economy histories")
+        if abs(float(summary.get("historical_total_tax_revenue_index", 0.0)) - economy_tax_revenue) > max(0.001, economy_tax_revenue * 0.0001):
+            failures.append("historical_total_tax_revenue_index does not match economy histories")
+        if abs(float(summary.get("historical_total_trade_revenue_index", 0.0)) - economy_trade_revenue) > max(0.001, economy_trade_revenue * 0.0001):
+            failures.append("historical_total_trade_revenue_index does not match economy histories")
+        if abs(float(summary.get("historical_total_war_cost_index", 0.0)) - economy_war_cost) > max(0.001, economy_war_cost * 0.0001):
+            failures.append("historical_total_war_cost_index does not match economy histories")
+        if abs(float(summary.get("historical_peak_army_capacity_population", 0.0)) - economy_peak_army) > max(1.0, economy_peak_army * 0.0001):
+            failures.append("historical_peak_army_capacity_population does not match economy histories")
+        if economy_valid_step_count:
+            if abs(float(summary.get("mean_historical_prosperity_index", 0.0)) - economy_prosperity_sum / economy_valid_step_count) > 0.001:
+                failures.append("mean_historical_prosperity_index does not match economy histories")
+            if abs(float(summary.get("mean_historical_trade_dependency_index", 0.0)) - economy_trade_dependency_sum / economy_valid_step_count) > 0.001:
+                failures.append("mean_historical_trade_dependency_index does not match economy histories")
+            if abs(float(summary.get("mean_historical_military_burden_index", 0.0)) - economy_military_burden_sum / economy_valid_step_count) > 0.001:
+                failures.append("mean_historical_military_burden_index does not match economy histories")
+        if int(summary.get("high_military_burden_economy_step_count", -1)) != economy_high_burden_steps:
+            failures.append("high_military_burden_economy_step_count does not match economy histories")
 
-    logistics_networks = payload.get("logistics_networks", [])
-    market_exchanges = payload.get("market_exchanges", [])
-    route_capacity_constraints = payload.get("route_capacity_constraints", [])
-    market_clearing_records = payload.get("market_clearing_records", [])
-    market_agent_orders = payload.get("market_agent_orders", [])
-    market_price_iterations = payload.get("market_price_iterations", [])
-    market_inventory_histories = payload.get("market_inventory_histories", [])
-    campaign_movements = payload.get("campaign_movements", [])
-    campaign_path_segments = payload.get("campaign_path_segments", [])
-    campaign_front_histories = payload.get("campaign_front_histories", [])
-    tactical_engagements = payload.get("tactical_engagements", [])
-    strategic_campaign_plans = payload.get("strategic_campaign_plans", [])
-    if int(summary.get("logistics_network_count", -1)) != len(logistics_networks):
-        failures.append("logistics_network_count does not match logistics_networks length")
-    if int(summary.get("market_exchange_count", -1)) != len(market_exchanges):
-        failures.append("market_exchange_count does not match market_exchanges length")
-    if int(summary.get("route_capacity_constraint_count", -1)) != len(route_capacity_constraints):
-        failures.append("route_capacity_constraint_count does not match route_capacity_constraints length")
-    if int(summary.get("market_clearing_record_count", -1)) != len(market_clearing_records):
-        failures.append("market_clearing_record_count does not match market_clearing_records length")
-    if int(summary.get("market_agent_order_count", -1)) != len(market_agent_orders):
-        failures.append("market_agent_order_count does not match market_agent_orders length")
-    if int(summary.get("market_price_iteration_count", -1)) != len(market_price_iterations):
-        failures.append("market_price_iteration_count does not match market_price_iterations length")
-    if int(summary.get("market_inventory_history_count", -1)) != len(market_inventory_histories):
-        failures.append("market_inventory_history_count does not match market_inventory_histories length")
-    if int(summary.get("campaign_movement_count", -1)) != len(campaign_movements):
-        failures.append("campaign_movement_count does not match campaign_movements length")
-    if int(summary.get("campaign_path_segment_count", -1)) != len(campaign_path_segments):
-        failures.append("campaign_path_segment_count does not match campaign_path_segments length")
-    if int(summary.get("campaign_front_history_count", -1)) != len(campaign_front_histories):
-        failures.append("campaign_front_history_count does not match campaign_front_histories length")
-    if int(summary.get("tactical_engagement_count", -1)) != len(tactical_engagements):
-        failures.append("tactical_engagement_count does not match tactical_engagements length")
-    if int(summary.get("strategic_campaign_plan_count", -1)) != len(strategic_campaign_plans):
-        failures.append("strategic_campaign_plan_count does not match strategic_campaign_plans length")
-    logistics_summary_keys = {
-        "logistics_route_link_count",
-        "interregional_market_exchange_count",
-        "route_capacity_constraint_count",
-        "market_clearing_record_count",
-        "market_agent_order_count",
-        "market_price_iteration_count",
-        "market_inventory_history_count",
-        "market_inventory_step_count",
-        "producer_market_order_count",
-        "consumer_market_order_count",
-        "constrained_market_exchange_count",
-        "total_market_exchange_volume_index",
-        "total_market_requested_volume_index",
-        "total_market_cleared_volume_index",
-        "total_market_unmet_demand_index",
-        "total_endogenous_market_supply_index",
-        "total_endogenous_market_demand_index",
-        "total_campaign_mobilized_population",
-        "mean_logistics_transport_efficiency_index",
-        "mean_logistics_resilience_index",
-        "mean_market_access_index",
-        "mean_market_disruption_risk_index",
-        "mean_market_clearance_fraction",
-        "mean_route_capacity_utilization_index",
-        "mean_market_price_adjustment_index",
-        "mean_market_rationing_index",
-        "mean_market_equilibrium_residual_index",
-        "mean_market_inventory_gap_index",
-        "mean_market_learning_rate_index",
-        "mean_market_inventory_pressure_index",
-        "high_inventory_stress_market_count",
-        "mean_campaign_travel_time_days",
-        "mean_campaign_attrition_risk_index",
-        "mean_campaign_operational_reach_index",
-        "campaign_path_segment_count",
-        "campaign_front_history_count",
-        "tactical_engagement_count",
-        "strategic_campaign_plan_count",
-        "campaign_front_step_count",
-        "tactical_engagement_step_count",
-        "strategic_decision_point_count",
-        "total_campaign_path_length_km",
-        "mean_campaign_path_length_km",
-        "mean_campaign_path_terrain_cost_index",
-        "mean_campaign_path_supply_loss_index",
-        "mean_campaign_path_attrition_index",
-        "mean_campaign_front_supply_integrity_index",
-        "mean_campaign_front_control_index",
-        "total_campaign_front_attrition_loss_population",
-        "tactical_total_attrition_loss_population",
-        "mean_tactical_counter_maneuver_index",
-        "mean_tactical_front_pressure_index",
-        "mean_tactical_supply_contest_index",
-        "independent_counter_campaign_plan_count",
-        "mean_counter_campaign_viability_index",
-        "mean_strategic_plan_confidence_index",
-        "mean_strategic_force_reserve_fraction",
-        "high_attrition_campaign_count",
-        "high_attrition_campaign_path_segment_count",
-        "high_pressure_tactical_step_count",
-        "high_escalation_strategic_plan_count",
-    }
-    if not logistics_summary_keys.issubset(summary):
-        failures.append("logistics history summary metrics missing")
-    logistics_network_keys = {
-        "id",
-        "region_id",
-        "route_ids",
-        "trade_flow_ids",
-        "border_ids",
-        "route_count",
-        "trade_flow_count",
-        "border_count",
-        "total_route_distance_km",
-        "total_route_cost",
-        "total_trade_volume_index",
-        "interregional_trade_volume_index",
-        "army_capacity_population",
-        "supply_capacity_index",
-        "transport_efficiency_index",
-        "logistics_resilience_index",
-        "chokepoint_exposure_index",
-    }
-    market_exchange_keys = {
-        "id",
-        "trade_flow_id",
-        "route_id",
-        "from_settlement_id",
-        "to_settlement_id",
-        "region_from",
-        "region_to",
-        "primary_good",
-        "interregional",
-        "distance_km",
-        "volume_index",
-        "friction",
-        "supply_index",
-        "demand_index",
-        "price_spread_index",
-        "market_access_index",
-        "tax_revenue_index",
-        "food_security_link_index",
-        "disruption_risk_index",
-        "market_clearing_record_id",
-        "market_inventory_history_id",
-        "cleared_volume_index",
-        "unmet_demand_index",
-        "clearance_fraction",
-    }
-    route_capacity_constraint_keys = {
-        "id",
-        "route_id",
-        "route_type",
-        "market_exchange_ids",
-        "market_exchange_count",
-        "distance_km",
-        "requested_volume_index",
-        "capacity_volume_index",
-        "cleared_volume_index",
-        "unmet_volume_index",
-        "utilization_index",
-        "congestion_index",
-        "shortage_index",
-        "spoilage_loss_index",
-    }
-    market_clearing_record_keys = {
-        "id",
-        "market_exchange_id",
-        "trade_flow_id",
-        "route_id",
-        "route_capacity_constraint_id",
-        "region_from",
-        "region_to",
-        "primary_good",
-        "requested_volume_index",
-        "cleared_volume_index",
-        "unmet_demand_index",
-        "clearance_fraction",
-        "route_utilization_index",
-        "price_adjustment_index",
-        "rationing_index",
-        "producer_surplus_index",
-        "consumer_welfare_index",
-        "agent_order_ids",
-        "agent_order_count",
-        "price_iteration_ids",
-        "price_iteration_count",
-        "market_inventory_history_id",
-        "endogenous_supply_index",
-        "endogenous_demand_index",
-        "equilibrium_price_index",
-        "price_residual_index",
-    }
-    market_agent_order_keys = {
-        "id",
-        "market_exchange_id",
-        "market_clearing_record_id",
-        "agent_type",
-        "agent_id",
-        "region_id",
-        "order_side",
-        "order_kind",
-        "primary_good",
-        "requested_volume_index",
-        "cleared_volume_index",
-        "limit_price_index",
-        "price_acceptance_index",
-        "rationing_index",
-        "inventory_change_index",
-    }
-    market_price_iteration_keys = {
-        "id",
-        "market_exchange_id",
-        "market_clearing_record_id",
-        "iteration_index",
-        "order_ids",
-        "order_count",
-        "price_index",
-        "supply_volume_index",
-        "demand_volume_index",
-        "imbalance_index",
-        "excess_demand_index",
-        "price_adjustment_index",
-    }
-    market_inventory_history_keys = {
-        "id",
-        "market_clearing_record_id",
-        "market_exchange_id",
-        "trade_flow_id",
-        "route_id",
-        "region_from",
-        "region_to",
-        "primary_good",
-        "initial_inventory_index",
-        "target_inventory_index",
-        "final_inventory_index",
-        "inventory_gap_index",
-        "learning_rate_index",
-        "mean_inventory_pressure_index",
-        "mean_price_expectation_index",
-        "mean_supply_response_index",
-        "mean_demand_adjustment_index",
-        "high_inventory_stress",
-        "step_count",
-        "steps",
-    }
-    campaign_movement_keys = {
-        "id",
-        "conflict_id",
-        "era_id",
-        "origin_region_id",
-        "target_region_id",
-        "origin_cell_id",
-        "target_cell_id",
-        "contested_cell_id",
-        "route_id",
-        "border_id",
-        "path_cell_ids",
-        "path_cell_count",
-        "path_segment_ids",
-        "path_segment_count",
-        "path_length_km",
-        "path_terrain_cost_index",
-        "path_supply_loss_index",
-        "path_attrition_index",
-        "campaign_front_history_id",
-        "start_year_bp",
-        "end_year_bp",
-        "distance_km",
-        "travel_time_days",
-        "force_estimate",
-        "supply_required_index",
-        "attrition_risk_index",
-        "logistics_strain_index",
-        "operational_reach_index",
-        "campaign_success_index",
-        "outcome",
-    }
-    campaign_path_segment_keys = {
-        "id",
-        "campaign_movement_id",
-        "sequence_index",
-        "from_cell_id",
-        "to_cell_id",
-        "route_mode",
-        "distance_km",
-        "elapsed_days",
-        "terrain_cost_index",
-        "barrier_cost_index",
-        "supply_loss_index",
-        "attrition_index",
-        "elevation_gain_m",
-        "water_crossing",
-    }
-    campaign_front_history_keys = {
-        "id",
-        "campaign_movement_id",
-        "conflict_id",
-        "origin_region_id",
-        "target_region_id",
-        "attacking_force_initial",
-        "defending_force_initial",
-        "final_attacking_force_estimate",
-        "final_defending_force_estimate",
-        "start_year_bp",
-        "end_year_bp",
-        "route_mode",
-        "path_cell_ids",
-        "path_segment_ids",
-        "step_count",
-        "captured_cell_count",
-        "final_occupied_cell_id",
-        "max_supply_line_length_km",
-        "mean_supply_integrity_index",
-        "mean_occupation_control_index",
-        "outcome_projection",
-        "steps",
-    }
-    tactical_engagement_keys = {
-        "id",
-        "conflict_id",
-        "era_id",
-        "campaign_movement_id",
-        "campaign_front_history_id",
-        "region_a",
-        "region_b",
-        "contested_cell_id",
-        "battle_cell_ids",
-        "battle_cell_count",
-        "start_year_bp",
-        "end_year_bp",
-        "initial_region_a_force",
-        "initial_region_b_force",
-        "final_region_a_force",
-        "final_region_b_force",
-        "winner_region_id",
-        "tactical_outcome",
-        "max_front_pressure_index",
-        "mean_counter_maneuver_index",
-        "mean_supply_contest_index",
-        "total_attrition_loss_population",
-        "step_count",
-        "steps",
-    }
-    strategic_campaign_plan_keys = {
-        "id",
-        "conflict_id",
-        "era_id",
-        "campaign_movement_id",
-        "campaign_front_history_id",
-        "tactical_engagement_id",
-        "primary_region_id",
-        "counter_region_id",
-        "primary_objective_cell_id",
-        "counter_objective_cell_id",
-        "primary_axis_cell_ids",
-        "counter_axis_cell_ids",
-        "primary_axis_cell_count",
-        "counter_axis_cell_count",
-        "decisive_cell_ids",
-        "decisive_cell_count",
-        "primary_force_allocation_population",
-        "counter_force_allocation_population",
-        "reserve_force_population",
-        "reserve_fraction",
-        "primary_logistics_score",
-        "counter_logistics_score",
-        "counter_campaign_viability_index",
-        "strategic_initiative_index",
-        "escalation_risk_index",
-        "operational_complexity_index",
-        "plan_confidence_index",
-        "expected_campaign_duration_days",
-        "counter_mobilization_days",
-        "strategic_posture",
-        "independent_counter_campaign_planned",
-        "decision_point_count",
-        "decision_points",
-    }
-    if logistics_networks and not logistics_network_keys.issubset(logistics_networks[0]):
-        failures.append("logistics network fields missing")
-    if market_exchanges and not market_exchange_keys.issubset(market_exchanges[0]):
-        failures.append("market exchange fields missing")
-    if route_capacity_constraints and not route_capacity_constraint_keys.issubset(route_capacity_constraints[0]):
-        failures.append("route capacity constraint fields missing")
-    if market_clearing_records and not market_clearing_record_keys.issubset(market_clearing_records[0]):
-        failures.append("market clearing record fields missing")
-    if market_agent_orders and not market_agent_order_keys.issubset(market_agent_orders[0]):
-        failures.append("market agent order fields missing")
-    if market_price_iterations and not market_price_iteration_keys.issubset(market_price_iterations[0]):
-        failures.append("market price iteration fields missing")
-    if market_inventory_histories and not market_inventory_history_keys.issubset(market_inventory_histories[0]):
-        failures.append("market inventory history fields missing")
-    if campaign_movements and not campaign_movement_keys.issubset(campaign_movements[0]):
-        failures.append("campaign movement fields missing")
-    if campaign_path_segments and not campaign_path_segment_keys.issubset(campaign_path_segments[0]):
-        failures.append("campaign path segment fields missing")
-    if campaign_front_histories and not campaign_front_history_keys.issubset(campaign_front_histories[0]):
-        failures.append("campaign front history fields missing")
-    if tactical_engagements and not tactical_engagement_keys.issubset(tactical_engagements[0]):
-        failures.append("tactical engagement fields missing")
-    if strategic_campaign_plans and not strategic_campaign_plan_keys.issubset(strategic_campaign_plans[0]):
-        failures.append("strategic campaign plan fields missing")
-
-    settlement_ids = {int(settlement.get("id", -1)) for settlement in settlements}
-    route_by_id = {int(route.get("id", -1)): route for route in routes}
-    trade_by_id = {int(trade.get("id", -1)): trade for trade in trade_flows}
-    conflict_by_id = {int(conflict.get("id", -1)): conflict for conflict in conflicts}
-    border_records = payload.get("borders", [])
-    border_by_id = {int(border.get("id", -1)): border for border in border_records}
-    logistics_by_id = {int(network.get("id", -1)): network for network in logistics_networks}
-    market_by_id = {int(market.get("id", -1)): market for market in market_exchanges}
-    route_constraint_by_id = {int(constraint.get("id", -1)): constraint for constraint in route_capacity_constraints}
-    clearing_by_id = {int(record.get("id", -1)): record for record in market_clearing_records}
-    market_order_by_id = {int(order.get("id", -1)): order for order in market_agent_orders}
-    market_iteration_by_id = {int(iteration.get("id", -1)): iteration for iteration in market_price_iterations}
-    market_inventory_by_id = {int(history.get("id", -1)): history for history in market_inventory_histories}
-    campaign_by_id = {int(campaign.get("id", -1)): campaign for campaign in campaign_movements}
-    campaign_segment_by_id = {int(segment.get("id", -1)): segment for segment in campaign_path_segments}
-    campaign_front_by_id = {int(history.get("id", -1)): history for history in campaign_front_histories}
-    tactical_engagement_by_id = {int(engagement.get("id", -1)): engagement for engagement in tactical_engagements}
-    strategic_plan_by_id = {int(plan.get("id", -1)): plan for plan in strategic_campaign_plans}
-    market_firm_ids = {int(firm.get("id", -1)) for firm in payload.get("firm_agents", [])}
-    market_household_ids = {int(cohort.get("id", -1)) for cohort in payload.get("household_cohorts", [])}
-    logistics_invalid = (
-        len(logistics_by_id) != len(logistics_networks)
-        or len(market_by_id) != len(market_exchanges)
-        or len(route_constraint_by_id) != len(route_capacity_constraints)
-        or len(clearing_by_id) != len(market_clearing_records)
-        or len(market_order_by_id) != len(market_agent_orders)
-        or len(market_iteration_by_id) != len(market_price_iterations)
-        or len(market_inventory_by_id) != len(market_inventory_histories)
-        or len(campaign_by_id) != len(campaign_movements)
-        or len(campaign_segment_by_id) != len(campaign_path_segments)
-        or len(campaign_front_by_id) != len(campaign_front_histories)
-        or len(tactical_engagement_by_id) != len(tactical_engagements)
-        or len(strategic_plan_by_id) != len(strategic_campaign_plans)
-        or any(record_id < 0 for record_id in logistics_by_id)
-        or any(record_id < 0 for record_id in market_by_id)
-        or any(record_id < 0 for record_id in route_constraint_by_id)
-        or any(record_id < 0 for record_id in clearing_by_id)
-        or any(record_id < 0 for record_id in market_order_by_id)
-        or any(record_id < 0 for record_id in market_iteration_by_id)
-        or any(record_id < 0 for record_id in market_inventory_by_id)
-        or any(record_id < 0 for record_id in campaign_by_id)
-        or any(record_id < 0 for record_id in campaign_segment_by_id)
-        or any(record_id < 0 for record_id in campaign_front_by_id)
-        or any(record_id < 0 for record_id in tactical_engagement_by_id)
-        or any(record_id < 0 for record_id in strategic_plan_by_id)
-    )
-    logistics_route_link_count = 0
-    logistics_efficiency_sum = 0.0
-    logistics_resilience_sum = 0.0
-    for network in logistics_networks:
-        region_id = int(network.get("region_id", -1))
-        route_ids = network.get("route_ids", [])
-        trade_ids = network.get("trade_flow_ids", [])
-        border_ids = network.get("border_ids", [])
-        if (
-            region_id not in political_region_ids
-            or not isinstance(route_ids, list)
-            or not isinstance(trade_ids, list)
-            or not isinstance(border_ids, list)
-            or int(network.get("route_count", -1)) != len(route_ids)
-            or int(network.get("trade_flow_count", -1)) != len(trade_ids)
-            or int(network.get("border_count", -1)) != len(border_ids)
-            or float(network.get("total_route_distance_km", -1.0)) < 0.0
-            or float(network.get("total_route_cost", -1.0)) < 0.0
-            or float(network.get("total_trade_volume_index", -1.0)) < 0.0
-            or float(network.get("interregional_trade_volume_index", -1.0)) < 0.0
-            or float(network.get("army_capacity_population", -1.0)) < 0.0
-        ):
-            logistics_invalid = True
-            break
-        for key in (
+    if social_tail_modes["logistics"] and social_tail_modes["market"]:
+        settlement_ids = {settlement["id"] for settlement in settlements}
+    if not (social_tail_modes["logistics"] and social_tail_modes["market"]):
+        logistics_networks = payload.get("logistics_networks", [])
+        market_exchanges = payload.get("market_exchanges", [])
+        route_capacity_constraints = payload.get("route_capacity_constraints", [])
+        market_clearing_records = payload.get("market_clearing_records", [])
+        market_agent_orders = payload.get("market_agent_orders", [])
+        market_price_iterations = payload.get("market_price_iterations", [])
+        market_inventory_histories = payload.get("market_inventory_histories", [])
+        campaign_movements = payload.get("campaign_movements", [])
+        campaign_path_segments = payload.get("campaign_path_segments", [])
+        campaign_front_histories = payload.get("campaign_front_histories", [])
+        tactical_engagements = payload.get("tactical_engagements", [])
+        strategic_campaign_plans = payload.get("strategic_campaign_plans", [])
+        if int(summary.get("logistics_network_count", -1)) != len(logistics_networks):
+            failures.append("logistics_network_count does not match logistics_networks length")
+        if int(summary.get("market_exchange_count", -1)) != len(market_exchanges):
+            failures.append("market_exchange_count does not match market_exchanges length")
+        if int(summary.get("route_capacity_constraint_count", -1)) != len(route_capacity_constraints):
+            failures.append("route_capacity_constraint_count does not match route_capacity_constraints length")
+        if int(summary.get("market_clearing_record_count", -1)) != len(market_clearing_records):
+            failures.append("market_clearing_record_count does not match market_clearing_records length")
+        if int(summary.get("market_agent_order_count", -1)) != len(market_agent_orders):
+            failures.append("market_agent_order_count does not match market_agent_orders length")
+        if int(summary.get("market_price_iteration_count", -1)) != len(market_price_iterations):
+            failures.append("market_price_iteration_count does not match market_price_iterations length")
+        if int(summary.get("market_inventory_history_count", -1)) != len(market_inventory_histories):
+            failures.append("market_inventory_history_count does not match market_inventory_histories length")
+        if int(summary.get("campaign_movement_count", -1)) != len(campaign_movements):
+            failures.append("campaign_movement_count does not match campaign_movements length")
+        if int(summary.get("campaign_path_segment_count", -1)) != len(campaign_path_segments):
+            failures.append("campaign_path_segment_count does not match campaign_path_segments length")
+        if int(summary.get("campaign_front_history_count", -1)) != len(campaign_front_histories):
+            failures.append("campaign_front_history_count does not match campaign_front_histories length")
+        if int(summary.get("tactical_engagement_count", -1)) != len(tactical_engagements):
+            failures.append("tactical_engagement_count does not match tactical_engagements length")
+        if int(summary.get("strategic_campaign_plan_count", -1)) != len(strategic_campaign_plans):
+            failures.append("strategic_campaign_plan_count does not match strategic_campaign_plans length")
+        logistics_summary_keys = {
+            "logistics_route_link_count",
+            "interregional_market_exchange_count",
+            "route_capacity_constraint_count",
+            "market_clearing_record_count",
+            "market_agent_order_count",
+            "market_price_iteration_count",
+            "market_inventory_history_count",
+            "market_inventory_step_count",
+            "producer_market_order_count",
+            "consumer_market_order_count",
+            "constrained_market_exchange_count",
+            "total_market_exchange_volume_index",
+            "total_market_requested_volume_index",
+            "total_market_cleared_volume_index",
+            "total_market_unmet_demand_index",
+            "total_endogenous_market_supply_index",
+            "total_endogenous_market_demand_index",
+            "total_campaign_mobilized_population",
+            "mean_logistics_transport_efficiency_index",
+            "mean_logistics_resilience_index",
+            "mean_market_access_index",
+            "mean_market_disruption_risk_index",
+            "mean_market_clearance_fraction",
+            "mean_route_capacity_utilization_index",
+            "mean_market_price_adjustment_index",
+            "mean_market_rationing_index",
+            "mean_market_equilibrium_residual_index",
+            "mean_market_inventory_gap_index",
+            "mean_market_learning_rate_index",
+            "mean_market_inventory_pressure_index",
+            "high_inventory_stress_market_count",
+            "mean_campaign_travel_time_days",
+            "mean_campaign_attrition_risk_index",
+            "mean_campaign_operational_reach_index",
+            "campaign_path_segment_count",
+            "campaign_front_history_count",
+            "tactical_engagement_count",
+            "strategic_campaign_plan_count",
+            "campaign_front_step_count",
+            "tactical_engagement_step_count",
+            "strategic_decision_point_count",
+            "total_campaign_path_length_km",
+            "mean_campaign_path_length_km",
+            "mean_campaign_path_terrain_cost_index",
+            "mean_campaign_path_supply_loss_index",
+            "mean_campaign_path_attrition_index",
+            "mean_campaign_front_supply_integrity_index",
+            "mean_campaign_front_control_index",
+            "total_campaign_front_attrition_loss_population",
+            "tactical_total_attrition_loss_population",
+            "mean_tactical_counter_maneuver_index",
+            "mean_tactical_front_pressure_index",
+            "mean_tactical_supply_contest_index",
+            "independent_counter_campaign_plan_count",
+            "mean_counter_campaign_viability_index",
+            "mean_strategic_plan_confidence_index",
+            "mean_strategic_force_reserve_fraction",
+            "high_attrition_campaign_count",
+            "high_attrition_campaign_path_segment_count",
+            "high_pressure_tactical_step_count",
+            "high_escalation_strategic_plan_count",
+        }
+        if not logistics_summary_keys.issubset(summary):
+            failures.append("logistics history summary metrics missing")
+        logistics_network_keys = {
+            "id",
+            "region_id",
+            "route_ids",
+            "trade_flow_ids",
+            "border_ids",
+            "route_count",
+            "trade_flow_count",
+            "border_count",
+            "total_route_distance_km",
+            "total_route_cost",
+            "total_trade_volume_index",
+            "interregional_trade_volume_index",
+            "army_capacity_population",
             "supply_capacity_index",
             "transport_efficiency_index",
             "logistics_resilience_index",
             "chokepoint_exposure_index",
-        ):
-            if not 0.0 <= float(network.get(key, -1.0)) <= 1.0:
-                logistics_invalid = True
-                break
-        if logistics_invalid:
-            break
-        expected_route_distance = 0.0
-        expected_route_cost = 0.0
-        for route_id_raw in route_ids:
-            route_id = int(route_id_raw)
-            if route_id not in route_by_id:
-                logistics_invalid = True
-                break
-            expected_route_distance += float(route_by_id[route_id].get("distance_km", 0.0))
-            expected_route_cost += float(route_by_id[route_id].get("cost", 0.0))
-        if logistics_invalid:
-            break
-        expected_trade_volume = 0.0
-        expected_interregional_volume = 0.0
-        for trade_id_raw in trade_ids:
-            trade_id = int(trade_id_raw)
-            if trade_id not in trade_by_id:
-                logistics_invalid = True
-                break
-            volume = float(trade_by_id[trade_id].get("volume_index", 0.0))
-            expected_trade_volume += volume
-            if bool(trade_by_id[trade_id].get("interregional", False)):
-                expected_interregional_volume += volume
-        if logistics_invalid:
-            break
-        for border_id_raw in border_ids:
-            if int(border_id_raw) not in border_by_id:
-                logistics_invalid = True
-                break
-        if logistics_invalid:
-            break
-        if (
-            abs(float(network.get("total_route_distance_km", 0.0)) - expected_route_distance) > max(0.001, expected_route_distance * 0.0001)
-            or abs(float(network.get("total_route_cost", 0.0)) - expected_route_cost) > max(0.001, expected_route_cost * 0.0001)
-            or abs(float(network.get("total_trade_volume_index", 0.0)) - expected_trade_volume) > max(0.001, expected_trade_volume * 0.0001)
-            or abs(float(network.get("interregional_trade_volume_index", 0.0)) - expected_interregional_volume) > max(0.001, expected_interregional_volume * 0.0001)
-        ):
-            logistics_invalid = True
-            break
-        logistics_route_link_count += len(route_ids)
-        logistics_efficiency_sum += float(network.get("transport_efficiency_index", 0.0))
-        logistics_resilience_sum += float(network.get("logistics_resilience_index", 0.0))
-
-    market_access_sum = 0.0
-    market_disruption_sum = 0.0
-    market_volume_sum = 0.0
-    interregional_market_count = 0
-    for market in market_exchanges:
-        trade_id = int(market.get("trade_flow_id", -1))
-        route_id = int(market.get("route_id", -1))
-        from_settlement_id = int(market.get("from_settlement_id", -1))
-        to_settlement_id = int(market.get("to_settlement_id", -1))
-        region_from = int(market.get("region_from", -1))
-        region_to = int(market.get("region_to", -1))
-        clearing_record_id = int(market.get("market_clearing_record_id", -1))
-        volume = float(market.get("volume_index", -1.0))
-        if (
-            trade_id not in trade_by_id
-            or route_id not in route_by_id
-            or from_settlement_id not in settlement_ids
-            or to_settlement_id not in settlement_ids
-            or region_from not in political_region_ids
-            or region_to not in political_region_ids
-            or clearing_record_id not in clearing_by_id
-            or not str(market.get("primary_good", "")).strip()
-            or float(market.get("distance_km", -1.0)) < 0.0
-            or volume < 0.0
-            or float(market.get("tax_revenue_index", -1.0)) < 0.0
-            or float(market.get("cleared_volume_index", -1.0)) < 0.0
-            or float(market.get("unmet_demand_index", -1.0)) < 0.0
-            or not 0.0 <= float(market.get("clearance_fraction", -1.0)) <= 1.0
-            or bool(market.get("interregional", False)) != bool(trade_by_id[trade_id].get("interregional", False))
-        ):
-            logistics_invalid = True
-            break
-        for key in (
+        }
+        market_exchange_keys = {
+            "id",
+            "trade_flow_id",
+            "route_id",
+            "from_settlement_id",
+            "to_settlement_id",
+            "region_from",
+            "region_to",
+            "primary_good",
+            "interregional",
+            "distance_km",
+            "volume_index",
             "friction",
             "supply_index",
             "demand_index",
             "price_spread_index",
             "market_access_index",
+            "tax_revenue_index",
             "food_security_link_index",
             "disruption_risk_index",
-        ):
-            if not 0.0 <= float(market.get(key, -1.0)) <= 1.0:
-                logistics_invalid = True
-                break
-        if logistics_invalid:
-            break
-        if (
-            abs(volume - float(trade_by_id[trade_id].get("volume_index", 0.0))) > max(0.001, volume * 0.0001)
-            or int(trade_by_id[trade_id].get("route_id", -1)) != route_id
-            or int(trade_by_id[trade_id].get("region_from", -1)) != region_from
-            or int(trade_by_id[trade_id].get("region_to", -1)) != region_to
-            or int(clearing_by_id[clearing_record_id].get("market_exchange_id", -1)) != int(market.get("id", -1))
-            or abs(float(market.get("cleared_volume_index", 0.0)) + float(market.get("unmet_demand_index", 0.0)) - volume)
-            > max(0.001, volume * 0.0001)
-        ):
-            logistics_invalid = True
-            break
-        market_access_sum += float(market.get("market_access_index", 0.0))
-        market_disruption_sum += float(market.get("disruption_risk_index", 0.0))
-        market_volume_sum += volume
-        interregional_market_count += 1 if bool(market.get("interregional", False)) else 0
-
-    route_constraint_requested_sum = 0.0
-    route_constraint_cleared_sum = 0.0
-    route_constraint_unmet_sum = 0.0
-    route_constraint_utilization_sum = 0.0
-    route_ids_with_markets = {
-        int(market.get("route_id", -1))
-        for market in market_exchanges
-        if int(market.get("route_id", -1)) >= 0
-    }
-    if len(route_capacity_constraints) != len(route_ids_with_markets):
-        logistics_invalid = True
-    seen_constraint_market_ids: set[int] = set()
-    for constraint in route_capacity_constraints:
-        constraint_id = int(constraint.get("id", -1))
-        route_id = int(constraint.get("route_id", -1))
-        market_ids = constraint.get("market_exchange_ids", [])
-        requested = float(constraint.get("requested_volume_index", -1.0))
-        capacity = float(constraint.get("capacity_volume_index", -1.0))
-        cleared = float(constraint.get("cleared_volume_index", -1.0))
-        unmet = float(constraint.get("unmet_volume_index", -1.0))
-        utilization = float(constraint.get("utilization_index", -1.0))
-        shortage = float(constraint.get("shortage_index", -1.0))
-        if (
-            constraint_id not in route_constraint_by_id
-            or route_id not in route_by_id
-            or not isinstance(market_ids, list)
-            or int(constraint.get("market_exchange_count", -1)) != len(market_ids)
-            or float(constraint.get("distance_km", -1.0)) < 0.0
-            or requested < 0.0
-            or capacity < 0.0
-            or cleared < 0.0
-            or unmet < 0.0
-            or cleared - requested > 0.001
-            or cleared - capacity > 0.001
-            or int(route_by_id[route_id].get("route_capacity_constraint_id", -1)) != constraint_id
-            or abs(float(route_by_id[route_id].get("market_capacity_volume_index", -1.0)) - capacity) > max(0.001, capacity * 0.0001)
-            or abs(float(route_by_id[route_id].get("market_capacity_utilization_index", -1.0)) - utilization) > 0.001
-        ):
-            logistics_invalid = True
-            break
-        for key in ("utilization_index", "congestion_index", "shortage_index", "spoilage_loss_index"):
-            if not 0.0 <= float(constraint.get(key, -1.0)) <= 1.0:
-                logistics_invalid = True
-                break
-        if logistics_invalid:
-            break
-        expected_requested = 0.0
-        for market_id_raw in market_ids:
-            market_id = int(market_id_raw)
-            if market_id not in market_by_id or int(market_by_id[market_id].get("route_id", -1)) != route_id:
-                logistics_invalid = True
-                break
-            expected_requested += float(market_by_id[market_id].get("volume_index", 0.0))
-            seen_constraint_market_ids.add(market_id)
-        if logistics_invalid:
-            break
-        expected_utilization = max(0.0, min(1.0, cleared / max(1.0, capacity)))
-        expected_shortage = max(0.0, min(1.0, unmet / max(1.0, requested)))
-        if (
-            abs(requested - expected_requested) > max(0.001, expected_requested * 0.0001)
-            or abs((cleared + unmet) - requested) > max(0.001, requested * 0.0001)
-            or abs(utilization - expected_utilization) > 0.001
-            or abs(shortage - expected_shortage) > 0.001
-        ):
-            logistics_invalid = True
-            break
-        route_constraint_requested_sum += requested
-        route_constraint_cleared_sum += cleared
-        route_constraint_unmet_sum += unmet
-        route_constraint_utilization_sum += utilization
-    if seen_constraint_market_ids != set(market_by_id):
-        logistics_invalid = True
-
-    market_clearance_sum = 0.0
-    market_price_adjustment_sum = 0.0
-    market_rationing_sum = 0.0
-    endogenous_market_supply_sum = 0.0
-    endogenous_market_demand_sum = 0.0
-    equilibrium_residual_sum = 0.0
-    constrained_market_records = 0
-    market_order_ids_seen: set[int] = set()
-    market_iteration_ids_seen: set[int] = set()
-    market_inventory_step_count = 0
-    market_inventory_gap_sum = 0.0
-    market_inventory_learning_sum = 0.0
-    market_inventory_pressure_sum = 0.0
-    high_inventory_stress_market_count = 0
-    seen_clearing_market_ids: set[int] = set()
-    for record in market_clearing_records:
-        record_id = int(record.get("id", -1))
-        market_id = int(record.get("market_exchange_id", -1))
-        trade_id = int(record.get("trade_flow_id", -1))
-        route_id = int(record.get("route_id", -1))
-        constraint_id = int(record.get("route_capacity_constraint_id", -1))
-        inventory_history_id = int(record.get("market_inventory_history_id", -1))
-        requested = float(record.get("requested_volume_index", -1.0))
-        cleared = float(record.get("cleared_volume_index", -1.0))
-        unmet = float(record.get("unmet_demand_index", -1.0))
-        clearance = float(record.get("clearance_fraction", -1.0))
-        route_utilization = float(record.get("route_utilization_index", -1.0))
-        rationing = float(record.get("rationing_index", -1.0))
-        order_ids = record.get("agent_order_ids", [])
-        iteration_ids = record.get("price_iteration_ids", [])
-        endogenous_supply = float(record.get("endogenous_supply_index", -1.0))
-        endogenous_demand = float(record.get("endogenous_demand_index", -1.0))
-        equilibrium_price = float(record.get("equilibrium_price_index", -1.0))
-        price_residual = float(record.get("price_residual_index", -1.0))
-        if (
-            record_id not in clearing_by_id
-            or market_id not in market_by_id
-            or trade_id not in trade_by_id
-            or route_id not in route_by_id
-            or constraint_id not in route_constraint_by_id
-            or inventory_history_id not in market_inventory_by_id
-            or requested < 0.0
-            or cleared < 0.0
-            or unmet < 0.0
-            or cleared - requested > 0.001
-            or not str(record.get("primary_good", "")).strip()
-            or not isinstance(order_ids, list)
-            or not isinstance(iteration_ids, list)
-            or int(record.get("agent_order_count", -1)) != len(order_ids)
-            or int(record.get("price_iteration_count", -1)) != len(iteration_ids)
-            or endogenous_supply < 0.0
-            or endogenous_demand < 0.0
-            or not 0.0 <= equilibrium_price <= 1.0
-            or not 0.0 <= price_residual <= 1.0
-        ):
-            logistics_invalid = True
-            break
-        for key in (
+            "market_clearing_record_id",
+            "market_inventory_history_id",
+            "cleared_volume_index",
+            "unmet_demand_index",
+            "clearance_fraction",
+        }
+        route_capacity_constraint_keys = {
+            "id",
+            "route_id",
+            "route_type",
+            "market_exchange_ids",
+            "market_exchange_count",
+            "distance_km",
+            "requested_volume_index",
+            "capacity_volume_index",
+            "cleared_volume_index",
+            "unmet_volume_index",
+            "utilization_index",
+            "congestion_index",
+            "shortage_index",
+            "spoilage_loss_index",
+        }
+        market_clearing_record_keys = {
+            "id",
+            "market_exchange_id",
+            "trade_flow_id",
+            "route_id",
+            "route_capacity_constraint_id",
+            "region_from",
+            "region_to",
+            "primary_good",
+            "requested_volume_index",
+            "cleared_volume_index",
+            "unmet_demand_index",
             "clearance_fraction",
             "route_utilization_index",
             "price_adjustment_index",
             "rationing_index",
             "producer_surplus_index",
             "consumer_welfare_index",
+            "agent_order_ids",
+            "agent_order_count",
+            "price_iteration_ids",
+            "price_iteration_count",
+            "market_inventory_history_id",
+            "endogenous_supply_index",
+            "endogenous_demand_index",
             "equilibrium_price_index",
             "price_residual_index",
-        ):
-            if not 0.0 <= float(record.get(key, -1.0)) <= 1.0:
-                logistics_invalid = True
-                break
-        if logistics_invalid:
-            break
-        market = market_by_id[market_id]
-        constraint = route_constraint_by_id[constraint_id]
-        expected_clearance = max(0.0, min(1.0, cleared / max(1.0, requested)))
-        expected_rationing = max(0.0, min(1.0, unmet / max(1.0, requested)))
-        if (
-            int(market.get("market_clearing_record_id", -1)) != record_id
-            or int(market.get("market_inventory_history_id", -1)) != inventory_history_id
-            or int(market.get("trade_flow_id", -1)) != trade_id
-            or int(market.get("route_id", -1)) != route_id
-            or int(market.get("region_from", -1)) != int(record.get("region_from", -1))
-            or int(market.get("region_to", -1)) != int(record.get("region_to", -1))
-            or int(constraint.get("route_id", -1)) != route_id
-            or market_id not in constraint.get("market_exchange_ids", [])
-            or abs(requested - float(market.get("volume_index", 0.0))) > max(0.001, requested * 0.0001)
-            or abs((cleared + unmet) - requested) > max(0.001, requested * 0.0001)
-            or abs(cleared - float(market.get("cleared_volume_index", 0.0))) > max(0.001, cleared * 0.0001)
-            or abs(unmet - float(market.get("unmet_demand_index", 0.0))) > max(0.001, unmet * 0.0001)
-            or abs(clearance - float(market.get("clearance_fraction", 0.0))) > 0.001
-            or abs(route_utilization - float(constraint.get("utilization_index", 0.0))) > 0.001
-            or abs(clearance - expected_clearance) > 0.001
-            or abs(rationing - expected_rationing) > 0.001
-        ):
-            logistics_invalid = True
-            break
-        for order_id_raw in order_ids:
-            order_id = int(order_id_raw)
-            order = market_order_by_id.get(order_id)
-            if (
-                order is None
-                or int(order.get("market_exchange_id", -1)) != market_id
-                or int(order.get("market_clearing_record_id", -1)) != record_id
-            ):
-                logistics_invalid = True
-                break
-            market_order_ids_seen.add(order_id)
-        if logistics_invalid:
-            break
-        for iteration_id_raw in iteration_ids:
-            iteration_id = int(iteration_id_raw)
-            iteration = market_iteration_by_id.get(iteration_id)
-            if (
-                iteration is None
-                or int(iteration.get("market_exchange_id", -1)) != market_id
-                or int(iteration.get("market_clearing_record_id", -1)) != record_id
-            ):
-                logistics_invalid = True
-                break
-            market_iteration_ids_seen.add(iteration_id)
-        if logistics_invalid:
-            break
-        seen_clearing_market_ids.add(market_id)
-        market_clearance_sum += clearance
-        market_price_adjustment_sum += float(record.get("price_adjustment_index", 0.0))
-        market_rationing_sum += rationing
-        endogenous_market_supply_sum += endogenous_supply
-        endogenous_market_demand_sum += endogenous_demand
-        equilibrium_residual_sum += price_residual
-        constrained_market_records += 1 if unmet > 0.0 else 0
-    if seen_clearing_market_ids != set(market_by_id):
-        logistics_invalid = True
-    if market_order_ids_seen != set(market_order_by_id):
-        logistics_invalid = True
-    if market_iteration_ids_seen != set(market_iteration_by_id):
-        logistics_invalid = True
-
-    producer_market_order_count = 0
-    consumer_market_order_count = 0
-    for order in market_agent_orders:
-        order_id = int(order.get("id", -1))
-        market_id = int(order.get("market_exchange_id", -1))
-        clearing_id = int(order.get("market_clearing_record_id", -1))
-        agent_type = str(order.get("agent_type", ""))
-        agent_id = int(order.get("agent_id", -1))
-        region_id = int(order.get("region_id", -1))
-        order_side = str(order.get("order_side", ""))
-        requested = float(order.get("requested_volume_index", -1.0))
-        cleared = float(order.get("cleared_volume_index", -1.0))
-        inventory_change = float(order.get("inventory_change_index", -2.0))
-        if (
-            order_id not in market_order_by_id
-            or market_id not in market_by_id
-            or clearing_id not in clearing_by_id
-            or region_id not in political_region_ids
-            or agent_type not in {"firm", "household_cohort", "state"}
-            or order_side not in {"supply", "demand"}
-            or not str(order.get("order_kind", "")).strip()
-            or not str(order.get("primary_good", "")).strip()
-            or requested < 0.0
-            or cleared < 0.0
-            or cleared - requested > 0.001
-            or not -1.0 <= inventory_change <= 1.0
-        ):
-            logistics_invalid = True
-            break
-        clearing = clearing_by_id[clearing_id]
-        if (
-            int(clearing.get("market_exchange_id", -1)) != market_id
-            or str(clearing.get("primary_good", "")) != str(order.get("primary_good", ""))
-            or (agent_type == "firm" and agent_id not in market_firm_ids)
-            or (agent_type == "household_cohort" and agent_id not in market_household_ids)
-            or (agent_type == "state" and agent_id not in political_region_ids)
-        ):
-            logistics_invalid = True
-            break
-        for key in ("limit_price_index", "price_acceptance_index", "rationing_index"):
-            if not 0.0 <= float(order.get(key, -1.0)) <= 1.0:
-                logistics_invalid = True
-                break
-        if logistics_invalid:
-            break
-        producer_market_order_count += 1 if order_side == "supply" else 0
-        consumer_market_order_count += 1 if order_side == "demand" else 0
-
-    for iteration in market_price_iterations:
-        iteration_id = int(iteration.get("id", -1))
-        market_id = int(iteration.get("market_exchange_id", -1))
-        clearing_id = int(iteration.get("market_clearing_record_id", -1))
-        order_ids = iteration.get("order_ids", [])
-        supply_volume = float(iteration.get("supply_volume_index", -1.0))
-        demand_volume = float(iteration.get("demand_volume_index", -1.0))
-        imbalance = float(iteration.get("imbalance_index", 0.0))
-        if (
-            iteration_id not in market_iteration_by_id
-            or market_id not in market_by_id
-            or clearing_id not in clearing_by_id
-            or int(iteration.get("iteration_index", 0)) <= 0
-            or not isinstance(order_ids, list)
-            or int(iteration.get("order_count", -1)) != len(order_ids)
-            or supply_volume < 0.0
-            or demand_volume < 0.0
-            or abs((demand_volume - supply_volume) - imbalance) > max(0.001, abs(imbalance) * 0.0001)
-        ):
-            logistics_invalid = True
-            break
-        clearing = clearing_by_id[clearing_id]
-        if int(clearing.get("market_exchange_id", -1)) != market_id:
-            logistics_invalid = True
-            break
-        for key in ("price_index", "excess_demand_index", "price_adjustment_index"):
-            if not 0.0 <= float(iteration.get(key, -1.0)) <= 1.0:
-                logistics_invalid = True
-                break
-        if logistics_invalid:
-            break
-        for order_id_raw in order_ids:
-            order = market_order_by_id.get(int(order_id_raw))
-            if (
-                order is None
-                or int(order.get("market_exchange_id", -1)) != market_id
-                or int(order.get("market_clearing_record_id", -1)) != clearing_id
-            ):
-                logistics_invalid = True
-                break
-        if logistics_invalid:
-            break
-
-    seen_inventory_clearing_ids: set[int] = set()
-    seen_inventory_market_ids: set[int] = set()
-    for history in market_inventory_histories:
-        history_id = int(history.get("id", -1))
-        clearing_id = int(history.get("market_clearing_record_id", -1))
-        market_id = int(history.get("market_exchange_id", -1))
-        trade_id = int(history.get("trade_flow_id", -1))
-        route_id = int(history.get("route_id", -1))
-        region_from = int(history.get("region_from", -1))
-        region_to = int(history.get("region_to", -1))
-        steps = history.get("steps", [])
-        target_inventory = float(history.get("target_inventory_index", -1.0))
-        final_inventory = float(history.get("final_inventory_index", -1.0))
-        inventory_gap = float(history.get("inventory_gap_index", -1.0))
-        if (
-            history_id not in market_inventory_by_id
-            or clearing_id not in clearing_by_id
-            or market_id not in market_by_id
-            or trade_id not in trade_by_id
-            or route_id not in route_by_id
-            or region_from not in political_region_ids
-            or region_to not in political_region_ids
-            or not isinstance(steps, list)
-            or int(history.get("step_count", -1)) != len(steps)
-            or not steps
-            or not str(history.get("primary_good", "")).strip()
-            or int(clearing_by_id[clearing_id].get("market_inventory_history_id", -1)) != history_id
-            or int(clearing_by_id[clearing_id].get("market_exchange_id", -1)) != market_id
-            or int(clearing_by_id[clearing_id].get("trade_flow_id", -1)) != trade_id
-            or int(clearing_by_id[clearing_id].get("route_id", -1)) != route_id
-            or int(market_by_id[market_id].get("market_inventory_history_id", -1)) != history_id
-            or int(market_by_id[market_id].get("market_clearing_record_id", -1)) != clearing_id
-            or int(market_by_id[market_id].get("region_from", -1)) != region_from
-            or int(market_by_id[market_id].get("region_to", -1)) != region_to
-        ):
-            logistics_invalid = True
-            break
-        for key in (
+        }
+        market_agent_order_keys = {
+            "id",
+            "market_exchange_id",
+            "market_clearing_record_id",
+            "agent_type",
+            "agent_id",
+            "region_id",
+            "order_side",
+            "order_kind",
+            "primary_good",
+            "requested_volume_index",
+            "cleared_volume_index",
+            "limit_price_index",
+            "price_acceptance_index",
+            "rationing_index",
+            "inventory_change_index",
+        }
+        market_price_iteration_keys = {
+            "id",
+            "market_exchange_id",
+            "market_clearing_record_id",
+            "iteration_index",
+            "order_ids",
+            "order_count",
+            "price_index",
+            "supply_volume_index",
+            "demand_volume_index",
+            "imbalance_index",
+            "excess_demand_index",
+            "price_adjustment_index",
+        }
+        market_inventory_history_keys = {
+            "id",
+            "market_clearing_record_id",
+            "market_exchange_id",
+            "trade_flow_id",
+            "route_id",
+            "region_from",
+            "region_to",
+            "primary_good",
             "initial_inventory_index",
             "target_inventory_index",
             "final_inventory_index",
@@ -20247,537 +17837,128 @@ def validate(
             "mean_price_expectation_index",
             "mean_supply_response_index",
             "mean_demand_adjustment_index",
-        ):
-            if not 0.0 <= float(history.get(key, -1.0)) <= 1.0:
-                logistics_invalid = True
-                break
-        if logistics_invalid:
-            break
-        expected_iteration_ids = list(clearing_by_id[clearing_id].get("price_iteration_ids", []))
-        pressure_sum = 0.0
-        price_expectation_sum = 0.0
-        supply_response_sum = 0.0
-        demand_adjustment_sum = 0.0
-        learning_sum = 0.0
-        for sequence_index, step in enumerate(steps):
-            price_iteration_id = int(step.get("price_iteration_id", -1))
-            if (
-                int(step.get("sequence_index", -1)) != sequence_index
-                or sequence_index >= len(expected_iteration_ids)
-                or price_iteration_id != int(expected_iteration_ids[sequence_index])
-                or price_iteration_id not in market_iteration_by_id
-            ):
-                logistics_invalid = True
-                break
-            for key in (
-                "price_index",
-                "inventory_index",
-                "target_inventory_index",
-                "inventory_gap_index",
-                "supply_response_index",
-                "demand_adjustment_index",
-                "learning_rate_index",
-                "producer_expectation_index",
-                "consumer_expectation_index",
-                "rationing_memory_index",
-                "clearance_memory_index",
-            ):
-                if not 0.0 <= float(step.get(key, -1.0)) <= 1.0:
-                    logistics_invalid = True
-                    break
-            if logistics_invalid:
-                break
-            if (
-                abs(float(step.get("target_inventory_index", 0.0)) - target_inventory) > 0.001
-                or abs(float(step.get("inventory_gap_index", 0.0)) - abs(float(step.get("inventory_index", 0.0)) - target_inventory)) > 0.001
-            ):
-                logistics_invalid = True
-                break
-            pressure = min(
-                1.0,
-                max(
-                    0.0,
-                    float(step.get("inventory_gap_index", 0.0)) * 0.45
-                    + float(step.get("rationing_memory_index", 0.0)) * 0.22
-                    + float(clearing_by_id[clearing_id].get("price_residual_index", 0.0)) * 0.18
-                    + float(step.get("price_index", 0.0)) * 0.15,
-                ),
-            )
-            pressure_sum += pressure
-            price_expectation_sum += (
-                float(step.get("producer_expectation_index", 0.0)) * 0.48
-                + float(step.get("consumer_expectation_index", 0.0)) * 0.52
-            )
-            supply_response_sum += float(step.get("supply_response_index", 0.0))
-            demand_adjustment_sum += float(step.get("demand_adjustment_index", 0.0))
-            learning_sum += float(step.get("learning_rate_index", 0.0))
-        if logistics_invalid:
-            break
-        step_count = len(steps)
-        expected_final = float(steps[-1].get("inventory_index", 0.0))
-        expected_gap = abs(expected_final - target_inventory)
-        expected_learning = learning_sum / step_count
-        expected_pressure = pressure_sum / step_count
-        expected_price_expectation = price_expectation_sum / step_count
-        expected_supply_response = supply_response_sum / step_count
-        expected_demand_adjustment = demand_adjustment_sum / step_count
-        expected_high_stress = expected_pressure >= 0.60 or expected_gap >= 0.45
-        if (
-            abs(final_inventory - expected_final) > 0.001
-            or abs(inventory_gap - expected_gap) > 0.001
-            or abs(float(history.get("learning_rate_index", 0.0)) - expected_learning) > 0.001
-            or abs(float(history.get("mean_inventory_pressure_index", 0.0)) - expected_pressure) > 0.001
-            or abs(float(history.get("mean_price_expectation_index", 0.0)) - expected_price_expectation) > 0.001
-            or abs(float(history.get("mean_supply_response_index", 0.0)) - expected_supply_response) > 0.001
-            or abs(float(history.get("mean_demand_adjustment_index", 0.0)) - expected_demand_adjustment) > 0.001
-            or bool(history.get("high_inventory_stress", False)) != expected_high_stress
-        ):
-            logistics_invalid = True
-            break
-        seen_inventory_clearing_ids.add(clearing_id)
-        seen_inventory_market_ids.add(market_id)
-        market_inventory_step_count += step_count
-        market_inventory_gap_sum += inventory_gap
-        market_inventory_learning_sum += float(history.get("learning_rate_index", 0.0))
-        market_inventory_pressure_sum += float(history.get("mean_inventory_pressure_index", 0.0))
-        high_inventory_stress_market_count += 1 if bool(history.get("high_inventory_stress", False)) else 0
-    if seen_inventory_clearing_ids != set(clearing_by_id) or seen_inventory_market_ids != set(market_by_id):
-        logistics_invalid = True
-
-    campaign_travel_sum = 0.0
-    campaign_attrition_sum = 0.0
-    campaign_reach_sum = 0.0
-    campaign_force_sum = 0.0
-    campaign_path_length_sum = 0.0
-    campaign_path_terrain_sum = 0.0
-    campaign_path_supply_loss_sum = 0.0
-    campaign_path_attrition_sum = 0.0
-    high_attrition_campaigns = 0
-    high_attrition_campaign_segments = 0
-    campaign_front_step_count = 0
-    campaign_front_supply_integrity_sum = 0.0
-    campaign_front_control_sum = 0.0
-    campaign_front_attrition_loss_sum = 0.0
-    tactical_engagement_step_count = 0
-    tactical_counter_sum = 0.0
-    tactical_pressure_sum = 0.0
-    tactical_supply_contest_sum = 0.0
-    tactical_attrition_loss_sum = 0.0
-    high_pressure_tactical_steps = 0
-    strategic_decision_point_count = 0
-    independent_counter_campaign_plans = 0
-    counter_campaign_viability_sum = 0.0
-    strategic_plan_confidence_sum = 0.0
-    strategic_force_reserve_fraction_sum = 0.0
-    high_escalation_strategic_plans = 0
-    seen_campaign_segment_ids: set[int] = set()
-    for campaign in campaign_movements:
-        campaign_id = int(campaign.get("id", -1))
-        conflict_id = int(campaign.get("conflict_id", -1))
-        origin_region = int(campaign.get("origin_region_id", -1))
-        target_region = int(campaign.get("target_region_id", -1))
-        origin_cell_id = int(campaign.get("origin_cell_id", -1))
-        target_cell_id = int(campaign.get("target_cell_id", -1))
-        route_id = int(campaign.get("route_id", -1))
-        border_id = int(campaign.get("border_id", -1))
-        front_history_id = int(campaign.get("campaign_front_history_id", -1))
-        attrition = float(campaign.get("attrition_risk_index", -1.0))
-        path_cell_ids = campaign.get("path_cell_ids", [])
-        path_segment_ids = campaign.get("path_segment_ids", [])
-        path_length = float(campaign.get("path_length_km", -1.0))
-        if (
-            conflict_id not in conflict_by_id
-            or origin_region not in political_region_ids
-            or target_region not in political_region_ids
-            or origin_region == target_region
-            or origin_cell_id not in cells_by_id
-            or target_cell_id not in cells_by_id
-            or (route_id >= 0 and route_id not in route_by_id)
-            or (border_id >= 0 and border_id not in border_by_id)
-            or front_history_id not in campaign_front_by_id
-            or not isinstance(path_cell_ids, list)
-            or not isinstance(path_segment_ids, list)
-            or len(path_cell_ids) < 2
-            or int(campaign.get("path_cell_count", -1)) != len(path_cell_ids)
-            or int(campaign.get("path_segment_count", -1)) != len(path_segment_ids)
-            or int(campaign.get("path_segment_count", -1)) != max(0, len(path_cell_ids) - 1)
-            or int(path_cell_ids[0]) != origin_cell_id
-            or int(path_cell_ids[-1]) != target_cell_id
-            or int(conflict_by_id[conflict_id].get("campaign_movement_id", -1)) != campaign_id
-            or int(campaign_front_by_id[front_history_id].get("campaign_movement_id", -1)) != campaign_id
-            or float(campaign.get("start_year_bp", -1.0)) < float(campaign.get("end_year_bp", -1.0))
-            or float(campaign.get("distance_km", -1.0)) <= 0.0
-            or path_length <= 0.0
-            or abs(float(campaign.get("distance_km", 0.0)) - path_length) > max(0.001, path_length * 0.0001)
-            or float(campaign.get("travel_time_days", -1.0)) <= 0.0
-            or float(campaign.get("force_estimate", -1.0)) < 0.0
-            or not str(campaign.get("outcome", "")).strip()
-        ):
-            logistics_invalid = True
-            break
-        for key in (
+            "high_inventory_stress",
+            "step_count",
+            "steps",
+        }
+        campaign_movement_keys = {
+            "id",
+            "conflict_id",
+            "era_id",
+            "origin_region_id",
+            "target_region_id",
+            "origin_cell_id",
+            "target_cell_id",
+            "contested_cell_id",
+            "route_id",
+            "border_id",
+            "path_cell_ids",
+            "path_cell_count",
+            "path_segment_ids",
+            "path_segment_count",
+            "path_length_km",
+            "path_terrain_cost_index",
+            "path_supply_loss_index",
+            "path_attrition_index",
+            "campaign_front_history_id",
+            "start_year_bp",
+            "end_year_bp",
+            "distance_km",
+            "travel_time_days",
+            "force_estimate",
             "supply_required_index",
             "attrition_risk_index",
             "logistics_strain_index",
             "operational_reach_index",
             "campaign_success_index",
-            "path_terrain_cost_index",
-            "path_supply_loss_index",
-            "path_attrition_index",
-        ):
-            if not 0.0 <= float(campaign.get(key, -1.0)) <= 1.0:
-                logistics_invalid = True
-                break
-        if logistics_invalid:
-            break
-        campaign_segment_distance_sum = 0.0
-        previous_elapsed_days = 0.0
-        for sequence_index, segment_id_raw in enumerate(path_segment_ids):
-            segment_id = int(segment_id_raw)
-            segment = campaign_segment_by_id.get(segment_id)
-            if segment is None:
-                logistics_invalid = True
-                break
-            from_cell_id = int(segment.get("from_cell_id", -1))
-            to_cell_id = int(segment.get("to_cell_id", -1))
-            segment_distance = float(segment.get("distance_km", -1.0))
-            elapsed_days = float(segment.get("elapsed_days", -1.0))
-            if (
-                int(segment.get("campaign_movement_id", -1)) != campaign_id
-                or int(segment.get("sequence_index", -1)) != sequence_index
-                or from_cell_id not in cells_by_id
-                or to_cell_id not in cells_by_id
-                or from_cell_id != int(path_cell_ids[sequence_index])
-                or to_cell_id != int(path_cell_ids[sequence_index + 1])
-                or to_cell_id not in {int(neighbor) for neighbor in cells_by_id[from_cell_id].get("neighbors", [])}
-                or segment_distance <= 0.0
-                or elapsed_days <= previous_elapsed_days
-                or float(segment.get("elevation_gain_m", -1.0)) < 0.0
-                or not str(segment.get("route_mode", "")).strip()
-            ):
-                logistics_invalid = True
-                break
-            for key in ("terrain_cost_index", "barrier_cost_index", "supply_loss_index", "attrition_index"):
-                if not 0.0 <= float(segment.get(key, -1.0)) <= 1.0:
-                    logistics_invalid = True
-                    break
-            if logistics_invalid:
-                break
-            campaign_segment_distance_sum += segment_distance
-            previous_elapsed_days = elapsed_days
-            seen_campaign_segment_ids.add(segment_id)
-            campaign_path_terrain_sum += float(segment.get("terrain_cost_index", 0.0))
-            campaign_path_supply_loss_sum += float(segment.get("supply_loss_index", 0.0))
-            segment_attrition = float(segment.get("attrition_index", 0.0))
-            campaign_path_attrition_sum += segment_attrition
-            high_attrition_campaign_segments += 1 if segment_attrition >= 0.65 else 0
-        if logistics_invalid:
-            break
-        if abs(campaign_segment_distance_sum - path_length) > max(0.001, path_length * 0.0001):
-            logistics_invalid = True
-            break
-        campaign_travel_sum += float(campaign.get("travel_time_days", 0.0))
-        campaign_attrition_sum += attrition
-        campaign_reach_sum += float(campaign.get("operational_reach_index", 0.0))
-        campaign_force_sum += float(campaign.get("force_estimate", 0.0))
-        campaign_path_length_sum += path_length
-        high_attrition_campaigns += 1 if attrition >= 0.65 else 0
-    if seen_campaign_segment_ids != set(campaign_segment_by_id):
-        logistics_invalid = True
-
-    seen_front_campaign_ids: set[int] = set()
-    for front_history in campaign_front_histories:
-        front_id = int(front_history.get("id", -1))
-        campaign_id = int(front_history.get("campaign_movement_id", -1))
-        conflict_id = int(front_history.get("conflict_id", -1))
-        origin_region = int(front_history.get("origin_region_id", -1))
-        target_region = int(front_history.get("target_region_id", -1))
-        path_cell_ids = front_history.get("path_cell_ids", [])
-        path_segment_ids = front_history.get("path_segment_ids", [])
-        steps = front_history.get("steps", [])
-        if (
-            front_id not in campaign_front_by_id
-            or campaign_id not in campaign_by_id
-            or conflict_id not in conflict_by_id
-            or origin_region not in political_region_ids
-            or target_region not in political_region_ids
-            or not isinstance(path_cell_ids, list)
-            or not isinstance(path_segment_ids, list)
-            or not isinstance(steps, list)
-            or int(front_history.get("step_count", -1)) != len(steps)
-            or len(steps) != len(path_cell_ids)
-            or int(front_history.get("captured_cell_count", -1)) != len(path_cell_ids)
-            or int(front_history.get("final_occupied_cell_id", -1)) != int(path_cell_ids[-1] if path_cell_ids else -1)
-            or int(campaign_by_id[campaign_id].get("campaign_front_history_id", -1)) != front_id
-            or list(path_cell_ids) != list(campaign_by_id[campaign_id].get("path_cell_ids", []))
-            or list(path_segment_ids) != list(campaign_by_id[campaign_id].get("path_segment_ids", []))
-            or float(front_history.get("attacking_force_initial", -1.0)) < 0.0
-            or float(front_history.get("defending_force_initial", -1.0)) < 0.0
-            or float(front_history.get("final_attacking_force_estimate", -1.0)) < 0.0
-            or float(front_history.get("final_defending_force_estimate", -1.0)) < 0.0
-            or float(front_history.get("final_attacking_force_estimate", 0.0)) > float(front_history.get("attacking_force_initial", 0.0))
-            or float(front_history.get("final_defending_force_estimate", 0.0)) > float(front_history.get("defending_force_initial", 0.0))
-            or float(front_history.get("start_year_bp", -1.0)) < float(front_history.get("end_year_bp", -1.0))
-            or float(front_history.get("max_supply_line_length_km", -1.0)) < 0.0
-            or not 0.0 <= float(front_history.get("mean_supply_integrity_index", -1.0)) <= 1.0
-            or not 0.0 <= float(front_history.get("mean_occupation_control_index", -1.0)) <= 1.0
-            or not str(front_history.get("route_mode", "")).strip()
-            or not str(front_history.get("outcome_projection", "")).strip()
-        ):
-            logistics_invalid = True
-            break
-        seen_front_campaign_ids.add(campaign_id)
-        previous_occupied_count = 0
-        previous_days = -1.0
-        supply_sum = 0.0
-        control_sum = 0.0
-        max_supply_line = 0.0
-        for sequence_index, step in enumerate(steps):
-            occupied_ids = step.get("occupied_cell_ids", [])
-            front_line_ids = step.get("front_line_cell_ids", [])
-            cell_id = int(step.get("cell_id", -1))
-            days_elapsed = float(step.get("days_elapsed", -1.0))
-            supply_line = float(step.get("supply_line_length_km", -1.0))
-            supply_integrity = float(step.get("supply_integrity_index", -1.0))
-            occupation_control = float(step.get("occupation_control_index", -1.0))
-            attrition_loss = float(step.get("attrition_loss_population", -1.0))
-            if (
-                int(step.get("sequence_index", -1)) != sequence_index
-                or sequence_index >= len(path_cell_ids)
-                or cell_id not in cells_by_id
-                or cell_id != int(path_cell_ids[sequence_index])
-                or not isinstance(occupied_ids, list)
-                or not isinstance(front_line_ids, list)
-                or int(step.get("occupied_cell_count", -1)) != len(occupied_ids)
-                or int(step.get("front_line_cell_count", -1)) != len(front_line_ids)
-                or not occupied_ids
-                or len(occupied_ids) < previous_occupied_count
-                or int(occupied_ids[-1]) != cell_id
-                or days_elapsed < previous_days
-                or supply_line < 0.0
-                or float(step.get("attacking_force_estimate", -1.0)) < 0.0
-                or float(step.get("defending_force_estimate", -1.0)) < 0.0
-                or attrition_loss < 0.0
-                or not 0.0 <= float(step.get("local_attrition_index", -1.0)) <= 1.0
-                or not 0.0 <= supply_integrity <= 1.0
-                or not 0.0 <= occupation_control <= 1.0
-                or not 0.0 <= float(step.get("front_width_index", -1.0)) <= 1.0
-            ):
-                logistics_invalid = True
-                break
-            for occupied_id_raw in occupied_ids:
-                if int(occupied_id_raw) not in cells_by_id:
-                    logistics_invalid = True
-                    break
-            if logistics_invalid:
-                break
-            for front_cell_id_raw in front_line_ids:
-                if int(front_cell_id_raw) not in cells_by_id:
-                    logistics_invalid = True
-                    break
-            if logistics_invalid:
-                break
-            previous_occupied_count = len(occupied_ids)
-            previous_days = days_elapsed
-            supply_sum += supply_integrity
-            control_sum += occupation_control
-            max_supply_line = max(max_supply_line, supply_line)
-            campaign_front_step_count += 1
-            campaign_front_supply_integrity_sum += supply_integrity
-            campaign_front_control_sum += occupation_control
-            campaign_front_attrition_loss_sum += attrition_loss
-        if logistics_invalid:
-            break
-        expected_supply = supply_sum / len(steps) if steps else 0.0
-        expected_control = control_sum / len(steps) if steps else 0.0
-        if (
-            abs(float(front_history.get("mean_supply_integrity_index", 0.0)) - expected_supply) > 0.001
-            or abs(float(front_history.get("mean_occupation_control_index", 0.0)) - expected_control) > 0.001
-            or abs(float(front_history.get("max_supply_line_length_km", 0.0)) - max_supply_line) > max(0.001, max_supply_line * 0.0001)
-        ):
-            logistics_invalid = True
-            break
-    if seen_front_campaign_ids != set(campaign_by_id):
-        logistics_invalid = True
-
-    seen_tactical_conflict_ids: set[int] = set()
-    for engagement in tactical_engagements:
-        engagement_id = int(engagement.get("id", -1))
-        conflict_id = int(engagement.get("conflict_id", -1))
-        campaign_id = int(engagement.get("campaign_movement_id", -1))
-        front_id = int(engagement.get("campaign_front_history_id", -1))
-        region_a = int(engagement.get("region_a", -1))
-        region_b = int(engagement.get("region_b", -1))
-        winner_region = int(engagement.get("winner_region_id", -1))
-        battle_cell_ids = engagement.get("battle_cell_ids", [])
-        steps = engagement.get("steps", [])
-        if (
-            engagement_id not in tactical_engagement_by_id
-            or conflict_id not in conflict_by_id
-            or campaign_id not in campaign_by_id
-            or front_id not in campaign_front_by_id
-            or region_a not in political_region_ids
-            or region_b not in political_region_ids
-            or region_a == region_b
-            or winner_region not in {region_a, region_b}
-            or not isinstance(battle_cell_ids, list)
-            or not isinstance(steps, list)
-            or int(engagement.get("battle_cell_count", -1)) != len(battle_cell_ids)
-            or int(engagement.get("step_count", -1)) != len(steps)
-            or not steps
-            or int(conflict_by_id[conflict_id].get("region_a", -1)) != region_a
-            or int(conflict_by_id[conflict_id].get("region_b", -1)) != region_b
-            or int(conflict_by_id[conflict_id].get("tactical_engagement_id", -1)) != engagement_id
-            or int(campaign_by_id[campaign_id].get("conflict_id", -1)) != conflict_id
-            or int(campaign_front_by_id[front_id].get("campaign_movement_id", -1)) != campaign_id
-            or list(battle_cell_ids) != list(campaign_by_id[campaign_id].get("path_cell_ids", []))
-            or float(engagement.get("start_year_bp", -1.0)) < float(engagement.get("end_year_bp", -1.0))
-            or float(engagement.get("initial_region_a_force", -1.0)) < 0.0
-            or float(engagement.get("initial_region_b_force", -1.0)) < 0.0
-            or float(engagement.get("final_region_a_force", -1.0)) < 0.0
-            or float(engagement.get("final_region_b_force", -1.0)) < 0.0
-            or float(engagement.get("final_region_a_force", 0.0)) > float(engagement.get("initial_region_a_force", 0.0))
-            or float(engagement.get("final_region_b_force", 0.0)) > float(engagement.get("initial_region_b_force", 0.0))
-            or float(engagement.get("total_attrition_loss_population", -1.0)) < 0.0
-            or not str(engagement.get("tactical_outcome", "")).strip()
-        ):
-            logistics_invalid = True
-            break
-        for key in ("max_front_pressure_index", "mean_counter_maneuver_index", "mean_supply_contest_index"):
-            if not 0.0 <= float(engagement.get(key, -1.0)) <= 1.0:
-                logistics_invalid = True
-                break
-        if logistics_invalid:
-            break
-        seen_tactical_conflict_ids.add(conflict_id)
-        previous_days = -1.0
-        engagement_attrition = 0.0
-        engagement_counter = 0.0
-        engagement_pressure = 0.0
-        engagement_supply = 0.0
-        engagement_max_pressure = 0.0
-        for sequence_index, step in enumerate(steps):
-            cell_id = int(step.get("cell_id", -1))
-            days_elapsed = float(step.get("days_elapsed", -1.0))
-            attrition_loss = float(step.get("attrition_loss_population", -1.0))
-            control_region = int(step.get("control_region_id", -1))
-            if (
-                int(step.get("sequence_index", -1)) != sequence_index
-                or sequence_index >= len(battle_cell_ids)
-                or cell_id not in cells_by_id
-                or cell_id != int(battle_cell_ids[sequence_index])
-                or days_elapsed < previous_days
-                or float(step.get("region_a_force_estimate", -1.0)) < 0.0
-                or float(step.get("region_b_force_estimate", -1.0)) < 0.0
-                or attrition_loss < 0.0
-                or control_region not in {region_a, region_b}
-            ):
-                logistics_invalid = True
-                break
-            for key in (
-                "region_a_supply_integrity_index",
-                "region_b_supply_integrity_index",
-                "front_pressure_index",
-                "counter_maneuver_index",
-                "supply_contest_index",
-                "encirclement_risk_index",
-                "withdrawal_pressure_index",
-                "control_balance_index",
-            ):
-                if not 0.0 <= float(step.get(key, -1.0)) <= 1.0:
-                    logistics_invalid = True
-                    break
-            if logistics_invalid:
-                break
-            previous_days = days_elapsed
-            pressure = float(step.get("front_pressure_index", 0.0))
-            counter = float(step.get("counter_maneuver_index", 0.0))
-            supply_contest = float(step.get("supply_contest_index", 0.0))
-            engagement_attrition += attrition_loss
-            engagement_counter += counter
-            engagement_pressure += pressure
-            engagement_supply += supply_contest
-            engagement_max_pressure = max(engagement_max_pressure, pressure)
-            tactical_engagement_step_count += 1
-            tactical_counter_sum += counter
-            tactical_pressure_sum += pressure
-            tactical_supply_contest_sum += supply_contest
-            tactical_attrition_loss_sum += attrition_loss
-            high_pressure_tactical_steps += 1 if pressure >= 0.65 else 0
-        if logistics_invalid:
-            break
-        step_count = len(steps)
-        if (
-            abs(float(engagement.get("total_attrition_loss_population", 0.0)) - engagement_attrition)
-            > max(1.0, engagement_attrition * 0.0001)
-            or abs(float(engagement.get("mean_counter_maneuver_index", 0.0)) - engagement_counter / step_count) > 0.001
-            or abs(float(engagement.get("mean_supply_contest_index", 0.0)) - engagement_supply / step_count) > 0.001
-            or abs(float(engagement.get("max_front_pressure_index", 0.0)) - engagement_max_pressure) > 0.001
-        ):
-            logistics_invalid = True
-            break
-    if seen_tactical_conflict_ids != set(campaign.get("conflict_id", -1) for campaign in campaign_movements):
-        logistics_invalid = True
-
-    seen_strategic_conflict_ids: set[int] = set()
-    for plan in strategic_campaign_plans:
-        plan_id = int(plan.get("id", -1))
-        conflict_id = int(plan.get("conflict_id", -1))
-        campaign_id = int(plan.get("campaign_movement_id", -1))
-        front_id = int(plan.get("campaign_front_history_id", -1))
-        tactical_id = int(plan.get("tactical_engagement_id", -1))
-        primary_region = int(plan.get("primary_region_id", -1))
-        counter_region = int(plan.get("counter_region_id", -1))
-        primary_objective = int(plan.get("primary_objective_cell_id", -1))
-        counter_objective = int(plan.get("counter_objective_cell_id", -1))
-        primary_axis = plan.get("primary_axis_cell_ids", [])
-        counter_axis = plan.get("counter_axis_cell_ids", [])
-        decisive_cell_ids = plan.get("decisive_cell_ids", [])
-        decision_points = plan.get("decision_points", [])
-        if (
-            plan_id not in strategic_plan_by_id
-            or conflict_id not in conflict_by_id
-            or campaign_id not in campaign_by_id
-            or front_id not in campaign_front_by_id
-            or tactical_id not in tactical_engagement_by_id
-            or primary_region not in political_region_ids
-            or counter_region not in political_region_ids
-            or primary_region == counter_region
-            or primary_objective not in cells_by_id
-            or counter_objective not in cells_by_id
-            or not isinstance(primary_axis, list)
-            or not isinstance(counter_axis, list)
-            or not isinstance(decisive_cell_ids, list)
-            or not isinstance(decision_points, list)
-            or len(primary_axis) < 2
-            or int(plan.get("primary_axis_cell_count", -1)) != len(primary_axis)
-            or int(plan.get("counter_axis_cell_count", -1)) != len(counter_axis)
-            or int(plan.get("decisive_cell_count", -1)) != len(decisive_cell_ids)
-            or int(plan.get("decision_point_count", -1)) != len(decision_points)
-            or list(primary_axis) != list(campaign_by_id[campaign_id].get("path_cell_ids", []))
-            or list(counter_axis) != list(reversed(primary_axis))
-            or primary_objective != int(campaign_by_id[campaign_id].get("target_cell_id", -1))
-            or counter_objective != int(campaign_by_id[campaign_id].get("origin_cell_id", -1))
-            or int(conflict_by_id[conflict_id].get("strategic_campaign_plan_id", -1)) != plan_id
-            or int(campaign_by_id[campaign_id].get("conflict_id", -1)) != conflict_id
-            or int(campaign_front_by_id[front_id].get("campaign_movement_id", -1)) != campaign_id
-            or int(tactical_engagement_by_id[tactical_id].get("campaign_movement_id", -1)) != campaign_id
-            or float(plan.get("primary_force_allocation_population", -1.0)) < 0.0
-            or float(plan.get("counter_force_allocation_population", -1.0)) < 0.0
-            or float(plan.get("reserve_force_population", -1.0)) < 0.0
-            or float(plan.get("expected_campaign_duration_days", -1.0)) < 0.0
-            or float(plan.get("counter_mobilization_days", -1.0)) < 0.0
-            or not str(plan.get("strategic_posture", "")).strip()
-        ):
-            logistics_invalid = True
-            break
-        for cell_id_raw in primary_axis + counter_axis + decisive_cell_ids:
-            if int(cell_id_raw) not in cells_by_id:
-                logistics_invalid = True
-                break
-        if logistics_invalid:
-            break
-        for key in (
+            "outcome",
+        }
+        campaign_path_segment_keys = {
+            "id",
+            "campaign_movement_id",
+            "sequence_index",
+            "from_cell_id",
+            "to_cell_id",
+            "route_mode",
+            "distance_km",
+            "elapsed_days",
+            "terrain_cost_index",
+            "barrier_cost_index",
+            "supply_loss_index",
+            "attrition_index",
+            "elevation_gain_m",
+            "water_crossing",
+        }
+        campaign_front_history_keys = {
+            "id",
+            "campaign_movement_id",
+            "conflict_id",
+            "origin_region_id",
+            "target_region_id",
+            "attacking_force_initial",
+            "defending_force_initial",
+            "final_attacking_force_estimate",
+            "final_defending_force_estimate",
+            "start_year_bp",
+            "end_year_bp",
+            "route_mode",
+            "path_cell_ids",
+            "path_segment_ids",
+            "step_count",
+            "captured_cell_count",
+            "final_occupied_cell_id",
+            "max_supply_line_length_km",
+            "mean_supply_integrity_index",
+            "mean_occupation_control_index",
+            "outcome_projection",
+            "steps",
+        }
+        tactical_engagement_keys = {
+            "id",
+            "conflict_id",
+            "era_id",
+            "campaign_movement_id",
+            "campaign_front_history_id",
+            "region_a",
+            "region_b",
+            "contested_cell_id",
+            "battle_cell_ids",
+            "battle_cell_count",
+            "start_year_bp",
+            "end_year_bp",
+            "initial_region_a_force",
+            "initial_region_b_force",
+            "final_region_a_force",
+            "final_region_b_force",
+            "winner_region_id",
+            "tactical_outcome",
+            "max_front_pressure_index",
+            "mean_counter_maneuver_index",
+            "mean_supply_contest_index",
+            "total_attrition_loss_population",
+            "step_count",
+            "steps",
+        }
+        strategic_campaign_plan_keys = {
+            "id",
+            "conflict_id",
+            "era_id",
+            "campaign_movement_id",
+            "campaign_front_history_id",
+            "tactical_engagement_id",
+            "primary_region_id",
+            "counter_region_id",
+            "primary_objective_cell_id",
+            "counter_objective_cell_id",
+            "primary_axis_cell_ids",
+            "counter_axis_cell_ids",
+            "primary_axis_cell_count",
+            "counter_axis_cell_count",
+            "decisive_cell_ids",
+            "decisive_cell_count",
+            "primary_force_allocation_population",
+            "counter_force_allocation_population",
+            "reserve_force_population",
             "reserve_fraction",
             "primary_logistics_score",
             "counter_logistics_score",
@@ -20786,336 +17967,1311 @@ def validate(
             "escalation_risk_index",
             "operational_complexity_index",
             "plan_confidence_index",
-        ):
-            if not 0.0 <= float(plan.get(key, -1.0)) <= 1.0:
-                logistics_invalid = True
-                break
-        if logistics_invalid:
-            break
-        for sequence_index, point in enumerate(decision_points):
-            point_cell_id = int(point.get("cell_id", -1))
-            path_index = int(point.get("path_index", -1))
+            "expected_campaign_duration_days",
+            "counter_mobilization_days",
+            "strategic_posture",
+            "independent_counter_campaign_planned",
+            "decision_point_count",
+            "decision_points",
+        }
+        if logistics_networks and not logistics_network_keys.issubset(logistics_networks[0]):
+            failures.append("logistics network fields missing")
+        if market_exchanges and not market_exchange_keys.issubset(market_exchanges[0]):
+            failures.append("market exchange fields missing")
+        if route_capacity_constraints and not route_capacity_constraint_keys.issubset(route_capacity_constraints[0]):
+            failures.append("route capacity constraint fields missing")
+        if market_clearing_records and not market_clearing_record_keys.issubset(market_clearing_records[0]):
+            failures.append("market clearing record fields missing")
+        if market_agent_orders and not market_agent_order_keys.issubset(market_agent_orders[0]):
+            failures.append("market agent order fields missing")
+        if market_price_iterations and not market_price_iteration_keys.issubset(market_price_iterations[0]):
+            failures.append("market price iteration fields missing")
+        if market_inventory_histories and not market_inventory_history_keys.issubset(market_inventory_histories[0]):
+            failures.append("market inventory history fields missing")
+        if campaign_movements and not campaign_movement_keys.issubset(campaign_movements[0]):
+            failures.append("campaign movement fields missing")
+        if campaign_path_segments and not campaign_path_segment_keys.issubset(campaign_path_segments[0]):
+            failures.append("campaign path segment fields missing")
+        if campaign_front_histories and not campaign_front_history_keys.issubset(campaign_front_histories[0]):
+            failures.append("campaign front history fields missing")
+        if tactical_engagements and not tactical_engagement_keys.issubset(tactical_engagements[0]):
+            failures.append("tactical engagement fields missing")
+        if strategic_campaign_plans and not strategic_campaign_plan_keys.issubset(strategic_campaign_plans[0]):
+            failures.append("strategic campaign plan fields missing")
+
+        settlement_ids = {int(settlement.get("id", -1)) for settlement in settlements}
+        route_by_id = {int(route.get("id", -1)): route for route in routes}
+        trade_by_id = {int(trade.get("id", -1)): trade for trade in trade_flows}
+        conflict_by_id = {int(conflict.get("id", -1)): conflict for conflict in conflicts}
+        border_records = payload.get("borders", [])
+        border_by_id = {int(border.get("id", -1)): border for border in border_records}
+        logistics_by_id = {int(network.get("id", -1)): network for network in logistics_networks}
+        market_by_id = {int(market.get("id", -1)): market for market in market_exchanges}
+        route_constraint_by_id = {int(constraint.get("id", -1)): constraint for constraint in route_capacity_constraints}
+        clearing_by_id = {int(record.get("id", -1)): record for record in market_clearing_records}
+        market_order_by_id = {int(order.get("id", -1)): order for order in market_agent_orders}
+        market_iteration_by_id = {int(iteration.get("id", -1)): iteration for iteration in market_price_iterations}
+        market_inventory_by_id = {int(history.get("id", -1)): history for history in market_inventory_histories}
+        campaign_by_id = {int(campaign.get("id", -1)): campaign for campaign in campaign_movements}
+        campaign_segment_by_id = {int(segment.get("id", -1)): segment for segment in campaign_path_segments}
+        campaign_front_by_id = {int(history.get("id", -1)): history for history in campaign_front_histories}
+        tactical_engagement_by_id = {int(engagement.get("id", -1)): engagement for engagement in tactical_engagements}
+        strategic_plan_by_id = {int(plan.get("id", -1)): plan for plan in strategic_campaign_plans}
+        market_firm_ids = {int(firm.get("id", -1)) for firm in payload.get("firm_agents", [])}
+        market_household_ids = {int(cohort.get("id", -1)) for cohort in payload.get("household_cohorts", [])}
+        logistics_invalid = (
+            len(logistics_by_id) != len(logistics_networks)
+            or len(market_by_id) != len(market_exchanges)
+            or len(route_constraint_by_id) != len(route_capacity_constraints)
+            or len(clearing_by_id) != len(market_clearing_records)
+            or len(market_order_by_id) != len(market_agent_orders)
+            or len(market_iteration_by_id) != len(market_price_iterations)
+            or len(market_inventory_by_id) != len(market_inventory_histories)
+            or len(campaign_by_id) != len(campaign_movements)
+            or len(campaign_segment_by_id) != len(campaign_path_segments)
+            or len(campaign_front_by_id) != len(campaign_front_histories)
+            or len(tactical_engagement_by_id) != len(tactical_engagements)
+            or len(strategic_plan_by_id) != len(strategic_campaign_plans)
+            or any(record_id < 0 for record_id in logistics_by_id)
+            or any(record_id < 0 for record_id in market_by_id)
+            or any(record_id < 0 for record_id in route_constraint_by_id)
+            or any(record_id < 0 for record_id in clearing_by_id)
+            or any(record_id < 0 for record_id in market_order_by_id)
+            or any(record_id < 0 for record_id in market_iteration_by_id)
+            or any(record_id < 0 for record_id in market_inventory_by_id)
+            or any(record_id < 0 for record_id in campaign_by_id)
+            or any(record_id < 0 for record_id in campaign_segment_by_id)
+            or any(record_id < 0 for record_id in campaign_front_by_id)
+            or any(record_id < 0 for record_id in tactical_engagement_by_id)
+            or any(record_id < 0 for record_id in strategic_plan_by_id)
+        )
+        logistics_route_link_count = 0
+        logistics_efficiency_sum = 0.0
+        logistics_resilience_sum = 0.0
+        for network in logistics_networks:
+            region_id = int(network.get("region_id", -1))
+            route_ids = network.get("route_ids", [])
+            trade_ids = network.get("trade_flow_ids", [])
+            border_ids = network.get("border_ids", [])
             if (
-                int(point.get("sequence_index", -1)) != sequence_index
-                or path_index < 0
-                or path_index >= len(primary_axis)
-                or point_cell_id != int(primary_axis[path_index])
-                or point_cell_id not in cells_by_id
-                or not str(point.get("plan_phase", "")).strip()
+                region_id not in political_region_ids
+                or not isinstance(route_ids, list)
+                or not isinstance(trade_ids, list)
+                or not isinstance(border_ids, list)
+                or int(network.get("route_count", -1)) != len(route_ids)
+                or int(network.get("trade_flow_count", -1)) != len(trade_ids)
+                or int(network.get("border_count", -1)) != len(border_ids)
+                or float(network.get("total_route_distance_km", -1.0)) < 0.0
+                or float(network.get("total_route_cost", -1.0)) < 0.0
+                or float(network.get("total_trade_volume_index", -1.0)) < 0.0
+                or float(network.get("interregional_trade_volume_index", -1.0)) < 0.0
+                or float(network.get("army_capacity_population", -1.0)) < 0.0
             ):
                 logistics_invalid = True
                 break
-            for key in ("trigger_pressure_index", "counter_maneuver_priority_index", "supply_risk_index"):
-                if not 0.0 <= float(point.get(key, -1.0)) <= 1.0:
+            for key in (
+                "supply_capacity_index",
+                "transport_efficiency_index",
+                "logistics_resilience_index",
+                "chokepoint_exposure_index",
+            ):
+                if not 0.0 <= float(network.get(key, -1.0)) <= 1.0:
                     logistics_invalid = True
                     break
             if logistics_invalid:
                 break
+            expected_route_distance = 0.0
+            expected_route_cost = 0.0
+            for route_id_raw in route_ids:
+                route_id = int(route_id_raw)
+                if route_id not in route_by_id:
+                    logistics_invalid = True
+                    break
+                expected_route_distance += float(route_by_id[route_id].get("distance_km", 0.0))
+                expected_route_cost += float(route_by_id[route_id].get("cost", 0.0))
+            if logistics_invalid:
+                break
+            expected_trade_volume = 0.0
+            expected_interregional_volume = 0.0
+            for trade_id_raw in trade_ids:
+                trade_id = int(trade_id_raw)
+                if trade_id not in trade_by_id:
+                    logistics_invalid = True
+                    break
+                volume = float(trade_by_id[trade_id].get("volume_index", 0.0))
+                expected_trade_volume += volume
+                if bool(trade_by_id[trade_id].get("interregional", False)):
+                    expected_interregional_volume += volume
+            if logistics_invalid:
+                break
+            for border_id_raw in border_ids:
+                if int(border_id_raw) not in border_by_id:
+                    logistics_invalid = True
+                    break
+            if logistics_invalid:
+                break
+            if (
+                abs(float(network.get("total_route_distance_km", 0.0)) - expected_route_distance) > max(0.001, expected_route_distance * 0.0001)
+                or abs(float(network.get("total_route_cost", 0.0)) - expected_route_cost) > max(0.001, expected_route_cost * 0.0001)
+                or abs(float(network.get("total_trade_volume_index", 0.0)) - expected_trade_volume) > max(0.001, expected_trade_volume * 0.0001)
+                or abs(float(network.get("interregional_trade_volume_index", 0.0)) - expected_interregional_volume) > max(0.001, expected_interregional_volume * 0.0001)
+            ):
+                logistics_invalid = True
+                break
+            logistics_route_link_count += len(route_ids)
+            logistics_efficiency_sum += float(network.get("transport_efficiency_index", 0.0))
+            logistics_resilience_sum += float(network.get("logistics_resilience_index", 0.0))
+
+        market_access_sum = 0.0
+        market_disruption_sum = 0.0
+        market_volume_sum = 0.0
+        interregional_market_count = 0
+        for market in market_exchanges:
+            trade_id = int(market.get("trade_flow_id", -1))
+            route_id = int(market.get("route_id", -1))
+            from_settlement_id = int(market.get("from_settlement_id", -1))
+            to_settlement_id = int(market.get("to_settlement_id", -1))
+            region_from = int(market.get("region_from", -1))
+            region_to = int(market.get("region_to", -1))
+            clearing_record_id = int(market.get("market_clearing_record_id", -1))
+            volume = float(market.get("volume_index", -1.0))
+            if (
+                trade_id not in trade_by_id
+                or route_id not in route_by_id
+                or from_settlement_id not in settlement_ids
+                or to_settlement_id not in settlement_ids
+                or region_from not in political_region_ids
+                or region_to not in political_region_ids
+                or clearing_record_id not in clearing_by_id
+                or not str(market.get("primary_good", "")).strip()
+                or float(market.get("distance_km", -1.0)) < 0.0
+                or volume < 0.0
+                or float(market.get("tax_revenue_index", -1.0)) < 0.0
+                or float(market.get("cleared_volume_index", -1.0)) < 0.0
+                or float(market.get("unmet_demand_index", -1.0)) < 0.0
+                or not 0.0 <= float(market.get("clearance_fraction", -1.0)) <= 1.0
+                or bool(market.get("interregional", False)) != bool(trade_by_id[trade_id].get("interregional", False))
+            ):
+                logistics_invalid = True
+                break
+            for key in (
+                "friction",
+                "supply_index",
+                "demand_index",
+                "price_spread_index",
+                "market_access_index",
+                "food_security_link_index",
+                "disruption_risk_index",
+            ):
+                if not 0.0 <= float(market.get(key, -1.0)) <= 1.0:
+                    logistics_invalid = True
+                    break
+            if logistics_invalid:
+                break
+            if (
+                abs(volume - float(trade_by_id[trade_id].get("volume_index", 0.0))) > max(0.001, volume * 0.0001)
+                or int(trade_by_id[trade_id].get("route_id", -1)) != route_id
+                or int(trade_by_id[trade_id].get("region_from", -1)) != region_from
+                or int(trade_by_id[trade_id].get("region_to", -1)) != region_to
+                or int(clearing_by_id[clearing_record_id].get("market_exchange_id", -1)) != int(market.get("id", -1))
+                or abs(float(market.get("cleared_volume_index", 0.0)) + float(market.get("unmet_demand_index", 0.0)) - volume)
+                > max(0.001, volume * 0.0001)
+            ):
+                logistics_invalid = True
+                break
+            market_access_sum += float(market.get("market_access_index", 0.0))
+            market_disruption_sum += float(market.get("disruption_risk_index", 0.0))
+            market_volume_sum += volume
+            interregional_market_count += 1 if bool(market.get("interregional", False)) else 0
+
+        route_constraint_requested_sum = 0.0
+        route_constraint_cleared_sum = 0.0
+        route_constraint_unmet_sum = 0.0
+        route_constraint_utilization_sum = 0.0
+        route_ids_with_markets = {
+            int(market.get("route_id", -1))
+            for market in market_exchanges
+            if int(market.get("route_id", -1)) >= 0
+        }
+        if len(route_capacity_constraints) != len(route_ids_with_markets):
+            logistics_invalid = True
+        seen_constraint_market_ids: set[int] = set()
+        for constraint in route_capacity_constraints:
+            constraint_id = int(constraint.get("id", -1))
+            route_id = int(constraint.get("route_id", -1))
+            market_ids = constraint.get("market_exchange_ids", [])
+            requested = float(constraint.get("requested_volume_index", -1.0))
+            capacity = float(constraint.get("capacity_volume_index", -1.0))
+            cleared = float(constraint.get("cleared_volume_index", -1.0))
+            unmet = float(constraint.get("unmet_volume_index", -1.0))
+            utilization = float(constraint.get("utilization_index", -1.0))
+            shortage = float(constraint.get("shortage_index", -1.0))
+            if (
+                constraint_id not in route_constraint_by_id
+                or route_id not in route_by_id
+                or not isinstance(market_ids, list)
+                or int(constraint.get("market_exchange_count", -1)) != len(market_ids)
+                or float(constraint.get("distance_km", -1.0)) < 0.0
+                or requested < 0.0
+                or capacity < 0.0
+                or cleared < 0.0
+                or unmet < 0.0
+                or cleared - requested > 0.001
+                or cleared - capacity > 0.001
+                or int(route_by_id[route_id].get("route_capacity_constraint_id", -1)) != constraint_id
+                or abs(float(route_by_id[route_id].get("market_capacity_volume_index", -1.0)) - capacity) > max(0.001, capacity * 0.0001)
+                or abs(float(route_by_id[route_id].get("market_capacity_utilization_index", -1.0)) - utilization) > 0.001
+            ):
+                logistics_invalid = True
+                break
+            for key in ("utilization_index", "congestion_index", "shortage_index", "spoilage_loss_index"):
+                if not 0.0 <= float(constraint.get(key, -1.0)) <= 1.0:
+                    logistics_invalid = True
+                    break
+            if logistics_invalid:
+                break
+            expected_requested = 0.0
+            for market_id_raw in market_ids:
+                market_id = int(market_id_raw)
+                if market_id not in market_by_id or int(market_by_id[market_id].get("route_id", -1)) != route_id:
+                    logistics_invalid = True
+                    break
+                expected_requested += float(market_by_id[market_id].get("volume_index", 0.0))
+                seen_constraint_market_ids.add(market_id)
+            if logistics_invalid:
+                break
+            expected_utilization = max(0.0, min(1.0, cleared / max(1.0, capacity)))
+            expected_shortage = max(0.0, min(1.0, unmet / max(1.0, requested)))
+            if (
+                abs(requested - expected_requested) > max(0.001, expected_requested * 0.0001)
+                or abs((cleared + unmet) - requested) > max(0.001, requested * 0.0001)
+                or abs(utilization - expected_utilization) > 0.001
+                or abs(shortage - expected_shortage) > 0.001
+            ):
+                logistics_invalid = True
+                break
+            route_constraint_requested_sum += requested
+            route_constraint_cleared_sum += cleared
+            route_constraint_unmet_sum += unmet
+            route_constraint_utilization_sum += utilization
+        if seen_constraint_market_ids != set(market_by_id):
+            logistics_invalid = True
+
+        market_clearance_sum = 0.0
+        market_price_adjustment_sum = 0.0
+        market_rationing_sum = 0.0
+        endogenous_market_supply_sum = 0.0
+        endogenous_market_demand_sum = 0.0
+        equilibrium_residual_sum = 0.0
+        constrained_market_records = 0
+        market_order_ids_seen: set[int] = set()
+        market_iteration_ids_seen: set[int] = set()
+        market_inventory_step_count = 0
+        market_inventory_gap_sum = 0.0
+        market_inventory_learning_sum = 0.0
+        market_inventory_pressure_sum = 0.0
+        high_inventory_stress_market_count = 0
+        seen_clearing_market_ids: set[int] = set()
+        for record in market_clearing_records:
+            record_id = int(record.get("id", -1))
+            market_id = int(record.get("market_exchange_id", -1))
+            trade_id = int(record.get("trade_flow_id", -1))
+            route_id = int(record.get("route_id", -1))
+            constraint_id = int(record.get("route_capacity_constraint_id", -1))
+            inventory_history_id = int(record.get("market_inventory_history_id", -1))
+            requested = float(record.get("requested_volume_index", -1.0))
+            cleared = float(record.get("cleared_volume_index", -1.0))
+            unmet = float(record.get("unmet_demand_index", -1.0))
+            clearance = float(record.get("clearance_fraction", -1.0))
+            route_utilization = float(record.get("route_utilization_index", -1.0))
+            rationing = float(record.get("rationing_index", -1.0))
+            order_ids = record.get("agent_order_ids", [])
+            iteration_ids = record.get("price_iteration_ids", [])
+            endogenous_supply = float(record.get("endogenous_supply_index", -1.0))
+            endogenous_demand = float(record.get("endogenous_demand_index", -1.0))
+            equilibrium_price = float(record.get("equilibrium_price_index", -1.0))
+            price_residual = float(record.get("price_residual_index", -1.0))
+            if (
+                record_id not in clearing_by_id
+                or market_id not in market_by_id
+                or trade_id not in trade_by_id
+                or route_id not in route_by_id
+                or constraint_id not in route_constraint_by_id
+                or inventory_history_id not in market_inventory_by_id
+                or requested < 0.0
+                or cleared < 0.0
+                or unmet < 0.0
+                or cleared - requested > 0.001
+                or not str(record.get("primary_good", "")).strip()
+                or not isinstance(order_ids, list)
+                or not isinstance(iteration_ids, list)
+                or int(record.get("agent_order_count", -1)) != len(order_ids)
+                or int(record.get("price_iteration_count", -1)) != len(iteration_ids)
+                or endogenous_supply < 0.0
+                or endogenous_demand < 0.0
+                or not 0.0 <= equilibrium_price <= 1.0
+                or not 0.0 <= price_residual <= 1.0
+            ):
+                logistics_invalid = True
+                break
+            for key in (
+                "clearance_fraction",
+                "route_utilization_index",
+                "price_adjustment_index",
+                "rationing_index",
+                "producer_surplus_index",
+                "consumer_welfare_index",
+                "equilibrium_price_index",
+                "price_residual_index",
+            ):
+                if not 0.0 <= float(record.get(key, -1.0)) <= 1.0:
+                    logistics_invalid = True
+                    break
+            if logistics_invalid:
+                break
+            market = market_by_id[market_id]
+            constraint = route_constraint_by_id[constraint_id]
+            expected_clearance = max(0.0, min(1.0, cleared / max(1.0, requested)))
+            expected_rationing = max(0.0, min(1.0, unmet / max(1.0, requested)))
+            if (
+                int(market.get("market_clearing_record_id", -1)) != record_id
+                or int(market.get("market_inventory_history_id", -1)) != inventory_history_id
+                or int(market.get("trade_flow_id", -1)) != trade_id
+                or int(market.get("route_id", -1)) != route_id
+                or int(market.get("region_from", -1)) != int(record.get("region_from", -1))
+                or int(market.get("region_to", -1)) != int(record.get("region_to", -1))
+                or int(constraint.get("route_id", -1)) != route_id
+                or market_id not in constraint.get("market_exchange_ids", [])
+                or abs(requested - float(market.get("volume_index", 0.0))) > max(0.001, requested * 0.0001)
+                or abs((cleared + unmet) - requested) > max(0.001, requested * 0.0001)
+                or abs(cleared - float(market.get("cleared_volume_index", 0.0))) > max(0.001, cleared * 0.0001)
+                or abs(unmet - float(market.get("unmet_demand_index", 0.0))) > max(0.001, unmet * 0.0001)
+                or abs(clearance - float(market.get("clearance_fraction", 0.0))) > 0.001
+                or abs(route_utilization - float(constraint.get("utilization_index", 0.0))) > 0.001
+                or abs(clearance - expected_clearance) > 0.001
+                or abs(rationing - expected_rationing) > 0.001
+            ):
+                logistics_invalid = True
+                break
+            for order_id_raw in order_ids:
+                order_id = int(order_id_raw)
+                order = market_order_by_id.get(order_id)
+                if (
+                    order is None
+                    or int(order.get("market_exchange_id", -1)) != market_id
+                    or int(order.get("market_clearing_record_id", -1)) != record_id
+                ):
+                    logistics_invalid = True
+                    break
+                market_order_ids_seen.add(order_id)
+            if logistics_invalid:
+                break
+            for iteration_id_raw in iteration_ids:
+                iteration_id = int(iteration_id_raw)
+                iteration = market_iteration_by_id.get(iteration_id)
+                if (
+                    iteration is None
+                    or int(iteration.get("market_exchange_id", -1)) != market_id
+                    or int(iteration.get("market_clearing_record_id", -1)) != record_id
+                ):
+                    logistics_invalid = True
+                    break
+                market_iteration_ids_seen.add(iteration_id)
+            if logistics_invalid:
+                break
+            seen_clearing_market_ids.add(market_id)
+            market_clearance_sum += clearance
+            market_price_adjustment_sum += float(record.get("price_adjustment_index", 0.0))
+            market_rationing_sum += rationing
+            endogenous_market_supply_sum += endogenous_supply
+            endogenous_market_demand_sum += endogenous_demand
+            equilibrium_residual_sum += price_residual
+            constrained_market_records += 1 if unmet > 0.0 else 0
+        if seen_clearing_market_ids != set(market_by_id):
+            logistics_invalid = True
+        if market_order_ids_seen != set(market_order_by_id):
+            logistics_invalid = True
+        if market_iteration_ids_seen != set(market_iteration_by_id):
+            logistics_invalid = True
+
+        producer_market_order_count = 0
+        consumer_market_order_count = 0
+        for order in market_agent_orders:
+            order_id = int(order.get("id", -1))
+            market_id = int(order.get("market_exchange_id", -1))
+            clearing_id = int(order.get("market_clearing_record_id", -1))
+            agent_type = str(order.get("agent_type", ""))
+            agent_id = int(order.get("agent_id", -1))
+            region_id = int(order.get("region_id", -1))
+            order_side = str(order.get("order_side", ""))
+            requested = float(order.get("requested_volume_index", -1.0))
+            cleared = float(order.get("cleared_volume_index", -1.0))
+            inventory_change = float(order.get("inventory_change_index", -2.0))
+            if (
+                order_id not in market_order_by_id
+                or market_id not in market_by_id
+                or clearing_id not in clearing_by_id
+                or region_id not in political_region_ids
+                or agent_type not in {"firm", "household_cohort", "state"}
+                or order_side not in {"supply", "demand"}
+                or not str(order.get("order_kind", "")).strip()
+                or not str(order.get("primary_good", "")).strip()
+                or requested < 0.0
+                or cleared < 0.0
+                or cleared - requested > 0.001
+                or not -1.0 <= inventory_change <= 1.0
+            ):
+                logistics_invalid = True
+                break
+            clearing = clearing_by_id[clearing_id]
+            if (
+                int(clearing.get("market_exchange_id", -1)) != market_id
+                or str(clearing.get("primary_good", "")) != str(order.get("primary_good", ""))
+                or (agent_type == "firm" and agent_id not in market_firm_ids)
+                or (agent_type == "household_cohort" and agent_id not in market_household_ids)
+                or (agent_type == "state" and agent_id not in political_region_ids)
+            ):
+                logistics_invalid = True
+                break
+            for key in ("limit_price_index", "price_acceptance_index", "rationing_index"):
+                if not 0.0 <= float(order.get(key, -1.0)) <= 1.0:
+                    logistics_invalid = True
+                    break
+            if logistics_invalid:
+                break
+            producer_market_order_count += 1 if order_side == "supply" else 0
+            consumer_market_order_count += 1 if order_side == "demand" else 0
+
+        for iteration in market_price_iterations:
+            iteration_id = int(iteration.get("id", -1))
+            market_id = int(iteration.get("market_exchange_id", -1))
+            clearing_id = int(iteration.get("market_clearing_record_id", -1))
+            order_ids = iteration.get("order_ids", [])
+            supply_volume = float(iteration.get("supply_volume_index", -1.0))
+            demand_volume = float(iteration.get("demand_volume_index", -1.0))
+            imbalance = float(iteration.get("imbalance_index", 0.0))
+            if (
+                iteration_id not in market_iteration_by_id
+                or market_id not in market_by_id
+                or clearing_id not in clearing_by_id
+                or int(iteration.get("iteration_index", 0)) <= 0
+                or not isinstance(order_ids, list)
+                or int(iteration.get("order_count", -1)) != len(order_ids)
+                or supply_volume < 0.0
+                or demand_volume < 0.0
+                or abs((demand_volume - supply_volume) - imbalance) > max(0.001, abs(imbalance) * 0.0001)
+            ):
+                logistics_invalid = True
+                break
+            clearing = clearing_by_id[clearing_id]
+            if int(clearing.get("market_exchange_id", -1)) != market_id:
+                logistics_invalid = True
+                break
+            for key in ("price_index", "excess_demand_index", "price_adjustment_index"):
+                if not 0.0 <= float(iteration.get(key, -1.0)) <= 1.0:
+                    logistics_invalid = True
+                    break
+            if logistics_invalid:
+                break
+            for order_id_raw in order_ids:
+                order = market_order_by_id.get(int(order_id_raw))
+                if (
+                    order is None
+                    or int(order.get("market_exchange_id", -1)) != market_id
+                    or int(order.get("market_clearing_record_id", -1)) != clearing_id
+                ):
+                    logistics_invalid = True
+                    break
+            if logistics_invalid:
+                break
+
+        seen_inventory_clearing_ids: set[int] = set()
+        seen_inventory_market_ids: set[int] = set()
+        for history in market_inventory_histories:
+            history_id = int(history.get("id", -1))
+            clearing_id = int(history.get("market_clearing_record_id", -1))
+            market_id = int(history.get("market_exchange_id", -1))
+            trade_id = int(history.get("trade_flow_id", -1))
+            route_id = int(history.get("route_id", -1))
+            region_from = int(history.get("region_from", -1))
+            region_to = int(history.get("region_to", -1))
+            steps = history.get("steps", [])
+            target_inventory = float(history.get("target_inventory_index", -1.0))
+            final_inventory = float(history.get("final_inventory_index", -1.0))
+            inventory_gap = float(history.get("inventory_gap_index", -1.0))
+            if (
+                history_id not in market_inventory_by_id
+                or clearing_id not in clearing_by_id
+                or market_id not in market_by_id
+                or trade_id not in trade_by_id
+                or route_id not in route_by_id
+                or region_from not in political_region_ids
+                or region_to not in political_region_ids
+                or not isinstance(steps, list)
+                or int(history.get("step_count", -1)) != len(steps)
+                or not steps
+                or not str(history.get("primary_good", "")).strip()
+                or int(clearing_by_id[clearing_id].get("market_inventory_history_id", -1)) != history_id
+                or int(clearing_by_id[clearing_id].get("market_exchange_id", -1)) != market_id
+                or int(clearing_by_id[clearing_id].get("trade_flow_id", -1)) != trade_id
+                or int(clearing_by_id[clearing_id].get("route_id", -1)) != route_id
+                or int(market_by_id[market_id].get("market_inventory_history_id", -1)) != history_id
+                or int(market_by_id[market_id].get("market_clearing_record_id", -1)) != clearing_id
+                or int(market_by_id[market_id].get("region_from", -1)) != region_from
+                or int(market_by_id[market_id].get("region_to", -1)) != region_to
+            ):
+                logistics_invalid = True
+                break
+            for key in (
+                "initial_inventory_index",
+                "target_inventory_index",
+                "final_inventory_index",
+                "inventory_gap_index",
+                "learning_rate_index",
+                "mean_inventory_pressure_index",
+                "mean_price_expectation_index",
+                "mean_supply_response_index",
+                "mean_demand_adjustment_index",
+            ):
+                if not 0.0 <= float(history.get(key, -1.0)) <= 1.0:
+                    logistics_invalid = True
+                    break
+            if logistics_invalid:
+                break
+            expected_iteration_ids = list(clearing_by_id[clearing_id].get("price_iteration_ids", []))
+            pressure_sum = 0.0
+            price_expectation_sum = 0.0
+            supply_response_sum = 0.0
+            demand_adjustment_sum = 0.0
+            learning_sum = 0.0
+            for sequence_index, step in enumerate(steps):
+                price_iteration_id = int(step.get("price_iteration_id", -1))
+                if (
+                    int(step.get("sequence_index", -1)) != sequence_index
+                    or sequence_index >= len(expected_iteration_ids)
+                    or price_iteration_id != int(expected_iteration_ids[sequence_index])
+                    or price_iteration_id not in market_iteration_by_id
+                ):
+                    logistics_invalid = True
+                    break
+                for key in (
+                    "price_index",
+                    "inventory_index",
+                    "target_inventory_index",
+                    "inventory_gap_index",
+                    "supply_response_index",
+                    "demand_adjustment_index",
+                    "learning_rate_index",
+                    "producer_expectation_index",
+                    "consumer_expectation_index",
+                    "rationing_memory_index",
+                    "clearance_memory_index",
+                ):
+                    if not 0.0 <= float(step.get(key, -1.0)) <= 1.0:
+                        logistics_invalid = True
+                        break
+                if logistics_invalid:
+                    break
+                if (
+                    abs(float(step.get("target_inventory_index", 0.0)) - target_inventory) > 0.001
+                    or abs(float(step.get("inventory_gap_index", 0.0)) - abs(float(step.get("inventory_index", 0.0)) - target_inventory)) > 0.001
+                ):
+                    logistics_invalid = True
+                    break
+                pressure = min(
+                    1.0,
+                    max(
+                        0.0,
+                        float(step.get("inventory_gap_index", 0.0)) * 0.45
+                        + float(step.get("rationing_memory_index", 0.0)) * 0.22
+                        + float(clearing_by_id[clearing_id].get("price_residual_index", 0.0)) * 0.18
+                        + float(step.get("price_index", 0.0)) * 0.15,
+                    ),
+                )
+                pressure_sum += pressure
+                price_expectation_sum += (
+                    float(step.get("producer_expectation_index", 0.0)) * 0.48
+                    + float(step.get("consumer_expectation_index", 0.0)) * 0.52
+                )
+                supply_response_sum += float(step.get("supply_response_index", 0.0))
+                demand_adjustment_sum += float(step.get("demand_adjustment_index", 0.0))
+                learning_sum += float(step.get("learning_rate_index", 0.0))
+            if logistics_invalid:
+                break
+            step_count = len(steps)
+            expected_final = float(steps[-1].get("inventory_index", 0.0))
+            expected_gap = abs(expected_final - target_inventory)
+            expected_learning = learning_sum / step_count
+            expected_pressure = pressure_sum / step_count
+            expected_price_expectation = price_expectation_sum / step_count
+            expected_supply_response = supply_response_sum / step_count
+            expected_demand_adjustment = demand_adjustment_sum / step_count
+            expected_high_stress = expected_pressure >= 0.60 or expected_gap >= 0.45
+            if (
+                abs(final_inventory - expected_final) > 0.001
+                or abs(inventory_gap - expected_gap) > 0.001
+                or abs(float(history.get("learning_rate_index", 0.0)) - expected_learning) > 0.001
+                or abs(float(history.get("mean_inventory_pressure_index", 0.0)) - expected_pressure) > 0.001
+                or abs(float(history.get("mean_price_expectation_index", 0.0)) - expected_price_expectation) > 0.001
+                or abs(float(history.get("mean_supply_response_index", 0.0)) - expected_supply_response) > 0.001
+                or abs(float(history.get("mean_demand_adjustment_index", 0.0)) - expected_demand_adjustment) > 0.001
+                or bool(history.get("high_inventory_stress", False)) != expected_high_stress
+            ):
+                logistics_invalid = True
+                break
+            seen_inventory_clearing_ids.add(clearing_id)
+            seen_inventory_market_ids.add(market_id)
+            market_inventory_step_count += step_count
+            market_inventory_gap_sum += inventory_gap
+            market_inventory_learning_sum += float(history.get("learning_rate_index", 0.0))
+            market_inventory_pressure_sum += float(history.get("mean_inventory_pressure_index", 0.0))
+            high_inventory_stress_market_count += 1 if bool(history.get("high_inventory_stress", False)) else 0
+        if seen_inventory_clearing_ids != set(clearing_by_id) or seen_inventory_market_ids != set(market_by_id):
+            logistics_invalid = True
+
+        campaign_travel_sum = 0.0
+        campaign_attrition_sum = 0.0
+        campaign_reach_sum = 0.0
+        campaign_force_sum = 0.0
+        campaign_path_length_sum = 0.0
+        campaign_path_terrain_sum = 0.0
+        campaign_path_supply_loss_sum = 0.0
+        campaign_path_attrition_sum = 0.0
+        high_attrition_campaigns = 0
+        high_attrition_campaign_segments = 0
+        campaign_front_step_count = 0
+        campaign_front_supply_integrity_sum = 0.0
+        campaign_front_control_sum = 0.0
+        campaign_front_attrition_loss_sum = 0.0
+        tactical_engagement_step_count = 0
+        tactical_counter_sum = 0.0
+        tactical_pressure_sum = 0.0
+        tactical_supply_contest_sum = 0.0
+        tactical_attrition_loss_sum = 0.0
+        high_pressure_tactical_steps = 0
+        strategic_decision_point_count = 0
+        independent_counter_campaign_plans = 0
+        counter_campaign_viability_sum = 0.0
+        strategic_plan_confidence_sum = 0.0
+        strategic_force_reserve_fraction_sum = 0.0
+        high_escalation_strategic_plans = 0
+        seen_campaign_segment_ids: set[int] = set()
+        for campaign in campaign_movements:
+            campaign_id = int(campaign.get("id", -1))
+            conflict_id = int(campaign.get("conflict_id", -1))
+            origin_region = int(campaign.get("origin_region_id", -1))
+            target_region = int(campaign.get("target_region_id", -1))
+            origin_cell_id = int(campaign.get("origin_cell_id", -1))
+            target_cell_id = int(campaign.get("target_cell_id", -1))
+            route_id = int(campaign.get("route_id", -1))
+            border_id = int(campaign.get("border_id", -1))
+            front_history_id = int(campaign.get("campaign_front_history_id", -1))
+            attrition = float(campaign.get("attrition_risk_index", -1.0))
+            path_cell_ids = campaign.get("path_cell_ids", [])
+            path_segment_ids = campaign.get("path_segment_ids", [])
+            path_length = float(campaign.get("path_length_km", -1.0))
+            if (
+                conflict_id not in conflict_by_id
+                or origin_region not in political_region_ids
+                or target_region not in political_region_ids
+                or origin_region == target_region
+                or origin_cell_id not in cells_by_id
+                or target_cell_id not in cells_by_id
+                or (route_id >= 0 and route_id not in route_by_id)
+                or (border_id >= 0 and border_id not in border_by_id)
+                or front_history_id not in campaign_front_by_id
+                or not isinstance(path_cell_ids, list)
+                or not isinstance(path_segment_ids, list)
+                or len(path_cell_ids) < 2
+                or int(campaign.get("path_cell_count", -1)) != len(path_cell_ids)
+                or int(campaign.get("path_segment_count", -1)) != len(path_segment_ids)
+                or int(campaign.get("path_segment_count", -1)) != max(0, len(path_cell_ids) - 1)
+                or int(path_cell_ids[0]) != origin_cell_id
+                or int(path_cell_ids[-1]) != target_cell_id
+                or int(conflict_by_id[conflict_id].get("campaign_movement_id", -1)) != campaign_id
+                or int(campaign_front_by_id[front_history_id].get("campaign_movement_id", -1)) != campaign_id
+                or float(campaign.get("start_year_bp", -1.0)) < float(campaign.get("end_year_bp", -1.0))
+                or float(campaign.get("distance_km", -1.0)) <= 0.0
+                or path_length <= 0.0
+                or abs(float(campaign.get("distance_km", 0.0)) - path_length) > max(0.001, path_length * 0.0001)
+                or float(campaign.get("travel_time_days", -1.0)) <= 0.0
+                or float(campaign.get("force_estimate", -1.0)) < 0.0
+                or not str(campaign.get("outcome", "")).strip()
+            ):
+                logistics_invalid = True
+                break
+            for key in (
+                "supply_required_index",
+                "attrition_risk_index",
+                "logistics_strain_index",
+                "operational_reach_index",
+                "campaign_success_index",
+                "path_terrain_cost_index",
+                "path_supply_loss_index",
+                "path_attrition_index",
+            ):
+                if not 0.0 <= float(campaign.get(key, -1.0)) <= 1.0:
+                    logistics_invalid = True
+                    break
+            if logistics_invalid:
+                break
+            campaign_segment_distance_sum = 0.0
+            previous_elapsed_days = 0.0
+            for sequence_index, segment_id_raw in enumerate(path_segment_ids):
+                segment_id = int(segment_id_raw)
+                segment = campaign_segment_by_id.get(segment_id)
+                if segment is None:
+                    logistics_invalid = True
+                    break
+                from_cell_id = int(segment.get("from_cell_id", -1))
+                to_cell_id = int(segment.get("to_cell_id", -1))
+                segment_distance = float(segment.get("distance_km", -1.0))
+                elapsed_days = float(segment.get("elapsed_days", -1.0))
+                if (
+                    int(segment.get("campaign_movement_id", -1)) != campaign_id
+                    or int(segment.get("sequence_index", -1)) != sequence_index
+                    or from_cell_id not in cells_by_id
+                    or to_cell_id not in cells_by_id
+                    or from_cell_id != int(path_cell_ids[sequence_index])
+                    or to_cell_id != int(path_cell_ids[sequence_index + 1])
+                    or to_cell_id not in {int(neighbor) for neighbor in cells_by_id[from_cell_id].get("neighbors", [])}
+                    or segment_distance <= 0.0
+                    or elapsed_days <= previous_elapsed_days
+                    or float(segment.get("elevation_gain_m", -1.0)) < 0.0
+                    or not str(segment.get("route_mode", "")).strip()
+                ):
+                    logistics_invalid = True
+                    break
+                for key in ("terrain_cost_index", "barrier_cost_index", "supply_loss_index", "attrition_index"):
+                    if not 0.0 <= float(segment.get(key, -1.0)) <= 1.0:
+                        logistics_invalid = True
+                        break
+                if logistics_invalid:
+                    break
+                campaign_segment_distance_sum += segment_distance
+                previous_elapsed_days = elapsed_days
+                seen_campaign_segment_ids.add(segment_id)
+                campaign_path_terrain_sum += float(segment.get("terrain_cost_index", 0.0))
+                campaign_path_supply_loss_sum += float(segment.get("supply_loss_index", 0.0))
+                segment_attrition = float(segment.get("attrition_index", 0.0))
+                campaign_path_attrition_sum += segment_attrition
+                high_attrition_campaign_segments += 1 if segment_attrition >= 0.65 else 0
+            if logistics_invalid:
+                break
+            if abs(campaign_segment_distance_sum - path_length) > max(0.001, path_length * 0.0001):
+                logistics_invalid = True
+                break
+            campaign_travel_sum += float(campaign.get("travel_time_days", 0.0))
+            campaign_attrition_sum += attrition
+            campaign_reach_sum += float(campaign.get("operational_reach_index", 0.0))
+            campaign_force_sum += float(campaign.get("force_estimate", 0.0))
+            campaign_path_length_sum += path_length
+            high_attrition_campaigns += 1 if attrition >= 0.65 else 0
+        if seen_campaign_segment_ids != set(campaign_segment_by_id):
+            logistics_invalid = True
+
+        seen_front_campaign_ids: set[int] = set()
+        for front_history in campaign_front_histories:
+            front_id = int(front_history.get("id", -1))
+            campaign_id = int(front_history.get("campaign_movement_id", -1))
+            conflict_id = int(front_history.get("conflict_id", -1))
+            origin_region = int(front_history.get("origin_region_id", -1))
+            target_region = int(front_history.get("target_region_id", -1))
+            path_cell_ids = front_history.get("path_cell_ids", [])
+            path_segment_ids = front_history.get("path_segment_ids", [])
+            steps = front_history.get("steps", [])
+            if (
+                front_id not in campaign_front_by_id
+                or campaign_id not in campaign_by_id
+                or conflict_id not in conflict_by_id
+                or origin_region not in political_region_ids
+                or target_region not in political_region_ids
+                or not isinstance(path_cell_ids, list)
+                or not isinstance(path_segment_ids, list)
+                or not isinstance(steps, list)
+                or int(front_history.get("step_count", -1)) != len(steps)
+                or len(steps) != len(path_cell_ids)
+                or int(front_history.get("captured_cell_count", -1)) != len(path_cell_ids)
+                or int(front_history.get("final_occupied_cell_id", -1)) != int(path_cell_ids[-1] if path_cell_ids else -1)
+                or int(campaign_by_id[campaign_id].get("campaign_front_history_id", -1)) != front_id
+                or list(path_cell_ids) != list(campaign_by_id[campaign_id].get("path_cell_ids", []))
+                or list(path_segment_ids) != list(campaign_by_id[campaign_id].get("path_segment_ids", []))
+                or float(front_history.get("attacking_force_initial", -1.0)) < 0.0
+                or float(front_history.get("defending_force_initial", -1.0)) < 0.0
+                or float(front_history.get("final_attacking_force_estimate", -1.0)) < 0.0
+                or float(front_history.get("final_defending_force_estimate", -1.0)) < 0.0
+                or float(front_history.get("final_attacking_force_estimate", 0.0)) > float(front_history.get("attacking_force_initial", 0.0))
+                or float(front_history.get("final_defending_force_estimate", 0.0)) > float(front_history.get("defending_force_initial", 0.0))
+                or float(front_history.get("start_year_bp", -1.0)) < float(front_history.get("end_year_bp", -1.0))
+                or float(front_history.get("max_supply_line_length_km", -1.0)) < 0.0
+                or not 0.0 <= float(front_history.get("mean_supply_integrity_index", -1.0)) <= 1.0
+                or not 0.0 <= float(front_history.get("mean_occupation_control_index", -1.0)) <= 1.0
+                or not str(front_history.get("route_mode", "")).strip()
+                or not str(front_history.get("outcome_projection", "")).strip()
+            ):
+                logistics_invalid = True
+                break
+            seen_front_campaign_ids.add(campaign_id)
+            previous_occupied_count = 0
+            previous_days = -1.0
+            supply_sum = 0.0
+            control_sum = 0.0
+            max_supply_line = 0.0
+            for sequence_index, step in enumerate(steps):
+                occupied_ids = step.get("occupied_cell_ids", [])
+                front_line_ids = step.get("front_line_cell_ids", [])
+                cell_id = int(step.get("cell_id", -1))
+                days_elapsed = float(step.get("days_elapsed", -1.0))
+                supply_line = float(step.get("supply_line_length_km", -1.0))
+                supply_integrity = float(step.get("supply_integrity_index", -1.0))
+                occupation_control = float(step.get("occupation_control_index", -1.0))
+                attrition_loss = float(step.get("attrition_loss_population", -1.0))
+                if (
+                    int(step.get("sequence_index", -1)) != sequence_index
+                    or sequence_index >= len(path_cell_ids)
+                    or cell_id not in cells_by_id
+                    or cell_id != int(path_cell_ids[sequence_index])
+                    or not isinstance(occupied_ids, list)
+                    or not isinstance(front_line_ids, list)
+                    or int(step.get("occupied_cell_count", -1)) != len(occupied_ids)
+                    or int(step.get("front_line_cell_count", -1)) != len(front_line_ids)
+                    or not occupied_ids
+                    or len(occupied_ids) < previous_occupied_count
+                    or int(occupied_ids[-1]) != cell_id
+                    or days_elapsed < previous_days
+                    or supply_line < 0.0
+                    or float(step.get("attacking_force_estimate", -1.0)) < 0.0
+                    or float(step.get("defending_force_estimate", -1.0)) < 0.0
+                    or attrition_loss < 0.0
+                    or not 0.0 <= float(step.get("local_attrition_index", -1.0)) <= 1.0
+                    or not 0.0 <= supply_integrity <= 1.0
+                    or not 0.0 <= occupation_control <= 1.0
+                    or not 0.0 <= float(step.get("front_width_index", -1.0)) <= 1.0
+                ):
+                    logistics_invalid = True
+                    break
+                for occupied_id_raw in occupied_ids:
+                    if int(occupied_id_raw) not in cells_by_id:
+                        logistics_invalid = True
+                        break
+                if logistics_invalid:
+                    break
+                for front_cell_id_raw in front_line_ids:
+                    if int(front_cell_id_raw) not in cells_by_id:
+                        logistics_invalid = True
+                        break
+                if logistics_invalid:
+                    break
+                previous_occupied_count = len(occupied_ids)
+                previous_days = days_elapsed
+                supply_sum += supply_integrity
+                control_sum += occupation_control
+                max_supply_line = max(max_supply_line, supply_line)
+                campaign_front_step_count += 1
+                campaign_front_supply_integrity_sum += supply_integrity
+                campaign_front_control_sum += occupation_control
+                campaign_front_attrition_loss_sum += attrition_loss
+            if logistics_invalid:
+                break
+            expected_supply = supply_sum / len(steps) if steps else 0.0
+            expected_control = control_sum / len(steps) if steps else 0.0
+            if (
+                abs(float(front_history.get("mean_supply_integrity_index", 0.0)) - expected_supply) > 0.001
+                or abs(float(front_history.get("mean_occupation_control_index", 0.0)) - expected_control) > 0.001
+                or abs(float(front_history.get("max_supply_line_length_km", 0.0)) - max_supply_line) > max(0.001, max_supply_line * 0.0001)
+            ):
+                logistics_invalid = True
+                break
+        if seen_front_campaign_ids != set(campaign_by_id):
+            logistics_invalid = True
+
+        seen_tactical_conflict_ids: set[int] = set()
+        for engagement in tactical_engagements:
+            engagement_id = int(engagement.get("id", -1))
+            conflict_id = int(engagement.get("conflict_id", -1))
+            campaign_id = int(engagement.get("campaign_movement_id", -1))
+            front_id = int(engagement.get("campaign_front_history_id", -1))
+            region_a = int(engagement.get("region_a", -1))
+            region_b = int(engagement.get("region_b", -1))
+            winner_region = int(engagement.get("winner_region_id", -1))
+            battle_cell_ids = engagement.get("battle_cell_ids", [])
+            steps = engagement.get("steps", [])
+            if (
+                engagement_id not in tactical_engagement_by_id
+                or conflict_id not in conflict_by_id
+                or campaign_id not in campaign_by_id
+                or front_id not in campaign_front_by_id
+                or region_a not in political_region_ids
+                or region_b not in political_region_ids
+                or region_a == region_b
+                or winner_region not in {region_a, region_b}
+                or not isinstance(battle_cell_ids, list)
+                or not isinstance(steps, list)
+                or int(engagement.get("battle_cell_count", -1)) != len(battle_cell_ids)
+                or int(engagement.get("step_count", -1)) != len(steps)
+                or not steps
+                or int(conflict_by_id[conflict_id].get("region_a", -1)) != region_a
+                or int(conflict_by_id[conflict_id].get("region_b", -1)) != region_b
+                or int(conflict_by_id[conflict_id].get("tactical_engagement_id", -1)) != engagement_id
+                or int(campaign_by_id[campaign_id].get("conflict_id", -1)) != conflict_id
+                or int(campaign_front_by_id[front_id].get("campaign_movement_id", -1)) != campaign_id
+                or list(battle_cell_ids) != list(campaign_by_id[campaign_id].get("path_cell_ids", []))
+                or float(engagement.get("start_year_bp", -1.0)) < float(engagement.get("end_year_bp", -1.0))
+                or float(engagement.get("initial_region_a_force", -1.0)) < 0.0
+                or float(engagement.get("initial_region_b_force", -1.0)) < 0.0
+                or float(engagement.get("final_region_a_force", -1.0)) < 0.0
+                or float(engagement.get("final_region_b_force", -1.0)) < 0.0
+                or float(engagement.get("final_region_a_force", 0.0)) > float(engagement.get("initial_region_a_force", 0.0))
+                or float(engagement.get("final_region_b_force", 0.0)) > float(engagement.get("initial_region_b_force", 0.0))
+                or float(engagement.get("total_attrition_loss_population", -1.0)) < 0.0
+                or not str(engagement.get("tactical_outcome", "")).strip()
+            ):
+                logistics_invalid = True
+                break
+            for key in ("max_front_pressure_index", "mean_counter_maneuver_index", "mean_supply_contest_index"):
+                if not 0.0 <= float(engagement.get(key, -1.0)) <= 1.0:
+                    logistics_invalid = True
+                    break
+            if logistics_invalid:
+                break
+            seen_tactical_conflict_ids.add(conflict_id)
+            previous_days = -1.0
+            engagement_attrition = 0.0
+            engagement_counter = 0.0
+            engagement_pressure = 0.0
+            engagement_supply = 0.0
+            engagement_max_pressure = 0.0
+            for sequence_index, step in enumerate(steps):
+                cell_id = int(step.get("cell_id", -1))
+                days_elapsed = float(step.get("days_elapsed", -1.0))
+                attrition_loss = float(step.get("attrition_loss_population", -1.0))
+                control_region = int(step.get("control_region_id", -1))
+                if (
+                    int(step.get("sequence_index", -1)) != sequence_index
+                    or sequence_index >= len(battle_cell_ids)
+                    or cell_id not in cells_by_id
+                    or cell_id != int(battle_cell_ids[sequence_index])
+                    or days_elapsed < previous_days
+                    or float(step.get("region_a_force_estimate", -1.0)) < 0.0
+                    or float(step.get("region_b_force_estimate", -1.0)) < 0.0
+                    or attrition_loss < 0.0
+                    or control_region not in {region_a, region_b}
+                ):
+                    logistics_invalid = True
+                    break
+                for key in (
+                    "region_a_supply_integrity_index",
+                    "region_b_supply_integrity_index",
+                    "front_pressure_index",
+                    "counter_maneuver_index",
+                    "supply_contest_index",
+                    "encirclement_risk_index",
+                    "withdrawal_pressure_index",
+                    "control_balance_index",
+                ):
+                    if not 0.0 <= float(step.get(key, -1.0)) <= 1.0:
+                        logistics_invalid = True
+                        break
+                if logistics_invalid:
+                    break
+                previous_days = days_elapsed
+                pressure = float(step.get("front_pressure_index", 0.0))
+                counter = float(step.get("counter_maneuver_index", 0.0))
+                supply_contest = float(step.get("supply_contest_index", 0.0))
+                engagement_attrition += attrition_loss
+                engagement_counter += counter
+                engagement_pressure += pressure
+                engagement_supply += supply_contest
+                engagement_max_pressure = max(engagement_max_pressure, pressure)
+                tactical_engagement_step_count += 1
+                tactical_counter_sum += counter
+                tactical_pressure_sum += pressure
+                tactical_supply_contest_sum += supply_contest
+                tactical_attrition_loss_sum += attrition_loss
+                high_pressure_tactical_steps += 1 if pressure >= 0.65 else 0
+            if logistics_invalid:
+                break
+            step_count = len(steps)
+            if (
+                abs(float(engagement.get("total_attrition_loss_population", 0.0)) - engagement_attrition)
+                > max(1.0, engagement_attrition * 0.0001)
+                or abs(float(engagement.get("mean_counter_maneuver_index", 0.0)) - engagement_counter / step_count) > 0.001
+                or abs(float(engagement.get("mean_supply_contest_index", 0.0)) - engagement_supply / step_count) > 0.001
+                or abs(float(engagement.get("max_front_pressure_index", 0.0)) - engagement_max_pressure) > 0.001
+            ):
+                logistics_invalid = True
+                break
+        if seen_tactical_conflict_ids != set(campaign.get("conflict_id", -1) for campaign in campaign_movements):
+            logistics_invalid = True
+
+        seen_strategic_conflict_ids: set[int] = set()
+        for plan in strategic_campaign_plans:
+            plan_id = int(plan.get("id", -1))
+            conflict_id = int(plan.get("conflict_id", -1))
+            campaign_id = int(plan.get("campaign_movement_id", -1))
+            front_id = int(plan.get("campaign_front_history_id", -1))
+            tactical_id = int(plan.get("tactical_engagement_id", -1))
+            primary_region = int(plan.get("primary_region_id", -1))
+            counter_region = int(plan.get("counter_region_id", -1))
+            primary_objective = int(plan.get("primary_objective_cell_id", -1))
+            counter_objective = int(plan.get("counter_objective_cell_id", -1))
+            primary_axis = plan.get("primary_axis_cell_ids", [])
+            counter_axis = plan.get("counter_axis_cell_ids", [])
+            decisive_cell_ids = plan.get("decisive_cell_ids", [])
+            decision_points = plan.get("decision_points", [])
+            if (
+                plan_id not in strategic_plan_by_id
+                or conflict_id not in conflict_by_id
+                or campaign_id not in campaign_by_id
+                or front_id not in campaign_front_by_id
+                or tactical_id not in tactical_engagement_by_id
+                or primary_region not in political_region_ids
+                or counter_region not in political_region_ids
+                or primary_region == counter_region
+                or primary_objective not in cells_by_id
+                or counter_objective not in cells_by_id
+                or not isinstance(primary_axis, list)
+                or not isinstance(counter_axis, list)
+                or not isinstance(decisive_cell_ids, list)
+                or not isinstance(decision_points, list)
+                or len(primary_axis) < 2
+                or int(plan.get("primary_axis_cell_count", -1)) != len(primary_axis)
+                or int(plan.get("counter_axis_cell_count", -1)) != len(counter_axis)
+                or int(plan.get("decisive_cell_count", -1)) != len(decisive_cell_ids)
+                or int(plan.get("decision_point_count", -1)) != len(decision_points)
+                or list(primary_axis) != list(campaign_by_id[campaign_id].get("path_cell_ids", []))
+                or list(counter_axis) != list(reversed(primary_axis))
+                or primary_objective != int(campaign_by_id[campaign_id].get("target_cell_id", -1))
+                or counter_objective != int(campaign_by_id[campaign_id].get("origin_cell_id", -1))
+                or int(conflict_by_id[conflict_id].get("strategic_campaign_plan_id", -1)) != plan_id
+                or int(campaign_by_id[campaign_id].get("conflict_id", -1)) != conflict_id
+                or int(campaign_front_by_id[front_id].get("campaign_movement_id", -1)) != campaign_id
+                or int(tactical_engagement_by_id[tactical_id].get("campaign_movement_id", -1)) != campaign_id
+                or float(plan.get("primary_force_allocation_population", -1.0)) < 0.0
+                or float(plan.get("counter_force_allocation_population", -1.0)) < 0.0
+                or float(plan.get("reserve_force_population", -1.0)) < 0.0
+                or float(plan.get("expected_campaign_duration_days", -1.0)) < 0.0
+                or float(plan.get("counter_mobilization_days", -1.0)) < 0.0
+                or not str(plan.get("strategic_posture", "")).strip()
+            ):
+                logistics_invalid = True
+                break
+            for cell_id_raw in primary_axis + counter_axis + decisive_cell_ids:
+                if int(cell_id_raw) not in cells_by_id:
+                    logistics_invalid = True
+                    break
+            if logistics_invalid:
+                break
+            for key in (
+                "reserve_fraction",
+                "primary_logistics_score",
+                "counter_logistics_score",
+                "counter_campaign_viability_index",
+                "strategic_initiative_index",
+                "escalation_risk_index",
+                "operational_complexity_index",
+                "plan_confidence_index",
+            ):
+                if not 0.0 <= float(plan.get(key, -1.0)) <= 1.0:
+                    logistics_invalid = True
+                    break
+            if logistics_invalid:
+                break
+            for sequence_index, point in enumerate(decision_points):
+                point_cell_id = int(point.get("cell_id", -1))
+                path_index = int(point.get("path_index", -1))
+                if (
+                    int(point.get("sequence_index", -1)) != sequence_index
+                    or path_index < 0
+                    or path_index >= len(primary_axis)
+                    or point_cell_id != int(primary_axis[path_index])
+                    or point_cell_id not in cells_by_id
+                    or not str(point.get("plan_phase", "")).strip()
+                ):
+                    logistics_invalid = True
+                    break
+                for key in ("trigger_pressure_index", "counter_maneuver_priority_index", "supply_risk_index"):
+                    if not 0.0 <= float(point.get(key, -1.0)) <= 1.0:
+                        logistics_invalid = True
+                        break
+                if logistics_invalid:
+                    break
+            if logistics_invalid:
+                break
+            seen_strategic_conflict_ids.add(conflict_id)
+            strategic_decision_point_count += len(decision_points)
+            independent_counter_campaign_plans += 1 if bool(plan.get("independent_counter_campaign_planned", False)) else 0
+            counter_campaign_viability_sum += float(plan.get("counter_campaign_viability_index", 0.0))
+            strategic_plan_confidence_sum += float(plan.get("plan_confidence_index", 0.0))
+            strategic_force_reserve_fraction_sum += float(plan.get("reserve_fraction", 0.0))
+            high_escalation_strategic_plans += 1 if float(plan.get("escalation_risk_index", 0.0)) >= 0.65 else 0
+        if seen_strategic_conflict_ids != set(campaign.get("conflict_id", -1) for campaign in campaign_movements):
+            logistics_invalid = True
+
         if logistics_invalid:
-            break
-        seen_strategic_conflict_ids.add(conflict_id)
-        strategic_decision_point_count += len(decision_points)
-        independent_counter_campaign_plans += 1 if bool(plan.get("independent_counter_campaign_planned", False)) else 0
-        counter_campaign_viability_sum += float(plan.get("counter_campaign_viability_index", 0.0))
-        strategic_plan_confidence_sum += float(plan.get("plan_confidence_index", 0.0))
-        strategic_force_reserve_fraction_sum += float(plan.get("reserve_fraction", 0.0))
-        high_escalation_strategic_plans += 1 if float(plan.get("escalation_risk_index", 0.0)) >= 0.65 else 0
-    if seen_strategic_conflict_ids != set(campaign.get("conflict_id", -1) for campaign in campaign_movements):
-        logistics_invalid = True
+            failures.append("logistics history records invalid")
+        if int(summary.get("logistics_route_link_count", -1)) != logistics_route_link_count:
+            failures.append("logistics_route_link_count does not match logistics networks")
+        if int(summary.get("interregional_market_exchange_count", -1)) != interregional_market_count:
+            failures.append("interregional_market_exchange_count does not match market exchanges")
+        if int(summary.get("constrained_market_exchange_count", -1)) != constrained_market_records:
+            failures.append("constrained_market_exchange_count does not match market clearing records")
+        if int(summary.get("producer_market_order_count", -1)) != producer_market_order_count:
+            failures.append("producer_market_order_count does not match market agent orders")
+        if int(summary.get("consumer_market_order_count", -1)) != consumer_market_order_count:
+            failures.append("consumer_market_order_count does not match market agent orders")
+        if int(summary.get("high_attrition_campaign_count", -1)) != high_attrition_campaigns:
+            failures.append("high_attrition_campaign_count does not match campaign movements")
+        if int(summary.get("high_attrition_campaign_path_segment_count", -1)) != high_attrition_campaign_segments:
+            failures.append("high_attrition_campaign_path_segment_count does not match campaign path segments")
+        if int(summary.get("campaign_front_step_count", -1)) != campaign_front_step_count:
+            failures.append("campaign_front_step_count does not match campaign front histories")
+        if int(summary.get("tactical_engagement_step_count", -1)) != tactical_engagement_step_count:
+            failures.append("tactical_engagement_step_count does not match tactical engagements")
+        if int(summary.get("high_pressure_tactical_step_count", -1)) != high_pressure_tactical_steps:
+            failures.append("high_pressure_tactical_step_count does not match tactical engagements")
+        if int(summary.get("strategic_decision_point_count", -1)) != strategic_decision_point_count:
+            failures.append("strategic_decision_point_count does not match strategic campaign plans")
+        if int(summary.get("independent_counter_campaign_plan_count", -1)) != independent_counter_campaign_plans:
+            failures.append("independent_counter_campaign_plan_count does not match strategic campaign plans")
+        if int(summary.get("high_escalation_strategic_plan_count", -1)) != high_escalation_strategic_plans:
+            failures.append("high_escalation_strategic_plan_count does not match strategic campaign plans")
+        if int(summary.get("market_inventory_step_count", -1)) != market_inventory_step_count:
+            failures.append("market_inventory_step_count does not match market inventory histories")
+        if int(summary.get("high_inventory_stress_market_count", -1)) != high_inventory_stress_market_count:
+            failures.append("high_inventory_stress_market_count does not match market inventory histories")
+        if abs(float(summary.get("total_market_exchange_volume_index", 0.0)) - market_volume_sum) > max(0.001, market_volume_sum * 0.0001):
+            failures.append("total_market_exchange_volume_index does not match market exchanges")
+        if abs(float(summary.get("total_market_requested_volume_index", 0.0)) - route_constraint_requested_sum) > max(0.001, route_constraint_requested_sum * 0.0001):
+            failures.append("total_market_requested_volume_index does not match route capacity constraints")
+        if abs(float(summary.get("total_market_cleared_volume_index", 0.0)) - route_constraint_cleared_sum) > max(0.001, route_constraint_cleared_sum * 0.0001):
+            failures.append("total_market_cleared_volume_index does not match route capacity constraints")
+        if abs(float(summary.get("total_market_unmet_demand_index", 0.0)) - route_constraint_unmet_sum) > max(0.001, route_constraint_unmet_sum * 0.0001):
+            failures.append("total_market_unmet_demand_index does not match route capacity constraints")
+        if abs(float(summary.get("total_endogenous_market_supply_index", 0.0)) - endogenous_market_supply_sum) > max(0.001, endogenous_market_supply_sum * 0.0001):
+            failures.append("total_endogenous_market_supply_index does not match market clearing records")
+        if abs(float(summary.get("total_endogenous_market_demand_index", 0.0)) - endogenous_market_demand_sum) > max(0.001, endogenous_market_demand_sum * 0.0001):
+            failures.append("total_endogenous_market_demand_index does not match market clearing records")
+        if abs(float(summary.get("total_campaign_mobilized_population", 0.0)) - campaign_force_sum) > max(1.0, campaign_force_sum * 0.0001):
+            failures.append("total_campaign_mobilized_population does not match campaign movements")
+        if abs(float(summary.get("total_campaign_path_length_km", 0.0)) - campaign_path_length_sum) > max(0.001, campaign_path_length_sum * 0.0001):
+            failures.append("total_campaign_path_length_km does not match campaign movements")
+        if abs(float(summary.get("total_campaign_front_attrition_loss_population", 0.0)) - campaign_front_attrition_loss_sum) > max(1.0, campaign_front_attrition_loss_sum * 0.0001):
+            failures.append("total_campaign_front_attrition_loss_population does not match campaign front histories")
+        if abs(float(summary.get("tactical_total_attrition_loss_population", 0.0)) - tactical_attrition_loss_sum) > max(1.0, tactical_attrition_loss_sum * 0.0001):
+            failures.append("tactical_total_attrition_loss_population does not match tactical engagements")
+        expected_logistics_efficiency = logistics_efficiency_sum / len(logistics_networks) if logistics_networks else 0.0
+        expected_logistics_resilience = logistics_resilience_sum / len(logistics_networks) if logistics_networks else 0.0
+        expected_market_access = market_access_sum / len(market_exchanges) if market_exchanges else 0.0
+        expected_market_disruption = market_disruption_sum / len(market_exchanges) if market_exchanges else 0.0
+        expected_market_clearance = market_clearance_sum / len(market_clearing_records) if market_clearing_records else 0.0
+        expected_route_capacity_utilization = route_constraint_utilization_sum / len(route_capacity_constraints) if route_capacity_constraints else 0.0
+        expected_market_price_adjustment = market_price_adjustment_sum / len(market_clearing_records) if market_clearing_records else 0.0
+        expected_market_rationing = market_rationing_sum / len(market_clearing_records) if market_clearing_records else 0.0
+        expected_market_equilibrium_residual = equilibrium_residual_sum / len(market_clearing_records) if market_clearing_records else 0.0
+        expected_market_inventory_gap = market_inventory_gap_sum / len(market_inventory_histories) if market_inventory_histories else 0.0
+        expected_market_learning_rate = market_inventory_learning_sum / len(market_inventory_histories) if market_inventory_histories else 0.0
+        expected_market_inventory_pressure = market_inventory_pressure_sum / len(market_inventory_histories) if market_inventory_histories else 0.0
+        expected_campaign_travel = campaign_travel_sum / len(campaign_movements) if campaign_movements else 0.0
+        expected_campaign_attrition = campaign_attrition_sum / len(campaign_movements) if campaign_movements else 0.0
+        expected_campaign_reach = campaign_reach_sum / len(campaign_movements) if campaign_movements else 0.0
+        expected_campaign_path_length = campaign_path_length_sum / len(campaign_movements) if campaign_movements else 0.0
+        expected_campaign_path_terrain = campaign_path_terrain_sum / len(campaign_path_segments) if campaign_path_segments else 0.0
+        expected_campaign_path_supply_loss = campaign_path_supply_loss_sum / len(campaign_path_segments) if campaign_path_segments else 0.0
+        expected_campaign_path_attrition = campaign_path_attrition_sum / len(campaign_path_segments) if campaign_path_segments else 0.0
+        expected_campaign_front_supply_integrity = campaign_front_supply_integrity_sum / campaign_front_step_count if campaign_front_step_count else 0.0
+        expected_campaign_front_control = campaign_front_control_sum / campaign_front_step_count if campaign_front_step_count else 0.0
+        expected_tactical_counter = tactical_counter_sum / tactical_engagement_step_count if tactical_engagement_step_count else 0.0
+        expected_tactical_pressure = tactical_pressure_sum / tactical_engagement_step_count if tactical_engagement_step_count else 0.0
+        expected_tactical_supply = tactical_supply_contest_sum / tactical_engagement_step_count if tactical_engagement_step_count else 0.0
+        expected_counter_campaign_viability = counter_campaign_viability_sum / len(strategic_campaign_plans) if strategic_campaign_plans else 0.0
+        expected_strategic_plan_confidence = strategic_plan_confidence_sum / len(strategic_campaign_plans) if strategic_campaign_plans else 0.0
+        expected_strategic_force_reserve_fraction = (
+            strategic_force_reserve_fraction_sum / len(strategic_campaign_plans) if strategic_campaign_plans else 0.0
+        )
+        expected_logistics_means = {
+            "mean_logistics_transport_efficiency_index": expected_logistics_efficiency,
+            "mean_logistics_resilience_index": expected_logistics_resilience,
+            "mean_market_access_index": expected_market_access,
+            "mean_market_disruption_risk_index": expected_market_disruption,
+            "mean_market_clearance_fraction": expected_market_clearance,
+            "mean_route_capacity_utilization_index": expected_route_capacity_utilization,
+            "mean_market_price_adjustment_index": expected_market_price_adjustment,
+            "mean_market_rationing_index": expected_market_rationing,
+            "mean_market_equilibrium_residual_index": expected_market_equilibrium_residual,
+            "mean_market_inventory_gap_index": expected_market_inventory_gap,
+            "mean_market_learning_rate_index": expected_market_learning_rate,
+            "mean_market_inventory_pressure_index": expected_market_inventory_pressure,
+            "mean_campaign_travel_time_days": expected_campaign_travel,
+            "mean_campaign_attrition_risk_index": expected_campaign_attrition,
+            "mean_campaign_operational_reach_index": expected_campaign_reach,
+            "mean_campaign_path_length_km": expected_campaign_path_length,
+            "mean_campaign_path_terrain_cost_index": expected_campaign_path_terrain,
+            "mean_campaign_path_supply_loss_index": expected_campaign_path_supply_loss,
+            "mean_campaign_path_attrition_index": expected_campaign_path_attrition,
+            "mean_campaign_front_supply_integrity_index": expected_campaign_front_supply_integrity,
+            "mean_campaign_front_control_index": expected_campaign_front_control,
+            "mean_tactical_counter_maneuver_index": expected_tactical_counter,
+            "mean_tactical_front_pressure_index": expected_tactical_pressure,
+            "mean_tactical_supply_contest_index": expected_tactical_supply,
+            "mean_counter_campaign_viability_index": expected_counter_campaign_viability,
+            "mean_strategic_plan_confidence_index": expected_strategic_plan_confidence,
+            "mean_strategic_force_reserve_fraction": expected_strategic_force_reserve_fraction,
+        }
+        for key, expected in expected_logistics_means.items():
+            if abs(float(summary.get(key, 0.0)) - expected) > max(0.001, abs(expected) * 0.0001):
+                failures.append(f"{key} does not match logistics history")
+                break
 
-    if logistics_invalid:
-        failures.append("logistics history records invalid")
-    if int(summary.get("logistics_route_link_count", -1)) != logistics_route_link_count:
-        failures.append("logistics_route_link_count does not match logistics networks")
-    if int(summary.get("interregional_market_exchange_count", -1)) != interregional_market_count:
-        failures.append("interregional_market_exchange_count does not match market exchanges")
-    if int(summary.get("constrained_market_exchange_count", -1)) != constrained_market_records:
-        failures.append("constrained_market_exchange_count does not match market clearing records")
-    if int(summary.get("producer_market_order_count", -1)) != producer_market_order_count:
-        failures.append("producer_market_order_count does not match market agent orders")
-    if int(summary.get("consumer_market_order_count", -1)) != consumer_market_order_count:
-        failures.append("consumer_market_order_count does not match market agent orders")
-    if int(summary.get("high_attrition_campaign_count", -1)) != high_attrition_campaigns:
-        failures.append("high_attrition_campaign_count does not match campaign movements")
-    if int(summary.get("high_attrition_campaign_path_segment_count", -1)) != high_attrition_campaign_segments:
-        failures.append("high_attrition_campaign_path_segment_count does not match campaign path segments")
-    if int(summary.get("campaign_front_step_count", -1)) != campaign_front_step_count:
-        failures.append("campaign_front_step_count does not match campaign front histories")
-    if int(summary.get("tactical_engagement_step_count", -1)) != tactical_engagement_step_count:
-        failures.append("tactical_engagement_step_count does not match tactical engagements")
-    if int(summary.get("high_pressure_tactical_step_count", -1)) != high_pressure_tactical_steps:
-        failures.append("high_pressure_tactical_step_count does not match tactical engagements")
-    if int(summary.get("strategic_decision_point_count", -1)) != strategic_decision_point_count:
-        failures.append("strategic_decision_point_count does not match strategic campaign plans")
-    if int(summary.get("independent_counter_campaign_plan_count", -1)) != independent_counter_campaign_plans:
-        failures.append("independent_counter_campaign_plan_count does not match strategic campaign plans")
-    if int(summary.get("high_escalation_strategic_plan_count", -1)) != high_escalation_strategic_plans:
-        failures.append("high_escalation_strategic_plan_count does not match strategic campaign plans")
-    if int(summary.get("market_inventory_step_count", -1)) != market_inventory_step_count:
-        failures.append("market_inventory_step_count does not match market inventory histories")
-    if int(summary.get("high_inventory_stress_market_count", -1)) != high_inventory_stress_market_count:
-        failures.append("high_inventory_stress_market_count does not match market inventory histories")
-    if abs(float(summary.get("total_market_exchange_volume_index", 0.0)) - market_volume_sum) > max(0.001, market_volume_sum * 0.0001):
-        failures.append("total_market_exchange_volume_index does not match market exchanges")
-    if abs(float(summary.get("total_market_requested_volume_index", 0.0)) - route_constraint_requested_sum) > max(0.001, route_constraint_requested_sum * 0.0001):
-        failures.append("total_market_requested_volume_index does not match route capacity constraints")
-    if abs(float(summary.get("total_market_cleared_volume_index", 0.0)) - route_constraint_cleared_sum) > max(0.001, route_constraint_cleared_sum * 0.0001):
-        failures.append("total_market_cleared_volume_index does not match route capacity constraints")
-    if abs(float(summary.get("total_market_unmet_demand_index", 0.0)) - route_constraint_unmet_sum) > max(0.001, route_constraint_unmet_sum * 0.0001):
-        failures.append("total_market_unmet_demand_index does not match route capacity constraints")
-    if abs(float(summary.get("total_endogenous_market_supply_index", 0.0)) - endogenous_market_supply_sum) > max(0.001, endogenous_market_supply_sum * 0.0001):
-        failures.append("total_endogenous_market_supply_index does not match market clearing records")
-    if abs(float(summary.get("total_endogenous_market_demand_index", 0.0)) - endogenous_market_demand_sum) > max(0.001, endogenous_market_demand_sum * 0.0001):
-        failures.append("total_endogenous_market_demand_index does not match market clearing records")
-    if abs(float(summary.get("total_campaign_mobilized_population", 0.0)) - campaign_force_sum) > max(1.0, campaign_force_sum * 0.0001):
-        failures.append("total_campaign_mobilized_population does not match campaign movements")
-    if abs(float(summary.get("total_campaign_path_length_km", 0.0)) - campaign_path_length_sum) > max(0.001, campaign_path_length_sum * 0.0001):
-        failures.append("total_campaign_path_length_km does not match campaign movements")
-    if abs(float(summary.get("total_campaign_front_attrition_loss_population", 0.0)) - campaign_front_attrition_loss_sum) > max(1.0, campaign_front_attrition_loss_sum * 0.0001):
-        failures.append("total_campaign_front_attrition_loss_population does not match campaign front histories")
-    if abs(float(summary.get("tactical_total_attrition_loss_population", 0.0)) - tactical_attrition_loss_sum) > max(1.0, tactical_attrition_loss_sum * 0.0001):
-        failures.append("tactical_total_attrition_loss_population does not match tactical engagements")
-    expected_logistics_efficiency = logistics_efficiency_sum / len(logistics_networks) if logistics_networks else 0.0
-    expected_logistics_resilience = logistics_resilience_sum / len(logistics_networks) if logistics_networks else 0.0
-    expected_market_access = market_access_sum / len(market_exchanges) if market_exchanges else 0.0
-    expected_market_disruption = market_disruption_sum / len(market_exchanges) if market_exchanges else 0.0
-    expected_market_clearance = market_clearance_sum / len(market_clearing_records) if market_clearing_records else 0.0
-    expected_route_capacity_utilization = route_constraint_utilization_sum / len(route_capacity_constraints) if route_capacity_constraints else 0.0
-    expected_market_price_adjustment = market_price_adjustment_sum / len(market_clearing_records) if market_clearing_records else 0.0
-    expected_market_rationing = market_rationing_sum / len(market_clearing_records) if market_clearing_records else 0.0
-    expected_market_equilibrium_residual = equilibrium_residual_sum / len(market_clearing_records) if market_clearing_records else 0.0
-    expected_market_inventory_gap = market_inventory_gap_sum / len(market_inventory_histories) if market_inventory_histories else 0.0
-    expected_market_learning_rate = market_inventory_learning_sum / len(market_inventory_histories) if market_inventory_histories else 0.0
-    expected_market_inventory_pressure = market_inventory_pressure_sum / len(market_inventory_histories) if market_inventory_histories else 0.0
-    expected_campaign_travel = campaign_travel_sum / len(campaign_movements) if campaign_movements else 0.0
-    expected_campaign_attrition = campaign_attrition_sum / len(campaign_movements) if campaign_movements else 0.0
-    expected_campaign_reach = campaign_reach_sum / len(campaign_movements) if campaign_movements else 0.0
-    expected_campaign_path_length = campaign_path_length_sum / len(campaign_movements) if campaign_movements else 0.0
-    expected_campaign_path_terrain = campaign_path_terrain_sum / len(campaign_path_segments) if campaign_path_segments else 0.0
-    expected_campaign_path_supply_loss = campaign_path_supply_loss_sum / len(campaign_path_segments) if campaign_path_segments else 0.0
-    expected_campaign_path_attrition = campaign_path_attrition_sum / len(campaign_path_segments) if campaign_path_segments else 0.0
-    expected_campaign_front_supply_integrity = campaign_front_supply_integrity_sum / campaign_front_step_count if campaign_front_step_count else 0.0
-    expected_campaign_front_control = campaign_front_control_sum / campaign_front_step_count if campaign_front_step_count else 0.0
-    expected_tactical_counter = tactical_counter_sum / tactical_engagement_step_count if tactical_engagement_step_count else 0.0
-    expected_tactical_pressure = tactical_pressure_sum / tactical_engagement_step_count if tactical_engagement_step_count else 0.0
-    expected_tactical_supply = tactical_supply_contest_sum / tactical_engagement_step_count if tactical_engagement_step_count else 0.0
-    expected_counter_campaign_viability = counter_campaign_viability_sum / len(strategic_campaign_plans) if strategic_campaign_plans else 0.0
-    expected_strategic_plan_confidence = strategic_plan_confidence_sum / len(strategic_campaign_plans) if strategic_campaign_plans else 0.0
-    expected_strategic_force_reserve_fraction = (
-        strategic_force_reserve_fraction_sum / len(strategic_campaign_plans) if strategic_campaign_plans else 0.0
-    )
-    expected_logistics_means = {
-        "mean_logistics_transport_efficiency_index": expected_logistics_efficiency,
-        "mean_logistics_resilience_index": expected_logistics_resilience,
-        "mean_market_access_index": expected_market_access,
-        "mean_market_disruption_risk_index": expected_market_disruption,
-        "mean_market_clearance_fraction": expected_market_clearance,
-        "mean_route_capacity_utilization_index": expected_route_capacity_utilization,
-        "mean_market_price_adjustment_index": expected_market_price_adjustment,
-        "mean_market_rationing_index": expected_market_rationing,
-        "mean_market_equilibrium_residual_index": expected_market_equilibrium_residual,
-        "mean_market_inventory_gap_index": expected_market_inventory_gap,
-        "mean_market_learning_rate_index": expected_market_learning_rate,
-        "mean_market_inventory_pressure_index": expected_market_inventory_pressure,
-        "mean_campaign_travel_time_days": expected_campaign_travel,
-        "mean_campaign_attrition_risk_index": expected_campaign_attrition,
-        "mean_campaign_operational_reach_index": expected_campaign_reach,
-        "mean_campaign_path_length_km": expected_campaign_path_length,
-        "mean_campaign_path_terrain_cost_index": expected_campaign_path_terrain,
-        "mean_campaign_path_supply_loss_index": expected_campaign_path_supply_loss,
-        "mean_campaign_path_attrition_index": expected_campaign_path_attrition,
-        "mean_campaign_front_supply_integrity_index": expected_campaign_front_supply_integrity,
-        "mean_campaign_front_control_index": expected_campaign_front_control,
-        "mean_tactical_counter_maneuver_index": expected_tactical_counter,
-        "mean_tactical_front_pressure_index": expected_tactical_pressure,
-        "mean_tactical_supply_contest_index": expected_tactical_supply,
-        "mean_counter_campaign_viability_index": expected_counter_campaign_viability,
-        "mean_strategic_plan_confidence_index": expected_strategic_plan_confidence,
-        "mean_strategic_force_reserve_fraction": expected_strategic_force_reserve_fraction,
-    }
-    for key, expected in expected_logistics_means.items():
-        if abs(float(summary.get(key, 0.0)) - expected) > max(0.001, abs(expected) * 0.0001):
-            failures.append(f"{key} does not match logistics history")
-            break
-
-    household_cohorts = payload.get("household_cohorts", [])
-    firm_agents = payload.get("firm_agents", [])
-    demographic_agent_histories = payload.get("demographic_agent_histories", [])
-    individual_agents = payload.get("individual_agents", [])
-    individual_life_events = payload.get("individual_life_events", [])
-    if int(summary.get("household_cohort_count", -1)) != len(household_cohorts):
-        failures.append("household_cohort_count does not match household_cohorts length")
-    if int(summary.get("firm_agent_count", -1)) != len(firm_agents):
-        failures.append("firm_agent_count does not match firm_agents length")
-    if int(summary.get("demographic_agent_history_count", -1)) != len(demographic_agent_histories):
-        failures.append("demographic_agent_history_count does not match demographic_agent_histories length")
-    if int(summary.get("individual_agent_count", -1)) != len(individual_agents):
-        failures.append("individual_agent_count does not match individual_agents length")
-    if int(summary.get("individual_life_event_count", -1)) != len(individual_life_events):
-        failures.append("individual_life_event_count does not match individual_life_events length")
-    demographic_agent_step_count = sum(int(history.get("step_count", 0)) for history in demographic_agent_histories)
-    if int(summary.get("demographic_agent_step_count", -1)) != demographic_agent_step_count:
-        failures.append("demographic_agent_step_count does not match demographic agent histories")
-    demographic_summary_keys = {
-        "total_household_cohort_population",
-        "total_firm_employment_capacity",
-        "mean_household_resilience_index",
-        "mean_household_migration_propensity_index",
-        "mean_household_consumption_pressure_index",
-        "mean_firm_productivity_index",
-        "mean_firm_market_dependency_index",
-        "mean_firm_supply_chain_risk_index",
-        "mean_demographic_vulnerability_index",
-        "mean_individual_lifespan_years",
-        "high_vulnerability_household_count",
-        "individual_birth_event_count",
-        "individual_death_event_count",
-        "individual_marriage_event_count",
-        "property_transfer_event_count",
-        "total_property_transfer_value_index",
-    }
-    if not demographic_summary_keys.issubset(summary):
-        failures.append("demographic agent summary metrics missing")
-    household_keys = {
-        "id",
-        "population_region_id",
-        "region_id",
-        "culture_region_id",
-        "language_region_id",
-        "cohort_type",
-        "population",
-        "household_count",
-        "average_household_size",
-        "urbanization_fraction",
-        "water_security_index",
-        "food_security_index",
-        "income_index",
-        "consumption_pressure_index",
-        "vulnerability_index",
-        "migration_propensity_index",
-        "fertility_rate_per_year",
-        "mortality_risk_index",
-        "labor_participation_index",
-    }
-    firm_keys = {
-        "id",
-        "region_id",
-        "population_region_id",
-        "settlement_id",
-        "sector",
-        "output_index",
-        "employment_capacity",
-        "wage_index",
-        "productivity_index",
-        "market_dependency_index",
-        "capital_stock_index",
-        "supply_chain_risk_index",
-        "tax_contribution_index",
-    }
-    demographic_history_keys = {
-        "id",
-        "population_region_id",
-        "region_id",
-        "household_cohort_ids",
-        "firm_agent_ids",
-        "step_count",
-        "final_agent_population",
-        "mean_labor_participation_index",
-        "steps",
-    }
-    individual_agent_keys = {
-        "id",
-        "population_region_id",
-        "region_id",
-        "household_cohort_id",
-        "culture_region_id",
-        "language_region_id",
-        "name",
-        "role",
-        "birth_year_bp",
-        "death_year_bp",
-        "lifespan_years",
-        "married_person_id",
-        "parent_person_ids",
-        "child_person_ids",
-        "property_value_index",
-        "mobility_index",
-        "vulnerability_index",
-        "event_ids",
-        "event_count",
-    }
-    individual_life_event_keys = {
-        "id",
-        "person_id",
-        "related_person_id",
-        "population_region_id",
-        "region_id",
-        "household_cohort_id",
-        "era_id",
-        "event_type",
-        "year_bp",
-        "property_value_index",
-        "demographic_pressure_index",
-        "mortality_risk_index",
-        "inheritance_fraction",
-    }
-    if household_cohorts and not household_keys.issubset(household_cohorts[0]):
-        failures.append("household cohort fields missing")
-    if firm_agents and not firm_keys.issubset(firm_agents[0]):
-        failures.append("firm agent fields missing")
-    if demographic_agent_histories and not demographic_history_keys.issubset(demographic_agent_histories[0]):
-        failures.append("demographic agent history fields missing")
-    if individual_agents and not individual_agent_keys.issubset(individual_agents[0]):
-        failures.append("individual agent fields missing")
-    if individual_life_events and not individual_life_event_keys.issubset(individual_life_events[0]):
-        failures.append("individual life event fields missing")
-    household_by_id = {int(cohort.get("id", -1)): cohort for cohort in household_cohorts}
-    firm_by_id = {int(firm.get("id", -1)): firm for firm in firm_agents}
-    demographic_history_by_id = {int(history.get("id", -1)): history for history in demographic_agent_histories}
-    individual_by_id = {int(person.get("id", -1)): person for person in individual_agents}
-    life_event_by_id = {int(event.get("id", -1)): event for event in individual_life_events}
-    demographic_invalid = (
-        len(household_by_id) != len(household_cohorts)
-        or len(firm_by_id) != len(firm_agents)
-        or len(demographic_history_by_id) != len(demographic_agent_histories)
-        or len(individual_by_id) != len(individual_agents)
-        or len(life_event_by_id) != len(individual_life_events)
-        or any(record_id < 0 for record_id in household_by_id)
-        or any(record_id < 0 for record_id in firm_by_id)
-        or any(record_id < 0 for record_id in demographic_history_by_id)
-        or any(record_id < 0 for record_id in individual_by_id)
-        or any(record_id < 0 for record_id in life_event_by_id)
-    )
-    household_population_sum = 0.0
-    household_resilience_sum = 0.0
-    household_migration_sum = 0.0
-    household_consumption_sum = 0.0
-    high_vulnerability_households = 0
-    households_by_population_region: dict[int, list[int]] = {}
-    for cohort in household_cohorts:
-        cohort_id = int(cohort.get("id", -1))
-        population_region_id = int(cohort.get("population_region_id", -1))
-        region_id = int(cohort.get("region_id", -1))
-        population = float(cohort.get("population", -1.0))
-        household_count = float(cohort.get("household_count", -1.0))
-        average_household_size = float(cohort.get("average_household_size", -1.0))
-        vulnerability = float(cohort.get("vulnerability_index", -1.0))
-        migration = float(cohort.get("migration_propensity_index", -1.0))
-        consumption = float(cohort.get("consumption_pressure_index", -1.0))
-        households_by_population_region.setdefault(population_region_id, []).append(cohort_id)
-        if (
-            population_region_id not in population_region_ids
-            or region_id not in political_region_ids
-            or not str(cohort.get("cohort_type", "")).strip()
-            or population < 0.0
-            or household_count < 0.0
-            or average_household_size <= 0.0
-            or abs(household_count * average_household_size - population) > max(1.0, population * 0.0001)
-            or float(cohort.get("fertility_rate_per_year", -1.0)) < 0.0
-        ):
-            demographic_invalid = True
-            break
-        for key in (
+    if not (social_tail_modes["demographic"]):
+        household_cohorts = payload.get("household_cohorts", [])
+        firm_agents = payload.get("firm_agents", [])
+        demographic_agent_histories = payload.get("demographic_agent_histories", [])
+        individual_agents = payload.get("individual_agents", [])
+        individual_life_events = payload.get("individual_life_events", [])
+        if int(summary.get("household_cohort_count", -1)) != len(household_cohorts):
+            failures.append("household_cohort_count does not match household_cohorts length")
+        if int(summary.get("firm_agent_count", -1)) != len(firm_agents):
+            failures.append("firm_agent_count does not match firm_agents length")
+        if int(summary.get("demographic_agent_history_count", -1)) != len(demographic_agent_histories):
+            failures.append("demographic_agent_history_count does not match demographic_agent_histories length")
+        if int(summary.get("individual_agent_count", -1)) != len(individual_agents):
+            failures.append("individual_agent_count does not match individual_agents length")
+        if int(summary.get("individual_life_event_count", -1)) != len(individual_life_events):
+            failures.append("individual_life_event_count does not match individual_life_events length")
+        demographic_agent_step_count = sum(int(history.get("step_count", 0)) for history in demographic_agent_histories)
+        if int(summary.get("demographic_agent_step_count", -1)) != demographic_agent_step_count:
+            failures.append("demographic_agent_step_count does not match demographic agent histories")
+        demographic_summary_keys = {
+            "total_household_cohort_population",
+            "total_firm_employment_capacity",
+            "mean_household_resilience_index",
+            "mean_household_migration_propensity_index",
+            "mean_household_consumption_pressure_index",
+            "mean_firm_productivity_index",
+            "mean_firm_market_dependency_index",
+            "mean_firm_supply_chain_risk_index",
+            "mean_demographic_vulnerability_index",
+            "mean_individual_lifespan_years",
+            "high_vulnerability_household_count",
+            "individual_birth_event_count",
+            "individual_death_event_count",
+            "individual_marriage_event_count",
+            "property_transfer_event_count",
+            "total_property_transfer_value_index",
+        }
+        if not demographic_summary_keys.issubset(summary):
+            failures.append("demographic agent summary metrics missing")
+        household_keys = {
+            "id",
+            "population_region_id",
+            "region_id",
+            "culture_region_id",
+            "language_region_id",
+            "cohort_type",
+            "population",
+            "household_count",
+            "average_household_size",
             "urbanization_fraction",
             "water_security_index",
             "food_security_index",
@@ -21123,333 +19279,464 @@ def validate(
             "consumption_pressure_index",
             "vulnerability_index",
             "migration_propensity_index",
+            "fertility_rate_per_year",
             "mortality_risk_index",
             "labor_participation_index",
-        ):
-            if not 0.0 <= float(cohort.get(key, -1.0)) <= 1.0:
-                demographic_invalid = True
-                break
-        if demographic_invalid:
-            break
-        household_population_sum += population
-        household_resilience_sum += 1.0 - vulnerability
-        household_migration_sum += migration
-        household_consumption_sum += consumption
-        high_vulnerability_households += 1 if vulnerability >= 0.65 else 0
-
-    firm_employment_sum = 0.0
-    firm_productivity_sum = 0.0
-    firm_market_dependency_sum = 0.0
-    firm_supply_chain_risk_sum = 0.0
-    firms_by_region: dict[int, list[int]] = {}
-    for firm in firm_agents:
-        firm_id = int(firm.get("id", -1))
-        region_id = int(firm.get("region_id", -1))
-        population_region_id = int(firm.get("population_region_id", -1))
-        settlement_id = int(firm.get("settlement_id", -1))
-        employment = float(firm.get("employment_capacity", -1.0))
-        firms_by_region.setdefault(region_id, []).append(firm_id)
-        if (
-            region_id not in political_region_ids
-            or population_region_id not in population_region_ids
-            or (settlement_id >= 0 and settlement_id not in settlement_ids)
-            or not str(firm.get("sector", "")).strip()
-            or float(firm.get("output_index", -1.0)) < 0.0
-            or employment < 0.0
-            or float(firm.get("tax_contribution_index", -1.0)) < 0.0
-        ):
-            demographic_invalid = True
-            break
-        for key in (
+        }
+        firm_keys = {
+            "id",
+            "region_id",
+            "population_region_id",
+            "settlement_id",
+            "sector",
+            "output_index",
+            "employment_capacity",
             "wage_index",
             "productivity_index",
             "market_dependency_index",
             "capital_stock_index",
             "supply_chain_risk_index",
-        ):
-            if not 0.0 <= float(firm.get(key, -1.0)) <= 1.0:
-                demographic_invalid = True
-                break
-        if demographic_invalid:
-            break
-        firm_employment_sum += employment
-        firm_productivity_sum += float(firm.get("productivity_index", 0.0))
-        firm_market_dependency_sum += float(firm.get("market_dependency_index", 0.0))
-        firm_supply_chain_risk_sum += float(firm.get("supply_chain_risk_index", 0.0))
-
-    demographic_vulnerability_sum = 0.0
-    demographic_step_total = 0
-    for history in demographic_agent_histories:
-        population_region_id = int(history.get("population_region_id", -1))
-        region_id = int(history.get("region_id", -1))
-        household_ids = history.get("household_cohort_ids", [])
-        firm_ids = history.get("firm_agent_ids", [])
-        steps = history.get("steps", [])
-        if (
-            population_region_id not in population_region_ids
-            or region_id not in political_region_ids
-            or not isinstance(household_ids, list)
-            or not isinstance(firm_ids, list)
-            or not isinstance(steps, list)
-            or int(history.get("step_count", -1)) != len(steps)
-            or float(history.get("final_agent_population", -1.0)) < 0.0
-            or not 0.0 <= float(history.get("mean_labor_participation_index", -1.0)) <= 1.0
-        ):
-            demographic_invalid = True
-            break
-        if set(int(cohort_id) for cohort_id in household_ids) != set(households_by_population_region.get(population_region_id, [])):
-            demographic_invalid = True
-            break
-        for firm_id_raw in firm_ids:
-            firm_id = int(firm_id_raw)
-            if firm_id not in firm_by_id or int(firm_by_id[firm_id].get("region_id", -1)) != region_id:
-                demographic_invalid = True
-                break
-        if demographic_invalid:
-            break
-        for index, step in enumerate(steps):
-            start_population = float(step.get("start_population", -1.0))
-            end_population = float(step.get("end_population", -1.0))
-            working_population = float(step.get("working_population", -1.0))
-            dependent_population = float(step.get("dependent_population", -1.0))
-            vulnerability = float(step.get("vulnerability_index", -1.0))
+            "tax_contribution_index",
+        }
+        demographic_history_keys = {
+            "id",
+            "population_region_id",
+            "region_id",
+            "household_cohort_ids",
+            "firm_agent_ids",
+            "step_count",
+            "final_agent_population",
+            "mean_labor_participation_index",
+            "steps",
+        }
+        individual_agent_keys = {
+            "id",
+            "population_region_id",
+            "region_id",
+            "household_cohort_id",
+            "culture_region_id",
+            "language_region_id",
+            "name",
+            "role",
+            "birth_year_bp",
+            "death_year_bp",
+            "lifespan_years",
+            "married_person_id",
+            "parent_person_ids",
+            "child_person_ids",
+            "property_value_index",
+            "mobility_index",
+            "vulnerability_index",
+            "event_ids",
+            "event_count",
+        }
+        individual_life_event_keys = {
+            "id",
+            "person_id",
+            "related_person_id",
+            "population_region_id",
+            "region_id",
+            "household_cohort_id",
+            "era_id",
+            "event_type",
+            "year_bp",
+            "property_value_index",
+            "demographic_pressure_index",
+            "mortality_risk_index",
+            "inheritance_fraction",
+        }
+        if household_cohorts and not household_keys.issubset(household_cohorts[0]):
+            failures.append("household cohort fields missing")
+        if firm_agents and not firm_keys.issubset(firm_agents[0]):
+            failures.append("firm agent fields missing")
+        if demographic_agent_histories and not demographic_history_keys.issubset(demographic_agent_histories[0]):
+            failures.append("demographic agent history fields missing")
+        if individual_agents and not individual_agent_keys.issubset(individual_agents[0]):
+            failures.append("individual agent fields missing")
+        if individual_life_events and not individual_life_event_keys.issubset(individual_life_events[0]):
+            failures.append("individual life event fields missing")
+        household_by_id = {int(cohort.get("id", -1)): cohort for cohort in household_cohorts}
+        firm_by_id = {int(firm.get("id", -1)): firm for firm in firm_agents}
+        demographic_history_by_id = {int(history.get("id", -1)): history for history in demographic_agent_histories}
+        individual_by_id = {int(person.get("id", -1)): person for person in individual_agents}
+        life_event_by_id = {int(event.get("id", -1)): event for event in individual_life_events}
+        demographic_invalid = (
+            len(household_by_id) != len(household_cohorts)
+            or len(firm_by_id) != len(firm_agents)
+            or len(demographic_history_by_id) != len(demographic_agent_histories)
+            or len(individual_by_id) != len(individual_agents)
+            or len(life_event_by_id) != len(individual_life_events)
+            or any(record_id < 0 for record_id in household_by_id)
+            or any(record_id < 0 for record_id in firm_by_id)
+            or any(record_id < 0 for record_id in demographic_history_by_id)
+            or any(record_id < 0 for record_id in individual_by_id)
+            or any(record_id < 0 for record_id in life_event_by_id)
+        )
+        household_population_sum = 0.0
+        household_resilience_sum = 0.0
+        household_migration_sum = 0.0
+        household_consumption_sum = 0.0
+        high_vulnerability_households = 0
+        households_by_population_region: dict[int, list[int]] = {}
+        for cohort in household_cohorts:
+            cohort_id = int(cohort.get("id", -1))
+            population_region_id = int(cohort.get("population_region_id", -1))
+            region_id = int(cohort.get("region_id", -1))
+            population = float(cohort.get("population", -1.0))
+            household_count = float(cohort.get("household_count", -1.0))
+            average_household_size = float(cohort.get("average_household_size", -1.0))
+            vulnerability = float(cohort.get("vulnerability_index", -1.0))
+            migration = float(cohort.get("migration_propensity_index", -1.0))
+            consumption = float(cohort.get("consumption_pressure_index", -1.0))
+            households_by_population_region.setdefault(population_region_id, []).append(cohort_id)
             if (
-                int(step.get("stage_index", -1)) != index + 1
-                or (era_ids and int(step.get("era_id", -1)) not in set(era_ids))
-                or float(step.get("start_year_bp", -1.0)) < float(step.get("end_year_bp", -1.0))
-                or start_population < 0.0
-                or end_population < 0.0
-                or working_population < 0.0
-                or dependent_population < 0.0
-                or abs((working_population + dependent_population) - end_population) > max(1.0, end_population * 0.0001)
+                population_region_id not in population_region_ids
+                or region_id not in political_region_ids
+                or not str(cohort.get("cohort_type", "")).strip()
+                or population < 0.0
+                or household_count < 0.0
+                or average_household_size <= 0.0
+                or abs(household_count * average_household_size - population) > max(1.0, population * 0.0001)
+                or float(cohort.get("fertility_rate_per_year", -1.0)) < 0.0
             ):
                 demographic_invalid = True
                 break
             for key in (
-                "migration_propensity_index",
+                "urbanization_fraction",
+                "water_security_index",
+                "food_security_index",
+                "income_index",
                 "consumption_pressure_index",
                 "vulnerability_index",
+                "migration_propensity_index",
+                "mortality_risk_index",
                 "labor_participation_index",
             ):
-                if not 0.0 <= float(step.get(key, -1.0)) <= 1.0:
+                if not 0.0 <= float(cohort.get(key, -1.0)) <= 1.0:
                     demographic_invalid = True
                     break
             if demographic_invalid:
                 break
-            demographic_vulnerability_sum += vulnerability
-            demographic_step_total += 1
-        if demographic_invalid:
-            break
-    individual_lifespan_sum = 0.0
-    individuals_by_population_region: dict[int, list[int]] = {}
-    events_by_person: dict[int, list[int]] = {}
-    birth_event_count = 0
-    death_event_count = 0
-    marriage_event_count = 0
-    property_transfer_event_count = 0
-    property_transfer_value_sum = 0.0
-    valid_life_event_types = {"birth", "death", "marriage", "property_transfer"}
-    for person in individual_agents:
-        person_id = int(person.get("id", -1))
-        population_region_id = int(person.get("population_region_id", -1))
-        region_id = int(person.get("region_id", -1))
-        household_cohort_id = int(person.get("household_cohort_id", -1))
-        married_person_id = int(person.get("married_person_id", -1))
-        parent_person_ids = person.get("parent_person_ids", [])
-        child_person_ids = person.get("child_person_ids", [])
-        event_ids = person.get("event_ids", [])
-        birth_year = float(person.get("birth_year_bp", -1.0))
-        death_year = float(person.get("death_year_bp", -1.0))
-        lifespan = float(person.get("lifespan_years", -1.0))
-        individuals_by_population_region.setdefault(population_region_id, []).append(person_id)
-        individual_lifespan_sum += lifespan
-        if (
-            person_id not in individual_by_id
-            or population_region_id not in population_region_ids
-            or region_id not in political_region_ids
-            or household_cohort_id not in household_by_id
-            or int(household_by_id[household_cohort_id].get("population_region_id", -1)) != population_region_id
-            or not str(person.get("name", "")).strip()
-            or not str(person.get("role", "")).strip()
-            or birth_year < death_year
-            or abs((birth_year - death_year) - lifespan) > max(0.001, abs(lifespan) * 0.0001)
-            or lifespan < 0.0
-            or married_person_id < -1
-            or not isinstance(parent_person_ids, list)
-            or not isinstance(child_person_ids, list)
-            or not isinstance(event_ids, list)
-            or int(person.get("event_count", -1)) != len(event_ids)
-            or float(person.get("property_value_index", -1.0)) < 0.0
-            or not 0.0 <= float(person.get("mobility_index", -1.0)) <= 1.0
-            or not 0.0 <= float(person.get("vulnerability_index", -1.0)) <= 1.0
-        ):
-            demographic_invalid = True
-            break
-        if married_person_id >= 0:
-            spouse = individual_by_id.get(married_person_id)
-            if spouse is None or int(spouse.get("married_person_id", -1)) != person_id:
+            household_population_sum += population
+            household_resilience_sum += 1.0 - vulnerability
+            household_migration_sum += migration
+            household_consumption_sum += consumption
+            high_vulnerability_households += 1 if vulnerability >= 0.65 else 0
+
+        firm_employment_sum = 0.0
+        firm_productivity_sum = 0.0
+        firm_market_dependency_sum = 0.0
+        firm_supply_chain_risk_sum = 0.0
+        firms_by_region: dict[int, list[int]] = {}
+        for firm in firm_agents:
+            firm_id = int(firm.get("id", -1))
+            region_id = int(firm.get("region_id", -1))
+            population_region_id = int(firm.get("population_region_id", -1))
+            settlement_id = int(firm.get("settlement_id", -1))
+            employment = float(firm.get("employment_capacity", -1.0))
+            firms_by_region.setdefault(region_id, []).append(firm_id)
+            if (
+                region_id not in political_region_ids
+                or population_region_id not in population_region_ids
+                or (settlement_id >= 0 and settlement_id not in settlement_ids)
+                or not str(firm.get("sector", "")).strip()
+                or float(firm.get("output_index", -1.0)) < 0.0
+                or employment < 0.0
+                or float(firm.get("tax_contribution_index", -1.0)) < 0.0
+            ):
                 demographic_invalid = True
                 break
-        for parent_id_raw in parent_person_ids:
-            parent_id = int(parent_id_raw)
-            parent = individual_by_id.get(parent_id)
-            if parent is None or person_id not in {int(child_id) for child_id in parent.get("child_person_ids", [])}:
+            for key in (
+                "wage_index",
+                "productivity_index",
+                "market_dependency_index",
+                "capital_stock_index",
+                "supply_chain_risk_index",
+            ):
+                if not 0.0 <= float(firm.get(key, -1.0)) <= 1.0:
+                    demographic_invalid = True
+                    break
+            if demographic_invalid:
+                break
+            firm_employment_sum += employment
+            firm_productivity_sum += float(firm.get("productivity_index", 0.0))
+            firm_market_dependency_sum += float(firm.get("market_dependency_index", 0.0))
+            firm_supply_chain_risk_sum += float(firm.get("supply_chain_risk_index", 0.0))
+
+        demographic_vulnerability_sum = 0.0
+        demographic_step_total = 0
+        for history in demographic_agent_histories:
+            population_region_id = int(history.get("population_region_id", -1))
+            region_id = int(history.get("region_id", -1))
+            household_ids = history.get("household_cohort_ids", [])
+            firm_ids = history.get("firm_agent_ids", [])
+            steps = history.get("steps", [])
+            if (
+                population_region_id not in population_region_ids
+                or region_id not in political_region_ids
+                or not isinstance(household_ids, list)
+                or not isinstance(firm_ids, list)
+                or not isinstance(steps, list)
+                or int(history.get("step_count", -1)) != len(steps)
+                or float(history.get("final_agent_population", -1.0)) < 0.0
+                or not 0.0 <= float(history.get("mean_labor_participation_index", -1.0)) <= 1.0
+            ):
                 demographic_invalid = True
                 break
-        if demographic_invalid:
-            break
-        for child_id_raw in child_person_ids:
-            child_id = int(child_id_raw)
-            child = individual_by_id.get(child_id)
-            if child is None or person_id not in {int(parent_id) for parent_id in child.get("parent_person_ids", [])}:
+            if set(int(cohort_id) for cohort_id in household_ids) != set(households_by_population_region.get(population_region_id, [])):
                 demographic_invalid = True
                 break
-        if demographic_invalid:
-            break
-        for event_id_raw in event_ids:
-            event_id = int(event_id_raw)
-            if event_id not in life_event_by_id:
-                demographic_invalid = True
+            for firm_id_raw in firm_ids:
+                firm_id = int(firm_id_raw)
+                if firm_id not in firm_by_id or int(firm_by_id[firm_id].get("region_id", -1)) != region_id:
+                    demographic_invalid = True
+                    break
+            if demographic_invalid:
                 break
-        if demographic_invalid:
-            break
-    for event in individual_life_events:
-        event_id = int(event.get("id", -1))
-        person_id = int(event.get("person_id", -1))
-        related_person_id = int(event.get("related_person_id", -1))
-        population_region_id = int(event.get("population_region_id", -1))
-        region_id = int(event.get("region_id", -1))
-        household_cohort_id = int(event.get("household_cohort_id", -1))
-        era_id = int(event.get("era_id", -1))
-        event_type = str(event.get("event_type", ""))
-        property_value = float(event.get("property_value_index", -1.0))
-        events_by_person.setdefault(person_id, []).append(event_id)
-        birth_event_count += 1 if event_type == "birth" else 0
-        death_event_count += 1 if event_type == "death" else 0
-        marriage_event_count += 1 if event_type == "marriage" else 0
-        property_transfer_event_count += 1 if event_type == "property_transfer" else 0
-        property_transfer_value_sum += property_value if event_type == "property_transfer" else 0.0
-        if (
-            event_id not in life_event_by_id
-            or person_id not in individual_by_id
-            or (related_person_id >= 0 and related_person_id not in individual_by_id)
-            or population_region_id not in population_region_ids
-            or region_id not in political_region_ids
-            or household_cohort_id not in household_by_id
-            or (era_ids and era_id not in set(era_ids))
-            or event_type not in valid_life_event_types
-            or float(event.get("year_bp", -1.0)) < 0.0
-            or property_value < 0.0
-            or not 0.0 <= float(event.get("demographic_pressure_index", -1.0)) <= 1.0
-            or not 0.0 <= float(event.get("mortality_risk_index", -1.0)) <= 1.0
-            or not 0.0 <= float(event.get("inheritance_fraction", -1.0)) <= 1.0
-        ):
-            demographic_invalid = True
-            break
-        person = individual_by_id[person_id]
-        if (
-            int(person.get("population_region_id", -1)) != population_region_id
-            or int(person.get("region_id", -1)) != region_id
-            or int(person.get("household_cohort_id", -1)) != household_cohort_id
-        ):
-            demographic_invalid = True
-            break
-        if event_type == "marriage" and (
-            related_person_id < 0 or int(individual_by_id[person_id].get("married_person_id", -1)) != related_person_id
-        ):
-            demographic_invalid = True
-            break
-        if event_type == "property_transfer" and float(event.get("inheritance_fraction", 0.0)) <= 0.0:
-            demographic_invalid = True
-            break
-    if not demographic_invalid:
+            for index, step in enumerate(steps):
+                start_population = float(step.get("start_population", -1.0))
+                end_population = float(step.get("end_population", -1.0))
+                working_population = float(step.get("working_population", -1.0))
+                dependent_population = float(step.get("dependent_population", -1.0))
+                vulnerability = float(step.get("vulnerability_index", -1.0))
+                if (
+                    int(step.get("stage_index", -1)) != index + 1
+                    or (era_ids and int(step.get("era_id", -1)) not in set(era_ids))
+                    or float(step.get("start_year_bp", -1.0)) < float(step.get("end_year_bp", -1.0))
+                    or start_population < 0.0
+                    or end_population < 0.0
+                    or working_population < 0.0
+                    or dependent_population < 0.0
+                    or abs((working_population + dependent_population) - end_population) > max(1.0, end_population * 0.0001)
+                ):
+                    demographic_invalid = True
+                    break
+                for key in (
+                    "migration_propensity_index",
+                    "consumption_pressure_index",
+                    "vulnerability_index",
+                    "labor_participation_index",
+                ):
+                    if not 0.0 <= float(step.get(key, -1.0)) <= 1.0:
+                        demographic_invalid = True
+                        break
+                if demographic_invalid:
+                    break
+                demographic_vulnerability_sum += vulnerability
+                demographic_step_total += 1
+            if demographic_invalid:
+                break
+        individual_lifespan_sum = 0.0
+        individuals_by_population_region: dict[int, list[int]] = {}
+        events_by_person: dict[int, list[int]] = {}
+        birth_event_count = 0
+        death_event_count = 0
+        marriage_event_count = 0
+        property_transfer_event_count = 0
+        property_transfer_value_sum = 0.0
+        valid_life_event_types = {"birth", "death", "marriage", "property_transfer"}
         for person in individual_agents:
             person_id = int(person.get("id", -1))
-            if set(int(event_id) for event_id in person.get("event_ids", [])) != set(events_by_person.get(person_id, [])):
+            population_region_id = int(person.get("population_region_id", -1))
+            region_id = int(person.get("region_id", -1))
+            household_cohort_id = int(person.get("household_cohort_id", -1))
+            married_person_id = int(person.get("married_person_id", -1))
+            parent_person_ids = person.get("parent_person_ids", [])
+            child_person_ids = person.get("child_person_ids", [])
+            event_ids = person.get("event_ids", [])
+            birth_year = float(person.get("birth_year_bp", -1.0))
+            death_year = float(person.get("death_year_bp", -1.0))
+            lifespan = float(person.get("lifespan_years", -1.0))
+            individuals_by_population_region.setdefault(population_region_id, []).append(person_id)
+            individual_lifespan_sum += lifespan
+            if (
+                person_id not in individual_by_id
+                or population_region_id not in population_region_ids
+                or region_id not in political_region_ids
+                or household_cohort_id not in household_by_id
+                or int(household_by_id[household_cohort_id].get("population_region_id", -1)) != population_region_id
+                or not str(person.get("name", "")).strip()
+                or not str(person.get("role", "")).strip()
+                or birth_year < death_year
+                or abs((birth_year - death_year) - lifespan) > max(0.001, abs(lifespan) * 0.0001)
+                or lifespan < 0.0
+                or married_person_id < -1
+                or not isinstance(parent_person_ids, list)
+                or not isinstance(child_person_ids, list)
+                or not isinstance(event_ids, list)
+                or int(person.get("event_count", -1)) != len(event_ids)
+                or float(person.get("property_value_index", -1.0)) < 0.0
+                or not 0.0 <= float(person.get("mobility_index", -1.0)) <= 1.0
+                or not 0.0 <= float(person.get("vulnerability_index", -1.0)) <= 1.0
+            ):
                 demographic_invalid = True
                 break
-    for population_region in population_regions:
-        population_region_id = int(population_region.get("id", -1))
-        cohort_ids = population_region.get("household_cohort_ids", [])
-        individual_ids = population_region.get("individual_agent_ids", [])
-        history_id = int(population_region.get("demographic_agent_history_id", -1))
-        if (
-            history_id not in demographic_history_by_id
-            or not isinstance(cohort_ids, list)
-            or not isinstance(individual_ids, list)
-            or int(population_region.get("household_cohort_count", -1)) != len(cohort_ids)
-            or int(population_region.get("individual_agent_count", -1)) != len(individual_ids)
-            or set(int(cohort_id) for cohort_id in cohort_ids) != set(households_by_population_region.get(population_region_id, []))
-            or set(int(person_id) for person_id in individual_ids) != set(individuals_by_population_region.get(population_region_id, []))
-            or float(population_region.get("representative_household_population", -1.0)) < 0.0
-        ):
-            demographic_invalid = True
-            break
-    for region in political_regions:
-        region_id = int(region.get("id", -1))
-        if "firm_agent_ids" not in region:
-            demographic_invalid = True
-            break
-        firm_ids = region.get("firm_agent_ids", [])
-        if (
-            not isinstance(firm_ids, list)
-            or int(region.get("firm_agent_count", -1)) != len(firm_ids)
-            or set(int(firm_id) for firm_id in firm_ids) != set(firms_by_region.get(region_id, []))
-        ):
-            demographic_invalid = True
-            break
-    if demographic_invalid:
-        failures.append("demographic agent records invalid")
-    if int(summary.get("high_vulnerability_household_count", -1)) != high_vulnerability_households:
-        failures.append("high_vulnerability_household_count does not match household cohorts")
-    if int(summary.get("individual_birth_event_count", -1)) != birth_event_count:
-        failures.append("individual_birth_event_count does not match individual life events")
-    if int(summary.get("individual_death_event_count", -1)) != death_event_count:
-        failures.append("individual_death_event_count does not match individual life events")
-    if int(summary.get("individual_marriage_event_count", -1)) != marriage_event_count:
-        failures.append("individual_marriage_event_count does not match individual life events")
-    if int(summary.get("property_transfer_event_count", -1)) != property_transfer_event_count:
-        failures.append("property_transfer_event_count does not match individual life events")
-    if abs(float(summary.get("total_household_cohort_population", 0.0)) - household_population_sum) > max(1.0, household_population_sum * 0.0001):
-        failures.append("total_household_cohort_population does not match household cohorts")
-    if abs(float(summary.get("total_firm_employment_capacity", 0.0)) - firm_employment_sum) > max(1.0, firm_employment_sum * 0.0001):
-        failures.append("total_firm_employment_capacity does not match firm agents")
-    if abs(float(summary.get("total_property_transfer_value_index", 0.0)) - property_transfer_value_sum) > max(0.001, property_transfer_value_sum * 0.0001):
-        failures.append("total_property_transfer_value_index does not match individual life events")
-    expected_agent_means = {
-        "mean_household_resilience_index": household_resilience_sum / len(household_cohorts) if household_cohorts else 0.0,
-        "mean_household_migration_propensity_index": household_migration_sum / len(household_cohorts) if household_cohorts else 0.0,
-        "mean_household_consumption_pressure_index": household_consumption_sum / len(household_cohorts) if household_cohorts else 0.0,
-        "mean_firm_productivity_index": firm_productivity_sum / len(firm_agents) if firm_agents else 0.0,
-        "mean_firm_market_dependency_index": firm_market_dependency_sum / len(firm_agents) if firm_agents else 0.0,
-        "mean_firm_supply_chain_risk_index": firm_supply_chain_risk_sum / len(firm_agents) if firm_agents else 0.0,
-        "mean_demographic_vulnerability_index": demographic_vulnerability_sum / demographic_step_total if demographic_step_total else 0.0,
-        "mean_individual_lifespan_years": individual_lifespan_sum / len(individual_agents) if individual_agents else 0.0,
-    }
-    for key, expected in expected_agent_means.items():
-        if abs(float(summary.get(key, 0.0)) - expected) > max(0.001, abs(expected) * 0.0001):
-            failures.append(f"{key} does not match demographic agents")
-            break
+            if married_person_id >= 0:
+                spouse = individual_by_id.get(married_person_id)
+                if spouse is None or int(spouse.get("married_person_id", -1)) != person_id:
+                    demographic_invalid = True
+                    break
+            for parent_id_raw in parent_person_ids:
+                parent_id = int(parent_id_raw)
+                parent = individual_by_id.get(parent_id)
+                if parent is None or person_id not in {int(child_id) for child_id in parent.get("child_person_ids", [])}:
+                    demographic_invalid = True
+                    break
+            if demographic_invalid:
+                break
+            for child_id_raw in child_person_ids:
+                child_id = int(child_id_raw)
+                child = individual_by_id.get(child_id)
+                if child is None or person_id not in {int(parent_id) for parent_id in child.get("parent_person_ids", [])}:
+                    demographic_invalid = True
+                    break
+            if demographic_invalid:
+                break
+            for event_id_raw in event_ids:
+                event_id = int(event_id_raw)
+                if event_id not in life_event_by_id:
+                    demographic_invalid = True
+                    break
+            if demographic_invalid:
+                break
+        for event in individual_life_events:
+            event_id = int(event.get("id", -1))
+            person_id = int(event.get("person_id", -1))
+            related_person_id = int(event.get("related_person_id", -1))
+            population_region_id = int(event.get("population_region_id", -1))
+            region_id = int(event.get("region_id", -1))
+            household_cohort_id = int(event.get("household_cohort_id", -1))
+            era_id = int(event.get("era_id", -1))
+            event_type = str(event.get("event_type", ""))
+            property_value = float(event.get("property_value_index", -1.0))
+            events_by_person.setdefault(person_id, []).append(event_id)
+            birth_event_count += 1 if event_type == "birth" else 0
+            death_event_count += 1 if event_type == "death" else 0
+            marriage_event_count += 1 if event_type == "marriage" else 0
+            property_transfer_event_count += 1 if event_type == "property_transfer" else 0
+            property_transfer_value_sum += property_value if event_type == "property_transfer" else 0.0
+            if (
+                event_id not in life_event_by_id
+                or person_id not in individual_by_id
+                or (related_person_id >= 0 and related_person_id not in individual_by_id)
+                or population_region_id not in population_region_ids
+                or region_id not in political_region_ids
+                or household_cohort_id not in household_by_id
+                or (era_ids and era_id not in set(era_ids))
+                or event_type not in valid_life_event_types
+                or float(event.get("year_bp", -1.0)) < 0.0
+                or property_value < 0.0
+                or not 0.0 <= float(event.get("demographic_pressure_index", -1.0)) <= 1.0
+                or not 0.0 <= float(event.get("mortality_risk_index", -1.0)) <= 1.0
+                or not 0.0 <= float(event.get("inheritance_fraction", -1.0)) <= 1.0
+            ):
+                demographic_invalid = True
+                break
+            person = individual_by_id[person_id]
+            if (
+                int(person.get("population_region_id", -1)) != population_region_id
+                or int(person.get("region_id", -1)) != region_id
+                or int(person.get("household_cohort_id", -1)) != household_cohort_id
+            ):
+                demographic_invalid = True
+                break
+            if event_type == "marriage" and (
+                related_person_id < 0 or int(individual_by_id[person_id].get("married_person_id", -1)) != related_person_id
+            ):
+                demographic_invalid = True
+                break
+            if event_type == "property_transfer" and float(event.get("inheritance_fraction", 0.0)) <= 0.0:
+                demographic_invalid = True
+                break
+        if not demographic_invalid:
+            for person in individual_agents:
+                person_id = int(person.get("id", -1))
+                if set(int(event_id) for event_id in person.get("event_ids", [])) != set(events_by_person.get(person_id, [])):
+                    demographic_invalid = True
+                    break
+        for population_region in population_regions:
+            population_region_id = int(population_region.get("id", -1))
+            cohort_ids = population_region.get("household_cohort_ids", [])
+            individual_ids = population_region.get("individual_agent_ids", [])
+            history_id = int(population_region.get("demographic_agent_history_id", -1))
+            if (
+                history_id not in demographic_history_by_id
+                or not isinstance(cohort_ids, list)
+                or not isinstance(individual_ids, list)
+                or int(population_region.get("household_cohort_count", -1)) != len(cohort_ids)
+                or int(population_region.get("individual_agent_count", -1)) != len(individual_ids)
+                or set(int(cohort_id) for cohort_id in cohort_ids) != set(households_by_population_region.get(population_region_id, []))
+                or set(int(person_id) for person_id in individual_ids) != set(individuals_by_population_region.get(population_region_id, []))
+                or float(population_region.get("representative_household_population", -1.0)) < 0.0
+            ):
+                demographic_invalid = True
+                break
+        for region in political_regions:
+            region_id = int(region.get("id", -1))
+            if "firm_agent_ids" not in region:
+                demographic_invalid = True
+                break
+            firm_ids = region.get("firm_agent_ids", [])
+            if (
+                not isinstance(firm_ids, list)
+                or int(region.get("firm_agent_count", -1)) != len(firm_ids)
+                or set(int(firm_id) for firm_id in firm_ids) != set(firms_by_region.get(region_id, []))
+            ):
+                demographic_invalid = True
+                break
+        if demographic_invalid:
+            failures.append("demographic agent records invalid")
+        if int(summary.get("high_vulnerability_household_count", -1)) != high_vulnerability_households:
+            failures.append("high_vulnerability_household_count does not match household cohorts")
+        if int(summary.get("individual_birth_event_count", -1)) != birth_event_count:
+            failures.append("individual_birth_event_count does not match individual life events")
+        if int(summary.get("individual_death_event_count", -1)) != death_event_count:
+            failures.append("individual_death_event_count does not match individual life events")
+        if int(summary.get("individual_marriage_event_count", -1)) != marriage_event_count:
+            failures.append("individual_marriage_event_count does not match individual life events")
+        if int(summary.get("property_transfer_event_count", -1)) != property_transfer_event_count:
+            failures.append("property_transfer_event_count does not match individual life events")
+        if abs(float(summary.get("total_household_cohort_population", 0.0)) - household_population_sum) > max(1.0, household_population_sum * 0.0001):
+            failures.append("total_household_cohort_population does not match household cohorts")
+        if abs(float(summary.get("total_firm_employment_capacity", 0.0)) - firm_employment_sum) > max(1.0, firm_employment_sum * 0.0001):
+            failures.append("total_firm_employment_capacity does not match firm agents")
+        if abs(float(summary.get("total_property_transfer_value_index", 0.0)) - property_transfer_value_sum) > max(0.001, property_transfer_value_sum * 0.0001):
+            failures.append("total_property_transfer_value_index does not match individual life events")
+        expected_agent_means = {
+            "mean_household_resilience_index": household_resilience_sum / len(household_cohorts) if household_cohorts else 0.0,
+            "mean_household_migration_propensity_index": household_migration_sum / len(household_cohorts) if household_cohorts else 0.0,
+            "mean_household_consumption_pressure_index": household_consumption_sum / len(household_cohorts) if household_cohorts else 0.0,
+            "mean_firm_productivity_index": firm_productivity_sum / len(firm_agents) if firm_agents else 0.0,
+            "mean_firm_market_dependency_index": firm_market_dependency_sum / len(firm_agents) if firm_agents else 0.0,
+            "mean_firm_supply_chain_risk_index": firm_supply_chain_risk_sum / len(firm_agents) if firm_agents else 0.0,
+            "mean_demographic_vulnerability_index": demographic_vulnerability_sum / demographic_step_total if demographic_step_total else 0.0,
+            "mean_individual_lifespan_years": individual_lifespan_sum / len(individual_agents) if individual_agents else 0.0,
+        }
+        for key, expected in expected_agent_means.items():
+            if abs(float(summary.get(key, 0.0)) - expected) > max(0.001, abs(expected) * 0.0001):
+                failures.append(f"{key} does not match demographic agents")
+                break
 
     dynasties = payload.get("dynasties", [])
-    if int(summary.get("dynasty_count", -1)) != len(dynasties):
-        failures.append("dynasty_count does not match dynasties length")
-    dynastic_lineages = sum(1 for dynasty in dynasties if int(dynasty.get("parent_dynasty_id", -1)) >= 0)
-    if int(summary.get("dynastic_lineage_count", -1)) != dynastic_lineages:
-        failures.append("dynastic_lineage_count does not match dynasty parent links")
-    dynasty_roots = sum(1 for dynasty in dynasties if int(dynasty.get("parent_dynasty_id", -1)) < 0)
-    if int(summary.get("dynasty_root_count", -1)) != dynasty_roots:
-        failures.append("dynasty_root_count does not match dynasty roots")
-    dynasty_successor_links = sum(1 for dynasty in dynasties if int(dynasty.get("successor_dynasty_id", -1)) >= 0)
-    if int(summary.get("dynasty_successor_link_count", -1)) != dynasty_successor_links:
-        failures.append("dynasty_successor_link_count does not match dynasty successors")
-    max_dynasty_depth = max((int(dynasty.get("lineage_depth", 0)) for dynasty in dynasties), default=0)
-    if int(summary.get("max_dynasty_lineage_depth", -1)) != max_dynasty_depth:
-        failures.append("max_dynasty_lineage_depth does not match dynasties")
-    if "mean_dynastic_continuity_index" not in summary:
-        failures.append("dynastic continuity summary metric missing")
-    elif not 0.0 <= float(summary.get("mean_dynastic_continuity_index", 0.0)) <= 1.0:
-        failures.append("mean_dynastic_continuity_index out of range")
+    if not native_social_availability:
+        if int(summary.get("dynasty_count", -1)) != len(dynasties):
+            failures.append("dynasty_count does not match dynasties length")
+        dynastic_lineages = sum(1 for dynasty in dynasties if int(dynasty.get("parent_dynasty_id", -1)) >= 0)
+        if int(summary.get("dynastic_lineage_count", -1)) != dynastic_lineages:
+            failures.append("dynastic_lineage_count does not match dynasty parent links")
+        dynasty_roots = sum(1 for dynasty in dynasties if int(dynasty.get("parent_dynasty_id", -1)) < 0)
+        if int(summary.get("dynasty_root_count", -1)) != dynasty_roots:
+            failures.append("dynasty_root_count does not match dynasty roots")
+        dynasty_successor_links = sum(1 for dynasty in dynasties if int(dynasty.get("successor_dynasty_id", -1)) >= 0)
+        if int(summary.get("dynasty_successor_link_count", -1)) != dynasty_successor_links:
+            failures.append("dynasty_successor_link_count does not match dynasty successors")
+        max_dynasty_depth = max((int(dynasty.get("lineage_depth", 0)) for dynasty in dynasties), default=0)
+        if int(summary.get("max_dynasty_lineage_depth", -1)) != max_dynasty_depth:
+            failures.append("max_dynasty_lineage_depth does not match dynasties")
+        if "mean_dynastic_continuity_index" not in summary:
+            failures.append("dynastic continuity summary metric missing")
+        elif not 0.0 <= float(summary.get("mean_dynastic_continuity_index", 0.0)) <= 1.0:
+            failures.append("mean_dynastic_continuity_index out of range")
     dynasty_keys = {
         "region_id",
         "parent_dynasty_id",
@@ -21513,271 +19800,272 @@ def validate(
     if dynasty_genealogy_invalid:
         failures.append("dynasty genealogy links invalid")
 
-    rulers = payload.get("rulers", [])
-    marriage_alliances = payload.get("marriage_alliances", [])
-    cadet_branches = payload.get("cadet_branches", [])
-    if int(summary.get("ruler_count", -1)) != len(rulers):
-        failures.append("ruler_count does not match rulers length")
-    named_ruler_dynasty_count = sum(1 for dynasty in dynasties if int(dynasty.get("ruler_count", 0)) > 0)
-    if int(summary.get("named_ruler_dynasty_count", -1)) != named_ruler_dynasty_count:
-        failures.append("named_ruler_dynasty_count does not match dynasties")
-    if int(summary.get("ruler_marriage_alliance_count", -1)) != len(marriage_alliances):
-        failures.append("ruler_marriage_alliance_count does not match marriage_alliances length")
-    if int(summary.get("cadet_branch_count", -1)) != len(cadet_branches):
-        failures.append("cadet_branch_count does not match cadet_branches length")
-    married_ruler_count = sum(1 for ruler in rulers if int(ruler.get("spouse_ruler_id", -1)) >= 0)
-    if int(summary.get("married_ruler_count", -1)) != married_ruler_count:
-        failures.append("married_ruler_count does not match ruler spouse links")
-    max_ruler_depth = max((int(ruler.get("ruler_lineage_depth", 0)) for ruler in rulers), default=0)
-    if int(summary.get("max_ruler_lineage_depth", -1)) != max_ruler_depth:
-        failures.append("max_ruler_lineage_depth does not match rulers")
+    if not (social_tail_modes["genealogy"]):
+        rulers = payload.get("rulers", [])
+        marriage_alliances = payload.get("marriage_alliances", [])
+        cadet_branches = payload.get("cadet_branches", [])
+        if int(summary.get("ruler_count", -1)) != len(rulers):
+            failures.append("ruler_count does not match rulers length")
+        named_ruler_dynasty_count = sum(1 for dynasty in dynasties if int(dynasty.get("ruler_count", 0)) > 0)
+        if int(summary.get("named_ruler_dynasty_count", -1)) != named_ruler_dynasty_count:
+            failures.append("named_ruler_dynasty_count does not match dynasties")
+        if int(summary.get("ruler_marriage_alliance_count", -1)) != len(marriage_alliances):
+            failures.append("ruler_marriage_alliance_count does not match marriage_alliances length")
+        if int(summary.get("cadet_branch_count", -1)) != len(cadet_branches):
+            failures.append("cadet_branch_count does not match cadet_branches length")
+        married_ruler_count = sum(1 for ruler in rulers if int(ruler.get("spouse_ruler_id", -1)) >= 0)
+        if int(summary.get("married_ruler_count", -1)) != married_ruler_count:
+            failures.append("married_ruler_count does not match ruler spouse links")
+        max_ruler_depth = max((int(ruler.get("ruler_lineage_depth", 0)) for ruler in rulers), default=0)
+        if int(summary.get("max_ruler_lineage_depth", -1)) != max_ruler_depth:
+            failures.append("max_ruler_lineage_depth does not match rulers")
 
-    ruler_keys = {
-        "id",
-        "dynasty_id",
-        "region_id",
-        "name",
-        "regnal_number",
-        "parent_ruler_id",
-        "predecessor_ruler_id",
-        "successor_ruler_id",
-        "spouse_ruler_id",
-        "marriage_alliance_id",
-        "cadet_branch_id",
-        "birth_year_bp",
-        "reign_start_year_bp",
-        "reign_end_year_bp",
-        "reign_length_years",
-        "ruler_lineage_depth",
-        "legitimacy_index",
-        "succession_claim_strength",
-        "military_prestige_index",
-        "economic_patronage_index",
-        "succession_crisis_risk",
-    }
-    alliance_keys = {
-        "id",
-        "dynasty_a_id",
-        "dynasty_b_id",
-        "ruler_a_id",
-        "ruler_b_id",
-        "region_a_id",
-        "region_b_id",
-        "alliance_year_bp",
-        "alliance_strength",
-        "trade_pact_index",
-        "succession_dispute_risk",
-    }
-    cadet_branch_keys = {
-        "id",
-        "dynasty_id",
-        "parent_dynasty_id",
-        "founder_ruler_id",
-        "heir_ruler_ids",
-        "branch_start_year_bp",
-        "branch_end_year_bp",
-        "claim_strength",
-        "cadet_legitimacy_index",
-    }
-    if rulers and not ruler_keys.issubset(rulers[0]):
-        failures.append("ruler fields missing")
-    if marriage_alliances and not alliance_keys.issubset(marriage_alliances[0]):
-        failures.append("marriage alliance fields missing")
-    if cadet_branches and not cadet_branch_keys.issubset(cadet_branches[0]):
-        failures.append("cadet branch fields missing")
+        ruler_keys = {
+            "id",
+            "dynasty_id",
+            "region_id",
+            "name",
+            "regnal_number",
+            "parent_ruler_id",
+            "predecessor_ruler_id",
+            "successor_ruler_id",
+            "spouse_ruler_id",
+            "marriage_alliance_id",
+            "cadet_branch_id",
+            "birth_year_bp",
+            "reign_start_year_bp",
+            "reign_end_year_bp",
+            "reign_length_years",
+            "ruler_lineage_depth",
+            "legitimacy_index",
+            "succession_claim_strength",
+            "military_prestige_index",
+            "economic_patronage_index",
+            "succession_crisis_risk",
+        }
+        alliance_keys = {
+            "id",
+            "dynasty_a_id",
+            "dynasty_b_id",
+            "ruler_a_id",
+            "ruler_b_id",
+            "region_a_id",
+            "region_b_id",
+            "alliance_year_bp",
+            "alliance_strength",
+            "trade_pact_index",
+            "succession_dispute_risk",
+        }
+        cadet_branch_keys = {
+            "id",
+            "dynasty_id",
+            "parent_dynasty_id",
+            "founder_ruler_id",
+            "heir_ruler_ids",
+            "branch_start_year_bp",
+            "branch_end_year_bp",
+            "claim_strength",
+            "cadet_legitimacy_index",
+        }
+        if rulers and not ruler_keys.issubset(rulers[0]):
+            failures.append("ruler fields missing")
+        if marriage_alliances and not alliance_keys.issubset(marriage_alliances[0]):
+            failures.append("marriage alliance fields missing")
+        if cadet_branches and not cadet_branch_keys.issubset(cadet_branches[0]):
+            failures.append("cadet branch fields missing")
 
-    ruler_by_id = {int(ruler.get("id", -1)): ruler for ruler in rulers}
-    alliance_by_id = {int(alliance.get("id", -1)): alliance for alliance in marriage_alliances}
-    cadet_branch_by_id = {int(branch.get("id", -1)): branch for branch in cadet_branches}
-    rulers_by_dynasty: dict[int, int] = {}
-    alliances_by_dynasty: dict[int, int] = {}
-    cadets_by_dynasty: dict[int, int] = {}
-    ruler_genealogy_invalid = (
-        len(ruler_by_id) != len(rulers)
-        or len(alliance_by_id) != len(marriage_alliances)
-        or len(cadet_branch_by_id) != len(cadet_branches)
-        or any(record_id < 0 for record_id in ruler_by_id)
-        or any(record_id < 0 for record_id in alliance_by_id)
-        or any(record_id < 0 for record_id in cadet_branch_by_id)
-    )
-    ruler_legitimacy_sum = 0.0
-    ruler_succession_risk_sum = 0.0
-    for ruler in rulers:
-        ruler_id = int(ruler.get("id", -1))
-        dynasty_id = int(ruler.get("dynasty_id", -1))
-        parent_id = int(ruler.get("parent_ruler_id", -1))
-        predecessor_id = int(ruler.get("predecessor_ruler_id", -1))
-        successor_id = int(ruler.get("successor_ruler_id", -1))
-        spouse_id = int(ruler.get("spouse_ruler_id", -1))
-        alliance_id = int(ruler.get("marriage_alliance_id", -1))
-        cadet_branch_id = int(ruler.get("cadet_branch_id", -1))
-        reign_start = float(ruler.get("reign_start_year_bp", -1.0))
-        reign_end = float(ruler.get("reign_end_year_bp", -1.0))
-        reign_length = float(ruler.get("reign_length_years", -1.0))
-        legitimacy = float(ruler.get("legitimacy_index", -1.0))
-        claim_strength = float(ruler.get("succession_claim_strength", -1.0))
-        military_prestige = float(ruler.get("military_prestige_index", -1.0))
-        patronage = float(ruler.get("economic_patronage_index", -1.0))
-        succession_risk = float(ruler.get("succession_crisis_risk", -1.0))
-        rulers_by_dynasty[dynasty_id] = rulers_by_dynasty.get(dynasty_id, 0) + 1
-        ruler_legitimacy_sum += legitimacy
-        ruler_succession_risk_sum += succession_risk
-        if (
-            ruler_id not in ruler_by_id
-            or dynasty_id not in dynasty_by_id
-            or not str(ruler.get("name", "")).strip()
-            or int(ruler.get("regnal_number", 0)) <= 0
-            or int(ruler.get("ruler_lineage_depth", -1)) < 0
-            or reign_start < reign_end
-            or abs(reign_length - max(0.0, reign_start - reign_end)) > 0.001
-            or not 0.0 <= legitimacy <= 1.0
-            or not 0.0 <= claim_strength <= 1.0
-            or not 0.0 <= military_prestige <= 1.0
-            or not 0.0 <= patronage <= 1.0
-            or not 0.0 <= succession_risk <= 1.0
-        ):
-            ruler_genealogy_invalid = True
-            break
-        if parent_id >= 0 and (
-            parent_id not in ruler_by_id
-            or int(ruler_by_id[parent_id].get("dynasty_id", -1)) != dynasty_id
-        ):
-            ruler_genealogy_invalid = True
-            break
-        if predecessor_id >= 0 and (
-            predecessor_id not in ruler_by_id
-            or int(ruler_by_id[predecessor_id].get("successor_ruler_id", -1)) != ruler_id
-        ):
-            ruler_genealogy_invalid = True
-            break
-        if successor_id >= 0 and (
-            successor_id not in ruler_by_id
-            or int(ruler_by_id[successor_id].get("predecessor_ruler_id", -1)) != ruler_id
-        ):
-            ruler_genealogy_invalid = True
-            break
-        if spouse_id >= 0 and (
-            spouse_id not in ruler_by_id
-            or int(ruler_by_id[spouse_id].get("spouse_ruler_id", -1)) != ruler_id
-            or alliance_id < 0
-        ):
-            ruler_genealogy_invalid = True
-            break
-        if alliance_id >= 0 and (
-            alliance_id not in alliance_by_id
-            or ruler_id
-            not in {
-                int(alliance_by_id[alliance_id].get("ruler_a_id", -1)),
-                int(alliance_by_id[alliance_id].get("ruler_b_id", -1)),
-            }
-        ):
-            ruler_genealogy_invalid = True
-            break
-        if cadet_branch_id >= 0 and cadet_branch_id not in cadet_branch_by_id:
-            ruler_genealogy_invalid = True
-            break
-
-    alliance_strength_sum = 0.0
-    for alliance in marriage_alliances:
-        alliance_id = int(alliance.get("id", -1))
-        dynasty_a_id = int(alliance.get("dynasty_a_id", -1))
-        dynasty_b_id = int(alliance.get("dynasty_b_id", -1))
-        ruler_a_id = int(alliance.get("ruler_a_id", -1))
-        ruler_b_id = int(alliance.get("ruler_b_id", -1))
-        strength = float(alliance.get("alliance_strength", -1.0))
-        trade_pact = float(alliance.get("trade_pact_index", -1.0))
-        dispute_risk = float(alliance.get("succession_dispute_risk", -1.0))
-        alliance_strength_sum += strength
-        alliances_by_dynasty[dynasty_a_id] = alliances_by_dynasty.get(dynasty_a_id, 0) + 1
-        alliances_by_dynasty[dynasty_b_id] = alliances_by_dynasty.get(dynasty_b_id, 0) + 1
-        if (
-            alliance_id not in alliance_by_id
-            or dynasty_a_id not in dynasty_by_id
-            or dynasty_b_id not in dynasty_by_id
-            or dynasty_a_id == dynasty_b_id
-            or ruler_a_id not in ruler_by_id
-            or ruler_b_id not in ruler_by_id
-            or int(ruler_by_id[ruler_a_id].get("dynasty_id", -1)) != dynasty_a_id
-            or int(ruler_by_id[ruler_b_id].get("dynasty_id", -1)) != dynasty_b_id
-            or int(ruler_by_id[ruler_a_id].get("spouse_ruler_id", -1)) != ruler_b_id
-            or int(ruler_by_id[ruler_b_id].get("spouse_ruler_id", -1)) != ruler_a_id
-            or int(ruler_by_id[ruler_a_id].get("marriage_alliance_id", -1)) != alliance_id
-            or int(ruler_by_id[ruler_b_id].get("marriage_alliance_id", -1)) != alliance_id
-            or not 0.0 <= strength <= 1.0
-            or not 0.0 <= trade_pact <= 1.0
-            or not 0.0 <= dispute_risk <= 1.0
-        ):
-            ruler_genealogy_invalid = True
-            break
-
-    cadet_claim_sum = 0.0
-    for branch in cadet_branches:
-        branch_id = int(branch.get("id", -1))
-        dynasty_id = int(branch.get("dynasty_id", -1))
-        founder_id = int(branch.get("founder_ruler_id", -1))
-        heir_ids = branch.get("heir_ruler_ids", [])
-        branch_start = float(branch.get("branch_start_year_bp", -1.0))
-        branch_end = float(branch.get("branch_end_year_bp", -1.0))
-        claim_strength = float(branch.get("claim_strength", -1.0))
-        legitimacy = float(branch.get("cadet_legitimacy_index", -1.0))
-        cadet_claim_sum += claim_strength
-        cadets_by_dynasty[dynasty_id] = cadets_by_dynasty.get(dynasty_id, 0) + 1
-        if (
-            branch_id not in cadet_branch_by_id
-            or dynasty_id not in dynasty_by_id
-            or founder_id not in ruler_by_id
-            or int(ruler_by_id[founder_id].get("dynasty_id", -1)) != dynasty_id
-            or int(ruler_by_id[founder_id].get("cadet_branch_id", -1)) != branch_id
-            or not isinstance(heir_ids, list)
-            or branch_start < branch_end
-            or not 0.0 <= claim_strength <= 1.0
-            or not 0.0 <= legitimacy <= 1.0
-        ):
-            ruler_genealogy_invalid = True
-            break
-        for heir_id in heir_ids:
-            heir_id = int(heir_id)
+        ruler_by_id = {int(ruler.get("id", -1)): ruler for ruler in rulers}
+        alliance_by_id = {int(alliance.get("id", -1)): alliance for alliance in marriage_alliances}
+        cadet_branch_by_id = {int(branch.get("id", -1)): branch for branch in cadet_branches}
+        rulers_by_dynasty: dict[int, int] = {}
+        alliances_by_dynasty: dict[int, int] = {}
+        cadets_by_dynasty: dict[int, int] = {}
+        ruler_genealogy_invalid = (
+            len(ruler_by_id) != len(rulers)
+            or len(alliance_by_id) != len(marriage_alliances)
+            or len(cadet_branch_by_id) != len(cadet_branches)
+            or any(record_id < 0 for record_id in ruler_by_id)
+            or any(record_id < 0 for record_id in alliance_by_id)
+            or any(record_id < 0 for record_id in cadet_branch_by_id)
+        )
+        ruler_legitimacy_sum = 0.0
+        ruler_succession_risk_sum = 0.0
+        for ruler in rulers:
+            ruler_id = int(ruler.get("id", -1))
+            dynasty_id = int(ruler.get("dynasty_id", -1))
+            parent_id = int(ruler.get("parent_ruler_id", -1))
+            predecessor_id = int(ruler.get("predecessor_ruler_id", -1))
+            successor_id = int(ruler.get("successor_ruler_id", -1))
+            spouse_id = int(ruler.get("spouse_ruler_id", -1))
+            alliance_id = int(ruler.get("marriage_alliance_id", -1))
+            cadet_branch_id = int(ruler.get("cadet_branch_id", -1))
+            reign_start = float(ruler.get("reign_start_year_bp", -1.0))
+            reign_end = float(ruler.get("reign_end_year_bp", -1.0))
+            reign_length = float(ruler.get("reign_length_years", -1.0))
+            legitimacy = float(ruler.get("legitimacy_index", -1.0))
+            claim_strength = float(ruler.get("succession_claim_strength", -1.0))
+            military_prestige = float(ruler.get("military_prestige_index", -1.0))
+            patronage = float(ruler.get("economic_patronage_index", -1.0))
+            succession_risk = float(ruler.get("succession_crisis_risk", -1.0))
+            rulers_by_dynasty[dynasty_id] = rulers_by_dynasty.get(dynasty_id, 0) + 1
+            ruler_legitimacy_sum += legitimacy
+            ruler_succession_risk_sum += succession_risk
             if (
-                heir_id not in ruler_by_id
-                or int(ruler_by_id[heir_id].get("dynasty_id", -1)) != dynasty_id
-                or int(ruler_by_id[heir_id].get("cadet_branch_id", -1)) != branch_id
+                ruler_id not in ruler_by_id
+                or dynasty_id not in dynasty_by_id
+                or not str(ruler.get("name", "")).strip()
+                or int(ruler.get("regnal_number", 0)) <= 0
+                or int(ruler.get("ruler_lineage_depth", -1)) < 0
+                or reign_start < reign_end
+                or abs(reign_length - max(0.0, reign_start - reign_end)) > 0.001
+                or not 0.0 <= legitimacy <= 1.0
+                or not 0.0 <= claim_strength <= 1.0
+                or not 0.0 <= military_prestige <= 1.0
+                or not 0.0 <= patronage <= 1.0
+                or not 0.0 <= succession_risk <= 1.0
+            ):
+                ruler_genealogy_invalid = True
+                break
+            if parent_id >= 0 and (
+                parent_id not in ruler_by_id
+                or int(ruler_by_id[parent_id].get("dynasty_id", -1)) != dynasty_id
+            ):
+                ruler_genealogy_invalid = True
+                break
+            if predecessor_id >= 0 and (
+                predecessor_id not in ruler_by_id
+                or int(ruler_by_id[predecessor_id].get("successor_ruler_id", -1)) != ruler_id
+            ):
+                ruler_genealogy_invalid = True
+                break
+            if successor_id >= 0 and (
+                successor_id not in ruler_by_id
+                or int(ruler_by_id[successor_id].get("predecessor_ruler_id", -1)) != ruler_id
+            ):
+                ruler_genealogy_invalid = True
+                break
+            if spouse_id >= 0 and (
+                spouse_id not in ruler_by_id
+                or int(ruler_by_id[spouse_id].get("spouse_ruler_id", -1)) != ruler_id
+                or alliance_id < 0
+            ):
+                ruler_genealogy_invalid = True
+                break
+            if alliance_id >= 0 and (
+                alliance_id not in alliance_by_id
+                or ruler_id
+                not in {
+                    int(alliance_by_id[alliance_id].get("ruler_a_id", -1)),
+                    int(alliance_by_id[alliance_id].get("ruler_b_id", -1)),
+                }
+            ):
+                ruler_genealogy_invalid = True
+                break
+            if cadet_branch_id >= 0 and cadet_branch_id not in cadet_branch_by_id:
+                ruler_genealogy_invalid = True
+                break
+
+        alliance_strength_sum = 0.0
+        for alliance in marriage_alliances:
+            alliance_id = int(alliance.get("id", -1))
+            dynasty_a_id = int(alliance.get("dynasty_a_id", -1))
+            dynasty_b_id = int(alliance.get("dynasty_b_id", -1))
+            ruler_a_id = int(alliance.get("ruler_a_id", -1))
+            ruler_b_id = int(alliance.get("ruler_b_id", -1))
+            strength = float(alliance.get("alliance_strength", -1.0))
+            trade_pact = float(alliance.get("trade_pact_index", -1.0))
+            dispute_risk = float(alliance.get("succession_dispute_risk", -1.0))
+            alliance_strength_sum += strength
+            alliances_by_dynasty[dynasty_a_id] = alliances_by_dynasty.get(dynasty_a_id, 0) + 1
+            alliances_by_dynasty[dynasty_b_id] = alliances_by_dynasty.get(dynasty_b_id, 0) + 1
+            if (
+                alliance_id not in alliance_by_id
+                or dynasty_a_id not in dynasty_by_id
+                or dynasty_b_id not in dynasty_by_id
+                or dynasty_a_id == dynasty_b_id
+                or ruler_a_id not in ruler_by_id
+                or ruler_b_id not in ruler_by_id
+                or int(ruler_by_id[ruler_a_id].get("dynasty_id", -1)) != dynasty_a_id
+                or int(ruler_by_id[ruler_b_id].get("dynasty_id", -1)) != dynasty_b_id
+                or int(ruler_by_id[ruler_a_id].get("spouse_ruler_id", -1)) != ruler_b_id
+                or int(ruler_by_id[ruler_b_id].get("spouse_ruler_id", -1)) != ruler_a_id
+                or int(ruler_by_id[ruler_a_id].get("marriage_alliance_id", -1)) != alliance_id
+                or int(ruler_by_id[ruler_b_id].get("marriage_alliance_id", -1)) != alliance_id
+                or not 0.0 <= strength <= 1.0
+                or not 0.0 <= trade_pact <= 1.0
+                or not 0.0 <= dispute_risk <= 1.0
+            ):
+                ruler_genealogy_invalid = True
+                break
+
+        cadet_claim_sum = 0.0
+        for branch in cadet_branches:
+            branch_id = int(branch.get("id", -1))
+            dynasty_id = int(branch.get("dynasty_id", -1))
+            founder_id = int(branch.get("founder_ruler_id", -1))
+            heir_ids = branch.get("heir_ruler_ids", [])
+            branch_start = float(branch.get("branch_start_year_bp", -1.0))
+            branch_end = float(branch.get("branch_end_year_bp", -1.0))
+            claim_strength = float(branch.get("claim_strength", -1.0))
+            legitimacy = float(branch.get("cadet_legitimacy_index", -1.0))
+            cadet_claim_sum += claim_strength
+            cadets_by_dynasty[dynasty_id] = cadets_by_dynasty.get(dynasty_id, 0) + 1
+            if (
+                branch_id not in cadet_branch_by_id
+                or dynasty_id not in dynasty_by_id
+                or founder_id not in ruler_by_id
+                or int(ruler_by_id[founder_id].get("dynasty_id", -1)) != dynasty_id
+                or int(ruler_by_id[founder_id].get("cadet_branch_id", -1)) != branch_id
+                or not isinstance(heir_ids, list)
+                or branch_start < branch_end
+                or not 0.0 <= claim_strength <= 1.0
+                or not 0.0 <= legitimacy <= 1.0
+            ):
+                ruler_genealogy_invalid = True
+                break
+            for heir_id in heir_ids:
+                heir_id = int(heir_id)
+                if (
+                    heir_id not in ruler_by_id
+                    or int(ruler_by_id[heir_id].get("dynasty_id", -1)) != dynasty_id
+                    or int(ruler_by_id[heir_id].get("cadet_branch_id", -1)) != branch_id
+                ):
+                    ruler_genealogy_invalid = True
+                    break
+            if ruler_genealogy_invalid:
+                break
+
+        for dynasty in dynasties:
+            dynasty_id = int(dynasty.get("id", -1))
+            founder_ruler_id = int(dynasty.get("founder_ruler_id", -1))
+            ruler_count = rulers_by_dynasty.get(dynasty_id, 0)
+            if (
+                int(dynasty.get("ruler_count", -1)) != ruler_count
+                or int(dynasty.get("marriage_alliance_count", -1)) != alliances_by_dynasty.get(dynasty_id, 0)
+                or int(dynasty.get("cadet_branch_count", -1)) != cadets_by_dynasty.get(dynasty_id, 0)
+            ):
+                ruler_genealogy_invalid = True
+                break
+            if ruler_count > 0 and (
+                founder_ruler_id not in ruler_by_id
+                or int(ruler_by_id[founder_ruler_id].get("dynasty_id", -1)) != dynasty_id
             ):
                 ruler_genealogy_invalid = True
                 break
         if ruler_genealogy_invalid:
-            break
-
-    for dynasty in dynasties:
-        dynasty_id = int(dynasty.get("id", -1))
-        founder_ruler_id = int(dynasty.get("founder_ruler_id", -1))
-        ruler_count = rulers_by_dynasty.get(dynasty_id, 0)
-        if (
-            int(dynasty.get("ruler_count", -1)) != ruler_count
-            or int(dynasty.get("marriage_alliance_count", -1)) != alliances_by_dynasty.get(dynasty_id, 0)
-            or int(dynasty.get("cadet_branch_count", -1)) != cadets_by_dynasty.get(dynasty_id, 0)
-        ):
-            ruler_genealogy_invalid = True
-            break
-        if ruler_count > 0 and (
-            founder_ruler_id not in ruler_by_id
-            or int(ruler_by_id[founder_ruler_id].get("dynasty_id", -1)) != dynasty_id
-        ):
-            ruler_genealogy_invalid = True
-            break
-    if ruler_genealogy_invalid:
-        failures.append("ruler genealogy links invalid")
-    mean_ruler_legitimacy = ruler_legitimacy_sum / len(rulers) if rulers else 0.0
-    mean_succession_risk = ruler_succession_risk_sum / len(rulers) if rulers else 0.0
-    mean_alliance_strength = alliance_strength_sum / len(marriage_alliances) if marriage_alliances else 0.0
-    mean_cadet_claim = cadet_claim_sum / len(cadet_branches) if cadet_branches else 0.0
-    if abs(float(summary.get("mean_ruler_legitimacy_index", 0.0)) - mean_ruler_legitimacy) > 0.001:
-        failures.append("mean_ruler_legitimacy_index does not match rulers")
-    if abs(float(summary.get("mean_succession_crisis_risk", 0.0)) - mean_succession_risk) > 0.001:
-        failures.append("mean_succession_crisis_risk does not match rulers")
-    if abs(float(summary.get("mean_marriage_alliance_strength", 0.0)) - mean_alliance_strength) > 0.001:
-        failures.append("mean_marriage_alliance_strength does not match marriage alliances")
-    if abs(float(summary.get("mean_cadet_branch_claim_strength", 0.0)) - mean_cadet_claim) > 0.001:
-        failures.append("mean_cadet_branch_claim_strength does not match cadet branches")
+            failures.append("ruler genealogy links invalid")
+        mean_ruler_legitimacy = ruler_legitimacy_sum / len(rulers) if rulers else 0.0
+        mean_succession_risk = ruler_succession_risk_sum / len(rulers) if rulers else 0.0
+        mean_alliance_strength = alliance_strength_sum / len(marriage_alliances) if marriage_alliances else 0.0
+        mean_cadet_claim = cadet_claim_sum / len(cadet_branches) if cadet_branches else 0.0
+        if abs(float(summary.get("mean_ruler_legitimacy_index", 0.0)) - mean_ruler_legitimacy) > 0.001:
+            failures.append("mean_ruler_legitimacy_index does not match rulers")
+        if abs(float(summary.get("mean_succession_crisis_risk", 0.0)) - mean_succession_risk) > 0.001:
+            failures.append("mean_succession_crisis_risk does not match rulers")
+        if abs(float(summary.get("mean_marriage_alliance_strength", 0.0)) - mean_alliance_strength) > 0.001:
+            failures.append("mean_marriage_alliance_strength does not match marriage alliances")
+        if abs(float(summary.get("mean_cadet_branch_claim_strength", 0.0)) - mean_cadet_claim) > 0.001:
+            failures.append("mean_cadet_branch_claim_strength does not match cadet branches")
 
     territorial_snapshots = payload.get("territorial_snapshots", [])
     if int(summary.get("territorial_snapshot_count", -1)) != len(territorial_snapshots):
@@ -21785,23 +20073,24 @@ def validate(
     snapshot_region_records = sum(len(snapshot.get("regions", [])) for snapshot in territorial_snapshots)
     if int(summary.get("snapshot_region_record_count", -1)) != snapshot_region_records:
         failures.append("snapshot_region_record_count does not match territorial snapshots")
-    snapshot_polygon_regions = sum(
-        1
-        for snapshot in territorial_snapshots
-        for region in snapshot.get("regions", [])
-        if float(region.get("dissolved_polygon_area_km2", 0.0)) > 0.0
-    )
-    if int(summary.get("snapshot_polygon_region_count", -1)) != snapshot_polygon_regions:
-        failures.append("snapshot_polygon_region_count does not match territorial snapshot regions")
-    if (
-        "mean_snapshot_polygon_area_error_fraction" not in summary
-        or "mean_snapshot_compactness_index" not in summary
-        or "mean_snapshot_geometry_quality" not in summary
-        or "mean_snapshot_boundary_perimeter_km" not in summary
-    ):
-        failures.append("territorial snapshot geometry summary metrics missing")
-    if not 0.0 <= float(summary.get("mean_snapshot_geometry_quality", 0.0)) <= 1.0:
-        failures.append("mean_snapshot_geometry_quality out of range")
+    if not native_social_availability:
+        snapshot_polygon_regions = sum(
+            1
+            for snapshot in territorial_snapshots
+            for region in snapshot.get("regions", [])
+            if float(region.get("dissolved_polygon_area_km2", 0.0)) > 0.0
+        )
+        if int(summary.get("snapshot_polygon_region_count", -1)) != snapshot_polygon_regions:
+            failures.append("snapshot_polygon_region_count does not match territorial snapshot regions")
+        if (
+            "mean_snapshot_polygon_area_error_fraction" not in summary
+            or "mean_snapshot_compactness_index" not in summary
+            or "mean_snapshot_geometry_quality" not in summary
+            or "mean_snapshot_boundary_perimeter_km" not in summary
+        ):
+            failures.append("territorial snapshot geometry summary metrics missing")
+        if not 0.0 <= float(summary.get("mean_snapshot_geometry_quality", 0.0)) <= 1.0:
+            failures.append("mean_snapshot_geometry_quality out of range")
     if territorial_snapshots:
         first_snapshot = territorial_snapshots[0]
         if int(first_snapshot.get("region_count", -1)) != len(first_snapshot.get("regions", [])):
@@ -21972,7 +20261,7 @@ def validate(
         failures.append("sacred_area_count does not match sacred_areas length")
 
     ruins = payload.get("ruins", [])
-    if int(summary.get("ruin_count", -1)) != len(ruins):
+    if not native_social_availability and int(summary.get("ruin_count", -1)) != len(ruins):
         failures.append("ruin_count does not match ruins length")
 
     borders = payload.get("borders", [])

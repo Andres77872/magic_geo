@@ -4,6 +4,8 @@
 
 This page documents the entire human-settlement stack: the native per-cell `settlement_score` field and every term that feeds it, the greedy separated site selector that turns that field into `settlements[]`, the endpoint-ranked route network, and the four Python enrichers that build on top of them — navigability-derived port sites, feature-weighted Dijkstra route corridors, and border-derived natural frontiers. Everything here is a static, deterministic suitability-and-cost construction: there is no population dynamics, no land market, no capacity, congestion or network equilibrium, and the model declarations in the world document say so explicitly. The whole layer is absent from geo-only worlds, and the last section explains exactly which downstream models change branch as a result.
 
+Current seasonal generation uses settlement selection **v3**, native routes **v1**, and navigation/ports/corridors **v3**. The route and transport declarations identify their actual source versions. Explicit historical selection v2 and transport v1/v2 retain their original paths, including genuine seasonal-climate archives with selection v2; climate ownership alone does not select the settlement version. The equations below describe available inputs. Current unavailable derived values use null and strict flags, while supported zero remains zero. The native settlement score retains its documented zero sentinel, explained below. See [Settlement and social estimate availability](../../settlement_social_availability.md) for the current native-social and downstream publication contracts.
+
 ## On this page
 
 - [Where the settlement layer runs](#where-the-settlement-layer-runs)
@@ -31,37 +33,39 @@ This page documents the entire human-settlement stack: the native per-cell `sett
 
 ## Where the settlement layer runs
 
-The native settlement and route stages are the first two calls inside the society branch of the pipeline, guarded by `if (include_society)` at `cpp/src/engine/pipeline.cpp:199`:
+The native settlement and route stages are the first two generation calls inside the society branch of `cpp/src/engine/pipeline.cpp`, guarded by `if (include_society)`:
 
 ```cpp
-society.settlements = generate_settlements(params, earth.cells);                   // pipeline.cpp:200
-society.routes      = generate_routes(params, earth.cells, society.settlements);   // pipeline.cpp:201
-society.political_regions = generate_political_regions(                            // pipeline.cpp:202
+society.settlements = generate_settlements(params, earth.cells);
+society.routes      = generate_routes(params, earth.cells, society.settlements);
+society.political_regions = generate_political_regions(
     params, earth.cells, society.settlements, society.routes);
 ```
 
-Both are declared in `cpp/src/engine/internal.hpp:342` / `:346` and defined in `cpp/src/engine/settlements.cpp`. `simulate_geo_world` runs stages 1–31 identically and skips the whole block, so `society.settlements` and `society.routes` stay empty vectors.
+Both are declared in `cpp/src/engine/internal.hpp` and defined in `cpp/src/engine/settlements.cpp`. Before this branch, the native pipeline derives soils/biomes/resources and landforms, then finalizes settlement climate applicability. `simulate_geo_world` skips society generation, so `society.settlements` and `society.routes` stay empty vectors. Native political, cultural, population and historical stages follow the pair in full generation.
 
-Everything downstream of the native pair is Python. In `generate_world` (`src/magic_geo/api.py:195`) the relevant enrichers run in this order:
+After native generation, `generate_world` in `src/magic_geo/api.py` retains cells internally, even for summary-only output. The relevant Python phases run in this order:
 
-| # in `generate_world` | Call | Module | Adds |
+| Order | Call or phase | Module | Purpose |
 |---|---|---|---|
-| 36 | `enrich_world_with_settlement_route_models` | `src/magic_geo/settlement_routes.py:41` | `settlement_selection_model`, `route_network_model` |
-| 42 | `enrich_world_with_navigability_diagnostics` | `src/magic_geo/navigability_diagnostics.py` | `navigable_waterways`, harbor/coastal/chokepoint cell indices |
-| 43 | `enrich_world_with_port_sites` | `src/magic_geo/port_sites.py:176` | `port_sites`, `port_site_model` |
-| 44 | `enrich_world_with_route_corridors` | `src/magic_geo/route_corridors.py:380` | `route_corridors`, `route_corridor_model` |
-| 56 | `enrich_world_with_natural_frontiers` | `src/magic_geo/natural_frontiers.py:166` | `natural_frontiers`, `natural_frontier_model` |
-| 57 | `enrich_world_with_worldbuilding_realism` | `src/magic_geo/worldbuilding_realism.py:145` | `worldbuilding_realism_checks`, `worldbuilding_realism_model` (two of five checks are settlement/route checks) |
+| 1 | `_enrich_physical_foundation` | `api.py` | Shared natural water, seasonal and terrain prerequisites |
+| 2 | Settlement/route and native social annotations | `settlement_routes.py` and social annotation modules | Audited source declarations before human consumers |
+| 3 | `enrich_world_with_navigability_diagnostics` | `navigability_diagnostics.py` | Waterway selection and marine transport indices |
+| 4 | `enrich_world_with_port_sites` | `port_sites.py` | Supported local port sites and selection coverage |
+| 5 | `enrich_world_with_route_corridors` | `route_corridors.py` | Paths, diagnostics and membership coverage |
+| 6 | `_enrich_ecosystems_and_resources` | `api.py` | Ecology/resources; physical reefs receive separate port-link annotations |
+| 7 | Land use, natural frontiers, worldbuilding | Their corresponding Python modules | Human land-use/terrain diagnostics and five realism checks |
+| 8 | Social histories and later human consumers | `api.py` | Population/economy, genealogy, logistics, demographics, markets, graphs and phonology |
 
-Line numbers for the calls: `api.py:235`, `:241`, `:242`, `:243`, `:255`, `:256`. Ordering is load-bearing — `port_sites` reads `harbor_suitability_index` produced by navigability, and `route_corridors` reads `port_suitability_index` and `port_site_id` produced by `port_sites`.
+Ordering is load-bearing: ports consume navigation, corridors consume navigation and ports, and reef port links follow port publication without changing physical reef equations. Cell suppression happens only after the full sequence finishes.
 
-`generate_geo_world` (`src/magic_geo/api.py:287`) calls **none** of these six.
+`generate_geo_world` shares the physical-foundation and ecology/resource phases and skips the human stages in this table.
 
 ---
 
 ## The `settlement_score` field: every input term
 
-`settlement_score` is a native per-cell field written by `derive_soils_biomes_resources` (`cpp/src/engine/environment.cpp:301`, called at `pipeline.cpp:187`) and then adjusted by `derive_landforms` (`environment.cpp:417`, called at `pipeline.cpp:188`). It is serialized as cell field #155 at precision `max(8, float_precision)`.
+`settlement_score` is a native per-cell field written by `derive_soils_biomes_resources`, adjusted by `derive_landforms`, and finally gated by `finalize_settlement_climate_applicability`. It is serialized at precision `max(8, float_precision)`.
 
 ### Shared intermediates
 
@@ -76,7 +80,11 @@ Line numbers for the calls: `api.py:235`, `:241`, `:242`, `:243`, `:255`, `:256`
 | `litho_base` | `volcanic → 0.78`, `granite → 0.50`, `shale → 0.44`, otherwise `0.58` | `environment.cpp:336` |
 | `fertility` | `clamp(litho_base + 0.20·climate_soil + (is_river ? 0.24 : 0) − 0.35·slope_penalty − (aridity < 0.45 ? 0.28 : 0), 0, 1)` | `environment.cpp:339` |
 
-`has_ocean_neighbor` is named for oceans but tests `is_water` on the neighbour, which is also true for lakes. Every "coastal" test in the native settlement code therefore includes lake shores. The Python replay validator mirrors this exactly (`src/magic_geo/cli/validators/settlement.py:267`, `:396`).
+`is_water` identifies marine cells; standing inland lakes use `is_lake` instead.
+Both have zero settlement score and are excluded from candidate selection.
+`has_ocean_neighbor` tests only marine neighbors, so its coastal bonus does not
+include inland lake shores. Lake shore suitability still depends on terrestrial
+runoff, river access, fertility and climate.
 
 ### The four positive terms, the hazard term and the biome multiplier
 
@@ -84,7 +92,7 @@ Line numbers for the calls: `api.py:235`, `:241`, `:242`, `:243`, `:255`, `:256`
 
 | Term | Formula | Weight | Notes |
 |---|---|---|---|
-| `water_access` | `is_river → 1.0`; else `is_lake → 0.85`; else `coast → 0.78`; else `clamp(runoff_mm_y / 550, 0, 0.55)` | `0.38` | First-match priority chain; the dry branch is capped at 0.55, so a non-water cell can never reach the river value |
+| `water_access` | `is_river → 1.0`; else `coast → 0.78`; else `clamp(runoff_mm_y / 550, 0, 0.55)` | `0.38` | Applies only to exposed terrestrial cells; marine and standing lake scores are zero |
 | `fertility` | as above | `0.30` | Uses the same value serialized as `cells[].fertility` |
 | `climate_score` | `clamp(1 − |temperature_c − 17| / 31, 0, 1)` | `0.18` | Peaks at 17 °C, reaches 0 at −14 °C and +48 °C |
 | `resource_score` | `resource == none ? 0.0 : 0.18` | `0.18` (flat) | Any non-`none` resource contributes the same bonus |
@@ -114,15 +122,17 @@ Water cells short-circuit at `environment.cpp:327`–`:334`: `settlement_score =
 
 The branches are `else if`-chained, so at most one applies. Note that `derive_landforms` also mutates other cell state *before* adjusting the score: `soil_type`, `fertility`, `biome` and `resource` on delta/floodplain cells (`environment.cpp:477`–`:484`), `soil_type` and `resource` on alluvial-fan cells (`:487`–`:490`) and on salt-flat cells (`:493`–`:494`), and `soil_type` on glacial-valley/moraine cells (`:497`–`:499`). Only the delta/floodplain branch touches `fertility`, so for those cells the serialized `fertility` is not the value that entered the score expression.
 
+For the current seasonal path, finalization runs **after all landform adjustments**. The annual proxy is supported only when the native temperature lies strictly inside **(-14, 48) °C**; outside that interval the final score is zero and bonuses cannot restore eligibility. `settlement_climate_temperature_c` retains the native annual value at round-trip precision, and `settlement_climate_supported` is a strict boolean. An unsupported dry zero is an unavailable proxy value; a supported dry zero is a valid zero; marine/lake zero is a known structural zero. The score itself is never made null. This interval limits this particular suitability proxy, not human survival or universal habitability. Explicit historical selection v2 retains its original ungated score path.
+
 ---
 
 ## Settlement site selection
 
-`generate_settlements` (`cpp/src/engine/settlements.cpp:25`) ignores `params` entirely (`(void)params;` at line 26). The algorithm is four steps.
+`generate_settlements` in `cpp/src/engine/settlements.cpp` uses `params.temperature_model` to select the seasonal applicability prerequisite. Its ranking, target and spacing equations are unchanged.
 
 | Step | Rule | Source |
 |---|---|---|
-| 1. Candidacy | Skip `is_water` cells and cells with `settlement_score < 0.48`. A cell is a candidate only if it is a **local maximum**: no non-water neighbour has a strictly greater `settlement_score`. Water neighbours never disqualify. | `settlements.cpp:29`–`:43` |
+| 1. Candidacy | Skip marine (`is_water`) and standing lake (`is_lake`) cells, unsupported seasonal proxy inputs, and cells with `settlement_score < 0.48`. A candidate must be a **local maximum** among eligible exposed terrestrial neighbors. Marine, lake and unsupported neighbors never disqualify it. | `settlements.cpp` |
 | 2. Ranking | Sort candidates by `settlement_score` **descending**, tie-broken by ascending cell id. Comparator is a strict total order, so the (unstable) `std::sort` is deterministic. | `settlements.cpp:44`–`:49` |
 | 3. Target count | `target = clamp(cell_count / 180, 8, 64)` (integer division) | `settlements.cpp:51` |
 | 4. Greedy spacing | Walk the ranked list; skip a candidate if its great-circle angular distance to **any already-selected** site is `< min_sep`; otherwise accept. Stop when `settlements.size() >= target`. | `settlements.cpp:52`–`:76` |
@@ -156,14 +166,16 @@ Settlement ids are assigned in selection order (`settlement.id = settlements.siz
 
 | Priority | Condition | Returned index | Serialized name |
 |---|---|---|---|
-| 1 | `has_ocean_neighbor(cells, cell.id)` (any water neighbour, lakes included) | 1 | `port` |
+| 1 | `has_ocean_neighbor(cells, cell.id)` (any marine neighbor) | 1 | `port` |
 | 2 | `cell.is_river` | 0 | `river_city` |
 | 3 | `resource ∈ {1, 2, 5, 6}` = `volcanic_arc_metals`, `craton_iron_gold`, `placer_metals`, `geothermal` | 2 | `mining_town` |
 | 4 | `fertility > 0.66` **or** `resource == 7` (`fertile_alluvium`) | 3 | `agricultural_town` |
 | 5 | `biome ∈ {9, 10}` = `cold_desert`, `hot_desert` **and** (`runoff_mm_y > 120.0` **or** `is_lake`) | 4 | `oasis` |
 | 6 | otherwise | 5 | `frontier_town` |
 
-Because rule 1 fires first, a river mouth on the coast is typed `port`, not `river_city`; and a lakeside settlement is typed `port` even though no marine water is adjacent. The mining-resource set is mirrored in Python as `SETTLEMENT_MINING_RESOURCES` (`src/magic_geo/cli/_constants.py:230`) and the desert biome set as `SETTLEMENT_DESERT_BIOMES` (`:236`).
+Because rule 1 fires first, a river mouth on the marine coast is typed `port`.
+An inland lakeside settlement proceeds through the remaining rules. The
+mining-resource and desert-biome sets are mirrored in the Python replay.
 
 ---
 
@@ -252,7 +264,7 @@ The route count is at most `2 * settlement_count` and typically less, because a 
 | 5 | `distance_km` | double | `float_precision` | great-circle endpoint distance, `angular_distance × planet_parameters.radius_km` |
 | 6 | `cost` | double | `float_precision` | `distance_km × barrier × type discount` |
 
-`route_corridors` later **adds three keys to each route dict in place** (Python side only, not part of the native schema): `route_corridor_id`, `route_corridor_type`, `path_cell_ids` (`src/magic_geo/route_corridors.py:452`–`:454`, and the not-found branches at `:424`–`:426` / `:438`–`:440`).
+Current `route_corridors` publication adds `route_corridor_id`, `route_corridor_type`, `path_cell_ids`, `route_path_supported` and `route_corridor_diagnostics_supported` to each route dict after auditing its prerequisites and staged outputs. These are Python annotations, not native route fields. Historical transport v1/v2 retains its original three-field annotation.
 
 ---
 
@@ -260,13 +272,14 @@ The route count is at most `2 * settlement_count` and typically less, because a 
 
 `enrich_world_with_settlement_route_models` (`src/magic_geo/settlement_routes.py:41`) computes **nothing physical**. It republishes the native algorithm contract as two top-level objects plus two summary strings, and independently recomputes the candidate count and target count as a cross-check.
 
-`world["settlement_selection_model"]` (`settlement_routes.py:62`–`:106`):
+Current seasonal `world["settlement_selection_model"]` (`settlement_routes.py`):
 
 | Key | Value | Meaning |
 |---|---|---|
-| `model_type` | `causal_native_score_local_max_separated_settlement_selection_v1` | |
-| `score_model` | `native_soil_biome_resource_water_climate_hazard_landform_score_v1` | |
-| `candidate_model` | `nonwater_raw_score_threshold_neighbor_local_max_v1` | |
+| `model_type` | `causal_native_score_local_max_separated_settlement_selection_v3` | Explicit historical v2 remains independently replayable |
+| `score_model` | `native_soil_biome_resource_water_climate_hazard_landform_score_with_annual_proxy_support_v3` | Unsupported seasonal scores are zero after all adjustments |
+| `candidate_model` | `nonmarine_nonlake_annual_proxy_supported_raw_score_threshold_neighbor_local_max_v3` | Only supported exposed neighbors can suppress a local maximum |
+| `annual_climate_applicability` | Exact `native_annual_settlement_suitability_proxy_support_v1` declaration in `settlement_climate_support.py` | Retained annual input, open interval, separate surface eligibility and unavailable-zero policy |
 | `rank_model` | `descending_raw_score_then_cell_id_v1` | |
 | `selection_model` | `greedy_spherical_minimum_separation_until_target_v1` | |
 | `target_model` | `clamp_floor_cell_count_divisor_minimum_maximum_v1` | |
@@ -312,6 +325,16 @@ The route count is at most `2 * settlement_count` and typically less, because a 
 
 Both strings are also written into `summary` (`settlement_routes.py:134`–`:136`).
 
+The current transport declarations are:
+
+| Key | `model_type` | Required current source families |
+|---|---|---|
+| `navigability_model` | `causal_channel_hydraulic_coastal_navigability_v3` | Settlement v3 and physical channel morphology/hydraulics v2 |
+| `port_site_model` | `causal_navigability_coastal_port_site_selection_v3` | Settlement v3 and navigation v3 |
+| `route_corridor_model` | `causal_feature_weighted_dijkstra_route_corridors_v3` | Settlement v3, navigation/ports v3, native routes v1 and aquifer v2 |
+
+Exact own and parent declarations are checked before mutation. Explicit transport v1/v2 uses its historical replay; missing or malformed current metadata is not a request to use a historical default.
+
 ---
 
 ## Navigability inputs consumed by ports and corridors
@@ -325,7 +348,9 @@ Three cell fields produced by `enrich_world_with_navigability_diagnostics` are t
 | `harbor_suitability_index` | `0` for water cells and for land cells with no marine neighbour; else `clamp(coastal_nav·0.32 + protected(0.24) + river_mouth(0.18) + low_relief(|elev|/900)·0.14 + settlement_score·0.18 − clamp(ice/300)·0.22)` | `navigability_diagnostics.py:93`–`:115` |
 | `transport_chokepoint_index` | `0` unless the cell is in a `marine_chokepoints` record; else `clamp(constriction·0.72 + coastal_nav·0.28)` | `navigability_diagnostics.py:118`–`:127` |
 
-`harbor_suitability_index` reads `settlement_score` with a `0.0` default. In geo-only worlds `settlement_score` has been stripped, so that term is identically zero — one of the concrete ways the human layer's absence propagates. (In practice the whole navigability enricher is skipped in geo-only mode anyway; see below.)
+The harbor formula runs only when its actual settlement input is available. Current coastal-land harbor inputs expose `harbor_site_applicable` and `harbor_suitability_supported`; unsupported harbor, overall `navigability_index` and classification are null with false support flags. Water or no-marine-contact harbor contributions remain known structural zeros. River/coastal/chokepoint components remain numeric. The old missing-`settlement_score=0.0` fallback belongs to historical replay; current full consumers require the declared source, and geo-only generation skips navigation entirely.
+
+`navigable_waterway_selection_complete` and `navigability_estimates_complete` describe whole-family coverage. Incomplete navigation withholds waterway components, publishes null membership IDs and unavailable aggregate estimates, and keeps the literal emitted-record count. An empty emitted list therefore needs its completeness flag before it can mean known absence.
 
 ---
 
@@ -335,7 +360,7 @@ Three cell fields produced by `enrich_world_with_navigability_diagnostics` are t
 
 ### The three access indices
 
-All three return `0.0` for water cells and for cells with no marine neighbour.
+All three have known `0.0` contributions for water cells and for cells with no marine neighbour. On applicable land, the bay and river-mouth formulas require their actual supported harbor input; otherwise those indices are null. Strait access remains physical and numeric.
 
 **`protected_bay_index`** (`port_sites.py:44`–`:56`):
 
@@ -382,11 +407,12 @@ Selection (`port_sites.py:217`–`:223`):
 
 ```
 severe_ice = ice_thickness_m >= 80.0  or  biome == "ice_cap"
-selected   = (not is_water) and ( (port_suitability_index >= 0.58 and not severe_ice)
+selected   = port_site_selection_supported and (not is_water) and (
+                                 (port_suitability_index >= 0.58 and not severe_ice)
                                   or cell_id hosts a settlement of type "port" )
 ```
 
-The `port` settlement override bypasses both the suitability threshold and the ice veto: a native port settlement always gets a port site. Selected cells are then walked in **ascending cell id** and given `port_site_id = len(records)` (`port_sites.py:229`–`:232`).
+After the support prerequisite, the `port` settlement override bypasses both the suitability threshold and the ice veto. It does not bypass input availability. Supported selected cells are walked in **ascending cell id** and given dense `port_site_id = len(records)` IDs. They remain emitted even when other cells make `port_site_selection_complete=false`.
 
 ### Site typing
 
@@ -401,22 +427,22 @@ The `port` settlement override bypasses both the suitability threshold and the i
 | 5 | `port_suitability >= 0.58` | `coastal_port` |
 | 6 | otherwise | `none` |
 
-A cell keeps its raw type only if it was also `selected`; otherwise the field is forced to `"none"` (`port_sites.py:221`). A selected cell whose raw type resolved to `"none"` — which can only happen through the port-settlement override — is relabelled `port_settlement` (`port_sites.py:233`–`:234`). The validator's allowed set is exactly `{none, protected_bay_port, river_mouth_port, strait_port, harbor_port, coastal_port, port_settlement}` (`src/magic_geo/cli/commands/validate.py:10891`).
+A supported cell keeps its raw type only if selected; known nonselection uses `"none"`. Unsupported selection has null type and ID. A selected cell whose raw type resolved to `"none"` — which can only happen through the port-settlement override — is relabelled `port_settlement`. The available type vocabulary remains `{none, protected_bay_port, river_mouth_port, strait_port, harbor_port, coastal_port, port_settlement}`.
 
 ### Cell fields and the port site record
 
-Cell fields written for every cell (`port_sites.py:211`–`:221`), each rounded to 6 decimals:
+Cell fields written for every cell; available numeric indices are rounded to 6 decimals:
 
 | Cell field | Range | Notes |
 |---|---|---|
-| `protected_bay_index` | `[0, 1]` | `0` on water |
-| `river_mouth_port_index` | `[0, 1]` | `0` on water and on non-river/non-fluvial-landform cells |
+| `protected_bay_index` | `[0, 1]` or null | `protected_bay_supported`; known `0` on water |
+| `river_mouth_port_index` | `[0, 1]` or null | `river_mouth_port_supported`; known `0` on water and outside the fluvial branch |
 | `strait_access_index` | `[0, 1]` | `0` on water |
-| `port_suitability_index` | `[0, 1]` | `0` on water |
-| `port_site_type` | enum string | `"none"` unless selected |
-| `port_site_id` | int | `-1` unless selected |
+| `port_suitability_index` | `[0, 1]` or null | `port_suitability_supported`; known `0` on water |
+| `port_site_type` | enum string or null | `"none"` for supported nonselection; null when selection is unsupported |
+| `port_site_id` | int or null | `-1` for supported nonselection; null when `port_site_selection_supported=false` |
 
-`world["port_sites"][]` — 24 fields (`port_sites.py:259`–`:289`):
+`world["port_sites"][]` retains supported selected-site records. Its existing fields and the current waterway-link annotation are:
 
 | Field | Type | Definition |
 |---|---|---|
@@ -436,7 +462,8 @@ Cell fields written for every cell (`port_sites.py:211`–`:221`), each rounded 
 | `route_ids` | int[] | union of routes incident on those settlements |
 | `marine_region_ids` | int[] | distinct `marine_region_id` of marine neighbours |
 | `marine_chokepoint_ids` | int[] | distinct `marine_chokepoint_id` of marine neighbours |
-| `navigable_waterway_ids` | int[] | `navigable_waterway_id` of this cell **and all neighbours**, `>= 0`, sorted (`port_sites.py:167`) |
+| `navigable_waterway_ids` | int[] or null | IDs on this cell and neighbors when the parent waterway selection is complete |
+| `navigable_waterway_links_complete` | bool | False means the link family is unavailable, not a known empty list |
 | `landform`, `biome`, `water_body_type` | string | cell mirrors |
 | `is_river` | bool | cell mirror |
 | `selected_by_port_settlement` | bool | `bool(port_settlement_ids)` |
@@ -524,6 +551,16 @@ Distance uses the haversine formula against `planet_parameters.radius_km`, with 
 
 Routes are processed in **ascending route id** (`route_corridors.py:419`). A route whose `from`/`to` settlement is missing, or whose search returns no path, gets `route_corridor_id = -1`, `route_corridor_type = "none"`, `path_cell_ids = []` and produces **no** corridor record.
 
+Current v3 also refuses to infer a path when a competing movement cost is unavailable; an unknown competitor is not silently skipped. The route states are:
+
+| State | `route_path_supported` | `path_cell_ids` | Corridor ID |
+|---|---|---|---|
+| Known nonempty path | true | Ordered cell IDs | Dense emitted record ID |
+| Known absent path | true | `[]` | `-1` |
+| Unavailable path | false | null | null |
+
+A known path can still have `route_corridor_diagnostics_supported=false`, retaining its physical path record with null classification and affected feature diagnostics. Thus known path, complete diagnostics and complete membership are separate claims.
+
 ### Corridor classification and cell assignment
 
 `_primary_corridor_type` (`route_corridors.py:274`–`:288`) counts path cells whose feature index is `>= 0.45` (one shared threshold, `MOUNTAIN_PASS_THRESHOLD = RIVER_VALLEY_THRESHOLD = COASTAL_ROUTE_THRESHOLD = OASIS_ROUTE_THRESHOLD = 0.45`, `route_corridors.py:13`–`:16`), then:
@@ -533,7 +570,7 @@ Routes are processed in **ascending route id** (`route_corridors.py:419`). A rou
 3. `route_type == "mountain_pass"` and `mountain_pass_corridor` count `> 0` → `mountain_pass_corridor`;
 4. otherwise the highest count, ties broken lexicographically by name; if the best count is `0` → `overland_corridor`.
 
-For every cell on the accepted path (`route_corridors.py:445`–`:451`):
+When all route paths and required diagnostics are complete, each accepted path contributes cell membership using the unchanged equation:
 
 ```
 feature_support = max of the four feature indices on that cell
@@ -544,18 +581,18 @@ if membership >= cell.route_corridor_index:                      # note >=, not 
     cell.route_corridor_id    = corridor_id
 ```
 
-The `>=` comparison means a **later** route wins equal ties, which is why the declared `cell_assignment_model` is `maximum_membership_with_later_route_winning_equal_ties_v1`. Cells never touched by a path keep `route_corridor_index = 0.0`, `route_corridor_type = "none"`, `route_corridor_id = -1`.
+The `>=` comparison means a **later** route wins equal ties, which is why the declared `cell_assignment_model` is `maximum_membership_with_later_route_winning_equal_ties_v1`. Under complete membership, untouched cells keep `route_corridor_index = 0.0`, `route_corridor_type = "none"`, `route_corridor_id = -1`. If `route_corridor_membership_complete=false`, all three cell membership fields are null; a known local path cannot establish global ownership by itself.
 
 ### The corridor record
 
-`world["route_corridors"][]` — 29 fields (`route_corridors.py:347`–`:377`):
+`world["route_corridors"][]` contains one record per supported nonempty path. Existing physical fields remain known; current diagnostic and link fields carry separate coverage:
 
 | Field | Type | Definition |
 |---|---|---|
 | `id` | int | corridor index, equals position in the array |
 | `route_id` | int | the source route |
 | `route_type` | string | the native route type string |
-| `corridor_type` | string | one of `mountain_pass_corridor`, `river_valley_corridor`, `coastal_corridor`, `oasis_corridor`, `overland_corridor` |
+| `corridor_type` | string or null | Available vocabulary: `mountain_pass_corridor`, `river_valley_corridor`, `coastal_corridor`, `oasis_corridor`, `overland_corridor` |
 | `from_settlement_id`, `to_settlement_id` | int | route `from` / `to` |
 | `start_cell_id`, `end_cell_id` | int | host cells of those settlements |
 | `cell_count` | int | `len(cell_ids)` |
@@ -563,21 +600,25 @@ The `>=` comparison means a **later** route wins equal ties, which is why the de
 | `path_length_km` | float | sum of haversine step distances, 6 dp |
 | `straight_distance_km` | float | `max(0.001, route.distance_km)`, 6 dp |
 | `detour_ratio` | float | `path_length_km / straight_distance_km`, 6 dp |
-| `mean_route_corridor_index`, `max_route_corridor_index` | float | over path cells, after assignment |
+| `mean_route_corridor_index`, `max_route_corridor_index` | float or null | Over path cells after complete membership assignment |
 | `mean_mountain_pass_route_index` | float | over path cells |
 | `mean_river_valley_route_index` | float | over path cells |
-| `mean_coastal_route_index` | float | over path cells |
+| `mean_coastal_route_index` | float or null | Over path cells when coastal diagnostics are supported |
 | `mean_oasis_route_index` | float | over path cells |
 | `mountain_pass_cell_count` | int | path cells with that index `>= 0.45` |
 | `river_valley_cell_count` | int | as above |
-| `coastal_cell_count` | int | as above |
+| `coastal_cell_count` | int or null | As above, when coastal diagnostics are supported |
 | `oasis_cell_count` | int | as above |
-| `named_feature_cell_count` | int | path cells where **any** of the four is `>= 0.45` |
+| `named_feature_cell_count` | int or null | Path cells where any feature is `>= 0.45`, when diagnostics are supported |
 | `settlement_ids` | int[] | sorted `{from, to}` minus `-1` |
 | `region_ids` | int[] | sorted political region ids of the two settlements, minus `-1` |
 | `route_ids` | int[] | always `[route_id]` |
-| `navigable_waterway_ids` | int[] | distinct non-negative `navigable_waterway_id` along the path |
-| `port_site_ids` | int[] | distinct non-negative `port_site_id` along the path |
+| `navigable_waterway_ids` | int[] or null | Known parent waterway IDs, with `navigable_waterway_links_complete` |
+| `port_site_ids` | int[] or null | Known parent port IDs, with `port_site_links_complete` |
+| `route_path_supported` | bool | True for every emitted nonempty-path record |
+| `route_corridor_diagnostics_supported` | bool | Whether the record's full classification/feature diagnostics are available |
+| `route_corridor_membership_complete` | bool | Whether global cell ownership and its derived means are available |
+| `navigable_waterway_links_complete`, `port_site_links_complete` | bool | Whether each linked source family is known along this path |
 
 `world["route_corridor_model"]` publishes the sub-model strings (`mountain_pass_model`, `river_valley_model`, `coastal_model`, `oasis_model`, `movement_cost_model`, `path_model`, `corridor_classification_model`, `cell_assignment_model`), the source model links to navigability / port / aquifer, `planet_radius_km`, `feature_threshold: 0.45`, `threshold_semantics: "serialized_feature_indices"`, `deterministic: true`, `route_count`, `corridor_count`, and `model_limitation = "diagnostic_static_corridors_without_capacity_congestion_seasonality_construction_cost_network_equilibrium_or_multimodal_scheduling"` (`route_corridors.py:470`–`:492`).
 
@@ -593,11 +634,11 @@ Note the threshold semantics differ from the port model: corridor feature counts
 | Present in geo-only worlds | no (society stage skipped, and the key is stripped) | no |
 | Geometry | two endpoints only; no intermediate cells | full ordered cell path over the mesh neighbour graph |
 | Cost model | endpoint-pair barrier multiplier × great-circle distance | per-edge directed terrain cost accumulated by Dijkstra |
-| Selection | 2 nearest-by-cost links per settlement, deduplicated to unordered pairs | one path per route with resolvable endpoints |
+| Selection | 2 nearest-by-cost links per settlement, deduplicated to unordered pairs | One record per supported nonempty path; unknown competing inputs withhold the inferred path |
 | Distance | `distance_km` = straight great-circle | `path_length_km` = summed steps; `detour_ratio` relates the two |
 | Type vocabulary | `overland`, `river_corridor`, `coastal_sea`, `mountain_pass` | `overland_corridor`, `river_valley_corridor`, `coastal_corridor`, `mountain_pass_corridor`, `oasis_corridor` |
-| Cell footprint | none | `route_corridor_index/_type/_id` on every path cell |
-| Cardinality | `<= 2 · settlement_count` | `<= route_count`; the full-world validator asserts equality (`validate.py:18004`) |
+| Cell footprint | none | `route_corridor_index/_type/_id` after complete path/diagnostic membership; otherwise null |
+| Cardinality | `<= 2 · settlement_count` | Current emitted count equals supported nonempty paths and is `<= route_count`; historical v1 inline validation required equality |
 
 The corridor layer is explicitly a **diagnostic overlay on top of** the route network, not a replacement for it: the route decides *which* settlements are connected and by what mode, the corridor decides *where the connection goes*. The route's `cost` is never recomputed from the corridor path.
 
@@ -716,18 +757,21 @@ magic-geo validate --world runs/world.json
 
 (`src/magic_geo/cli/commands/validate.py:92`; the command exits non-zero on any failure.) They do **not** run under `validate-geo` — that command calls `validate_geo_world` on the natural-only report (`src/magic_geo/cli/commands/validate_geo.py:23`–`:88`).
 
+Current transport v3 goes through `validate_public_human_water_transport` and the independent versioned replay in `human_water_transport_validation.py`, after natural-parent validation. It audits matching own/source declarations, strict support flags, nullable values, complete record coverage and path linkage. Emitted corridor count equals supported **nonempty** paths, not necessarily native route count. Explicit historical v1 uses the inline scalar checks described below; explicit v2 retains its own independent numerical path. These historical descriptions do not impose numeric or known-absence assumptions on unavailable v3 output.
+
 ### `_validate_settlement_selection`
 
 `src/magic_geo/cli/validators/settlement.py:22`, invoked at `validate.py:10584`. Emits the single failure string `"settlement selection model or causal replay invalid"`.
 
 | Stage | What it asserts |
 |---|---|
-| Metadata | Every one of the 22 `settlement_selection_model` keys checked in the metadata block equals its expected constant (the shared ones live at `src/magic_geo/cli/_constants.py:220`–`:236`), including all four `score_weights`, all five `hazard_weights`, all six `landform_score_adjustments`, `selection_score_precision == max(8, summary.output_float_precision)`, and `summary.settlement_selection_model` (`settlement.py:33`–`:102`). The remaining three published keys — `candidate_cell_count`, `target_count`, `settlement_count` — are checked against the replay in the Counts stage below |
-| Score replay | Independently recomputes the **entire** native `settlement_score` in Python — local relief, aridity, monthly PET dry/wet month counts, the full soil/biome decision tree, the resource decision tree, water access, climate score, hazard, cold-biome multiplier and landform adjustments — and compares against `cells[].settlement_score` (`settlement.py:126`–`:325`) |
+| Metadata | Exact own-version dispatch and matching summary identity select current v3 or explicit historical v2. Each family's expected score/candidate descriptors, all weights/adjustments and precision policy are checked. V3 additionally requires the exact typed `annual_climate_applicability` declaration; historical v2 rejects successor markers. Candidate, target and settlement counts are checked against replay |
+| Annual support | V3 independently reconstructs the retained annual source, verifies the round-trip temperature and strict open-interval flag, and requires unavailable score zero. Genuine historical seasonal-v2 archives retain native source/coverage audits but use their original score replay inputs |
+| Score replay | Independently recomputes local relief, aridity, monthly PET dry/wet month counts, soil/biome/resource decisions, water access, climate score, hazard, cold-biome multiplier and landform adjustments; current v3 then applies the final annual-support gate before comparing `cells[].settlement_score` |
 | Score tolerance | `max(1e-9, 16·10^-selection_score_precision, 10^-output_float_precision)`; with the default `float_precision = 4` this is `1e-4` (`settlement.py:312`–`:314`) |
-| Selection replay | Recomputes candidates, the descending-score/ascending-id sort, `target`, `min_sep = 2.4·sqrt(4π/N)` and the greedy pass using `position_3d` and `acos(clamp(dot))`; requires `[s.cell_id for s in settlements] == selected_ids` exactly (`settlement.py:327`–`:390`) |
+| Selection replay | Recomputes each family's eligible candidates/neighbors, descending-score/ascending-id sort, `target`, `min_sep = 2.4·sqrt(4π/N)` and the greedy pass using `position_3d` and `acos(clamp(dot))`; requires `[s.cell_id for s in settlements] == selected_ids` exactly |
 | Counts | `model.candidate_cell_count`, `model.target_count`, `model.settlement_count`, `summary.settlement_count` all match the replay |
-| Record mirrors | For each settlement: `id == index`, `type` matches the replayed type chain, `score` matches the cell's `settlement_score` **exactly** (`!=`, not a tolerance), `lat_deg`/`lon_deg`/`fertility` within `0.5·10^-precision + 1e-12`, and `biome`, `resource`, `water_body_type`, `is_river`, `region_id`, `culture_region_id`, `language_region_id` all equal to the host cell's fields (`settlement.py:416`–`:456`) |
+| Record mirrors | For each settlement: `id == index`, `type` matches the replayed type chain, `score` matches the cell's score exactly, coordinates/fertility meet the existing serialization tolerance, and biome/resource/water/river/culture/language mirrors match the host cell. `region_id` instead matches the political region's settlement-membership list; settlement allegiance can differ from the host cell's territorial assignment |
 | Summary | `summary.top_settlement_score` equals `settlements[0].score` exactly, or `0.0` when there are no settlements (`settlement.py:457`–`:461`) |
 
 The score replay is the reason this validator is a genuine gate on the native engine and not just a schema check: any change to `derive_soils_biomes_resources` or `derive_landforms` that is not mirrored in `settlement.py` fails the world.
@@ -744,7 +788,7 @@ The score replay is the reason this validator is a genuine gate on the native en
 | Counts | `len(routes)`, `model.settlement_count`, `model.route_count`, `summary.route_count` |
 | Per-route | `id`, `from`, `to`, `type` exact; `distance_km` within `10^-precision`; `cost` within `max(output_unit, distance·0.45·0.75·output_unit + output_unit)` — a forward-error bound derived from the barrier's tectonic term against the serialized-input quantization grid (`settlement.py:691`–`:707`) |
 
-### `_validate_port_sites`
+### Historical v1 `_validate_port_sites`
 
 `src/magic_geo/cli/validators/ports.py:21`, invoked at `validate.py:10856`. Failure string `"port site model or causal replay invalid"`. It re-derives `protected_bay`, `river_mouth`, `strait_access`, `port_suitability`, `severe_ice`, `selected` and the type chain for every cell, then the record list in ascending candidate cell id, then compares:
 
@@ -755,7 +799,7 @@ The score replay is the reason this validator is a genuine gate on the native en
 
 A separate structural block starting at `validate.py:10858` independently checks the port cell-field invariants: all four indices in `[0,1]`; water cells must have all four indices exactly `0.0`, type `"none"` and id `-1`; `site_id == -1 ⟺ site_type == "none"`; `site_type` drawn from the seven-value allowed set; and the candidate set recomputed from `port_suitability >= 0.58 and not severe_ice` or port-settlement membership must equal the assigned set.
 
-### `_validate_route_corridors`
+### Historical v1 `_validate_route_corridors`
 
 `src/magic_geo/cli/validators/corridors.py:24`, invoked at `validate.py:17996`. Failure string `"route corridor model or causal replay invalid"`. This is the heaviest replay in the layer: it re-implements all four feature indices, the directed movement cost, the Dijkstra, the classification chain and the cell-assignment `>=` rule, then checks:
 
@@ -794,15 +838,15 @@ Thresholds at `worldbuilding_realism.py:85`–`:92`, records at `:175`–`:218`.
 
 ## Geo-only mode: what disappears and what it implies
 
-At the **C++ layer there is no shape difference**. The geo facade feeds `simulate_geo_world` into the very same `serialize_world` the full facade uses (`cpp/src/engine.cpp:24` vs `:35`); `settlements`, `routes` and every derived summary counter are simply emitted empty or zero.
+Native geo generation skips society. Some historical civilization arrays/counters are still emitted as empty/default schema fields, but the current native social availability envelope is conditional and is absent in geo scope. Raw full and geo shapes therefore already differ.
 
-The divergence is created in Python. `_strip_native_civilization_outputs` (`src/magic_geo/api.py:269`) runs before any enricher and removes the stable-but-empty civilization schema, then `world["generation_scope"] = "geo_only"` is set (`api.py:305`).
+Python `_strip_native_civilization_outputs` removes civilization fields before the shared natural enrichment phases, then sets `world["generation_scope"] = "geo_only"`. Missing social inference is an explicit scope, not an observed empty society.
 
 | Removed scope | Settlement-layer entries |
 |---|---|
-| Top-level keys | `settlements`, `routes` (plus 13 other civilization arrays) |
-| Per-cell fields | `settlement_score`, `political_region_id`, `culture_region_id`, `language_region_id` |
-| Summary keys | `settlement_count`, `route_count`, `top_settlement_score`, `natural_border_fraction`, `border_segment_count`, `border_total_length_km` (plus 52 others) |
+| Top-level keys | `settlements`, `routes`, other civilization arrays/declarations and any native social availability envelope |
+| Per-cell fields | `settlement_score`, `settlement_climate_supported`, `settlement_climate_temperature_c`, `political_region_id`, `culture_region_id`, `language_region_id` |
+| Summary keys | Settlement/route/social counts, estimates, model mirrors and availability markers |
 
 `generate_geo_world` additionally raises `ValueError` unless `output.include_cells` is true (`api.py:296`–`:300`).
 
@@ -818,19 +862,7 @@ Because `enrich_world_with_navigability_diagnostics`, `enrich_world_with_port_si
 | `agricultural_zones`, `mining_zones`, `land_use_zone_model` | `agricultural_potential_index`, `mining_potential_index`, `agricultural_zone_id`, `mining_zone_id` |
 | `worldbuilding_realism_checks`, `worldbuilding_realism_model` | — |
 
-The reason the stripping is done explicitly, rather than relying on the native empty arrays, is stated in the `generate_geo_world` docstring at `api.py:288`–`:293`: mixed natural/human models must take their documented **no-human default branch** rather than reading an empty list as real data. The load-bearing removal is `settlement_score`, which the following natural enrichers read with a `0.0` default:
-
-| Enricher | Where `settlement_score` is used | Effect of removal |
-|---|---|---|
-| `aquifer_resources` | extraction-risk term | risk reflects hydrogeology only |
-| `ecosystem_dynamics` | disturbance-pressure term | disturbance is natural only |
-| `wildfire_disturbance` | ignition-potential term | ignition is natural only |
-| `navigability_diagnostics` | `harbor_suitability_index` (`navigability_diagnostics.py:106`) | not reached — enricher skipped |
-| `port_sites` | `_port_suitability` `settlement` term (`port_sites.py:103`) | not reached — enricher skipped |
-| `route_corridors` | via `port_suitability_index` and oasis settlement ids | not reached — enricher skipped |
-| `land_use_zones`, `resource_dynamics` | accessibility/viability terms | not reached / natural baseline |
-
-Practically: a geo-only world is internally consistent but its natural indices are the *pristine* variants. Comparing an aquifer extraction-risk or wildfire ignition value between a full world and a geo-only world of the same seed is comparing two different model branches, not measuring a human effect. `enrich_world_with_geo_evolution_provenance` (`api.py:374`) is the geo-only-exclusive registry that records this scope explicitly.
+Current natural water v2, ecosystem E5 and native wildfire v7 do not read settlement score in either scope; removing S does not select a separate pristine natural formula. Both API paths share the physical foundation and ecology/resource sequence. Current resource v5 economic access/viability are unavailable in geo scope (null with false support), while separately named geographic baseline fields remain numeric. Human transport, land-use and worldbuilding stages are skipped. Explicit older models retain their historical default behavior when independently replayed. See the [current availability and geo contract](../../settlement_social_availability.md#reading-unknown-and-empty-results); `enrich_world_with_geo_evolution_provenance` records the natural-only scope.
 
 ---
 
@@ -860,11 +892,13 @@ for s in world["settlements"][:5]:
     print(s["id"], s["type"], round(s["score"], 4), s["biome"], s["resource"])
 
 for r in world["routes"][:5]:
-    # route_corridors adds these three keys in place
+    # Unknown inferred paths remain distinct from known empty paths.
+    path_size = (len(r["path_cell_ids"]) if r["route_path_supported"] is True
+                 else "unavailable")
     print(r["id"], r["from"], "->", r["to"], r["type"],
           round(r["distance_km"], 1), round(r["cost"], 1),
           "corridor", r["route_corridor_id"], r["route_corridor_type"],
-          "cells", len(r["path_cell_ids"]))
+          "cells", path_size)
 
 for c in world["route_corridors"][:5]:
     print(c["id"], c["corridor_type"], c["cell_count"],
@@ -926,15 +960,15 @@ Python enricher summary keys (all absent in geo-only mode):
 | `natural_frontier_model`, `natural_frontier_count`, `natural_frontier_cell_count`, `natural_frontier_border_segment_count`, `natural_frontier_total_area_km2`, `natural_frontier_total_length_km`, `mean_natural_frontier_index`, `mean_natural_frontier_barrier_score`, `natural_frontier_type_counts`, and `mountain_frontier_count`, `river_frontier_count`, `desert_frontier_count`, `coastal_frontier_count`, `ice_frontier_count`, `dense_forest_frontier_count`, `wetland_frontier_count` | `natural_frontiers.py:279`–`:325` |
 | `large_settlement_water_access_index`, `route_barrier_avoidance_index` (plus three non-settlement checks) | `worldbuilding_realism.py` |
 
-`route_feature_coverage_index` is defined as the fraction of corridors with at least one named-feature cell, and defaults to `1.0` when there are no corridors (`route_corridors.py:504`–`:509`) — another "empty layer trivially passes" default.
+Current summary coverage includes `navigable_waterway_selection_complete`, `navigability_estimates_complete`, `port_site_selection_complete`, the three port mean-support flags, `route_path_selection_complete`, `route_corridor_diagnostics_complete`, `route_corridor_membership_complete` and `coastal_route_estimates_complete`. Emitted record counts remain literal; unavailable family estimates/counts are null rather than supported-only renormalizations. `route_feature_coverage_index` is the fraction of records with a named-feature cell when diagnostics are complete. A complete empty diagnostic family yields `1.0`; incomplete diagnostics yield null, even if no records were emitted.
 
 ---
 
 ## Configuration surface
 
-There is **no settlement, route, port, corridor or frontier section in the configuration schema**. `generate_settlements` discards `params` entirely (`settlements.cpp:26`) and `generate_routes` reads only `params.radius_km`. Every threshold and weight documented on this page is a source constant.
+There is **no settlement, route, port, corridor or frontier tuning section in the configuration schema**. `generate_settlements` reads `params.temperature_model` to choose its applicability prerequisite, and `generate_routes` reads `params.radius_km`. The thresholds and weights documented here remain source constants.
 
-The three configuration values that do change the output:
+Resolution, radius and output precision affect these outputs directly:
 
 | Config key | Effect | Source |
 |---|---|---|
@@ -965,10 +999,10 @@ Everything else — climate, tectonics, hydrology, erosion — reaches this laye
   | `natural_frontiers._cell_barrier_type` `landform == "wetland"` (`:45`) | — | `wetland` is not in `LANDFORM_NAMES` |
 
   Most consequentially, **`mountain_belt` — the native landform for a mountain range (`LANDFORM_NAMES[6]`) — is in neither mountain-landform set.** A cell on a genuine orogenic belt therefore receives no landform-based mountain bonus in `_mountain_pass_index` or `_cell_barrier_score`; it can only reach those signals through the elevation and `boundary_convergent` terms. The mirrored constants in `src/magic_geo/cli/_constants.py:199`–`:219` reproduce the same sets, so the validators confirm the behaviour rather than flag it. This is reported as observed source behaviour; the intent behind these sets is not documented in the tree and is not resolved here.
-- **`has_ocean_neighbor` includes lakes.** Every "coastal" test in the native settlement path (`settlement_type_for_cell`, the `water_access` chain) is really an "any adjacent water" test (`environment.cpp:5`–`:12`). Lakeside settlements are typed `port`. The Python replay reproduces this, so it is a stable contract, not a drift — but the field name is misleading.
+- **Inland lake shore access is indirect.** The coastal score and port type use marine neighbors. Terrestrial cells near lakes depend on runoff, river access and the other suitability inputs; there is no dedicated freshwater-shore bonus.
 - **Ranking discount and cost discount disagree by construction.** A shared-basin pair with only one river endpoint is ranked with the `0.78` discount but priced without it. The replay validator reproduces both rules separately, so the divergence is enforced rather than accidental drift — but no source comment or model declaration states an intent behind it, and it means `cost` is not a monotone function of the ranking key.
 - **Corridor cell membership is order-dependent.** The assignment rule uses `>=`, so on exactly equal membership the highest-numbered route wins. Changing route ordering — which changes with settlement ordering, which changes with the score field — reshuffles corridor ownership of shared cells without any physical meaning attached to the change.
-- **Two realism checks cannot detect an empty layer.** `large_settlement_water_access` and `route_barrier_avoidance` both default to `1.0` with no settlements or no routes, as does `route_feature_coverage_index`. Passing these checks is not evidence that the layer produced anything.
+- **Empty diagnostics do not prove a populated layer.** `large_settlement_water_access` and `route_barrier_avoidance` retain their `1.0` empty-source defaults. Current `route_feature_coverage_index` is `1.0` only for complete empty diagnostics and null for incomplete diagnostics. Inspect emitted counts and source coverage before drawing a conclusion.
 - **No physical time.** Nothing in this layer carries a time coordinate. There is no founding date, no growth trajectory, no route construction epoch. The world's nominal timestep and elapsed time apply to the earth-system ledgers only, and the world document keeps `physical_time_resolved = false` and `nominal_time_calibrated = false` on those ledgers. Any narrative reading of settlement or route "history" comes from the separate historical layer, not from here.
 - **Determinism, not realism.** Every model in this layer declares `deterministic: true` and is byte-reproducible for a given seed and configuration. That guarantees replayability; it makes no claim that the resulting settlement pattern, route topology, port distribution or frontier geometry matches any real-world statistics. There is no calibration of this layer against empirical settlement or transport data anywhere in the tree.
 

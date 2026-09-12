@@ -4,6 +4,8 @@ import math
 from collections import Counter, deque
 from typing import Any
 
+from .grounded_ice_validation import APPLICABLE, RAW_THICKNESS, require_grounded_ice
+
 
 GLACIAL_LANDFORM_TYPES = {
     "none",
@@ -106,9 +108,11 @@ def _ice_cover_type(cell: dict[str, Any], relief_index: float) -> str:
     return "mountain_glacier"
 
 
-def _glacial_landform_type(cell: dict[str, Any], neighbors: list[dict[str, Any]]) -> str:
+def _glacial_landform_type(cell: dict[str, Any], neighbors: list[dict[str, Any]], *, grounded_current: bool = False) -> str:
     landform = str(cell.get("landform", ""))
     if landform in {"fjord", "glacial_valley", "glacial_lake", "moraine"}:
+        if grounded_current and (bool(cell.get("is_water", False)) or bool(cell.get("is_lake", False))) and landform not in {"fjord", "glacial_lake"}:
+            return "none"
         return landform
 
     relief = _neighbor_relief(cell, neighbors)
@@ -119,6 +123,12 @@ def _glacial_landform_type(cell: dict[str, Any], neighbors: list[dict[str, Any]]
     runoff = max(0.0, float(cell.get("runoff_mm_y", 0.0)))
     flow_accumulation = max(0.0, float(cell.get("flow_accumulation", 0.0)))
     is_water = bool(cell.get("is_water", False))
+
+    exposed = not is_water and not bool(cell.get("is_lake", False))
+    if grounded_current and not exposed:
+        # Historical glacial water terrain remains meaningful; present lake
+        # or sea ice cannot become a grounded glacier or moraine classifier.
+        return "glacial_lake" if _is_freshwater(cell) and (deglaciation_age >= 5.0 or moraine_deposition >= 0.35) else "none"
 
     if landform == "ice_field" and ice_thickness >= 25.0:
         return _ice_cover_type(cell, relief)
@@ -198,6 +208,7 @@ def _region_record(
     component: list[dict[str, Any]],
     glacial_type: str,
     cells_by_id: dict[int, dict[str, Any]],
+    *, grounded_current: bool = False,
 ) -> dict[str, Any]:
     divisor = max(1, len(component))
     centroid_lat, centroid_lon = _lat_lon_centroid(component)
@@ -229,7 +240,11 @@ def _region_record(
         "mean_permafrost_extent_index": _round(
             sum(float(cell.get("permafrost_extent_index", 0.0)) for cell in component) / divisor
         ),
-        "ice_covered_cell_count": sum(1 for cell in component if float(cell.get("ice_thickness_m", 0.0)) > 25.0),
+        "ice_covered_cell_count": (
+            sum(1 for cell in component if cell[APPLICABLE] and cell[RAW_THICKNESS] > 25.0)
+            if grounded_current else
+            sum(1 for cell in component if float(cell.get("ice_thickness_m", 0.0)) > 25.0)
+        ),
         "river_cell_count": sum(1 for cell in component if bool(cell.get("is_river", False))),
         "lake_cell_count": sum(1 for cell in component if _is_freshwater(cell)),
         "coastal_cell_count": sum(1 for cell in component if _has_marine_contact(cell, _neighbor_cells(cell, cells_by_id))),
@@ -242,7 +257,7 @@ def _region_record(
     }
 
 
-def _connected_regions(cells: list[dict[str, Any]], cells_by_id: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+def _connected_regions(cells: list[dict[str, Any]], cells_by_id: dict[int, dict[str, Any]], *, grounded_current: bool = False) -> list[dict[str, Any]]:
     candidate_ids = {_cell_id(cell) for cell in cells if str(cell.get("glacial_landform_type", "none")) != "none"}
     remaining = set(candidate_ids)
     records: list[dict[str, Any]] = []
@@ -272,11 +287,12 @@ def _connected_regions(cells: list[dict[str, Any]], cells_by_id: dict[int, dict[
         region_id = len(records)
         for cell in component:
             cell["glacial_landform_system_id"] = region_id
-        records.append(_region_record(region_id, component, glacial_type, cells_by_id))
+        records.append(_region_record(region_id, component, glacial_type, cells_by_id, grounded_current=grounded_current))
     return records
 
 
 def enrich_world_with_glacial_landforms(world: dict[str, Any]) -> dict[str, Any]:
+    grounded_current = require_grounded_ice(world)
     cells = world.get("cells", [])
     summary = world.setdefault("summary", {})
     if not isinstance(cells, list) or not cells:
@@ -302,7 +318,7 @@ def enrich_world_with_glacial_landforms(world: dict[str, Any]) -> dict[str, Any]
 
     for cell in cells:
         neighbors = _neighbor_cells(cell, cells_by_id)
-        glacial_type = _glacial_landform_type(cell, neighbors)
+        glacial_type = _glacial_landform_type(cell, neighbors, grounded_current=grounded_current)
         landform_index, erosion_index, deposition_index, meltwater_index = _glacial_indices(cell, neighbors, glacial_type)
         cell["glacial_landform_index"] = _round(landform_index)
         cell["glacial_erosion_intensity_index"] = _round(erosion_index)
@@ -320,7 +336,7 @@ def enrich_world_with_glacial_landforms(world: dict[str, Any]) -> dict[str, Any]
         meltwater_sum += meltwater_index
         type_counts[glacial_type] += 1
 
-    systems = _connected_regions(cells, cells_by_id)
+    systems = _connected_regions(cells, cells_by_id, grounded_current=grounded_current)
     divisor = float(len(cells))
     summary["glacial_landform_cell_count"] = glacial_cell_count
     summary["glacial_landform_system_count"] = len(systems)

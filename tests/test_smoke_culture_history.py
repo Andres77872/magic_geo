@@ -7,6 +7,7 @@ what it needs from the shared world, so they no longer depend on order.
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
@@ -21,8 +22,40 @@ from support.cli import assert_no_cli_crash
 
 
 class SmokeCultureHistoryTests(TestCase):
+    def _fully_supported_world(self, key: str) -> dict:
+        """These current seeds exercise complete estimates and populated records.
+
+        Mixed-source nullability has dedicated availability tests. Keep this
+        smoke suite's numeric assertions conditional on an explicit healthy
+        witness, so unsupported estimates cannot masquerade as numeric zero.
+        """
+        world = worlds.cached_world_readonly(key)
+        summary = world["summary"]
+        for field in (
+            "historical_event_count", "dynastic_change_count", "ruin_count",
+            "mean_historical_instability", "mean_cultural_continuity",
+        ):
+            self.assertIs(summary["native_social_summary_availability"][field], True, field)
+        speaker_flags = summary["speaker_history_summary_availability"]
+        self.assertEqual(set(speaker_flags), {
+            "total_estimated_speaker_population", "high_contact_speaker_history_count",
+            "mean_speaker_allophonic_variation_index", "mean_speaker_syllable_pressure_index",
+            "mean_speaker_contact_index", "mean_speaker_population_adoption_index",
+            "mean_speaker_phonetic_reduction_index", "mean_speaker_lexical_diffusion_pressure_index",
+        })
+        for field, available in speaker_flags.items():
+            self.assertIs(available, True, field)
+        for culture in world["cultures"]:
+            self.assertIs(culture["continuity_estimate_available"], True)
+            self.assertIs(culture["ruin_count_available"], True)
+        for history in world["speaker_population_histories"]:
+            self.assertIs(history["estimate_available"], True)
+            for step in history["steps"]:
+                self.assertIs(step["estimate_available"], True)
+        return world
+
     def test_cultures(self) -> None:
-        world = worlds.cached_world_readonly("small_smoke")
+        world = self._fully_supported_world("small_smoke")
         summary = world["summary"]
         self.assertEqual(summary["culture_region_count"], len(world["cultures"]))
         self.assertGreater(summary["culture_region_count"], 0)
@@ -84,7 +117,7 @@ class SmokeCultureHistoryTests(TestCase):
             sum(history["step_count"] for history in world["speaker_population_histories"]),
         )
     def test_language_regions(self) -> None:
-        world = worlds.cached_world_readonly("small_smoke")
+        world = self._fully_supported_world("small_smoke")
         summary = world["summary"]
         self.assertEqual(
             summary["lexical_correspondence_language_count"],
@@ -159,7 +192,7 @@ class SmokeCultureHistoryTests(TestCase):
             delta=0.0001,
         )
     def test_cultures_2(self) -> None:
-        world = worlds.cached_world_readonly("small_smoke")
+        world = self._fully_supported_world("small_smoke")
         first_culture = world["cultures"][0]
         self.assertIn("language_region_id", first_culture)
         self.assertIn("homeland_region_id", first_culture)
@@ -404,7 +437,7 @@ class SmokeCultureHistoryTests(TestCase):
             self.assertGreaterEqual(step["semantic_shift_index"], 0.0)
             self.assertLessEqual(step["semantic_shift_index"], 1.0)
     def test_historical_eras(self) -> None:
-        world = worlds.cached_world_readonly("small_smoke")
+        world = self._fully_supported_world("small_smoke")
         first_era = world["historical_eras"][0]
         self.assertIn("dominant_process", first_era)
         self.assertIn("start_year_bp", first_era)
@@ -431,22 +464,22 @@ class SmokeCultureHistoryTests(TestCase):
         again -- a claim a CLI verdict line cannot make.
         """
 
-        world = worlds.cached_world_readonly("mid_512")
+        world = self._fully_supported_world("mid_512")
 
         for model_key, model_type in (
             (
                 "culture_region_model",
-                "causal_political_homeland_barrier_trade_culture_regions_v1",
+                "causal_political_homeland_barrier_trade_culture_regions_v2",
             ),
             ("language_region_model", "causal_trade_union_family_lineage_phonology_v1"),
-            ("cultural_site_model", "causal_terrain_culture_ranked_sacred_ruin_sites_v1"),
+            ("cultural_site_model", "causal_terrain_culture_ranked_sacred_ruin_sites_v2"),
             (
                 "historical_event_model",
-                "causal_region_culture_language_trade_site_timeline_v1",
+                "causal_region_culture_language_trade_site_timeline_v2",
             ),
             (
                 "phonology_history_model",
-                "causal_language_era_sound_rule_lexical_diffusion_speaker_history_v1",
+                "causal_language_era_sound_rule_lexical_diffusion_speaker_history_v2",
             ),
         ):
             with self.subTest(model=model_key):
@@ -470,42 +503,44 @@ class SmokeCultureHistoryTests(TestCase):
         self.assertEqual(len(world["historical_eras"]), 4)
 
     def test_validate_reports_every_culture_history_replay_verdict(self) -> None:
-        """``validate`` reaches and reports the culture, history and phonology replays.
+        """Each current replay is reached with its upstream prerequisites intact.
 
-        Wiring is the one claim the dedicated validator modules cannot make -- they
-        never go through the public command. One tamper per verdict in a single pass
-        is all that claim needs.
+        Native failures correctly stop the dependent phonology audit. Isolate
+        each tamper to prove all three public verdicts without invalidating the
+        next case's source layer.
         """
 
-        world = worlds.cached_world("mid_512")
+        original = self._fully_supported_world("mid_512")
         runner = CliRunner()
 
         with TemporaryDirectory() as temporary_directory:
             world_path = Path(temporary_directory) / "world.json"
 
-            def validate_current() -> Result:
+            def validate_current(world: dict) -> Result:
                 world_path.write_text(json.dumps(world), encoding="utf-8")
                 return runner.invoke(app, ["validate", "--world", str(world_path)])
 
-            control = validate_current()
+            control = validate_current(original)
             assert_no_cli_crash(self, control, command="validate")
             self.assertEqual(control.exit_code, 0, control.output)
 
-            culture = world["cultures"][0]
-            culture["type"] = (
-                "agrarian_lowland" if culture["type"] != "agrarian_lowland" else "river_valley"
-            )
-            world["historical_events"][0]["year_bp"] += 2.0
-            world["phonological_rules"][0]["probability_index"] += 0.01
-
-            result = validate_current()
-
-        assert_no_cli_crash(self, result, command="validate")
-        self.assertEqual(result.exit_code, 1, result.output)
-        for message in (
-            "cultural geography model or causal replay invalid",
-            "historical geography model or causal replay invalid",
-            "phonology history model or causal replay invalid",
-        ):
-            with self.subTest(message=message):
-                self.assertIn(message, result.output)
+            for family, message in (
+                ("culture", "native cultural availability model or causal replay invalid"),
+                ("history", "native historical availability model or causal replay invalid"),
+                ("phonology", "phonology history model or causal replay invalid"),
+            ):
+                with self.subTest(family=family):
+                    world = deepcopy(original)
+                    if family == "culture":
+                        culture = world["cultures"][0]
+                        culture["type"] = (
+                            "agrarian_lowland" if culture["type"] != "agrarian_lowland" else "river_valley"
+                        )
+                    elif family == "history":
+                        world["historical_events"][0]["year_bp"] += 2.0
+                    else:
+                        world["phonological_rules"][0]["probability_index"] += 0.01
+                    result = validate_current(world)
+                    assert_no_cli_crash(self, result, command="validate")
+                    self.assertEqual(result.exit_code, 1, result.output)
+                    self.assertIn(message, result.output)

@@ -1025,8 +1025,13 @@ class ReefTypeClassificationTests(TestCase):
             _reef_pair(sea, land)
             growth[temperature] = sea["reef_growth_index"]
 
-        self.assertAlmostEqual(growth[26.0] - growth[1.0], 0.26, places=6)
-        self.assertAlmostEqual(growth[17.0] - growth[1.0], 13.0 / 14.0 * 0.55 * 0.26, places=6)
+        self.assertEqual(growth[1.0], 0.0)
+        # Within the model's support, the original additive thermal and
+        # nonthermal contributions still apply. Outside it, shelf/coast
+        # bonuses cannot provide a positive habitat baseline.
+        nonthermal = 0.25 + 0.24 + (1.0 - 0.42 / 0.58) * 0.10
+        self.assertAlmostEqual(growth[26.0], nonthermal + 0.26, places=6)
+        self.assertAlmostEqual(growth[17.0], nonthermal + 13.0 / 14.0 * 0.55 * 0.26, places=6)
 
 
 class ReefIndexTests(TestCase):

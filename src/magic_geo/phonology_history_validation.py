@@ -1281,6 +1281,13 @@ def _contains_expected(actual: Any, expected: Any) -> bool:
 
 
 def validate_phonology_history_replay(payload: dict[str, Any]) -> list[str]:
+    from .native_phonology_history_validation import phonology_version
+    try:
+        if phonology_version(payload) == 2:
+            from .native_phonology_history_validation import validate_native_phonology_history
+            return validate_native_phonology_history(payload)
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+        return ["phonology history model or causal replay invalid"]
     try:
         summary = payload.get("summary", {})
         required_lists = (

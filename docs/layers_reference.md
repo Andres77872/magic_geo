@@ -2,7 +2,8 @@
 
 > **Auto-generated** by `scripts/gen_layers_reference.mjs` from the same
 > [`debug_ui/layer_docs.js`](../src/magic_geo/debug_ui/layer_docs.js) that powers the in-app docs
-> helper, run over a real `export-debug` manifest — so it cannot drift from what the UI shows.
+> helper, run over a real `export-debug` manifest. Ranges below describe that retained sample;
+> current source-availability notes may cover states absent from the sample.
 > Regenerate after re-exporting a cache or editing `CURATED`:
 > `node scripts/gen_layers_reference.mjs [manifest.json] [out.md]`.
 > Companion to [debugger.md](debugger.md), the review in [layers_review.md](layers_review.md),
@@ -539,7 +540,7 @@ Layers by domain (documentation gaps = generated tier):
 
 | Layer | Kind | Unit | Range (min … max) | Role | Doc | What it is |
 | --- | --- | --- | --- | --- | --- | --- |
-| `distance_to_marine_water_km` | numeric | `km` | 0 … 3741 | measurement | curated | Great-circle distance to the nearest marine (non-lake) water cell. |
+| `distance_to_marine_water_km` | numeric | `km` | 0 … 3741 | measurement | curated | Shortest path along mesh edges to the nearest marine water cell. Null with `marine_distance_status=no_marine_source` when no marine source exists; the viewer shows a neutral map without a numeric ramp. Actual marine distance zero remains numeric. |
 | `fishery_productivity_index` | numeric | `index` | 0 … 0.7711 | index | curated | Marine biological productivity from upwelling, shelf area, and currents. |
 | `ocean_current_east` | numeric | — | -1 … 1 | measurement | curated | Eastward component of the surface ocean current. Pair with `ocean_current_north`. |
 | `ocean_current_north` | numeric | — | -0.5039 … 0.5039 | measurement | curated | Northward component of the surface ocean current. Pair with `ocean_current_east`. |

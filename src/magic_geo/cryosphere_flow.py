@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .grounded_ice_validation import APPLICABLE, RAW_THICKNESS, require_grounded_ice
 from .planet_parameters import planet_radius_km, surface_gravity_m_s2
 
 
@@ -60,12 +61,14 @@ def _select_flowline_sources(cells: list[dict[str, Any]], limit: int) -> list[di
     return selected
 
 
-def _follow_flowline(source: dict[str, Any], cells_by_id: dict[int, dict[str, Any]], max_length: int) -> list[dict[str, Any]]:
+def _follow_flowline(source: dict[str, Any], cells_by_id: dict[int, dict[str, Any]], max_length: int, *, grounded_current: bool = False) -> list[dict[str, Any]]:
     path: list[dict[str, Any]] = []
     seen: set[int] = set()
     current = source
     source_sheet_id = int(source.get("ice_sheet_id", -1))
     for _ in range(max_length):
+        if grounded_current and (not current[APPLICABLE] or current[RAW_THICKNESS] <= 0.0):
+            break
         cell_id = int(current.get("id", -1))
         if cell_id < 0 or cell_id in seen:
             break
@@ -88,6 +91,7 @@ def enrich_world_with_ice_flowline_history(
     flowline_limit: int = 10,
     max_path_length: int = 48,
 ) -> dict[str, Any]:
+    grounded_current = require_grounded_ice(world)
     cells = world.get("cells", [])
     if not isinstance(cells, list) or not cells:
         return world
@@ -116,7 +120,7 @@ def enrich_world_with_ice_flowline_history(
     max_strain_heating_index = 0.0
 
     for source in _select_flowline_sources(cells, flowline_limit):
-        path = _follow_flowline(source, cells_by_id, max_path_length)
+        path = _follow_flowline(source, cells_by_id, max_path_length, grounded_current=grounded_current)
         if len(path) < 2:
             continue
 

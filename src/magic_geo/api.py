@@ -20,6 +20,8 @@ from .commodity_resources import enrich_world_with_commodity_occurrences
 from .civilization_geography import enrich_world_with_civilization_geography_models
 from .cultural_geography import enrich_world_with_cultural_geography_models
 from .config import WorldConfig, config_to_native, load_config
+from .seasonal_config import SeasonalWorldConfig
+from .grounded_ice_validation import require_grounded_ice
 from .cryosphere_dynamics import enrich_world_with_ice_sheet_history
 from .cryosphere_flow import enrich_world_with_ice_flowline_history
 from .cryosphere_stability import enrich_world_with_ice_sheet_stability
@@ -48,6 +50,9 @@ from .market_clearing import enrich_world_with_market_clearing
 from .mesh_lod import enrich_world_with_mesh_lod
 from .natural_frontiers import enrich_world_with_natural_frontiers
 from .navigability_diagnostics import enrich_world_with_navigability_diagnostics
+from .native_social_public_validation import (
+    NATIVE_SOCIAL_PUBLIC_MODELS, RECORDED_SUMMARY_FIELDS,
+)
 from .ocean_circulation import enrich_world_with_ocean_circulation
 from .ore_genesis import enrich_world_with_ore_genesis
 from .permafrost_diagnostics import enrich_world_with_permafrost_diagnostics
@@ -101,7 +106,7 @@ NATIVE_CIVILIZATION_TOP_LEVEL_FIELDS = frozenset(
         "territorial_snapshots",
         "trade_flows",
     }
-)
+) | NATIVE_SOCIAL_PUBLIC_MODELS | {"native_social_availability"}
 
 NATIVE_CIVILIZATION_CELL_FIELDS = frozenset(
     {
@@ -109,6 +114,8 @@ NATIVE_CIVILIZATION_CELL_FIELDS = frozenset(
         "language_region_id",
         "political_region_id",
         "settlement_score",
+        "settlement_climate_supported",
+        "settlement_climate_temperature_c",
     }
 )
 
@@ -173,7 +180,7 @@ NATIVE_CIVILIZATION_SUMMARY_FIELDS = frozenset(
         "trade_flow_count",
         "trade_total_volume_index",
     }
-)
+) | NATIVE_SOCIAL_PUBLIC_MODELS | RECORDED_SUMMARY_FIELDS
 
 
 def backend_info() -> dict[str, Any]:
@@ -192,28 +199,31 @@ def _require_configured_planet_snapshot(
         )
 
 
-def generate_world(config: WorldConfig) -> dict[str, Any]:
-    from .native import generate_world as native_generate_world
+def _enrich_physical_foundation(world: dict[str, Any], config: WorldConfig) -> None:
+    """Enrich shared natural prerequisites in producer-before-consumer order.
 
-    world = native_generate_world(config_to_native(config))
-    _require_configured_planet_snapshot(world, config)
+    Both entrypoints use the same sequence. Native generation has already
+    evolved relief, climate, hydrology, soils, biomes, and resources; these
+    Python layers diagnose that final state and add linked derived records.
+    """
+    require_grounded_ice(world)
     enrich_world_with_mesh_lod(world)
     enrich_world_with_spherical_index(world)
     enrich_world_with_cell_geometry(world)
-    enrich_world_with_sea_level_diagnostics(world)
-    enrich_world_with_ocean_circulation(world)
-    enrich_world_with_climate_continentality(world)
     enrich_world_with_geology_realism(world)
     enrich_world_with_tectonic_zones(world)
     enrich_world_with_fault_systems(world)
+    enrich_world_with_sea_level_diagnostics(world)
+    enrich_world_with_ocean_circulation(world)
+    enrich_world_with_climate_continentality(world)
     enrich_world_with_seasonal_climate_history(world)
     enrich_world_with_climate_energy_balance(world, config.planet)
     enrich_world_with_planet_realism(world, config.planet)
     enrich_world_with_climate_realism(world)
     enrich_world_with_lake_overflow_history(world)
     enrich_world_with_watershed_diagnostics(world)
-    enrich_world_with_sediment_routing_history(world)
     enrich_world_with_hydrology_realism(world)
+    enrich_world_with_sediment_routing_history(world)
     enrich_world_with_river_network_evolution(world)
     enrich_world_with_sediment_transport_history(world)
     enrich_world_with_sequence_stratigraphy(world)
@@ -221,6 +231,8 @@ def generate_world(config: WorldConfig) -> dict[str, Any]:
     enrich_world_with_ice_sheet_stability(world)
     enrich_world_with_ice_flowline_history(world)
     enrich_world_with_soil_diagnostics(world)
+    # Publish seasonal biome diagnostics before the linked frozen-ground
+    # records, which also consume soil moisture and organic matter.
     enrich_world_with_biome_diagnostics(world)
     enrich_world_with_permafrost_diagnostics(world)
     enrich_world_with_glacial_landforms(world)
@@ -232,16 +244,15 @@ def generate_world(config: WorldConfig) -> dict[str, Any]:
     enrich_world_with_groundwater_flow(world)
     enrich_world_with_river_channel_morphology(world)
     enrich_world_with_river_hydraulics(world)
-    enrich_world_with_settlement_route_models(world)
-    enrich_world_with_political_geography_models(world)
-    enrich_world_with_cultural_geography_models(world)
-    enrich_world_with_historical_geography_model(world)
-    enrich_world_with_civilization_geography_models(world)
-    enrich_world_with_territorial_geography_model(world)
-    enrich_world_with_navigability_diagnostics(world)
-    enrich_world_with_port_sites(world)
-    enrich_world_with_route_corridors(world)
     enrich_world_with_karst_diagnostics(world)
+
+
+def _enrich_ecosystems_and_resources(world: dict[str, Any]) -> None:
+    """Complete soil/water-dependent ecosystems and geologic occurrences.
+
+    In a full world, ports must exist before reef records link nearby ports.
+    In a geo-only world those optional human inputs have been removed.
+    """
     enrich_world_with_ecosystem_dynamics(world)
     enrich_world_with_reef_diagnostics(world)
     enrich_world_with_species_ranges(world)
@@ -251,6 +262,33 @@ def generate_world(config: WorldConfig) -> dict[str, Any]:
     enrich_world_with_sedimentary_resource_systems(world)
     enrich_world_with_petroleum_migration(world)
     enrich_world_with_commodity_occurrences(world)
+
+
+def generate_world(config: WorldConfig) -> dict[str, Any]:
+    if isinstance(config, SeasonalWorldConfig):
+        config = SeasonalWorldConfig.model_validate(config, strict=True)
+        from .native import generate_seasonal_world as native_generate_world
+    else:
+        from .native import generate_world as native_generate_world
+
+    # include_cells is an output choice, not permission to omit prerequisite
+    # simulation data. Enrichers need the complete state even for summary-only
+    # exports; suppress cells only after all linked records have been built.
+    native_config = config_to_native(config)
+    native_config["output"]["include_cells"] = True
+    world = native_generate_world(native_config)
+    _require_configured_planet_snapshot(world, config)
+    _enrich_physical_foundation(world, config)
+    enrich_world_with_settlement_route_models(world)
+    enrich_world_with_political_geography_models(world)
+    enrich_world_with_cultural_geography_models(world)
+    enrich_world_with_historical_geography_model(world)
+    enrich_world_with_civilization_geography_models(world)
+    enrich_world_with_territorial_geography_model(world)
+    enrich_world_with_navigability_diagnostics(world)
+    enrich_world_with_port_sites(world)
+    enrich_world_with_route_corridors(world)
+    _enrich_ecosystems_and_resources(world)
     enrich_world_with_land_use_zones(world)
     enrich_world_with_natural_frontiers(world)
     enrich_world_with_worldbuilding_realism(world)
@@ -263,6 +301,8 @@ def generate_world(config: WorldConfig) -> dict[str, Any]:
     enrich_world_with_graph_diagnostics(world)
     enrich_world_with_boundary_geometry(world)
     enrich_world_with_phonology_history(world)
+    if not config.output.include_cells:
+        world["cells"] = []
     return world
 
 
@@ -289,9 +329,14 @@ def generate_geo_world(config: WorldConfig) -> dict[str, Any]:
 
     Native civilization simulation is skipped. Stable empty/default
     civilization schema fields are removed before enrichment so mixed natural
-    models consistently take their documented no-human defaults.
+    models use their declared geographic scope. Current resource economics are
+    unavailable here; separately named geographic baselines remain numeric.
     """
-    from .native import generate_geo_world as native_generate_geo_world
+    if isinstance(config, SeasonalWorldConfig):
+        config = SeasonalWorldConfig.model_validate(config, strict=True)
+        from .native import generate_seasonal_geo_world as native_generate_geo_world
+    else:
+        from .native import generate_geo_world as native_generate_geo_world
 
     if not config.output.include_cells:
         raise ValueError(
@@ -304,69 +349,8 @@ def generate_geo_world(config: WorldConfig) -> dict[str, Any]:
     _strip_native_civilization_outputs(world)
     world["generation_scope"] = "geo_only"
 
-    # Geometry and physical topology.
-    enrich_world_with_mesh_lod(world)
-    enrich_world_with_spherical_index(world)
-    enrich_world_with_cell_geometry(world)
-
-    # Tectonic and geologic diagnostics consume the native crust simulation.
-    enrich_world_with_geology_realism(world)
-    enrich_world_with_tectonic_zones(world)
-    enrich_world_with_fault_systems(world)
-
-    # Sea state and ocean circulation precede atmospheric refinements.
-    enrich_world_with_sea_level_diagnostics(world)
-    enrich_world_with_ocean_circulation(world)
-
-    # Equilibrium and seasonal climate layers.
-    enrich_world_with_climate_continentality(world)
-    enrich_world_with_seasonal_climate_history(world)
-    enrich_world_with_climate_energy_balance(world, config.planet)
-    enrich_world_with_planet_realism(world, config.planet)
-    enrich_world_with_climate_realism(world)
-
-    # Surface water routing and sediment evolution.
-    enrich_world_with_lake_overflow_history(world)
-    enrich_world_with_watershed_diagnostics(world)
-    enrich_world_with_hydrology_realism(world)
-    enrich_world_with_sediment_routing_history(world)
-    enrich_world_with_river_network_evolution(world)
-    enrich_world_with_sediment_transport_history(world)
-    enrich_world_with_sequence_stratigraphy(world)
-
-    # Cryosphere, soils, and climate-conditioned biomes.
-    enrich_world_with_ice_sheet_history(world)
-    enrich_world_with_ice_sheet_stability(world)
-    enrich_world_with_ice_flowline_history(world)
-    enrich_world_with_soil_diagnostics(world)
-    enrich_world_with_permafrost_diagnostics(world)
-    enrich_world_with_glacial_landforms(world)
-    enrich_world_with_biome_diagnostics(world)
-    enrich_world_with_biome_ecotones(world)
-    enrich_world_with_biome_realism(world)
-
-    # Soil- and biome-dependent water systems.
-    enrich_world_with_aquifer_resources(world)
-    enrich_world_with_hydrology_budget(world)
-    enrich_world_with_wetland_diagnostics(world)
-    enrich_world_with_groundwater_flow(world)
-    enrich_world_with_river_channel_morphology(world)
-    enrich_world_with_river_hydraulics(world)
-    enrich_world_with_karst_diagnostics(world)
-
-    # Ecosystems and disturbances.  Settlement/port inputs are deliberately
-    # absent, so mixed models follow their natural baseline branches.
-    enrich_world_with_ecosystem_dynamics(world)
-    enrich_world_with_reef_diagnostics(world)
-    enrich_world_with_species_ranges(world)
-    enrich_world_with_wildfire_disturbance(world)
-
-    # Natural-resource formation and occurrence diagnostics.
-    enrich_world_with_resource_deposits(world)
-    enrich_world_with_ore_genesis(world)
-    enrich_world_with_sedimentary_resource_systems(world)
-    enrich_world_with_petroleum_migration(world)
-    enrich_world_with_commodity_occurrences(world)
+    _enrich_physical_foundation(world, config)
+    _enrich_ecosystems_and_resources(world)
 
     # Only physical graph and boundary products are valid in this scope.
     enrich_world_with_physical_graph_diagnostics(world)

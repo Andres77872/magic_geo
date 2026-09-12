@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "social_availability.hpp"
 
 namespace magic_geo::detail {
 
@@ -199,8 +200,19 @@ std::string summary_json(
     const std::vector<PlateMotionStep>& plate_motion_history,
     const std::vector<NumericDepressionCorrectionEvent>& numeric_depression_correction_history,
     const std::vector<HillslopeSedimentTransportStage>& hillslope_transport_history,
-    const std::vector<GlacialSedimentTransportStage>& glacial_transport_history
+    const std::vector<GlacialSedimentTransportStage>& glacial_transport_history,
+    const SocialAvailability* availability
 ) {
+    const bool native_social = social_mode(availability);
+    const bool population_complete = std::all_of(population_regions.begin(), population_regions.end(),
+        [](const auto& p) { return p.population_estimate_available; });
+    const bool cultures_complete = std::all_of(cultural_layers.cultures.begin(), cultural_layers.cultures.end(),
+        [](const auto& c) { return c.continuity_estimate_available; });
+    const bool snapshot_geometry_complete = std::all_of(territorial_snapshots.begin(), territorial_snapshots.end(),
+        [](const auto& t) { return t.geometry_estimate_available; });
+    const bool history_counts_complete = !native_social || std::all_of(historical_layers.eras.begin(), historical_layers.eras.end(),
+        [](const auto& e) { return e.event_count_available; });
+
     double ocean = 0.0, min_elev = std::numeric_limits<double>::infinity(), max_elev = -std::numeric_limits<double>::infinity();
     double surface_area_km2 = 0.0, ocean_area_km2 = 0.0, ocean_volume_km3 = 0.0;
     double cell_area_squared_sum = 0.0;
@@ -686,7 +698,7 @@ std::string summary_json(
     }
     for (const CultureRegion& culture : cultural_layers.cultures) {
         largest_culture_area = std::max(largest_culture_area, culture.area_km2);
-        cultural_continuity_sum += culture.continuity_index;
+        if (!native_social || culture.continuity_estimate_available) cultural_continuity_sum += culture.continuity_index;
     }
     for (const LanguageRegion& language : cultural_layers.language_regions) {
         if (language.parent_language_region_id >= 0) {
@@ -706,8 +718,10 @@ std::string summary_json(
         }
     }
     for (const PopulationRegion& population : population_regions) {
-        estimated_world_population += population.estimated_population;
-        population_pressure_sum += population.population_pressure;
+        if (!native_social || population.population_estimate_available) {
+            estimated_world_population += population.estimated_population;
+            population_pressure_sum += population.population_pressure;
+        }
     }
     const double conflict_intensity_scale = std::pow(10.0, static_cast<double>(clamp(params.float_precision, 0, 8)));
     for (const ConflictRecord& conflict : conflicts) {
@@ -740,9 +754,9 @@ std::string summary_json(
     }
     for (const TerritorialSnapshot& snapshot : territorial_snapshots) {
         snapshot_region_records += static_cast<int>(snapshot.regions.size());
-        snapshot_fragmentation_sum += snapshot.fragmentation_index;
+        if (!native_social || snapshot.geometry_estimate_available) snapshot_fragmentation_sum += snapshot.fragmentation_index;
         for (const SnapshotRegion& region : snapshot.regions) {
-            if (region.dissolved_polygon_area_km2 > 0.0) {
+            if ((!native_social || region.geometry_estimate_available) && region.dissolved_polygon_area_km2 > 0.0) {
                 snapshot_polygon_region_count++;
                 snapshot_polygon_area_error_sum += region.polygon_area_error_fraction;
                 snapshot_compactness_sum += region.compactness_index;
@@ -1829,60 +1843,159 @@ std::string summary_json(
     add_double(out, first, "mean_trade_friction",
         trade_flows.empty() ? 0.0 : trade_friction / static_cast<double>(trade_flows.size()), params.float_precision);
     add_int(out, first, "political_region_count", static_cast<int>(political_regions.size()));
+    if (native_social) {
+        std::string coverage = "{";
+        bool cfirst = true;
+        add_bool(coverage, cfirst, "conflict_count", availability->conflict_inference_available);
+        add_bool(coverage, cfirst, "dynastic_change_count", availability->historical_event_family_coverage[1].inference_available);
+        add_bool(coverage, cfirst, "dynastic_lineage_count", availability->dynasty_inference_available);
+        add_bool(coverage, cfirst, "dynasty_count", availability->dynasty_inference_available);
+        add_bool(coverage, cfirst, "dynasty_root_count", availability->dynasty_inference_available);
+        add_bool(coverage, cfirst, "dynasty_successor_link_count", availability->dynasty_inference_available);
+        add_bool(coverage, cfirst, "estimated_world_population", population_complete);
+        add_bool(coverage, cfirst, "high_economic_disruption_conflict_count", availability->conflict_inference_available);
+        add_bool(coverage, cfirst, "high_intensity_conflict_count", availability->conflict_inference_available);
+        add_bool(coverage, cfirst, "historical_event_count", history_counts_complete);
+        add_bool(coverage, cfirst, "max_conflict_casualty_rate", availability->conflict_inference_available);
+        add_bool(coverage, cfirst, "max_dynasty_lineage_depth", availability->dynasty_inference_available);
+        add_bool(coverage, cfirst, "mean_conflict_casualty_rate", availability->conflict_inference_available);
+        add_bool(coverage, cfirst, "mean_conflict_economic_disruption_index", availability->conflict_inference_available);
+        add_bool(coverage, cfirst, "mean_conflict_intensity", availability->conflict_inference_available);
+        add_bool(coverage, cfirst, "mean_conflict_logistics_strain_index", availability->conflict_inference_available);
+        add_bool(coverage, cfirst, "mean_cultural_continuity", cultures_complete && !cultural_layers.cultures.empty());
+        add_bool(coverage, cfirst, "mean_dynastic_continuity_index", availability->dynasty_inference_available);
+        add_bool(coverage, cfirst, "mean_historical_instability", history_counts_complete && !historical_layers.events.empty());
+        add_bool(coverage, cfirst, "mean_population_pressure", population_complete && !population_regions.empty());
+        add_bool(coverage, cfirst, "mean_snapshot_boundary_perimeter_km", snapshot_geometry_complete);
+        add_bool(coverage, cfirst, "mean_snapshot_compactness_index", snapshot_geometry_complete);
+        add_bool(coverage, cfirst, "mean_snapshot_fragmentation_index", snapshot_geometry_complete);
+        add_bool(coverage, cfirst, "mean_snapshot_geometry_quality", snapshot_geometry_complete);
+        add_bool(coverage, cfirst, "mean_snapshot_polygon_area_error_fraction", snapshot_geometry_complete);
+        add_bool(coverage, cfirst, "mean_war_duration_years", availability->conflict_inference_available);
+        add_bool(coverage, cfirst, "ruin_count", availability->ruin_inference_available);
+        add_bool(coverage, cfirst, "snapshot_polygon_region_count", snapshot_geometry_complete);
+        add_bool(coverage, cfirst, "total_mobilized_population", availability->conflict_inference_available);
+        coverage += "}";
+        add_raw(out, first, "native_social_summary_availability", coverage);
+        add_int(out, first, "recorded_historical_event_count", static_cast<int>(historical_layers.events.size()));
+        add_int(out, first, "recorded_ruin_count", static_cast<int>(cultural_layers.ruins.size()));
+        add_int(out, first, "recorded_conflict_count", static_cast<int>(conflicts.size()));
+        add_int(out, first, "recorded_dynasty_count", static_cast<int>(dynasties.size()));
+        add_int(out, first, "available_population_region_count", static_cast<int>(std::count_if(population_regions.begin(), population_regions.end(),
+            [](const auto& p) { return p.population_estimate_available; })));
+        add_int(out, first, "available_culture_continuity_count", static_cast<int>(std::count_if(cultural_layers.cultures.begin(), cultural_layers.cultures.end(),
+            [](const auto& c) { return c.continuity_estimate_available; })));
+    }
     add_int(out, first, "culture_region_count", static_cast<int>(cultural_layers.cultures.size()));
     add_int(out, first, "language_region_count", static_cast<int>(cultural_layers.language_regions.size()));
     add_int(out, first, "historical_era_count", static_cast<int>(historical_layers.eras.size()));
+    if (!native_social || (history_counts_complete)) {
     add_int(out, first, "historical_event_count", static_cast<int>(historical_layers.events.size()));
+    } else add_raw(out, first, "historical_event_count", "null");
     add_int(out, first, "migration_event_count", migration_events);
+    if (!native_social || (availability->historical_event_family_coverage[1].inference_available)) {
     add_int(out, first, "dynastic_change_count", dynastic_change_events);
+    } else add_raw(out, first, "dynastic_change_count", "null");
     add_int(out, first, "language_lineage_count", language_lineages);
     add_int(out, first, "population_region_count", static_cast<int>(population_regions.size()));
+    if (!native_social || (population_complete)) {
     add_double(out, first, "estimated_world_population", estimated_world_population, params.float_precision);
+    } else add_raw(out, first, "estimated_world_population", "null");
+    if (!native_social || (population_complete && !population_regions.empty())) {
     add_double(out, first, "mean_population_pressure",
         population_regions.empty() ? 0.0 : population_pressure_sum / static_cast<double>(population_regions.size()), params.float_precision);
+    } else add_raw(out, first, "mean_population_pressure", "null");
+    if (!native_social || (availability->conflict_inference_available)) {
     add_int(out, first, "conflict_count", static_cast<int>(conflicts.size()));
+    } else add_raw(out, first, "conflict_count", "null");
+    if (!native_social || (availability->conflict_inference_available)) {
     add_int(out, first, "high_intensity_conflict_count", high_intensity_conflicts);
+    } else add_raw(out, first, "high_intensity_conflict_count", "null");
+    if (!native_social || (availability->conflict_inference_available)) {
     add_double(out, first, "mean_conflict_intensity",
         conflicts.empty() ? 0.0 : conflict_intensity_sum / static_cast<double>(conflicts.size()), params.float_precision);
+    } else add_raw(out, first, "mean_conflict_intensity", "null");
+    if (!native_social || (availability->conflict_inference_available)) {
     add_double(out, first, "mean_war_duration_years",
         conflicts.empty() ? 0.0 : conflict_duration_sum / static_cast<double>(conflicts.size()), params.float_precision);
+    } else add_raw(out, first, "mean_war_duration_years", "null");
+    if (!native_social || (availability->conflict_inference_available)) {
     add_double(out, first, "total_mobilized_population", conflict_mobilized_sum, params.float_precision);
+    } else add_raw(out, first, "total_mobilized_population", "null");
+    if (!native_social || (availability->conflict_inference_available)) {
     add_double(out, first, "mean_conflict_logistics_strain_index",
         conflicts.empty() ? 0.0 : conflict_logistics_strain_sum / static_cast<double>(conflicts.size()), params.float_precision);
+    } else add_raw(out, first, "mean_conflict_logistics_strain_index", "null");
+    if (!native_social || (availability->conflict_inference_available)) {
     add_double(out, first, "mean_conflict_economic_disruption_index",
         conflicts.empty() ? 0.0 : conflict_economic_disruption_sum / static_cast<double>(conflicts.size()), params.float_precision);
+    } else add_raw(out, first, "mean_conflict_economic_disruption_index", "null");
+    if (!native_social || (availability->conflict_inference_available)) {
     add_int(out, first, "high_economic_disruption_conflict_count", high_economic_disruption_conflicts);
+    } else add_raw(out, first, "high_economic_disruption_conflict_count", "null");
+    if (!native_social || (availability->conflict_inference_available)) {
     add_double(out, first, "mean_conflict_casualty_rate",
         conflicts.empty() ? 0.0 : conflict_casualty_rate_sum / static_cast<double>(conflicts.size()), params.float_precision);
+    } else add_raw(out, first, "mean_conflict_casualty_rate", "null");
+    if (!native_social || (availability->conflict_inference_available)) {
     add_double(out, first, "max_conflict_casualty_rate", max_conflict_casualty_rate, params.float_precision);
+    } else add_raw(out, first, "max_conflict_casualty_rate", "null");
+    if (!native_social || (availability->dynasty_inference_available)) {
     add_int(out, first, "dynasty_count", static_cast<int>(dynasties.size()));
+    } else add_raw(out, first, "dynasty_count", "null");
+    if (!native_social || (availability->dynasty_inference_available)) {
     add_int(out, first, "dynastic_lineage_count", dynastic_lineages);
+    } else add_raw(out, first, "dynastic_lineage_count", "null");
+    if (!native_social || (availability->dynasty_inference_available)) {
     add_int(out, first, "dynasty_root_count", dynasty_roots);
+    } else add_raw(out, first, "dynasty_root_count", "null");
+    if (!native_social || (availability->dynasty_inference_available)) {
     add_int(out, first, "dynasty_successor_link_count", dynasty_successor_links);
+    } else add_raw(out, first, "dynasty_successor_link_count", "null");
+    if (!native_social || (availability->dynasty_inference_available)) {
     add_int(out, first, "max_dynasty_lineage_depth", max_dynasty_lineage_depth);
+    } else add_raw(out, first, "max_dynasty_lineage_depth", "null");
+    if (!native_social || (availability->dynasty_inference_available)) {
     add_double(out, first, "mean_dynastic_continuity_index",
         dynasties.empty() ? 0.0 : dynastic_continuity_sum / static_cast<double>(dynasties.size()), params.float_precision);
+    } else add_raw(out, first, "mean_dynastic_continuity_index", "null");
     add_int(out, first, "territorial_snapshot_count", static_cast<int>(territorial_snapshots.size()));
     add_int(out, first, "snapshot_region_record_count", snapshot_region_records);
+    if (!native_social || (snapshot_geometry_complete)) {
     add_int(out, first, "snapshot_polygon_region_count", snapshot_polygon_region_count);
+    } else add_raw(out, first, "snapshot_polygon_region_count", "null");
+    if (!native_social || (snapshot_geometry_complete)) {
     add_double(out, first, "mean_snapshot_fragmentation_index",
         territorial_snapshots.empty() ? 0.0 : snapshot_fragmentation_sum / static_cast<double>(territorial_snapshots.size()), params.float_precision);
+    } else add_raw(out, first, "mean_snapshot_fragmentation_index", "null");
+    if (!native_social || (snapshot_geometry_complete)) {
     add_double(out, first, "mean_snapshot_polygon_area_error_fraction",
         snapshot_polygon_region_count > 0 ? snapshot_polygon_area_error_sum / static_cast<double>(snapshot_polygon_region_count) : 0.0,
         params.float_precision);
+    } else add_raw(out, first, "mean_snapshot_polygon_area_error_fraction", "null");
+    if (!native_social || (snapshot_geometry_complete)) {
     add_double(out, first, "mean_snapshot_compactness_index",
         snapshot_polygon_region_count > 0 ? snapshot_compactness_sum / static_cast<double>(snapshot_polygon_region_count) : 0.0,
         params.float_precision);
+    } else add_raw(out, first, "mean_snapshot_compactness_index", "null");
+    if (!native_social || (snapshot_geometry_complete)) {
     add_double(out, first, "mean_snapshot_geometry_quality",
         snapshot_polygon_region_count > 0 ? snapshot_geometry_quality_sum / static_cast<double>(snapshot_polygon_region_count) : 0.0,
         params.float_precision);
+    } else add_raw(out, first, "mean_snapshot_geometry_quality", "null");
+    if (!native_social || (snapshot_geometry_complete)) {
     add_double(out, first, "mean_snapshot_boundary_perimeter_km",
         snapshot_polygon_region_count > 0 ? snapshot_boundary_perimeter_sum / static_cast<double>(snapshot_polygon_region_count) : 0.0,
         params.float_precision);
+    } else add_raw(out, first, "mean_snapshot_boundary_perimeter_km", "null");
+    if (!native_social || (history_counts_complete && !historical_layers.events.empty())) {
     add_double(out, first, "mean_historical_instability",
         historical_layers.events.empty() ? 0.0 : historical_instability_sum / static_cast<double>(historical_layers.events.size()), params.float_precision);
+    } else add_raw(out, first, "mean_historical_instability", "null");
+    if (!native_social || (cultures_complete && !cultural_layers.cultures.empty())) {
     add_double(out, first, "mean_cultural_continuity",
         cultural_layers.cultures.empty() ? 0.0 : cultural_continuity_sum / static_cast<double>(cultural_layers.cultures.size()), params.float_precision);
+    } else add_raw(out, first, "mean_cultural_continuity", "null");
     add_double(out, first, "mean_language_change_rate",
         cultural_layers.language_regions.empty() ? 0.0 : language_change_sum / static_cast<double>(cultural_layers.language_regions.size()), params.float_precision);
     add_double(out, first, "mean_phonological_complexity",
@@ -1892,7 +2005,9 @@ std::string summary_json(
     add_double(out, first, "mean_inherited_phonology_fraction",
         cultural_layers.language_regions.empty() ? 0.0 : inherited_phonology_sum / static_cast<double>(cultural_layers.language_regions.size()), params.float_precision);
     add_int(out, first, "sacred_area_count", static_cast<int>(cultural_layers.sacred_areas.size()));
+    if (!native_social || (availability->ruin_inference_available)) {
     add_int(out, first, "ruin_count", static_cast<int>(cultural_layers.ruins.size()));
+    } else add_raw(out, first, "ruin_count", "null");
     add_int(out, first, "border_segment_count", static_cast<int>(borders.size()));
     add_double(out, first, "border_total_length_km", border_length, params.float_precision);
     add_double(out, first, "natural_border_fraction",
@@ -2076,6 +2191,8 @@ std::string summary_json(
         glacier_cells > 0 ? ice_velocity_sum / static_cast<double>(glacier_cells) : 0.0, params.float_precision);
     add_double(out, first, "glaciated_land_fraction",
         land_count > 0.0 ? static_cast<double>(glacier_cells) / land_count : 0.0, params.float_precision);
+    add_str(out, first, "grounded_ice_model",
+        "exposed_land_annual_grounded_ice_diagnostic_v1");
     add_int(out, first, "ice_sheet_count", static_cast<int>(ice_sheets.size()));
     add_double(out, first, "mean_ice_sheet_retreat_rate_m_y",
         ice_sheets.empty() ? 0.0 : ice_sheet_retreat_rate_sum / static_cast<double>(ice_sheets.size()), params.float_precision);

@@ -1,0 +1,31 @@
+{
+  "native-unit-worlds": {
+    "fixture": "native-unit-worlds.json.gz",
+    "retained_source": "/tmp/settlement-native-integration/build/native-unit-worlds.json",
+    "sha256": "5960f2e18422f3112c79ce87c7dca8a4e5e411fdf21bac658c6f6e19357dfbd5",
+    "gzip_sha256": "8622a4fd93534d93152193b694d2494dc6ff33fa18ea432a5a74f42fb64a0bbb"
+  },
+  "earthlike_seed": {
+    "fixture": "earthlike_seed.json.gz",
+    "retained_source": "/tmp/settlement-native-integration/archives/earthlike_seed.json",
+    "sha256": "72fe208e7958b919f5063164c5194e0145e4034736790aa6ea4146fed80a916d",
+    "gzip_sha256": "1352a4588193c7a0aecf0c6a3ee19aad9b9ce7d68313bea6933bf391530d1765"
+  },
+  "verdant_hothouse": {
+    "fixture": "verdant_hothouse.json.gz",
+    "retained_source": "/tmp/settlement-native-integration/archives/verdant_hothouse.json",
+    "sha256": "d5e8a1c0ef3f94e8653dfdaba1a6644c25e677feb66d105d96cfc7ef7993aa36",
+    "gzip_sha256": "3014ac495a914a4754977efa52dc8ba3b5b9a2358d173595054137ba0e87eae6"
+  },
+  "young_volcanic": {
+    "fixture": "young_volcanic.json.gz",
+    "retained_source": "/tmp/settlement-native-integration/archives/young_volcanic.json",
+    "sha256": "338f90f91bf34094d2c30312140ccc5933a03c25441e6551fb26982d24cac61c",
+    "gzip_sha256": "a43d158bdce6581f8bae62bf0602727e72eae4871dfc52af831aa43b1e73c68e"
+  },
+  "legacy-enriched": {
+    "fixture": "legacy-enriched.json",
+    "sha256": "6fc21d76ba47aee9394fd46d10560d28d5bb9109841098bd3648fa4fa8f66e58",
+    "baseline_producer_sha256": "85171c5a0c1eb534fbd2410616bd011ec573d012fd8d73126675bea7b2c2f2d7"
+  }
+}

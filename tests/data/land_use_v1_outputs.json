@@ -1,0 +1,576 @@
+{
+  "scope": "Constructed legacy stage inputs and exact outputs of frozen original producer, not native worlds.",
+  "producer_sha256": "646d05cc7b99d2c456f41d6d37ad14f5584eb868e957c04b7afc13165b7cb7b9",
+  "input": {
+    "cells": [
+      {
+        "area_km2": 1.0,
+        "temperature_c": 80,
+        "is_water": false,
+        "is_lake": false,
+        "water_body_type": "land",
+        "resource": "none",
+        "biome": "temperate_forest",
+        "landform": "floodplain",
+        "is_river": false,
+        "fertility": 1.0,
+        "soil_depth_m": 3.2,
+        "soil_moisture_index": 1.0,
+        "soil_salinity_index": 0.0,
+        "soil_erodibility_index": 0.0,
+        "erosion_rate": 0.0,
+        "growing_season_months": 10.0,
+        "runoff_mm_y": 650.0,
+        "groundwater_recharge_mm_y": 300.0,
+        "ice_thickness_m": 0.0,
+        "seasonal_aridity_index": 0.0,
+        "id": 0,
+        "neighbors": [
+          1
+        ]
+      },
+      {
+        "area_km2": 1.0,
+        "temperature_c": 17.0,
+        "is_water": false,
+        "is_lake": true,
+        "water_body_type": "fresh_lake",
+        "resource": "none",
+        "biome": "temperate_forest",
+        "landform": "floodplain",
+        "is_river": false,
+        "fertility": 1.0,
+        "soil_depth_m": 3.2,
+        "soil_moisture_index": 1.0,
+        "soil_salinity_index": 0.0,
+        "soil_erodibility_index": 0.0,
+        "erosion_rate": 0.0,
+        "growing_season_months": 10.0,
+        "runoff_mm_y": 650.0,
+        "groundwater_recharge_mm_y": 300.0,
+        "ice_thickness_m": 0.0,
+        "seasonal_aridity_index": 0.0,
+        "id": 1,
+        "neighbors": [
+          0,
+          2
+        ]
+      },
+      {
+        "area_km2": 1.0,
+        "temperature_c": 17.0,
+        "is_water": false,
+        "is_lake": true,
+        "water_body_type": "saline_basin",
+        "resource": "evaporites",
+        "biome": "temperate_forest",
+        "landform": "floodplain",
+        "is_river": false,
+        "fertility": 1.0,
+        "soil_depth_m": 3.2,
+        "soil_moisture_index": 1.0,
+        "soil_salinity_index": 0.0,
+        "soil_erodibility_index": 0.0,
+        "erosion_rate": 0.0,
+        "growing_season_months": 10.0,
+        "runoff_mm_y": 650.0,
+        "groundwater_recharge_mm_y": 300.0,
+        "ice_thickness_m": 0.0,
+        "seasonal_aridity_index": 0.0,
+        "id": 2,
+        "neighbors": [
+          1
+        ]
+      },
+      {
+        "area_km2": 1.0,
+        "temperature_c": 17.0,
+        "is_water": false,
+        "is_lake": false,
+        "water_body_type": "land",
+        "resource": "placer_metals",
+        "biome": "temperate_forest",
+        "landform": "floodplain",
+        "is_river": false,
+        "fertility": 1.0,
+        "soil_depth_m": 3.2,
+        "soil_moisture_index": 1.0,
+        "soil_salinity_index": 0.0,
+        "soil_erodibility_index": 0.0,
+        "erosion_rate": 0.0,
+        "growing_season_months": 10.0,
+        "runoff_mm_y": 650.0,
+        "groundwater_recharge_mm_y": 300.0,
+        "ice_thickness_m": 0.0,
+        "seasonal_aridity_index": 0.0,
+        "id": 3,
+        "neighbors": []
+      }
+    ],
+    "summary": {
+      "land_use_zone_model": "causal_soil_climate_resource_connected_land_use_zones_v1"
+    },
+    "resource_deposits": [
+      {
+        "id": 0,
+        "cell_id": 2,
+        "resource": "evaporites",
+        "reserve_potential_index": 1.0,
+        "economic_viability_index": 1.0,
+        "geologic_confidence_index": 1.0,
+        "accessibility_index": 1.0,
+        "extraction_hazard_index": 0.0
+      },
+      {
+        "id": 1,
+        "cell_id": 3,
+        "resource": "placer_metals",
+        "reserve_potential_index": 1.0,
+        "economic_viability_index": 1.0,
+        "geologic_confidence_index": 1.0,
+        "accessibility_index": 1.0,
+        "extraction_hazard_index": 0.0
+      }
+    ],
+    "settlements": [
+      {
+        "id": 0,
+        "cell_id": 0
+      },
+      {
+        "id": 1,
+        "cell_id": 3
+      }
+    ],
+    "routes": [
+      {
+        "id": 0,
+        "from": 0,
+        "to": 1
+      }
+    ],
+    "land_use_zone_model": {
+      "model_type": "causal_soil_climate_resource_connected_land_use_zones_v1",
+      "deterministic": true,
+      "agricultural_threshold": 0.58,
+      "mining_threshold": 0.52,
+      "threshold_semantics": "raw_pre_serialization_greater_than_or_equal_v1",
+      "cell_index_serialization_decimals": 6,
+      "agricultural_potential_model": "bounded_soil_climate_water_alluvial_hazard_weighted_index_v1",
+      "agricultural_parameters": {
+        "fertility_weight": 0.27,
+        "soil_depth_scale_m": 3.2,
+        "soil_depth_weight": 0.14,
+        "soil_moisture_weight": 0.15,
+        "climate_optimum_c": 17.0,
+        "climate_tolerance_c": 26.0,
+        "climate_weight": 0.14,
+        "growing_season_scale_months": 10.0,
+        "growing_season_weight": 0.12,
+        "runoff_scale_mm_y": 650.0,
+        "river_water_bonus": 0.2,
+        "fresh_lake_water_bonus": 0.16,
+        "groundwater_recharge_scale_mm_y": 300.0,
+        "groundwater_water_weight": 0.18,
+        "water_weight": 0.12,
+        "alluvial_landform_bonus": 0.18,
+        "agricultural_biome_bonus": 0.1,
+        "salinity_penalty_weight": 0.18,
+        "erosion_rate_scale": 140.0,
+        "erosion_penalty_weight": 0.1,
+        "ice_thickness_scale_m": 400.0,
+        "ice_penalty_weight": 0.22,
+        "aridity_penalty_weight": 0.12
+      },
+      "agricultural_landforms": [
+        "coastal_plain",
+        "delta",
+        "floodplain",
+        "lacustrine_basin",
+        "river_valley"
+      ],
+      "agricultural_biomes": [
+        "savanna",
+        "temperate_forest",
+        "temperate_grassland",
+        "tropical_seasonal_forest",
+        "wetland"
+      ],
+      "mining_potential_model": "eligible_resource_deposit_geology_access_hazard_weighted_index_v1",
+      "mining_parameters": {
+        "reserve_weight": 0.28,
+        "viability_weight": 0.24,
+        "confidence_weight": 0.18,
+        "accessibility_weight": 0.12,
+        "geology_weight": 0.1,
+        "settlement_access_weight": 0.08,
+        "hazard_penalty_weight": 0.12,
+        "convergent_geology_weight": 0.26,
+        "divergent_geology_weight": 0.2,
+        "volcanic_geology_weight": 0.18,
+        "sediment_scale_m": 3.0,
+        "sediment_geology_weight": 0.18,
+        "crust_age_scale_ma": 2500.0,
+        "crust_age_geology_weight": 0.18
+      },
+      "mining_resources": [
+        "craton_iron_gold",
+        "evaporites",
+        "geothermal",
+        "placer_metals",
+        "sedimentary_fuels",
+        "volcanic_arc_metals"
+      ],
+      "component_model": "candidate_induced_mesh_components_min_cell_breadth_first_v1",
+      "record_order": "agricultural_then_mining_components_by_minimum_cell_id_v1",
+      "dominant_field_model": "count_then_lexicographic_order_v1",
+      "record_link_model": "member_cell_settlement_route_and_primary_resource_deposit_links_v1",
+      "model_limitation": "diagnostic_static_potential_and_connected_zones_without_land_market_crop_mine_capacity_or_development_feedback"
+    }
+  },
+  "output": {
+    "cells": [
+      {
+        "area_km2": 1.0,
+        "temperature_c": 80,
+        "is_water": false,
+        "is_lake": false,
+        "water_body_type": "land",
+        "resource": "none",
+        "biome": "temperate_forest",
+        "landform": "floodplain",
+        "is_river": false,
+        "fertility": 1.0,
+        "soil_depth_m": 3.2,
+        "soil_moisture_index": 1.0,
+        "soil_salinity_index": 0.0,
+        "soil_erodibility_index": 0.0,
+        "erosion_rate": 0.0,
+        "growing_season_months": 10.0,
+        "runoff_mm_y": 650.0,
+        "groundwater_recharge_mm_y": 300.0,
+        "ice_thickness_m": 0.0,
+        "seasonal_aridity_index": 0.0,
+        "id": 0,
+        "neighbors": [
+          1
+        ],
+        "agricultural_potential_index": 1.0,
+        "mining_potential_index": 0.0,
+        "agricultural_zone_id": 0,
+        "mining_zone_id": -1
+      },
+      {
+        "area_km2": 1.0,
+        "temperature_c": 17.0,
+        "is_water": false,
+        "is_lake": true,
+        "water_body_type": "fresh_lake",
+        "resource": "none",
+        "biome": "temperate_forest",
+        "landform": "floodplain",
+        "is_river": false,
+        "fertility": 1.0,
+        "soil_depth_m": 3.2,
+        "soil_moisture_index": 1.0,
+        "soil_salinity_index": 0.0,
+        "soil_erodibility_index": 0.0,
+        "erosion_rate": 0.0,
+        "growing_season_months": 10.0,
+        "runoff_mm_y": 650.0,
+        "groundwater_recharge_mm_y": 300.0,
+        "ice_thickness_m": 0.0,
+        "seasonal_aridity_index": 0.0,
+        "id": 1,
+        "neighbors": [
+          0,
+          2
+        ],
+        "agricultural_potential_index": 1.0,
+        "mining_potential_index": 0.0,
+        "agricultural_zone_id": 0,
+        "mining_zone_id": -1
+      },
+      {
+        "area_km2": 1.0,
+        "temperature_c": 17.0,
+        "is_water": false,
+        "is_lake": true,
+        "water_body_type": "saline_basin",
+        "resource": "evaporites",
+        "biome": "temperate_forest",
+        "landform": "floodplain",
+        "is_river": false,
+        "fertility": 1.0,
+        "soil_depth_m": 3.2,
+        "soil_moisture_index": 1.0,
+        "soil_salinity_index": 0.0,
+        "soil_erodibility_index": 0.0,
+        "erosion_rate": 0.0,
+        "growing_season_months": 10.0,
+        "runoff_mm_y": 650.0,
+        "groundwater_recharge_mm_y": 300.0,
+        "ice_thickness_m": 0.0,
+        "seasonal_aridity_index": 0.0,
+        "id": 2,
+        "neighbors": [
+          1
+        ],
+        "agricultural_potential_index": 1.0,
+        "mining_potential_index": 0.82,
+        "agricultural_zone_id": 0,
+        "mining_zone_id": 0
+      },
+      {
+        "area_km2": 1.0,
+        "temperature_c": 17.0,
+        "is_water": false,
+        "is_lake": false,
+        "water_body_type": "land",
+        "resource": "placer_metals",
+        "biome": "temperate_forest",
+        "landform": "floodplain",
+        "is_river": false,
+        "fertility": 1.0,
+        "soil_depth_m": 3.2,
+        "soil_moisture_index": 1.0,
+        "soil_salinity_index": 0.0,
+        "soil_erodibility_index": 0.0,
+        "erosion_rate": 0.0,
+        "growing_season_months": 10.0,
+        "runoff_mm_y": 650.0,
+        "groundwater_recharge_mm_y": 300.0,
+        "ice_thickness_m": 0.0,
+        "seasonal_aridity_index": 0.0,
+        "id": 3,
+        "neighbors": [],
+        "agricultural_potential_index": 1.0,
+        "mining_potential_index": 0.82,
+        "agricultural_zone_id": 1,
+        "mining_zone_id": 1
+      }
+    ],
+    "summary": {
+      "agricultural_zone_count": 2,
+      "agricultural_zone_cell_count": 4,
+      "agricultural_zone_total_area_km2": 4.0,
+      "mean_agricultural_potential_index": 1.0,
+      "mining_zone_count": 2,
+      "mining_zone_cell_count": 2,
+      "mining_zone_total_area_km2": 2.0,
+      "mean_mining_potential_index": 0.41,
+      "land_use_zone_model": "causal_soil_climate_resource_connected_land_use_zones_v1"
+    },
+    "resource_deposits": [
+      {
+        "id": 0,
+        "cell_id": 2,
+        "resource": "evaporites",
+        "reserve_potential_index": 1.0,
+        "economic_viability_index": 1.0,
+        "geologic_confidence_index": 1.0,
+        "accessibility_index": 1.0,
+        "extraction_hazard_index": 0.0
+      },
+      {
+        "id": 1,
+        "cell_id": 3,
+        "resource": "placer_metals",
+        "reserve_potential_index": 1.0,
+        "economic_viability_index": 1.0,
+        "geologic_confidence_index": 1.0,
+        "accessibility_index": 1.0,
+        "extraction_hazard_index": 0.0
+      }
+    ],
+    "settlements": [
+      {
+        "id": 0,
+        "cell_id": 0
+      },
+      {
+        "id": 1,
+        "cell_id": 3
+      }
+    ],
+    "routes": [
+      {
+        "id": 0,
+        "from": 0,
+        "to": 1
+      }
+    ],
+    "land_use_zone_model": {
+      "model_type": "causal_soil_climate_resource_connected_land_use_zones_v1",
+      "deterministic": true,
+      "agricultural_threshold": 0.58,
+      "mining_threshold": 0.52,
+      "threshold_semantics": "raw_pre_serialization_greater_than_or_equal_v1",
+      "cell_index_serialization_decimals": 6,
+      "agricultural_potential_model": "bounded_soil_climate_water_alluvial_hazard_weighted_index_v1",
+      "agricultural_parameters": {
+        "fertility_weight": 0.27,
+        "soil_depth_scale_m": 3.2,
+        "soil_depth_weight": 0.14,
+        "soil_moisture_weight": 0.15,
+        "climate_optimum_c": 17.0,
+        "climate_tolerance_c": 26.0,
+        "climate_weight": 0.14,
+        "growing_season_scale_months": 10.0,
+        "growing_season_weight": 0.12,
+        "runoff_scale_mm_y": 650.0,
+        "river_water_bonus": 0.2,
+        "fresh_lake_water_bonus": 0.16,
+        "groundwater_recharge_scale_mm_y": 300.0,
+        "groundwater_water_weight": 0.18,
+        "water_weight": 0.12,
+        "alluvial_landform_bonus": 0.18,
+        "agricultural_biome_bonus": 0.1,
+        "salinity_penalty_weight": 0.18,
+        "erosion_rate_scale": 140.0,
+        "erosion_penalty_weight": 0.1,
+        "ice_thickness_scale_m": 400.0,
+        "ice_penalty_weight": 0.22,
+        "aridity_penalty_weight": 0.12
+      },
+      "agricultural_landforms": [
+        "coastal_plain",
+        "delta",
+        "floodplain",
+        "lacustrine_basin",
+        "river_valley"
+      ],
+      "agricultural_biomes": [
+        "savanna",
+        "temperate_forest",
+        "temperate_grassland",
+        "tropical_seasonal_forest",
+        "wetland"
+      ],
+      "mining_potential_model": "eligible_resource_deposit_geology_access_hazard_weighted_index_v1",
+      "mining_parameters": {
+        "reserve_weight": 0.28,
+        "viability_weight": 0.24,
+        "confidence_weight": 0.18,
+        "accessibility_weight": 0.12,
+        "geology_weight": 0.1,
+        "settlement_access_weight": 0.08,
+        "hazard_penalty_weight": 0.12,
+        "convergent_geology_weight": 0.26,
+        "divergent_geology_weight": 0.2,
+        "volcanic_geology_weight": 0.18,
+        "sediment_scale_m": 3.0,
+        "sediment_geology_weight": 0.18,
+        "crust_age_scale_ma": 2500.0,
+        "crust_age_geology_weight": 0.18
+      },
+      "mining_resources": [
+        "craton_iron_gold",
+        "evaporites",
+        "geothermal",
+        "placer_metals",
+        "sedimentary_fuels",
+        "volcanic_arc_metals"
+      ],
+      "component_model": "candidate_induced_mesh_components_min_cell_breadth_first_v1",
+      "record_order": "agricultural_then_mining_components_by_minimum_cell_id_v1",
+      "dominant_field_model": "count_then_lexicographic_order_v1",
+      "record_link_model": "member_cell_settlement_route_and_primary_resource_deposit_links_v1",
+      "model_limitation": "diagnostic_static_potential_and_connected_zones_without_land_market_crop_mine_capacity_or_development_feedback"
+    },
+    "agricultural_zones": [
+      {
+        "id": 0,
+        "zone_type": "agricultural",
+        "cell_count": 3,
+        "cell_ids": [
+          0,
+          1,
+          2
+        ],
+        "area_km2": 3.0,
+        "mean_potential_index": 1.0,
+        "mean_fertility_index": 1.0,
+        "dominant_resource": "none",
+        "dominant_landform": "floodplain",
+        "dominant_biome": "temperate_forest",
+        "settlement_ids": [
+          0
+        ],
+        "route_ids": [
+          0
+        ],
+        "resource_deposit_ids": [
+          0
+        ]
+      },
+      {
+        "id": 1,
+        "zone_type": "agricultural",
+        "cell_count": 1,
+        "cell_ids": [
+          3
+        ],
+        "area_km2": 1.0,
+        "mean_potential_index": 1.0,
+        "mean_fertility_index": 1.0,
+        "dominant_resource": "placer_metals",
+        "dominant_landform": "floodplain",
+        "dominant_biome": "temperate_forest",
+        "settlement_ids": [
+          1
+        ],
+        "route_ids": [
+          0
+        ],
+        "resource_deposit_ids": [
+          1
+        ]
+      }
+    ],
+    "mining_zones": [
+      {
+        "id": 0,
+        "zone_type": "mining",
+        "cell_count": 1,
+        "cell_ids": [
+          2
+        ],
+        "area_km2": 1.0,
+        "mean_potential_index": 0.82,
+        "mean_fertility_index": 1.0,
+        "dominant_resource": "evaporites",
+        "dominant_landform": "floodplain",
+        "dominant_biome": "temperate_forest",
+        "settlement_ids": [],
+        "route_ids": [],
+        "resource_deposit_ids": [
+          0
+        ]
+      },
+      {
+        "id": 1,
+        "zone_type": "mining",
+        "cell_count": 1,
+        "cell_ids": [
+          3
+        ],
+        "area_km2": 1.0,
+        "mean_potential_index": 0.82,
+        "mean_fertility_index": 1.0,
+        "dominant_resource": "placer_metals",
+        "dominant_landform": "floodplain",
+        "dominant_biome": "temperate_forest",
+        "settlement_ids": [
+          1
+        ],
+        "route_ids": [
+          0
+        ],
+        "resource_deposit_ids": [
+          1
+        ]
+      }
+    ]
+  }
+}

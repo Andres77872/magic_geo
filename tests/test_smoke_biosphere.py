@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from unittest import TestCase
 
+from magic_geo.natural_water_validation_dispatch import validate_public_natural_water_chain
 from support import worlds
 
 
@@ -404,6 +405,10 @@ class SmokeBiosphereTests(TestCase):
         ]
     def test_soil_profiles_2(self) -> None:
         world = worlds.cached_world_readonly("small_smoke")
+        self.assertEqual(validate_public_natural_water_chain(world), (True, []))
+        self.assertTrue(all("aquifer_extraction_risk_index" not in cell for cell in world["cells"]))
+        self.assertNotIn("mean_aquifer_extraction_risk_index", world["summary"])
+        self.assertNotIn("groundwater_stressed_cell_count", world["summary"])
         first_cell = world["cells"][0]
         if world["soil_profiles"]:
             first_profile = world["soil_profiles"][0]
@@ -545,7 +550,7 @@ class SmokeBiosphereTests(TestCase):
             "aquifer_storage_index",
             "aquifer_quality_index",
             "aquifer_productivity_index",
-            "aquifer_extraction_risk_index",
+            "aquifer_natural_limitation_index",
             "aquifer_class",
             "aquifer_system_id",
             "groundwater_hydraulic_head_m",
@@ -594,7 +599,7 @@ class SmokeBiosphereTests(TestCase):
             "aquifer_storage_index",
             "aquifer_quality_index",
             "aquifer_productivity_index",
-            "aquifer_extraction_risk_index",
+            "aquifer_natural_limitation_index",
         ):
             self.assertGreaterEqual(first_cell[key], 0.0)
             self.assertLessEqual(first_cell[key], 1.0)
@@ -702,7 +707,7 @@ class SmokeBiosphereTests(TestCase):
                 "mean_aquifer_storage_index",
                 "mean_aquifer_quality_index",
                 "mean_aquifer_productivity_index",
-                "mean_aquifer_extraction_risk_index",
+                "mean_aquifer_natural_limitation_index",
                 "closed_basin_fraction",
             ):
                 self.assertGreaterEqual(first_aquifer[key], 0.0)
@@ -736,7 +741,7 @@ class SmokeBiosphereTests(TestCase):
                 "mean_groundwater_gradient_index",
                 "mean_spring_discharge_index",
                 "mean_baseflow_support_index",
-                "mean_aquifer_extraction_risk_index",
+                "mean_aquifer_natural_limitation_index",
             ):
                 self.assertGreaterEqual(first_flow_system[key], 0.0)
                 self.assertLessEqual(first_flow_system[key], 1.0)

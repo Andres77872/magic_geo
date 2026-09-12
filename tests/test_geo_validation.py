@@ -11,6 +11,7 @@ from unittest import TestCase
 from typer.testing import CliRunner
 
 from support import worlds
+from support.cryosphere_worlds import cached_cold_world
 
 from magic_geo.api import (
     NATIVE_CIVILIZATION_CELL_FIELDS,
@@ -204,10 +205,12 @@ class GeoWorldValidationTests(TestCase):
                     "current_climate_model",
                 )
                 self.assertFalse(climate_check["passed"])
-                self.assertEqual(
-                    climate_check["observed"][field],
-                    retired_value,
-                )
+                if field in climate_check["observed"]:
+                    self.assertEqual(climate_check["observed"][field], retired_value)
+                else:
+                    # Native validation reports additional precipitation
+                    # policies through its independent contract diagnostics.
+                    self.assertIn(field, " ".join(climate_check["evidence"]["native_climate_errors"]))
 
     def test_geo_validation_rejects_retired_world_fields(self) -> None:
         altered = deepcopy(self.world)
@@ -301,7 +304,7 @@ class GeoWorldValidationTests(TestCase):
         self.assertEqual(report["summary"]["error_failure_count"], 0)
         self.assertEqual(report["metrics"]["cell_count"], 128)
 
-    def test_small_generated_earth_world_passes_earthlike_internal_calibration(
+    def test_small_earth_internal_calibration_does_not_hide_missing_ice(
         self,
     ) -> None:
         report = validate_geo_world(self.world, profile="earthlike")
@@ -311,12 +314,21 @@ class GeoWorldValidationTests(TestCase):
             "calibration_pass_fraction",
         )
 
-        self.assertTrue(report["passed"])
         self.assertTrue(calibration["passed"])
         self.assertGreaterEqual(
             calibration["observed"],
             calibration["expected"]["minimum"],
         )
+        # The current prescribed-climate scenario has no ice cells. Preserve
+        # the separate Earth-profile failure instead of weakening its envelope
+        # or mistaking the aggregate calibration pass fraction for a full pass.
+        self.assertFalse(report["passed"])
+        failures = [(check["domain"], check["name"]) for check in report["checks"]
+                    if check["status"] == "failed"]
+        self.assertEqual(failures, [("earthlike_profile", "ice_cell_fraction")])
+        ice = _check(report, "earthlike_profile", "ice_cell_fraction")
+        self.assertEqual(ice["observed"], 0.0)
+        self.assertEqual(ice["expected"], {"minimum": 0.005, "maximum": 0.45})
 
     def test_each_natural_layer_has_direct_contract_evidence(self) -> None:
         report = validate_geo_world(self.world, profile="generic")
@@ -1543,8 +1555,8 @@ class GeoValidationViolationBranchTests(TestCase):
                     ),
                     "climate",
                     "climate_energy_record_coverage",
-                    lambda check: self.assertEqual(
-                        check["observed"]["invalid_record_count"], 1
+                    lambda check: self.assertIn(
+                        "expected object", " ".join(check["evidence"]["violations"])
                     ),
                 ),
                 (
@@ -1554,22 +1566,22 @@ class GeoValidationViolationBranchTests(TestCase):
                     ),
                     "climate",
                     "climate_energy_record_coverage",
-                    lambda check: self.assertEqual(
-                        check["observed"]["unique_cell_count"], 127
+                    lambda check: self.assertIn(
+                        "record.cell_id: expected uint64 integer", " ".join(check["evidence"]["violations"])
                     ),
                 ),
                 (
-                    "energy record temperature drifts from its cell",
+                    "cell temperature drifts from its retained native energy record",
                     lambda world: self.assign(
-                        world["climate_energy_balance_records"][0],
+                        world["cells"][0],
                         "temperature_c",
-                        world["climate_energy_balance_records"][0]["temperature_c"]
+                        world["cells"][0]["temperature_c"]
                         + 5.0,
                     ),
                     "climate",
                     "climate_energy_record_coverage",
-                    lambda check: self.assertEqual(
-                        check["observed"]["invalid_record_count"], 1
+                    lambda check: self.assertIn(
+                        "cell[0].temperature_c: does not match retained value", " ".join(check["evidence"]["violations"])
                     ),
                 ),
                 (
@@ -1579,7 +1591,9 @@ class GeoValidationViolationBranchTests(TestCase):
                     ),
                     "climate",
                     "climate_energy_record_coverage",
-                    lambda check: self.assertIsNone(check["observed"]["record_count"]),
+                    lambda check: self.assertIn(
+                        "climate_energy_balance_records: expected nonempty array", " ".join(check["evidence"]["violations"])
+                    ),
                 ),
                 (
                     "groundwater outflow has no valid receiver",
@@ -1701,6 +1715,18 @@ class GeoValidationViolationBranchTests(TestCase):
             )
         )
 
+    def test_actual_cold_ice_sheet_aggregate_rejects_inconsistent_membership(self) -> None:
+        world = cached_cold_world()
+        self.assertTrue(world["ice_sheets"], "the current cold fixture must exercise real sheet membership")
+        control = validate_geo_world(world)
+        self.assertTrue(_check(control, "cryosphere", "ice_sheet_and_flow_coherence")["passed"])
+        sheet = world["ice_sheets"][0]
+        self.assign(sheet, "cell_count", sheet["cell_count"] + 7)
+        report = validate_geo_world(world)
+        check = _check(report, "cryosphere", "ice_sheet_and_flow_coherence")
+        self.assertFalse(check["passed"])
+        self.assertEqual(check["observed"]["invalid_ice_sheet_record_count"], 1)
+
     def test_cryosphere_soil_and_biome_violations_are_reported(self) -> None:
         def unassigned_ice(world: dict) -> None:
             cell = next(
@@ -1747,19 +1773,6 @@ class GeoValidationViolationBranchTests(TestCase):
                     "ice_sheet_and_flow_coherence",
                     lambda check: self.assertEqual(
                         check["observed"]["invalid_glacier_link_count"], 1
-                    ),
-                ),
-                (
-                    "ice sheet aggregate contradicts its member cells",
-                    lambda world: self.assign(
-                        world["ice_sheets"][0],
-                        "cell_count",
-                        int(world["ice_sheets"][0]["cell_count"]) + 7,
-                    ),
-                    "cryosphere",
-                    "ice_sheet_and_flow_coherence",
-                    lambda check: self.assertEqual(
-                        check["observed"]["invalid_ice_sheet_record_count"], 1
                     ),
                 ),
                 (

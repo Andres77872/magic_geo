@@ -562,7 +562,7 @@ class DebugServerTests(TestCase):
 
                 valid = endpoint(app, "/api/config/validate", "POST")(
                     ConfigTextRequest(
-                        yaml="mesh:\n  cell_count: 128\ntectonics:\n  plate_count: 8\n"
+                        yaml="config_version: 2\nmesh:\n  cell_count: 128\ntectonics:\n  plate_count: 8\n"
                     )
                 )
                 self.assertTrue(valid["valid"])
@@ -639,6 +639,62 @@ class DebugServerTests(TestCase):
                     "/api/family/{family_name}",
                 ):
                     self.assertIn(route, openapi["paths"])
+            finally:
+                app.state.job_manager.close()
+                app.state.cache_manager.close()
+
+    def test_catalog_retains_estimate_display_scope_and_models(self) -> None:
+        from magic_geo.public_estimate_display import display_contract
+
+        for scope in ("full", "geo_only"):
+            with self.subTest(scope=scope), TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                cache_dir = _make_cache(root)
+                # Presentation declarations only; no generated-world or model replay.
+                contract = display_contract({
+                    "generation_scope": scope,
+                    "native_social_availability_model": {
+                        "model_type": "native_settlement_source_complete_social_estimates_v1",
+                    },
+                    "population_region_model": {
+                        "model_type": "causal_area_weighted_capacity_occupancy_population_regions_v2",
+                        "membership_model": "nonwater_political_region_cells_v1",
+                    },
+                    "population_regions": [],
+                })
+                _mutate_manifest(cache_dir, lambda manifest: manifest.update(
+                    estimate_display=contract,
+                ))
+                app = create_app(cache_dir, project_root=root, workspace=Path("runs"))
+                try:
+                    revision = app.state.cache_manager.status()["cache_revision"]
+                    status, manifest_body = asgi_get(app, f"/api/manifest?revision={revision}")
+                    self.assertEqual(status, 200)
+                    status, catalog_body = asgi_get(app, f"/api/catalog?revision={revision}")
+                    self.assertEqual(status, 200)
+                    manifest = json.loads(manifest_body)
+                    catalog = json.loads(catalog_body)
+                    self.assertEqual(manifest["estimate_display"], contract)
+                    self.assertEqual(catalog.get("estimate_display"), contract)
+                    self.assertEqual(catalog["layers"], manifest["layers"])
+                    status, _body = asgi_get(app, "/api/catalog?revision=stale")
+                    self.assertEqual(status, 409)
+                finally:
+                    app.state.job_manager.close()
+                    app.state.cache_manager.close()
+
+    def test_catalog_does_not_invent_estimate_display_for_legacy_cache(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            cache_dir = _make_cache(root)
+            app = create_app(cache_dir, project_root=root, workspace=Path("runs"))
+            try:
+                status, manifest_body = asgi_get(app, "/api/manifest")
+                self.assertEqual(status, 200)
+                status, catalog_body = asgi_get(app, "/api/catalog")
+                self.assertEqual(status, 200)
+                self.assertNotIn("estimate_display", json.loads(manifest_body))
+                self.assertNotIn("estimate_display", json.loads(catalog_body))
             finally:
                 app.state.job_manager.close()
                 app.state.cache_manager.close()
@@ -904,7 +960,7 @@ class DebugServerTests(TestCase):
             try:
                 with self.assertRaises(HTTPException) as context:
                     endpoint(app, "/api/config/save", "POST")(
-                        ConfigSaveRequest(yaml="{}\n", name="escaped.yaml")
+                        ConfigSaveRequest(yaml="config_version: 2\n", name="escaped.yaml")
                     )
                 self.assertEqual(context.exception.status_code, 422)
                 self.assertFalse((outside / "escaped.yaml").exists())
@@ -926,7 +982,7 @@ class DebugServerTests(TestCase):
                     with self.subTest(name=name):
                         with self.assertRaises(HTTPException) as context:
                             endpoint(app, "/api/config/save", "POST")(
-                                ConfigSaveRequest(yaml="{}\n", name=name, force=True)
+                                ConfigSaveRequest(yaml="config_version: 2\n", name=name, force=True)
                             )
                         self.assertEqual(context.exception.status_code, 422)
                 self.assertFalse((configs / "victim.yaml").exists())
@@ -939,7 +995,7 @@ class DebugServerTests(TestCase):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "configs").mkdir()
-            (root / "configs/config.yaml").write_text("{}", encoding="utf-8")
+            (root / "configs/config.yaml").write_text("config_version: 2\n", encoding="utf-8")
             manager = JobManager(root, Path("runs"))
             try:
                 normalized, command, artifacts = manager._build_command(
@@ -987,7 +1043,7 @@ class DebugServerTests(TestCase):
                     )
                 cache_input_dir = root / "runs" / "cache-input"
                 cache_input_dir.mkdir()
-                (cache_input_dir / "config.yaml").write_text("{}", encoding="utf-8")
+                (cache_input_dir / "config.yaml").write_text("config_version: 2\n", encoding="utf-8")
                 with self.assertRaisesRegex(JobInputError, "contain an input"):
                     manager._build_command(
                         "generate",
@@ -1087,7 +1143,7 @@ class DebugServerTests(TestCase):
             outside = Path(outside_dir)
             (root / "configs").mkdir()
             (root / "runs").mkdir()
-            (root / "configs/config.yaml").write_text("{}", encoding="utf-8")
+            (root / "configs/config.yaml").write_text("config_version: 2\n", encoding="utf-8")
             (root / "runs/world.json").write_text("{}", encoding="utf-8")
             local_data = root / "configs/data.asc"
             local_data.write_text("local", encoding="utf-8")
@@ -1999,6 +2055,105 @@ class CacheManagerDegradationTests(_WorkbenchTestCase):
         self.assertEqual(manager.selected_relative(), "runs/debug")
         self.assertEqual(manager.get().manifest["world"]["name"], "tiny")
 
+    def test_select_and_job_publication_keep_metadata_and_revision_together(self) -> None:
+        root = self.temp_root()
+        cache_dir = _make_cache(root)
+        manager = self.manager(root, Path("runs"), cache_dir)
+        original_revision = manager.status()["cache_revision"]
+        staging = root / "runs" / ".debug.staging"
+        shutil.copytree(cache_dir, staging)
+        _mutate_manifest(
+            staging, lambda manifest: _assign(manifest, ("world", "name"), "published")
+        )
+        _write_parquet(
+            staging / "tables/cells.parquet",
+            {"id": [0, 1], "elevation_m": [101.0, -202.0], "biome": ["forest", "ocean"]},
+        )
+        candidate_loaded = threading.Event()
+        publication_attempted = threading.Event()
+        publication_finished = threading.Event()
+        failures = []
+        real_cache = _DebugCache
+        real_lock = manager._lock
+
+        class CoordinatedLock:
+            """Expose entry order without changing the real lock's exclusion."""
+
+            def __init__(self) -> None:
+                self.local = threading.local()
+
+            def __enter__(self) -> None:
+                if threading.current_thread() is publisher:
+                    publication_attempted.set()
+                real_lock.acquire()
+                self.local.depth = getattr(self.local, "depth", 0) + 1
+
+            def __exit__(self, *_args: object) -> None:
+                self.local.depth -= 1
+                real_lock.release()
+
+            def held_here(self) -> bool:
+                return getattr(self.local, "depth", 0) > 0
+
+        coordinated = CoordinatedLock()
+        manager._lock = coordinated
+
+        def load_candidate(path: Path) -> _DebugCache:
+            candidate = real_cache(path)
+            if threading.current_thread() is selector:
+                candidate_loaded.set()
+                self.assertTrue(publication_attempted.wait(5.0))
+                # Complete the competing publication before returning the old
+                # candidate whenever select permits that interleaving. If
+                # select owns the lock, it must finish before publication can.
+                if not coordinated.held_here():
+                    self.assertTrue(publication_finished.wait(5.0))
+            return candidate
+
+        def choose() -> None:
+            try:
+                manager.select(cache_dir)
+            except Exception as exc:
+                failures.append(exc)
+
+        def publish() -> None:
+            try:
+                manager.publish(staging, cache_dir)
+            except Exception as exc:
+                failures.append(exc)
+            finally:
+                publication_finished.set()
+
+        selector = threading.Thread(target=choose, daemon=True)
+        publisher = threading.Thread(target=publish, daemon=True)
+        with patch("magic_geo.debug_server._DebugCache", load_candidate):
+            selector.start()
+            self.assertTrue(candidate_loaded.wait(5.0))
+            publisher.start()
+            selector.join(5.0)
+            publisher.join(5.0)
+        self.assertFalse(selector.is_alive())
+        self.assertFalse(publisher.is_alive())
+        self.assertEqual(failures, [])
+
+        revision = manager.status()["cache_revision"]
+        self.assertNotEqual(revision, original_revision)
+        observed = manager.with_cache(
+            lambda cache: {
+                "api_manifest_name": cache.manifest["world"]["name"],
+                "layer_values": cache.layer_values("cells/elevation_m", None, None),
+                "file_manifest_name": json.loads((cache_dir / "manifest.json").read_bytes())["world"]["name"],
+            },
+            revision,
+        )
+        self.assertEqual(observed, {
+            "api_manifest_name": "published", "layer_values": [101.0, -202.0],
+            "file_manifest_name": "published",
+        })
+        with self.assertRaises(HTTPException) as stale:
+            manager.with_cache(lambda cache: cache.manifest, original_revision)
+        self.assertEqual(stale.exception.status_code, 409)
+
     def test_status_and_reads_degrade_when_the_manifest_disappears(self) -> None:
         root = self.temp_root()
         cache_dir = _make_cache(root)
@@ -2429,12 +2584,12 @@ class DebugServerApiErrorTests(_WorkbenchTestCase):
         self.assertEqual(payload["rows"], [records[2]])
         self.assertIsNone(payload["next_offset"])
 
-        # Without a scalars table the scalars view falls back to the JSONL rows.
+        # A missing sidecar changes storage, not the requested scalar view.
         payload = json.loads(
             asgi_call(app, "GET", "/api/family/jsonl_only?detail=scalars&limit=2")[2]
         )
-        self.assertEqual(payload["rows"], records[:2])
-        self.assertEqual(payload["detail"], "full")
+        self.assertEqual(payload["rows"], [{"id": row["id"], "score": row["score"]} for row in records[:2]])
+        self.assertEqual(payload["detail"], "scalars")
 
         status, _headers, body = asgi_call(app, "GET", "/api/family/ghost")
         self.assertEqual(status, 404, body)
@@ -2672,7 +2827,7 @@ class DebugServerApiErrorTests(_WorkbenchTestCase):
         self.assertEqual(_detail(body)["source"], "<web overrides>")
 
         status, _headers, body = asgi_call(
-            app, "POST", "/api/config/save", json_body={"yaml": "{}\n", "name": "bad name"}
+            app, "POST", "/api/config/save", json_body={"yaml": "config_version: 2\n", "name": "bad name"}
         )
         self.assertEqual(status, 422, body)
         self.assertEqual(
@@ -2696,7 +2851,7 @@ class DebugServerApiErrorTests(_WorkbenchTestCase):
             app,
             "POST",
             "/api/config/save",
-            json_body={"yaml": "{}\n", "name": "blocked.yaml", "force": True},
+            json_body={"yaml": "config_version: 2\n", "name": "blocked.yaml", "force": True},
         )
         self.assertEqual(status, 500, body)
         self.assertRegex(_detail(body), r"^unable to save configuration: ")
@@ -2710,7 +2865,7 @@ class DebugServerApiErrorTests(_WorkbenchTestCase):
                 app,
                 "POST",
                 "/api/config/save",
-                json_body={"yaml": "{}\n", "name": "raced.yaml", "force": True},
+                json_body={"yaml": "config_version: 2\n", "name": "raced.yaml", "force": True},
             )
         self.assertEqual(status, 409, body)
         self.assertEqual(_detail(body), "configuration already exists: raced.yaml")
@@ -2736,7 +2891,7 @@ class DebugServerApiErrorTests(_WorkbenchTestCase):
                 app,
                 "POST",
                 "/api/config/save",
-                json_body={"yaml": "{}\n", "name": "raced-directory.yaml"},
+                json_body={"yaml": "config_version: 2\n", "name": "raced-directory.yaml"},
             )
         self.assertEqual(status, 422, body)
         self.assertEqual(_detail(body), "config directory escapes workspace")
@@ -2759,7 +2914,7 @@ class DebugServerApiErrorTests(_WorkbenchTestCase):
                 app,
                 "POST",
                 "/api/config/save",
-                json_body={"yaml": "{}\n", "name": "raced-file.yaml", "force": True},
+                json_body={"yaml": "config_version: 2\n", "name": "raced-file.yaml", "force": True},
             )
         self.assertEqual(status, 422, body)
         self.assertEqual(_detail(body), "invalid configuration name")

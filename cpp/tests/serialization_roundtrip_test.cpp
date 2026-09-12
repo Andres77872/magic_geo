@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <locale>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -85,6 +86,24 @@ bool nonfinite_values_remain_fail_closed() {
         return true;
     }
     return false;
+}
+
+bool json_numbers_ignore_process_global_locale() {
+    struct CommaDecimal final : std::numpunct<char> {
+        char do_decimal_point() const override { return ','; }
+        char do_thousands_sep() const override { return '.'; }
+        std::string do_grouping() const override { return "\3"; }
+    };
+    struct RestoreLocale {
+        std::locale previous = std::locale();
+        ~RestoreLocale() { std::locale::global(previous); }
+    } restore;
+    std::locale::global(std::locale(std::locale::classic(), new CommaDecimal));
+    CHECK(roundtrip_num(1234.5) == "1234.5");
+    CHECK(num(1234.5, 3) == "1234.500");
+    CHECK(roundtrip_double_array_json({1234.5, 0.25}) == "[1234.5,0.25]");
+    CHECK(!json_to_messagepack("{\"number\":" + roundtrip_num(1234.5) + "}").empty());
+    return true;
 }
 
 bool messagepack_scalars_use_lossless_standard_encodings() {
@@ -199,6 +218,7 @@ int main() {
     if (!strictly_positive_area_arrays_round_trip_binary64() ||
         !positive_area_scalars_round_trip_binary64() ||
         !nonfinite_values_remain_fail_closed() ||
+        !json_numbers_ignore_process_global_locale() ||
         !messagepack_scalars_use_lossless_standard_encodings() ||
         !messagepack_strings_and_containers_are_valid() ||
         !malformed_json_to_messagepack_fails_closed() ||

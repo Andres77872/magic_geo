@@ -373,6 +373,12 @@ def _contains_expected(actual: Any, expected: Any) -> bool:
 
 
 def validate_logistics_exchange_replay(payload: dict[str, Any]) -> list[str]:
+    from .logistics_availability_validation import uses_logistics_availability, validate_logistics_availability
+    try:
+        if uses_logistics_availability(payload):
+            return validate_logistics_availability(payload)
+    except (TypeError, ValueError, KeyError, OverflowError):
+        return ["logistics exchange model or causal replay invalid"]
     try:
         summary = payload.get("summary", {})
         required_lists = (

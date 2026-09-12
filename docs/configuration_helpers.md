@@ -4,8 +4,21 @@ This guide covers the supported ways to create, inspect, validate, override,
 serialize, and save generation configuration. For the physical meaning and
 range of every property, use the [complete configuration reference](configuration_reference.md).
 
-The authoritative schema is `magic_geo.config.WorldConfig`. CLI creation, the
-Python helpers, JSON Schema, and the browser editor all use that same model.
+`magic_geo.WorldConfig()` and every built-in profile create version-2
+configurations for the prescribed seasonal energy model. Every YAML document
+must explicitly contain the exact integer `config_version: 2`; empty or
+unversioned files receive migration errors. Nested fields use strict types.
+
+For a small version-2 example, use `configs/seasonal_smoke.yaml`. In Python,
+construct `SeasonalWorldConfig(config_version=2, ...)` and use the ordinary
+generation API. Version-2 climate uses `reference_infrared_optical_depth`; old
+mean-temperature/lapse controls produce located migration errors, including
+in dotted overrides. See the [seasonal configuration reference](configuration_reference.md#explicit-seasonal-configuration-version-2).
+
+The workbench schema reference, profiles, templates, `/render`, validation,
+saving and generation jobs all use version 2. Its reference describes optical
+depth and preserves numeric bounds. Existing editor text is retained when
+loading fails or the schema and template versions disagree.
 
 ## Built-in profiles
 
@@ -15,11 +28,11 @@ the loader.
 | Profile | Purpose | Important differences |
 |---|---|---|
 | `default` | Neutral editable schema defaults | Exact `WorldConfig()` values; 4,096 cells, automatic compute, precipitation scale `1.0`, plate-motion scale `2.0`. |
-| `earthlike` | Calibrated checked-in Earth reference | Plate-motion scale `4.0` and precipitation scale `0.8`; otherwise schema defaults. This exactly matches `configs/earthlike_seed.yaml`. |
+| `earthlike` | Earth reference inputs; seasonal climate calibration not established | Plate-motion scale `4.0` and precipitation scale `0.8`; otherwise schema defaults. This exactly matches `configs/earthlike_seed.yaml`. |
 | `smoke` | Fast integration/debug run | Earth-like forcing (`4.0` plate-motion and `0.8` precipitation scales), 128 cells, 8 plates, one erosion iteration, one CPU thread, deterministic CPU backend. |
 
-An empty YAML document (`{}` or an empty file) means the `default` profile. It
-does not mean `earthlike`. A profile is materialized as a complete YAML file,
+The minimal valid YAML document is `config_version: 2`, which receives the
+neutral `default` values for omitted sections. A profile is materialized as a complete YAML file,
 so generated artifacts remain reproducible without depending on future profile
 definitions.
 
@@ -126,6 +139,7 @@ mapping.
 ```python
 config = parse_config_yaml(
     """
+    config_version: 2
     mesh:
       cell_count: 512
     tectonics:
@@ -142,13 +156,17 @@ Both paths reject:
 - malformed or multi-document YAML;
 - duplicate mapping keys (plain `yaml.safe_load` silently keeps the last one);
 - a non-mapping document root;
+- missing or unsupported document versions, including `"2"`, `2.0` and booleans;
 - unknown sections or properties;
 - non-finite numbers and values outside declared ranges;
 - invalid cross-field combinations.
 
-Missing sections and fields are valid and receive schema defaults. Pydantic's
-normal scalar coercion remains supported for backward compatibility; generated
-templates always emit canonical boolean, integer, float, and string values.
+Missing sections and fields receive schema defaults after the explicit version
+is checked. Numeric strings and boolean numeric controls are rejected. An
+integer is accepted for a float field; a float is not accepted for an integer
+field. Generated templates emit canonical values. `LegacyWorldConfig` is an
+explicit Python compatibility type for old-model/ABI callers; YAML loading and
+profile creation never select it.
 
 ### Errors
 
@@ -211,7 +229,7 @@ The result is standard Pydantic JSON Schema plus `x-magic-geo` metadata:
 
 - all nine section descriptions;
 - descriptions, types, defaults, enums, and bounds for all 44 fields;
-- stable `section_order` and schema version `1` (`urn:magic-geo:schema:world-config:v1`);
+- stable `section_order` and schema version `2` (`urn:magic-geo:schema:world-config:v2`);
 - the name, description, and complete values of each built-in profile.
 
 This is what drives the browser field reference. Applications should follow

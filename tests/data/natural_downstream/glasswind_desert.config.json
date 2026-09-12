@@ -1,0 +1,64 @@
+{
+  "config_version": 2,
+  "run": {
+    "seed": 12051002,
+    "name": "glasswind_desert"
+  },
+  "planet": {
+    "radius_km": 5600.0,
+    "gravity_g": 0.82,
+    "day_length_hours": 30.0,
+    "axial_tilt_deg": 18.0,
+    "orbital_eccentricity": 0.05,
+    "stellar_luminosity": 1.1,
+    "atmosphere_pressure_bar": 0.7,
+    "greenhouse_factor": 1.05,
+    "ocean_fraction_target": 0.0,
+    "ocean_water_inventory_km3": 0.0,
+    "internal_heat": 0.75,
+    "geological_age_ga": 5.6
+  },
+  "mesh": {
+    "backend": "fibonacci_sphere",
+    "cell_count": 128,
+    "neighbor_count": 7
+  },
+  "tectonics": {
+    "plate_count": 8,
+    "continental_plate_fraction": 0.78,
+    "continental_crust_fraction_target": 0.72,
+    "min_angular_speed": 0.01,
+    "max_angular_speed": 0.45,
+    "boundary_smoothing_steps": 8,
+    "plate_motion_scale_deg_per_step": 1.5,
+    "oceanic_crust_aging_ma_per_step": 3.0
+  },
+  "climate": {
+    "months": 12,
+    "reference_infrared_optical_depth": 1.0,
+    "precipitation_scale": 0.08,
+    "subtropical_drying_strength": 0.88
+  },
+  "hydrology": {
+    "river_percentile": 0.97,
+    "preserve_geologic_depressions": true
+  },
+  "erosion": {
+    "iterations": 0,
+    "maturation_timestep_ma": 5.0,
+    "stream_power_coefficient": 3.0,
+    "drainage_exponent": 0.45,
+    "slope_exponent": 1.0,
+    "hillslope_diffusion": 0.025,
+    "tectonic_uplift_scale": 0.55
+  },
+  "compute": {
+    "backend": "cpu",
+    "threads": 1,
+    "opencl_prefer_gpu": true
+  },
+  "output": {
+    "include_cells": true,
+    "float_precision": 4
+  }
+}

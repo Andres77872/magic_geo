@@ -363,7 +363,7 @@ Per-allocation fields (11), all replayed: `sink_cell_id`, `target_cell_id`, `dep
 
 ## Glacial transport
 
-Model type `downhill_area_conserving_glacial_sediment_transport_v2` (`cpp/src/engine/process_serialization.cpp:848-849`).
+Current model type is `downhill_area_conserving_glacial_sediment_transport_v3`, with `source_grounded_ice_model = exposed_land_annual_grounded_ice_diagnostic_v1`. It excludes native marine and lake cells as grounded-ice donors while permitting them as sediment deposition targets. Explicit historical v2 worlds retain their v2 snapshot and replay; missing metadata does not silently select the successor. See the [grounded-ice scope and limitations](cryosphere.md#native-cryosphere-state-derivation).
 
 | Model field | Value |
 |---|---|
@@ -373,7 +373,7 @@ Model type `downhill_area_conserving_glacial_sediment_transport_v2` (`cpp/src/en
 | `mobile_sediment_fraction` | `0.28` (`GLACIAL_SEDIMENT_MOBILE_FRACTION`, `cpp/src/engine/constants.hpp:67`) |
 | `source_depth_model` | `glacial_erosion_potential_times_mobile_sediment_fraction` |
 | `source_material_partition_model` | `available_alluvium_first_then_bedrock_erosion_v1` |
-| `stage_input_snapshot` | `complete_cell_cryosphere_terrain_and_sediment_inventory_before_transport_v2` |
+| `stage_input_snapshot` | `complete_cell_cryosphere_terrain_and_sediment_inventory_before_transport_v3`; strict `is_water` and `is_lake` for every input cell |
 | `volume_transfer_model` | `source_depth_times_source_area_equals_target_depth_times_target_area` |
 | `mass_conserving` | `true` (`bulk_reference_volume_only_not_dry_rock_mass`) |
 | `finite_sediment_inventory_resolved` | `true` |
@@ -383,7 +383,7 @@ Model type `downhill_area_conserving_glacial_sediment_transport_v2` (`cpp/src/en
 | `multi_step_ice_dynamics_resolved` | **`false`** |
 | `model_limitation` | `single_post_erosion_bulk_transfer_without_calibrated_time_multistep_ice_dynamics_or_grain_classes` |
 
-The erosion potential itself comes from `derive_cryosphere_state`: `glacial_erosion_m = clamp((ice_thickness_m / 1000) * max(0, slope*900) * 12, 0, 85)` (`cpp/src/engine/environment.cpp:89`), which is where the `bounded_85m` in the model name comes from.
+The erosion potential itself comes from `derive_cryosphere_state`: `glacial_erosion_m = clamp((ice_thickness_m / 1000) * max(0, slope*900) * 12, 0, 85)`. The exposed-land formula is unchanged. Its annual grounded-ice input is a static diagnostic, with no seasonal mass/energy or physical-time claim. Source lake membership comes from the retained pre-transport snapshot and may differ from the final stabilized world; the v2 replay continues to use its original evidence rather than inferring new lake flags.
 
 Transport is one transfer per source with `glacier_flow_to >= 0` and `glacial_erosion_m > 0` (`environment.cpp:136-141`); the target must be a listed neighbor of the source or the engine throws `"glacial sediment transfer target is invalid"` (`:142-153`). Source depth is `glacial_erosion_m * 0.28`; volume and target depth follow the same `depth * area / 1000` / `volume * 1000 / area` conversion as hillslope. Because at most one transfer exists per source, `source_cell_count == transfer_count` (`environment.cpp:280-281`), and the source-partition replay explicitly rejects a repeated glacial source (`src/magic_geo/sediment_source_partition_validation.py:271`).
 

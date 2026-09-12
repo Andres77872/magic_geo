@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+from .biological_resource_validation import validate_biological_resources
+
 import math
 from collections import Counter, deque
 from copy import deepcopy
 from typing import Any, Iterable
 
 from .biome_dynamics import enrich_world_with_biome_diagnostics
+from .climate_energy_validation_dispatch import (
+    climate_energy_validation_mode,
+    validate_native_climate_energy_output,
+)
 from .control_volume_geometry import (
     CONTROL_VOLUME_AREA_MODELS,
     inspect_control_volume_geometry,
 )
 from .geo_evolution_provenance import validate_geo_evolution_provenance
+from .natural_water_validation_dispatch import validate_public_natural_water_chain
 from .geo_layer_contracts import evaluate_geo_layer_contracts
 from .geo_validation_physics import validate_physics_replays
 from .geo_validation_subsystems import validate_natural_subsystems
@@ -334,6 +341,62 @@ def _cycle_nodes(flow_to: dict[int, int]) -> set[int]:
             if indegree[target] == 0:
                 pending.append(target)
     return {cell_id for cell_id, degree in indegree.items() if degree > 0}
+
+
+def _dry_priority_flood_seed(
+    world: dict[str, Any], cells: list[dict[str, Any]], reconstructed_accumulation: dict[int, float],
+) -> int | None:
+    """Recognize the dry global outlet retained by the declared routing model.
+
+    With no marine seed, Priority-Flood starts at the first lowest terrain cell.
+    When all routed runoff is zero, the native model leaves basin IDs unset and
+    emits no watersheds. This identifies that one seed; it grants no exception
+    to adjacency, downhill potential, graph or accumulation checks.
+    """
+    summary = world.get("summary", {})
+    budget = world.get("hydrologic_water_budget_model")
+    if (
+        not isinstance(summary, dict) or not isinstance(budget, dict)
+        or summary.get("hydrologic_surface_model") != "priority_flood_fill_with_deterministic_flat_gradient_v1"
+        or summary.get("depression_routing_model") != "raw_downhill_sink_units_with_priority_flood_spill_corridors_v1"
+        or budget.get("model_type") != "causal_land_climate_loss_partition_v1"
+        or budget.get("runoff_computed_before_flow_routing") is not True
+        or world.get("watersheds") != []
+        or not cells
+    ):
+        return None
+    for cell in cells:
+        if (
+            cell.get("is_water") is not False or cell.get("is_lake") is not False
+            or type(cell.get("basin_id")) is not int or cell["basin_id"] != -1
+            or not _finite_number(cell.get("elevation_m"))
+            or not _finite_number(cell.get("runoff_mm_y")) or cell["runoff_mm_y"] != 0.0
+            or not _finite_number(cell.get("flow_accumulation")) or cell["flow_accumulation"] != 0.0
+            or reconstructed_accumulation.get(cell["id"]) != 0.0
+        ):
+            return None
+    seed = min(cells, key=lambda cell: (float(cell["elevation_m"]), cell["id"]))
+    if (
+        seed.get("flow_to") != -1 or seed.get("spill_to") != -1
+        or seed.get("lake_basin_id") != -1 or seed.get("is_closed_basin") is not False
+        or not _finite_number(seed.get("depression_depth_m")) or seed["depression_depth_m"] != 0.0
+        or not _finite_number(seed.get("water_depth_m")) or seed["water_depth_m"] != 0.0
+        or not _finite_number(seed.get("hydrologic_surface_elevation_m"))
+        or not _finite_number(seed.get("spill_elevation_m"))
+    ):
+        return None
+    precision = summary.get("output_float_precision")
+    if type(precision) is not int or not 0 <= precision <= 8:
+        return None
+    elevation = float(seed["elevation_m"])
+    # Terrain may retain binary64 precision while these two exported routing
+    # potentials use the requested decimal display precision.
+    tolerance = 0.5 * 10.0 ** (-precision) + 4.0 * math.ulp(elevation)
+    if any(abs(float(seed[field]) - elevation) > tolerance for field in (
+        "hydrologic_surface_elevation_m", "spill_elevation_m",
+    )):
+        return None
+    return int(seed["id"])
 
 
 def extract_geo_metrics(world: dict[str, Any]) -> dict[str, Any]:
@@ -825,6 +888,18 @@ def _validate_geo_world_impl(
         return _finalize_report(profile, {}, checks)
     summary = world.get("summary", {})
     cells = world.get("cells", [])
+    if world.get("generation_scope") == "geo_only":
+        from .native_social_public_validation import NATIVE_SOCIAL_PUBLIC_MODELS, RECORDED_SUMMARY_FIELDS
+        forbidden_top = sorted((NATIVE_SOCIAL_PUBLIC_MODELS | {"native_social_availability", "reef_port_links_model"}).intersection(world))
+        forbidden_summary = sorted((NATIVE_SOCIAL_PUBLIC_MODELS | RECORDED_SUMMARY_FIELDS).intersection(summary)) if isinstance(summary, dict) else ["malformed summary"]
+        forbidden_cells = [cell.get("id") for cell in cells if isinstance(cell, dict) and any(key in cell for key in ("settlement_score", "settlement_climate_supported", "settlement_climate_temperature_c"))] if isinstance(cells, list) else ["malformed cells"]
+        _check(
+            checks, domain="contract", name="geography_only_social_exclusion",
+            passed=not (forbidden_top or forbidden_summary or forbidden_cells),
+            message="Geography-only output excludes settlement and social estimates before natural enrichment.",
+            observed={"top": forbidden_top, "summary": forbidden_summary, "cells": forbidden_cells[:16]},
+            expected="no native social envelope, own-model mirrors or settlement input fields",
+        )
     _check(
         checks,
         domain="contract",
@@ -869,6 +944,19 @@ def _validate_geo_world_impl(
             expected="non-empty list",
         )
         return _finalize_report(profile, {}, checks)
+
+    natural_groundwater, groundwater_errors = validate_public_natural_water_chain(world)
+    _check(
+        checks,
+        domain="aquifers_wetlands_karst",
+        name="declared_groundwater_contract",
+        passed=not groundwater_errors,
+        message="Natural water declarations must match; aquifer, groundwater, river, hydraulic and karst outputs must replay with the final infiltration summary.",
+        observed={"natural_v2": natural_groundwater, "errors": groundwater_errors},
+        expected="compatible declared versions and independently replayed natural water diagnostics",
+    )
+    if groundwater_errors:
+        return _finalize_report(profile, {"cell_count": len(cells)}, checks)
 
     try:
         recorded_cell_count = int(summary.get("cell_count", -1))
@@ -933,6 +1021,23 @@ def _validate_geo_world_impl(
             "exact_zero_monthly_and_annual_precipitation"
         ),
     }
+    try:
+        climate_validation_mode = climate_energy_validation_mode(world)
+    except ValueError as error:
+        climate_validation_mode, native_climate_errors, native_climate_report = "invalid", [str(error)], None
+    else:
+        native_climate_errors, native_climate_report = (
+            validate_native_climate_energy_output(world)
+            if climate_validation_mode == "native" else ([], None)
+        )
+    if climate_validation_mode != "legacy":
+        expected_climate_contract = {
+            "model_type": "prescribed_seasonal_surface_energy_v1",
+            "temperature_model": "periodic_graybody_storage_conservative_transport_v1",
+            "temperature_source": "climate_energy_balance_records_monthly_mean_temperature_k",
+            "precipitation_model": "solved_temperature_scaled_empirical_circulation_orography_wind_transport_v1",
+            "imposed_mean_temperature": False,
+        }
     climate_model = world.get("climate_model")
     observed_climate_contract = (
         {
@@ -946,13 +1051,14 @@ def _validate_geo_world_impl(
         checks,
         domain="contract",
         name="current_climate_model",
-        passed=observed_climate_contract == expected_climate_contract,
+        passed=observed_climate_contract == expected_climate_contract and not native_climate_errors,
         message=(
             "natural-world validation requires the current climate and "
             "precipitation semantics"
         ),
         observed=observed_climate_contract,
         expected=expected_climate_contract,
+        evidence={"native_climate_errors": native_climate_errors},
     )
     all_cells_are_objects = all(isinstance(cell, dict) for cell in cells)
     cell_ids = [cell.get("id") for cell in cells if isinstance(cell, dict)]
@@ -1481,27 +1587,48 @@ def _validate_geo_world_impl(
         },
         expected={"month_count": 12, "temperature_tolerance_c": 1.0e-3, "precipitation_tolerance_mm_y": 1.0e-2},
     )
-    climate_model = world.get("climate_model", {})
-    base_temperature = float(climate_model.get("base_temperature_c", 15.0)) if isinstance(climate_model, dict) else 15.0
-    luminosity = _planet_value(world, "stellar_luminosity", 1.0)
-    greenhouse = _planet_value(world, "greenhouse_factor", 1.0)
-    pressure = _planet_value(world, "atmosphere_pressure_bar", 1.0)
-    expected_global_temperature = (
-        base_temperature
-        + 38.0 * (luminosity ** 0.25 - 1.0)
-        + 11.0 * (greenhouse - 1.0)
-        + 4.5 * math.log(max(0.01, pressure))
-    )
-    observed_global_temperature = _area_weighted_mean(cells, "temperature_c")
-    _check(
-        checks,
-        domain="climate",
-        name="configured_global_temperature_response",
-        passed=abs(observed_global_temperature - expected_global_temperature) <= 0.35,
-        message="area-mean temperature must respond to configured stellar, greenhouse, and pressure forcing",
-        observed=observed_global_temperature,
-        expected={"temperature_c": expected_global_temperature, "tolerance_c": 0.35},
-    )
+    if climate_validation_mode != "legacy":
+        _check(
+            checks,
+            domain="climate",
+            name="configured_global_temperature_response",
+            passed=None,
+            message="The native seasonal model has no imposed global temperature response formula.",
+            observed={"imposed_mean_temperature": False},
+            expected="not applicable to the native seasonal energy model",
+        )
+        _check(
+            checks,
+            domain="climate",
+            name="native_solved_temperature_linkage",
+            passed=not native_climate_errors,
+            message="Published monthly and annual cell temperatures must mirror the retained native solved budget.",
+            observed=native_climate_report,
+            expected={"full_world_display_fields_linked": True, "unexported_thermal_trajectory_replayed": False},
+            evidence={"violations": native_climate_errors},
+        )
+    else:
+        climate_model = world.get("climate_model", {})
+        base_temperature = float(climate_model.get("base_temperature_c", 15.0)) if isinstance(climate_model, dict) else 15.0
+        luminosity = _planet_value(world, "stellar_luminosity", 1.0)
+        greenhouse = _planet_value(world, "greenhouse_factor", 1.0)
+        pressure = _planet_value(world, "atmosphere_pressure_bar", 1.0)
+        expected_global_temperature = (
+            base_temperature
+            + 38.0 * (luminosity ** 0.25 - 1.0)
+            + 11.0 * (greenhouse - 1.0)
+            + 4.5 * math.log(max(0.01, pressure))
+        )
+        observed_global_temperature = _area_weighted_mean(cells, "temperature_c")
+        _check(
+            checks,
+            domain="climate",
+            name="configured_global_temperature_response",
+            passed=abs(observed_global_temperature - expected_global_temperature) <= 0.35,
+            message="area-mean temperature must respond to configured stellar, greenhouse, and pressure forcing",
+            observed=observed_global_temperature,
+            expected={"temperature_c": expected_global_temperature, "tolerance_c": 0.35},
+        )
 
     land_cells = [cell for cell in cells if not bool(cell.get("is_water", False))]
     water_budget_residual = 0.0
@@ -1763,6 +1890,8 @@ def _validate_geo_world_impl(
         if not bool(cell.get("is_water", False))
         and int(cell.get("basin_id", -1)) >= 0
     }
+    dry_seed_id = _dry_priority_flood_seed(world, cells, reconstructed_accumulation)
+    dry_seed_path_count = 0
     invalid_terminal_count = 0
     for cell_id, cell in cells_by_id.items():
         if bool(cell.get("is_water", False)):
@@ -1777,10 +1906,14 @@ def _validate_geo_world_impl(
         terminal_watershed = watershed_by_basin.get(
             int(terminal.get("basin_id", -1)), {}
         )
+        dry_seed_terminal = dry_seed_id is not None and terminal_id == dry_seed_id
+        if dry_seed_terminal:
+            dry_seed_path_count += 1
         if not (
             bool(terminal.get("is_water", False))
             or bool(terminal.get("is_lake", False))
             or bool(terminal.get("is_closed_basin", False))
+            or dry_seed_terminal
             or (
                 isinstance(terminal_watershed, dict)
                 and (
@@ -1803,7 +1936,7 @@ def _validate_geo_world_impl(
         and invalid_river_cells == 0
         and invalid_terminal_count == 0
         and land_basin_ids == watershed_basin_ids,
-        message="drainage must be adjacent, strictly downhill, acyclic, accumulation-conserving, and terminate in valid basins",
+        message="drainage must be adjacent, strictly downhill, acyclic, accumulation-conserving, and terminate in valid basins or the declared zero-runoff global Priority-Flood seed",
         observed={
             "invalid_target_count": invalid_flow_targets,
             "nonneighbor_link_count": nonneighbor_flow_links,
@@ -1814,6 +1947,8 @@ def _validate_geo_world_impl(
             "accumulation_tolerance": accumulation_tolerance,
             "invalid_river_cell_count": invalid_river_cells,
             "invalid_terminal_count": invalid_terminal_count,
+            "dry_priority_flood_seed_cell_id": dry_seed_id,
+            "dry_priority_flood_seed_path_count": dry_seed_path_count,
             "land_basin_count": len(land_basin_ids),
             "watershed_basin_count": len(watershed_basin_ids),
         },
@@ -2075,52 +2210,65 @@ def _validate_geo_world_impl(
         expected={"stage_count": expected_stage_count},
     )
 
-    energy_records = world.get("climate_energy_balance_records", [])
-    energy_cell_ids: set[int] = set()
-    invalid_energy_records = 0
-    if isinstance(energy_records, list):
-        for record in energy_records:
-            if not isinstance(record, dict):
-                invalid_energy_records += 1
-                continue
-            try:
-                cell_id = int(record.get("cell_id", -1))
-            except (TypeError, ValueError):
-                invalid_energy_records += 1
-                continue
-            cell = cells_by_id.get(cell_id)
-            required_energy_fields = (
-                "top_of_atmosphere_insolation_w_m2",
-                "absorbed_shortwave_w_m2",
-                "outgoing_longwave_w_m2",
-                "greenhouse_trapping_w_m2",
-                "net_radiative_balance_w_m2",
-                "energy_balance_residual_c",
-            )
-            if (
-                cell is None
-                or cell_id in energy_cell_ids
-                or any(not _finite_number(record.get(field)) for field in required_energy_fields)
-                or abs(float(record.get("temperature_c", math.inf)) - float(cell["temperature_c"])) > 1.0e-3
-            ):
-                invalid_energy_records += 1
-            energy_cell_ids.add(cell_id)
+    if climate_validation_mode != "legacy":
+        _check(
+            checks,
+            domain="climate",
+            name="climate_energy_record_coverage",
+            passed=not native_climate_errors,
+            message="Every cell must have one native budget with twelve monthly moments and fluxes, thirteen boundaries, and verified temperature linkage.",
+            observed=native_climate_report,
+            expected={"unique_cell_count": len(cells), "monthly_values_per_record": 12, "boundary_values_per_record": 13},
+            evidence={"violations": native_climate_errors},
+        )
     else:
-        invalid_energy_records = 1
-    _check(
-        checks,
-        domain="climate",
-        name="climate_energy_record_coverage",
-        passed=invalid_energy_records == 0 and energy_cell_ids == set(cells_by_id),
-        message="every cell must have one finite climate-energy diagnostic tied to its generated temperature",
-        observed={
-            "record_count": len(energy_records) if isinstance(energy_records, list) else None,
-            "unique_cell_count": len(energy_cell_ids),
-            "invalid_record_count": invalid_energy_records,
-        },
-        expected={"unique_cell_count": len(cells)},
-    )
+        energy_records = world.get("climate_energy_balance_records", [])
+        energy_cell_ids: set[int] = set()
+        invalid_energy_records = 0
+        if isinstance(energy_records, list):
+            for record in energy_records:
+                if not isinstance(record, dict):
+                    invalid_energy_records += 1
+                    continue
+                try:
+                    cell_id = int(record.get("cell_id", -1))
+                except (TypeError, ValueError):
+                    invalid_energy_records += 1
+                    continue
+                cell = cells_by_id.get(cell_id)
+                required_energy_fields = (
+                    "top_of_atmosphere_insolation_w_m2",
+                    "absorbed_shortwave_w_m2",
+                    "outgoing_longwave_w_m2",
+                    "greenhouse_trapping_w_m2",
+                    "net_radiative_balance_w_m2",
+                    "energy_balance_residual_c",
+                )
+                if (
+                    cell is None
+                    or cell_id in energy_cell_ids
+                    or any(not _finite_number(record.get(field)) for field in required_energy_fields)
+                    or abs(float(record.get("temperature_c", math.inf)) - float(cell["temperature_c"])) > 1.0e-3
+                ):
+                    invalid_energy_records += 1
+                energy_cell_ids.add(cell_id)
+        else:
+            invalid_energy_records = 1
+        _check(
+            checks,
+            domain="climate",
+            name="climate_energy_record_coverage",
+            passed=invalid_energy_records == 0 and energy_cell_ids == set(cells_by_id),
+            message="every cell must have one finite climate-energy diagnostic tied to its generated temperature",
+            observed={
+                "record_count": len(energy_records) if isinstance(energy_records, list) else None,
+                "unique_cell_count": len(energy_cell_ids),
+                "invalid_record_count": invalid_energy_records,
+            },
+            expected={"unique_cell_count": len(cells)},
+        )
 
+    grounded_current = "grounded_ice_model" in world
     ice_sheets = world.get("ice_sheets", [])
     ice_sheet_records = {
         int(record.get("id", -1)): record
@@ -2130,11 +2278,12 @@ def _validate_geo_world_impl(
     invalid_ice_cells = 0
     invalid_glacier_links = 0
     for cell_id, cell in cells_by_id.items():
-        ice_thickness = float(cell.get("ice_thickness_m", 0.0))
+        ice_thickness = float(cell.get("grounded_ice_diagnostic_thickness_m" if grounded_current else "ice_thickness_m", 0.0))
         ice_sheet_id = cell.get("ice_sheet_id", -1)
         if ice_thickness < 0.0 or (
             ice_thickness > 25.0
             and not bool(cell.get("is_water", False))
+            and (not grounded_current or not bool(cell.get("is_lake", False)))
             and (not isinstance(ice_sheet_id, int) or ice_sheet_id not in ice_sheet_records)
         ):
             invalid_ice_cells += 1
@@ -2154,13 +2303,14 @@ def _validate_geo_world_impl(
             cell
             for cell in cells
             if int(cell.get("ice_sheet_id", -1)) == sheet_id
-            and float(cell.get("ice_thickness_m", 0.0)) > 25.0
+            and float(cell.get("grounded_ice_diagnostic_thickness_m" if grounded_current else "ice_thickness_m", 0.0)) > 25.0
             and not bool(cell.get("is_water", False))
+            and (not grounded_current or not bool(cell.get("is_lake", False)))
         ]
         member_area = sum(float(cell.get("area_km2", 0.0)) for cell in members)
         mean_thickness = (
             sum(
-                float(cell.get("ice_thickness_m", 0.0))
+                float(cell.get("grounded_ice_diagnostic_thickness_m" if grounded_current else "ice_thickness_m", 0.0))
                 * float(cell.get("area_km2", 0.0))
                 for cell in members
             )
@@ -2426,18 +2576,20 @@ def _validate_geo_world_impl(
         )
     else:
         invalid_commodity_links = 1
+    biological_resource_errors = validate_biological_resources(world)
     _check(
         checks,
         domain="natural_resources",
         name="deposit_and_commodity_linkage",
-        passed=invalid_deposits == 0 and invalid_commodity_links == 0,
-        message="natural deposits must mirror source cells and every commodity must link to a valid deposit",
+        passed=invalid_deposits == 0 and invalid_commodity_links == 0 and not biological_resource_errors,
+        message="Natural deposits must mirror source cells and every commodity must link to a valid deposit with its declared biological inputs available.",
         observed={
             "deposit_count": len(deposit_ids),
             "invalid_deposit_count": invalid_deposits,
             "invalid_commodity_link_count": invalid_commodity_links,
         },
         expected="zero invalid links",
+        evidence={"biological_resource_errors": biological_resource_errors},
     )
 
     watersheds_for_graph = world.get("watersheds", [])

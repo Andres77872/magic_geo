@@ -1,0 +1,57 @@
+{
+  "warm": {
+    "key": "full_world-8d1d0e536470146698db94beaf989ccae6686b8c6084ce8f2a4540afa9d54de0",
+    "kind": "actual_public_generation",
+    "seconds": 16.70037970104022,
+    "world_file": "/home/andres/CLionProjects/magic-geo/runs/seasonal-default-fixtures/physics-subsystems/full_world-8d1d0e536470146698db94beaf989ccae6686b8c6084ce8f2a4540afa9d54de0.world.json.gz",
+    "world_sha256": "f73134be97b36713f901a1f8158bf744927f0fec3ad318a93c6d7ec7ce8078b4",
+    "config_file": "/home/andres/CLionProjects/magic-geo/runs/seasonal-default-fixtures/physics-subsystems/full_world-8d1d0e536470146698db94beaf989ccae6686b8c6084ce8f2a4540afa9d54de0.config.json",
+    "config_sha256": "a4822f35a25637cb73986fb202df28876db766f33d722458b0303efcf1fdfccd",
+    "fixture_gzip_sha256": "63026fd39e6b6f0ae7725ca0ce697d989c4e873e518f30bfe02e2ed29bd66939",
+    "fixture": "warm.json.gz",
+    "config_fixture": "warm.config.json",
+    "scope": "complete original Python-enriched full-world output; no native regeneration during replay"
+  },
+  "cold": {
+    "key": "full_world-2522918cb77d9a6c0c049150f8057715fb48381a3d2478f3bdb1646926ee29d4",
+    "kind": "actual_public_generation",
+    "seconds": 8.982779495010618,
+    "world_file": "/home/andres/CLionProjects/magic-geo/runs/seasonal-default-fixtures/physics-subsystems/full_world-2522918cb77d9a6c0c049150f8057715fb48381a3d2478f3bdb1646926ee29d4.world.json.gz",
+    "world_sha256": "8a13ed496a3ce9d082b4fb36c22e141f60d3c6faf29449900d8f7b9f66605404",
+    "config_file": "/home/andres/CLionProjects/magic-geo/runs/seasonal-default-fixtures/physics-subsystems/full_world-2522918cb77d9a6c0c049150f8057715fb48381a3d2478f3bdb1646926ee29d4.config.json",
+    "config_sha256": "1573409c08a05f9e964fc8e1fc1a25f8a7b6f113a9b205f44e8396dbe0c33d61",
+    "fixture_gzip_sha256": "05136db0fe2153cd272bea2098e85227fb85783e7aa4734325bb9eb18a42cfa0",
+    "fixture": "cold.json.gz",
+    "config_fixture": "cold.config.json",
+    "scope": "complete original Python-enriched full-world output; no native regeneration during replay"
+  },
+  "legacy": {
+    "utc": "2026-09-10T06:37:12.206621+00:00",
+    "trigger": "tests/test_native_climate_validation_dispatch.py::test_known_legacy_physics_still_replays_original_equations:call",
+    "module": "support.worlds",
+    "cache": "_legacy_cache",
+    "key": "energy_128",
+    "object_id": 130295264619008,
+    "world_file": "worlds/0d1dc78d91d317ffb9ff20c6bb88c9d64f72b0a21ec369f816c6a21b3dfd82f7.json.gz",
+    "uncompressed_sha256": "0d1dc78d91d317ffb9ff20c6bb88c9d64f72b0a21ec369f816c6a21b3dfd82f7",
+    "uncompressed_bytes": 4366731,
+    "config_file": "configs/0d03b1303b461163add2a0d48ba19b6ca06c50544ee05f2ad6f677e1218009dc.json",
+    "config_recipe": {
+      "function": "build_legacy_config",
+      "overrides": {
+        "mesh.cell_count": 128,
+        "tectonics.plate_count": 8,
+        "erosion.iterations": 0,
+        "compute.backend": "cpu",
+        "compute.threads": 1
+      }
+    },
+    "config_provenance": "reconstructed_at_archive_time_with_existing_fixture_builder",
+    "cache_module_source_sha256": "8ec3546e9d7f00c544c93933a1ef85bb2e592b451b56020362bb92ac2f92b74d",
+    "world_sha256": "0d1dc78d91d317ffb9ff20c6bb88c9d64f72b0a21ec369f816c6a21b3dfd82f7",
+    "fixture_gzip_sha256": "752a988988b17a62bd177dd0aea0121e904e35ca8d75e398c58d1cd84aa917af",
+    "fixture": "legacy.json.gz",
+    "config_fixture": "legacy.config.json",
+    "scope": "complete original full-world output with explicitly selected legacy climate; no native regeneration during replay"
+  }
+}

@@ -490,6 +490,13 @@ def _replay_valid(payload: dict[str, Any]) -> bool:
 
 
 def validate_historical_geography_replay(payload: dict[str, Any]) -> list[str]:
+    from .native_social_availability import uses_native_social_availability
+    try:
+        if uses_native_social_availability(payload):
+            from .native_historical_availability_validation import validate_native_historical_availability
+            return validate_native_historical_availability(payload)
+    except (TypeError, ValueError, OverflowError):
+        return ["historical geography model or causal replay invalid"]
     try:
         valid = _replay_valid(payload)
     except (IndexError, KeyError, TypeError, ValueError):

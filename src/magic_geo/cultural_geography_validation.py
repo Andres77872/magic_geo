@@ -843,4 +843,11 @@ def _replay_valid(payload: dict[str, Any]) -> bool:
 
 
 def validate_cultural_geography_replay(payload: dict[str, Any]) -> list[str]:
+    from .native_social_availability import uses_native_social_availability
+    try:
+        if uses_native_social_availability(payload):
+            from .native_cultural_availability_validation import validate_native_cultural_availability
+            return validate_native_cultural_availability(payload)
+    except (TypeError, ValueError, OverflowError):
+        return ["cultural geography model or causal replay invalid"]
     return [] if _replay_valid(payload) else ["cultural geography model or causal replay invalid"]

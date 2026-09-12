@@ -743,7 +743,7 @@ def _build_strategic_campaign_plans(
     return strategic_plans, summary_values
 
 
-def enrich_world_with_logistics_history(world: dict[str, Any]) -> dict[str, Any]:
+def _legacy_enrich_world_with_logistics_history(world: dict[str, Any]) -> dict[str, Any]:
     radius_km = planet_radius_km(world)
     _set_logistics_campaign_models(world)
     regions = world.get("political_regions", [])
@@ -1343,3 +1343,11 @@ def enrich_world_with_logistics_history(world: dict[str, Any]) -> dict[str, Any]
     summary["high_attrition_campaign_count"] = high_attrition_campaigns
     summary["high_attrition_campaign_path_segment_count"] = high_attrition_path_segments
     return world
+
+
+def enrich_world_with_logistics_history(world: dict[str, Any]) -> dict[str, Any]:
+    from .logistics_availability_validation import uses_logistics_availability
+    if uses_logistics_availability(world):
+        from .logistics_availability import enrich_available_logistics
+        return enrich_available_logistics(world)
+    return _legacy_enrich_world_with_logistics_history(world)

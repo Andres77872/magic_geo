@@ -96,6 +96,42 @@ add_library(
   cpp/src/c_api.cpp
   cpp/src/engine.cpp
   cpp/src/engine/climate.cpp
+  cpp/src/engine/climate_transport.cpp
+  cpp/src/engine/physical_columns.cpp
+  cpp/src/engine/seasonal_climate.cpp
+  cpp/src/engine/seasonal_climate_cache.cpp
+  cpp/src/engine/seasonal_climate_serialization.cpp
+  cpp/src/engine/adaptive_energy_balance.cpp
+  cpp/src/engine/periodic_energy_balance.cpp
+  cpp/src/engine/seasonal_energy_balance.cpp
+  cpp/src/engine/enthalpy_mesh.cpp
+  cpp/src/engine/enthalpy_mesh_serialization.cpp
+  cpp/src/engine/enthalpy_mesh_sdirk2.cpp
+  cpp/src/engine/enthalpy_mesh_sdirk2_serialization.cpp
+  cpp/src/engine/enthalpy_mesh_proof_codec.cpp
+  cpp/src/engine/layered_proof_store.cpp
+  cpp/src/engine/layered_proof_record.cpp
+  cpp/src/engine/layered_ice_column.cpp
+  cpp/src/engine/layered_ice_material.cpp
+  cpp/src/engine/layered_ice_absorption.cpp
+  cpp/src/engine/layered_ice_remap.cpp
+  cpp/src/engine/layered_ice_topology.cpp
+  cpp/src/engine/layered_ice_owner.cpp
+  cpp/src/engine/layered_ice_owner_kernel.cpp
+  cpp/src/engine/layered_ice_owner_metadata.cpp
+  cpp/src/engine/layered_ice_forcing_history.cpp
+  cpp/src/engine/layered_ice_owner_ledger.cpp
+  cpp/src/engine/layered_ice_owner_serialization.cpp
+  cpp/src/engine/enthalpy_mesh_owner.cpp
+  cpp/src/engine/enthalpy_mesh_owner_serialization.cpp
+  cpp/src/engine/finalized_enthalpy_context.cpp
+  cpp/src/engine/finalized_enthalpy_context_serialization.cpp
+  cpp/src/engine/finalized_layered_state.cpp
+  cpp/src/engine/finalized_layered_foundation.cpp
+  cpp/src/engine/time_integrated_energy.cpp
+  cpp/src/engine/solar_insolation.cpp
+  cpp/src/engine/solar_calendar.cpp
+  cpp/src/engine/solar_calendar_serialization.cpp
   cpp/src/engine/civilization.cpp
   cpp/src/engine/core.cpp
   cpp/src/engine/crust_overlap_candidate_fate.cpp
@@ -108,6 +144,16 @@ add_library(
   cpp/src/engine/environment.cpp
   cpp/src/engine/history.cpp
   cpp/src/engine/hydrology.cpp
+  cpp/src/engine/seasonal_liquid_routing.cpp
+  cpp/src/engine/terrestrial_water.cpp
+  cpp/src/engine/terrestrial_water_serialization.cpp
+  cpp/src/engine/terrestrial_calorimeter_backend.cpp
+  cpp/src/engine/terrestrial_coupled.cpp
+  cpp/src/engine/terrestrial_coupled_error.cpp
+  cpp/src/engine/terrestrial_thermal_backend.cpp
+  cpp/src/engine/terrestrial_thermal/phase_segment.cpp
+  cpp/src/engine/terrestrial_thermal/hermite_residual.cpp
+  cpp/src/engine/terrestrial_thermal/phase_segment_serialization.cpp
   cpp/src/engine/mesh.cpp
   cpp/src/engine/messagepack.cpp
   cpp/src/engine/numeric_serialization.cpp
@@ -190,7 +236,7 @@ if(OpenMP_CXX_FOUND)
   target_compile_definitions(magic_geo_native PRIVATE MAGIC_GEO_HAS_OPENMP=1)
 endif()
 
-target_link_libraries(magic_geo_native PRIVATE ${CMAKE_DL_LIBS})
+target_link_libraries(magic_geo_native PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
 
 if(MAGIC_GEO_CUDA_ENABLED)
   target_compile_definitions(magic_geo_native PRIVATE MAGIC_GEO_HAS_CUDA=1)
@@ -221,6 +267,581 @@ install(
 )
 
 if(BUILD_TESTING)
+  add_executable(magic_geo_solar_calendar_test
+    cpp/tests/solar_calendar_test.cpp $<TARGET_OBJECTS:magic_geo_native>)
+  target_include_directories(magic_geo_solar_calendar_test PRIVATE cpp/include cpp/src/engine)
+  target_link_libraries(magic_geo_solar_calendar_test PRIVATE
+    $<TARGET_PROPERTY:magic_geo_native,LINK_LIBRARIES>)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_solar_calendar_test PRIVATE -Wall -Wextra -Werror -ffp-contract=off)
+  endif()
+  add_test(NAME magic_geo_solar_calendar COMMAND magic_geo_solar_calendar_test controls)
+  add_test(NAME magic_geo_solar_calendar_owner COMMAND magic_geo_solar_calendar_test owner)
+  set_tests_properties(magic_geo_solar_calendar magic_geo_solar_calendar_owner PROPERTIES TIMEOUT 30)
+  # Reuse the exact production objects for an internal finalized-surface entry
+  # test without exporting that implementation through the public shared ABI.
+  add_executable(magic_geo_finalized_enthalpy_context_test
+    cpp/tests/finalized_enthalpy_context_test.cpp $<TARGET_OBJECTS:magic_geo_native>)
+  target_include_directories(magic_geo_finalized_enthalpy_context_test PRIVATE cpp/include cpp/src/engine)
+  target_link_libraries(magic_geo_finalized_enthalpy_context_test PRIVATE
+    $<TARGET_PROPERTY:magic_geo_native,LINK_LIBRARIES>)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_finalized_enthalpy_context_test PRIVATE -Wall -Wextra -Werror -ffp-contract=off)
+  endif()
+  add_test(NAME magic_geo_finalized_enthalpy_context
+    COMMAND magic_geo_finalized_enthalpy_context_test controls)
+  add_test(NAME magic_geo_finalized_enthalpy_production
+    COMMAND magic_geo_finalized_enthalpy_context_test production
+      "${CMAKE_CURRENT_BINARY_DIR}/finalized_enthalpy_production_world.json")
+  set_tests_properties(magic_geo_finalized_enthalpy_context PROPERTIES TIMEOUT 30)
+  set_tests_properties(magic_geo_finalized_enthalpy_production PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
+  # Test the actual production objects and hidden geographic-stage API.
+  add_executable(magic_geo_geographic_foundation_test
+    cpp/tests/geographic_foundation_test.cpp $<TARGET_OBJECTS:magic_geo_native>)
+  target_include_directories(magic_geo_geographic_foundation_test PRIVATE cpp/include cpp/src/engine)
+  target_link_libraries(magic_geo_geographic_foundation_test PRIVATE
+    $<TARGET_PROPERTY:magic_geo_native,LINK_LIBRARIES>)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_geographic_foundation_test PRIVATE -Wall -Wextra -Werror -ffp-contract=off)
+  endif()
+  add_test(NAME magic_geo_geographic_foundation
+    COMMAND magic_geo_geographic_foundation_test --run "${CMAKE_CURRENT_BINARY_DIR}/geographic_foundation_output")
+  set_tests_properties(magic_geo_geographic_foundation PROPERTIES TIMEOUT 120)
+  add_executable(magic_geo_finalized_layered_state_test
+    cpp/tests/finalized_layered_state_test.cpp $<TARGET_OBJECTS:magic_geo_native>)
+  target_include_directories(magic_geo_finalized_layered_state_test PRIVATE cpp/include cpp/src/engine)
+  target_link_libraries(magic_geo_finalized_layered_state_test PRIVATE
+    $<TARGET_PROPERTY:magic_geo_native,LINK_LIBRARIES>)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_finalized_layered_state_test PRIVATE -Wall -Wextra -Werror -ffp-contract=off)
+  endif()
+  add_test(NAME magic_geo_finalized_layered_state
+    COMMAND magic_geo_finalized_layered_state_test --controls)
+  set_tests_properties(magic_geo_finalized_layered_state PROPERTIES TIMEOUT 120)
+  # Data-only proof qualification uses retained fixtures and an explicitly
+  # provisioned file; the large external-store exercise is never an automatic test.
+  add_executable(magic_geo_enthalpy_mesh_proof_codec_test
+    cpp/tests/enthalpy_mesh_proof_codec_test.cpp $<TARGET_OBJECTS:magic_geo_native>)
+  add_executable(magic_geo_layered_proof_store_test
+    cpp/tests/layered_proof_store_test.cpp $<TARGET_OBJECTS:magic_geo_native>)
+  add_executable(magic_geo_layered_proof_record_test
+    cpp/tests/layered_proof_record_test.cpp $<TARGET_OBJECTS:magic_geo_native>)
+  add_executable(magic_geo_layered_ice_owner_metadata_test
+    cpp/tests/layered_ice_owner_metadata_test.cpp $<TARGET_OBJECTS:magic_geo_native>)
+  foreach(_target magic_geo_enthalpy_mesh_proof_codec_test magic_geo_layered_proof_store_test
+                  magic_geo_layered_proof_record_test magic_geo_layered_ice_owner_metadata_test)
+    target_include_directories(${_target} PRIVATE cpp/include cpp/src cpp/src/engine)
+    target_link_libraries(${_target} PRIVATE $<TARGET_PROPERTY:magic_geo_native,LINK_LIBRARIES>)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+      target_compile_options(${_target} PRIVATE -Wall -Wextra -Werror -ffp-contract=off)
+    endif()
+  endforeach()
+  add_executable(magic_geo_layered_forcing_history_test
+    cpp/tests/layered_ice_forcing_history_test.cpp cpp/src/engine/layered_ice_forcing_history.cpp)
+  target_include_directories(magic_geo_layered_forcing_history_test PRIVATE cpp/src/engine)
+  add_executable(magic_geo_layered_owner_storage_test
+    cpp/tests/layered_ice_owner_storage_test.cpp $<TARGET_OBJECTS:magic_geo_native>)
+  target_include_directories(magic_geo_layered_owner_storage_test PRIVATE cpp/include cpp/src/engine)
+  target_link_libraries(magic_geo_layered_owner_storage_test PRIVATE
+    $<TARGET_PROPERTY:magic_geo_native,LINK_LIBRARIES>)
+  add_executable(magic_geo_layered_owner_storage_budget_test
+    cpp/tests/layered_ice_owner_storage_budget_test.cpp $<TARGET_OBJECTS:magic_geo_native>)
+  target_include_directories(magic_geo_layered_owner_storage_budget_test PRIVATE cpp/include cpp/src/engine)
+  target_link_libraries(magic_geo_layered_owner_storage_budget_test PRIVATE
+    $<TARGET_PROPERTY:magic_geo_native,LINK_LIBRARIES>)
+  foreach(_target magic_geo_layered_forcing_history_test magic_geo_layered_owner_storage_test
+                  magic_geo_layered_owner_storage_budget_test)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+      target_compile_options(${_target} PRIVATE -Wall -Wextra -Werror -ffp-contract=off)
+    endif()
+    add_test(NAME ${_target} COMMAND ${_target} --run)
+    set_tests_properties(${_target} PROPERTIES TIMEOUT 120)
+  endforeach()
+  # Explicit interval ownership only: these tests use synthetic fixed cells.
+  # No simulation or climate generation is invoked by these executables.
+  set(_terrestrial_test_sources
+    cpp/src/engine/terrestrial_water.cpp
+    cpp/src/engine/terrestrial_water_serialization.cpp
+    cpp/src/engine/terrestrial_calorimeter_backend.cpp
+    cpp/src/engine/hydrology.cpp cpp/src/engine/climate.cpp
+    cpp/src/engine/core.cpp cpp/src/engine/numeric_serialization.cpp)
+  set(_coupled_sources
+    cpp/src/engine/terrestrial_coupled.cpp
+    cpp/src/engine/terrestrial_coupled_error.cpp
+    cpp/src/engine/terrestrial_thermal_backend.cpp
+    cpp/src/engine/terrestrial_thermal/phase_segment.cpp
+    cpp/src/engine/terrestrial_thermal/hermite_residual.cpp
+    cpp/src/engine/terrestrial_thermal/phase_segment_serialization.cpp)
+  # Pipeline exposes both opt-in owner modes; ordinary generation never calls them.
+  list(APPEND _terrestrial_test_sources ${_coupled_sources})
+  add_executable(magic_geo_enthalpy_mesh_test cpp/tests/enthalpy_mesh_test.cpp
+    cpp/src/engine/enthalpy_mesh.cpp cpp/src/engine/enthalpy_mesh_serialization.cpp
+    cpp/src/engine/seasonal_energy_balance.cpp)
+  target_include_directories(magic_geo_enthalpy_mesh_test PRIVATE cpp/include cpp/src/engine)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_enthalpy_mesh_test PRIVATE -Wall -Wextra -Werror -ffp-contract=off)
+  endif()
+  add_test(NAME magic_geo_enthalpy_mesh COMMAND magic_geo_enthalpy_mesh_test)
+  add_executable(magic_geo_enthalpy_mesh_sdirk2_test cpp/tests/enthalpy_mesh_sdirk2_test.cpp
+    cpp/src/engine/enthalpy_mesh_sdirk2.cpp cpp/src/engine/enthalpy_mesh_sdirk2_serialization.cpp
+    cpp/src/engine/enthalpy_mesh.cpp cpp/src/engine/enthalpy_mesh_serialization.cpp)
+  add_executable(magic_geo_seasonal_liquid_routing_test cpp/tests/seasonal_liquid_routing_test.cpp
+    cpp/src/engine/seasonal_liquid_routing.cpp)
+  add_executable(magic_geo_enthalpy_mesh_pure_water_test cpp/tests/enthalpy_mesh_pure_water_test.cpp
+    cpp/src/engine/enthalpy_mesh.cpp cpp/src/engine/enthalpy_mesh_serialization.cpp
+    cpp/src/engine/enthalpy_mesh_sdirk2.cpp cpp/src/engine/enthalpy_mesh_sdirk2_serialization.cpp)
+  add_executable(magic_geo_layered_ice_column_test cpp/tests/layered_ice_column_test.cpp
+    cpp/src/engine/layered_ice_column.cpp cpp/src/engine/enthalpy_mesh_serialization.cpp)
+  add_executable(magic_geo_layered_ice_thermal_test cpp/tests/layered_ice_thermal_test.cpp
+    cpp/src/engine/layered_ice_column.cpp cpp/src/engine/enthalpy_mesh.cpp cpp/src/engine/enthalpy_mesh_serialization.cpp
+    cpp/src/engine/enthalpy_mesh_sdirk2.cpp cpp/src/engine/enthalpy_mesh_sdirk2_serialization.cpp)
+  add_executable(magic_geo_layered_ice_material_test cpp/tests/layered_ice_material_test.cpp
+    cpp/src/engine/layered_ice_material.cpp cpp/src/engine/layered_ice_column.cpp
+    cpp/src/engine/enthalpy_mesh_serialization.cpp cpp/src/engine/terrestrial_calorimeter/cryosphere_enthalpy.cpp)
+  add_executable(magic_geo_layered_ice_remap_test cpp/tests/layered_ice_remap_test.cpp
+    cpp/src/engine/layered_ice_remap.cpp cpp/src/engine/layered_ice_column.cpp cpp/src/engine/enthalpy_mesh_serialization.cpp)
+  add_executable(magic_geo_layered_ice_topology_test cpp/tests/layered_ice_topology_test.cpp
+    cpp/src/engine/layered_ice_topology.cpp cpp/src/engine/layered_ice_column.cpp cpp/src/engine/enthalpy_mesh_serialization.cpp)
+  add_executable(magic_geo_layered_material_successor_test cpp/tests/layered_material_successor_test.cpp
+    cpp/src/engine/layered_ice_material.cpp cpp/src/engine/layered_ice_remap.cpp cpp/src/engine/layered_ice_column.cpp
+    cpp/src/engine/terrestrial_calorimeter/cryosphere_enthalpy.cpp cpp/src/engine/enthalpy_mesh.cpp
+    cpp/src/engine/enthalpy_mesh_serialization.cpp cpp/src/engine/enthalpy_mesh_sdirk2.cpp
+    cpp/src/engine/enthalpy_mesh_sdirk2_serialization.cpp)
+  add_executable(magic_geo_layered_material_unavailable_test cpp/tests/layered_material_unavailable_test.cpp
+    cpp/src/engine/layered_ice_material.cpp cpp/src/engine/layered_ice_column.cpp cpp/src/engine/enthalpy_mesh_serialization.cpp)
+  target_compile_definitions(magic_geo_layered_material_unavailable_test PRIVATE MAGIC_GEO_TERRESTRIAL_DISABLE_CALORIMETER=1)
+  add_executable(magic_geo_layered_ice_owner_test cpp/tests/layered_ice_owner_test.cpp
+    cpp/src/engine/layered_ice_owner.cpp cpp/src/engine/layered_ice_owner_kernel.cpp cpp/src/engine/layered_ice_forcing_history.cpp cpp/src/engine/layered_ice_owner_ledger.cpp
+    cpp/src/engine/layered_ice_absorption.cpp cpp/src/engine/layered_ice_topology.cpp
+    cpp/src/engine/layered_ice_owner_serialization.cpp cpp/src/engine/seasonal_liquid_routing.cpp
+    cpp/src/engine/layered_ice_material.cpp cpp/src/engine/layered_ice_remap.cpp cpp/src/engine/layered_ice_column.cpp
+    cpp/src/engine/terrestrial_calorimeter/cryosphere_enthalpy.cpp cpp/src/engine/enthalpy_mesh.cpp
+    cpp/src/engine/enthalpy_mesh_serialization.cpp cpp/src/engine/enthalpy_mesh_sdirk2.cpp
+    cpp/src/engine/enthalpy_mesh_sdirk2_serialization.cpp)
+  target_link_libraries(magic_geo_layered_ice_owner_test PRIVATE Threads::Threads)
+  add_executable(magic_geo_layered_ice_absorption_owner_test cpp/tests/layered_ice_absorption_owner_test.cpp
+    cpp/src/engine/layered_ice_owner.cpp cpp/src/engine/layered_ice_owner_kernel.cpp cpp/src/engine/layered_ice_forcing_history.cpp cpp/src/engine/layered_ice_owner_ledger.cpp
+    cpp/src/engine/layered_ice_absorption.cpp cpp/src/engine/layered_ice_topology.cpp
+    cpp/src/engine/layered_ice_owner_serialization.cpp cpp/src/engine/seasonal_liquid_routing.cpp
+    cpp/src/engine/layered_ice_material.cpp cpp/src/engine/layered_ice_remap.cpp cpp/src/engine/layered_ice_column.cpp
+    cpp/src/engine/terrestrial_calorimeter/cryosphere_enthalpy.cpp cpp/src/engine/enthalpy_mesh.cpp
+    cpp/src/engine/enthalpy_mesh_serialization.cpp cpp/src/engine/enthalpy_mesh_sdirk2.cpp
+    cpp/src/engine/enthalpy_mesh_sdirk2_serialization.cpp)
+  target_link_libraries(magic_geo_layered_ice_absorption_owner_test PRIVATE Threads::Threads)
+  add_executable(magic_geo_layered_ice_topology_owner_test cpp/tests/layered_ice_topology_owner_test.cpp
+    cpp/src/engine/layered_ice_owner.cpp cpp/src/engine/layered_ice_owner_kernel.cpp cpp/src/engine/layered_ice_forcing_history.cpp cpp/src/engine/layered_ice_owner_ledger.cpp
+    cpp/src/engine/layered_ice_absorption.cpp cpp/src/engine/layered_ice_topology.cpp
+    cpp/src/engine/layered_ice_owner_serialization.cpp cpp/src/engine/seasonal_liquid_routing.cpp
+    cpp/src/engine/layered_ice_material.cpp cpp/src/engine/layered_ice_remap.cpp cpp/src/engine/layered_ice_column.cpp
+    cpp/src/engine/terrestrial_calorimeter/cryosphere_enthalpy.cpp cpp/src/engine/enthalpy_mesh.cpp
+    cpp/src/engine/enthalpy_mesh_serialization.cpp cpp/src/engine/enthalpy_mesh_sdirk2.cpp
+    cpp/src/engine/enthalpy_mesh_sdirk2_serialization.cpp)
+  target_link_libraries(magic_geo_layered_ice_topology_owner_test PRIVATE Threads::Threads)
+  add_executable(magic_geo_layered_ice_owner_quota_test cpp/tests/layered_ice_owner_quota_test.cpp
+    cpp/src/engine/layered_ice_owner.cpp cpp/src/engine/layered_ice_owner_kernel.cpp cpp/src/engine/layered_ice_forcing_history.cpp cpp/src/engine/layered_ice_owner_ledger.cpp
+    cpp/src/engine/layered_ice_absorption.cpp cpp/src/engine/layered_ice_topology.cpp
+    cpp/src/engine/layered_ice_owner_serialization.cpp cpp/src/engine/seasonal_liquid_routing.cpp
+    cpp/src/engine/layered_ice_material.cpp cpp/src/engine/layered_ice_remap.cpp cpp/src/engine/layered_ice_column.cpp
+    cpp/src/engine/terrestrial_calorimeter/cryosphere_enthalpy.cpp cpp/src/engine/enthalpy_mesh.cpp
+    cpp/src/engine/enthalpy_mesh_serialization.cpp cpp/src/engine/enthalpy_mesh_sdirk2.cpp
+    cpp/src/engine/enthalpy_mesh_sdirk2_serialization.cpp)
+  target_link_libraries(magic_geo_layered_ice_owner_quota_test PRIVATE Threads::Threads)
+  foreach(_target magic_geo_enthalpy_mesh_sdirk2_test magic_geo_seasonal_liquid_routing_test
+      magic_geo_enthalpy_mesh_pure_water_test magic_geo_layered_ice_column_test magic_geo_layered_ice_thermal_test
+      magic_geo_layered_ice_material_test magic_geo_layered_ice_remap_test magic_geo_layered_material_successor_test
+      magic_geo_layered_material_unavailable_test magic_geo_layered_ice_owner_test magic_geo_layered_ice_absorption_owner_test
+      magic_geo_layered_ice_topology_test magic_geo_layered_ice_topology_owner_test magic_geo_layered_ice_owner_quota_test)
+    target_include_directories(${_target} PRIVATE cpp/include cpp/src cpp/src/engine)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+      target_compile_options(${_target} PRIVATE -Wall -Wextra -Werror -ffp-contract=off)
+    endif()
+    if(_target STREQUAL "magic_geo_layered_ice_column_test" OR _target STREQUAL "magic_geo_layered_ice_remap_test" OR _target STREQUAL "magic_geo_layered_ice_owner_test" OR _target STREQUAL "magic_geo_layered_ice_absorption_owner_test" OR _target STREQUAL "magic_geo_layered_ice_topology_test" OR _target STREQUAL "magic_geo_layered_ice_topology_owner_test" OR _target STREQUAL "magic_geo_layered_ice_owner_quota_test")
+      add_test(NAME ${_target} COMMAND ${_target} --run)
+    else()
+      add_test(NAME ${_target} COMMAND ${_target})
+    endif()
+    set_tests_properties(${_target} PROPERTIES TIMEOUT 30)
+  endforeach()
+  add_executable(magic_geo_enthalpy_mesh_owner_test cpp/tests/enthalpy_mesh_owner_test.cpp
+    cpp/src/engine/enthalpy_mesh_owner.cpp cpp/src/engine/enthalpy_mesh_owner_serialization.cpp
+    cpp/src/engine/enthalpy_mesh.cpp cpp/src/engine/enthalpy_mesh_serialization.cpp
+    ${_terrestrial_test_sources})
+  add_executable(magic_geo_terrestrial_coupled_test
+    cpp/tests/terrestrial_coupled_test.cpp ${_terrestrial_test_sources})
+  add_executable(magic_geo_terrestrial_coupled_fixed_duration_test
+    cpp/tests/terrestrial_coupled_fixed_duration_test.cpp ${_terrestrial_test_sources})
+  add_executable(magic_geo_terrestrial_hermite_residual_test
+    cpp/tests/terrestrial_hermite_residual_test.cpp ${_terrestrial_test_sources})
+  add_executable(magic_geo_terrestrial_coupled_automatic_sources_test
+    cpp/tests/terrestrial_coupled_automatic_sources_test.cpp ${_terrestrial_test_sources})
+  add_executable(magic_geo_terrestrial_coupled_automatic_test
+    cpp/tests/terrestrial_coupled_automatic_test.cpp ${_terrestrial_test_sources})
+  add_executable(magic_geo_terrestrial_coupled_error_test
+    cpp/tests/terrestrial_coupled_error_test.cpp
+    cpp/src/engine/terrestrial_coupled_error.cpp)
+  add_executable(magic_geo_terrestrial_coupled_segment_error_test
+    cpp/tests/terrestrial_coupled_segment_error_test.cpp
+    cpp/src/engine/terrestrial_coupled_error.cpp)
+  add_executable(magic_geo_terrestrial_coupled_pipeline_test
+    cpp/tests/terrestrial_coupled_pipeline_test.cpp cpp/src/engine/pipeline.cpp
+    cpp/src/engine/seasonal_climate_cache.cpp ${_terrestrial_test_sources})
+  add_executable(magic_geo_terrestrial_coupled_unavailable_test
+    cpp/tests/terrestrial_coupled_pipeline_test.cpp cpp/src/engine/pipeline.cpp
+    cpp/src/engine/seasonal_climate_cache.cpp ${_terrestrial_test_sources})
+  target_compile_definitions(magic_geo_terrestrial_coupled_unavailable_test
+    PRIVATE MAGIC_GEO_TERRESTRIAL_DISABLE_CALORIMETER=1)
+  add_executable(magic_geo_terrestrial_water_test
+    cpp/tests/terrestrial_water_test.cpp ${_terrestrial_test_sources})
+  add_executable(magic_geo_terrestrial_mass_event_test
+    cpp/tests/terrestrial_mass_event_test.cpp
+    cpp/src/engine/terrestrial_calorimeter_backend.cpp)
+  add_executable(magic_geo_terrestrial_water_pipeline_test
+    cpp/tests/terrestrial_water_pipeline_test.cpp cpp/src/engine/pipeline.cpp
+    cpp/src/engine/seasonal_climate_cache.cpp
+    ${_terrestrial_test_sources})
+  add_executable(magic_geo_terrestrial_water_unavailable_test
+    cpp/tests/terrestrial_water_pipeline_test.cpp cpp/src/engine/pipeline.cpp
+    cpp/src/engine/seasonal_climate_cache.cpp
+    ${_terrestrial_test_sources})
+  target_compile_definitions(magic_geo_terrestrial_water_unavailable_test
+    PRIVATE MAGIC_GEO_TERRESTRIAL_DISABLE_CALORIMETER=1)
+  add_executable(magic_geo_terrestrial_hydrology_parity_test
+    cpp/tests/terrestrial_hydrology_parity_test.cpp cpp/src/engine/hydrology.cpp
+    cpp/src/engine/climate.cpp cpp/src/engine/core.cpp
+    cpp/src/engine/process_serialization.cpp cpp/src/engine/entity_serialization.cpp
+    cpp/src/engine/numeric_serialization.cpp)
+  foreach(_terrestrial_target
+    magic_geo_enthalpy_mesh_owner_test
+    magic_geo_terrestrial_coupled_test magic_geo_terrestrial_coupled_error_test
+    magic_geo_terrestrial_coupled_fixed_duration_test
+    magic_geo_terrestrial_hermite_residual_test
+    magic_geo_terrestrial_coupled_automatic_test
+    magic_geo_terrestrial_coupled_automatic_sources_test
+    magic_geo_terrestrial_coupled_segment_error_test
+    magic_geo_terrestrial_coupled_pipeline_test magic_geo_terrestrial_coupled_unavailable_test
+    magic_geo_terrestrial_water_test magic_geo_terrestrial_mass_event_test
+    magic_geo_terrestrial_water_pipeline_test
+    magic_geo_terrestrial_water_unavailable_test magic_geo_terrestrial_hydrology_parity_test)
+    target_include_directories(${_terrestrial_target} PRIVATE cpp/include cpp/src/engine)
+    if(OpenMP_CXX_FOUND)
+      target_link_libraries(${_terrestrial_target} PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+    if(MSVC)
+      target_compile_options(${_terrestrial_target} PRIVATE /Gy /Gw)
+      target_link_options(${_terrestrial_target} PRIVATE /OPT:REF)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+      target_compile_options(${_terrestrial_target} PRIVATE -Wall -Wextra -Werror
+        -ffunction-sections -fdata-sections -ffp-contract=off)
+      if(APPLE)
+        target_link_options(${_terrestrial_target} PRIVATE -Wl,-dead_strip)
+      else()
+        target_link_options(${_terrestrial_target} PRIVATE -Wl,--gc-sections)
+      endif()
+    endif()
+  endforeach()
+  add_test(NAME magic_geo_terrestrial_coupled COMMAND magic_geo_terrestrial_coupled_test)
+  add_test(NAME magic_geo_enthalpy_mesh_owner COMMAND magic_geo_enthalpy_mesh_owner_test)
+  add_test(NAME magic_geo_terrestrial_coupled_fixed_duration COMMAND magic_geo_terrestrial_coupled_fixed_duration_test)
+  add_test(NAME magic_geo_terrestrial_hermite_residual COMMAND magic_geo_terrestrial_hermite_residual_test)
+  add_test(NAME magic_geo_terrestrial_coupled_automatic COMMAND magic_geo_terrestrial_coupled_automatic_test)
+  add_test(NAME magic_geo_terrestrial_coupled_automatic_sources COMMAND magic_geo_terrestrial_coupled_automatic_sources_test)
+  add_test(NAME magic_geo_terrestrial_coupled_error COMMAND magic_geo_terrestrial_coupled_error_test)
+  add_test(NAME magic_geo_terrestrial_coupled_segment_error COMMAND magic_geo_terrestrial_coupled_segment_error_test)
+  add_test(NAME magic_geo_terrestrial_coupled_pipeline COMMAND magic_geo_terrestrial_coupled_pipeline_test)
+  add_test(NAME magic_geo_terrestrial_coupled_unavailable COMMAND magic_geo_terrestrial_coupled_unavailable_test)
+  add_test(NAME magic_geo_terrestrial_water COMMAND magic_geo_terrestrial_water_test)
+  add_test(NAME magic_geo_terrestrial_mass_event COMMAND magic_geo_terrestrial_mass_event_test)
+  add_test(NAME magic_geo_terrestrial_water_pipeline COMMAND magic_geo_terrestrial_water_pipeline_test)
+  add_test(NAME magic_geo_terrestrial_water_unavailable COMMAND magic_geo_terrestrial_water_unavailable_test)
+  # Parity is checked by the bounded external original/candidate comparison,
+  # not by this witness executable's successful exit alone.
+
+  add_executable(magic_geo_grounded_ice_domain_test
+    cpp/tests/grounded_ice_domain_test.cpp
+    cpp/src/engine/environment.cpp cpp/src/engine/climate.cpp
+    cpp/src/engine/core.cpp cpp/src/engine/hydrology.cpp
+    cpp/src/engine/sediment_partition.cpp cpp/src/engine/process_serialization.cpp
+    cpp/src/engine/entity_serialization.cpp cpp/src/engine/numeric_serialization.cpp)
+  target_include_directories(magic_geo_grounded_ice_domain_test PRIVATE cpp/include cpp/src/engine)
+  if(OpenMP_CXX_FOUND)
+    target_link_libraries(magic_geo_grounded_ice_domain_test PRIVATE OpenMP::OpenMP_CXX)
+  endif()
+  if(MSVC)
+    target_compile_options(magic_geo_grounded_ice_domain_test PRIVATE /Gy /Gw)
+    target_link_options(magic_geo_grounded_ice_domain_test PRIVATE /OPT:REF)
+  elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_grounded_ice_domain_test PRIVATE -Wall -Wextra -Werror -ffunction-sections -fdata-sections -ffp-contract=off)
+    if(APPLE)
+      target_link_options(magic_geo_grounded_ice_domain_test PRIVATE -Wl,-dead_strip)
+    else()
+      target_link_options(magic_geo_grounded_ice_domain_test PRIVATE -Wl,--gc-sections)
+    endif()
+  endif()
+  add_test(NAME magic_geo_grounded_ice_domain COMMAND magic_geo_grounded_ice_domain_test)
+
+  # Compile the real settlement/environment functions into the focused test.
+  # Section elimination omits uncalled simulation subsystems without runtime
+  # stubs or exporting private engine symbols from the public C library.
+  add_executable(magic_geo_social_availability_test
+    cpp/tests/social_availability_test.cpp
+    cpp/src/engine/civilization.cpp cpp/src/engine/history.cpp cpp/src/engine/settlements.cpp
+    cpp/src/engine/environment.cpp cpp/src/engine/climate.cpp
+    cpp/src/engine/core.cpp cpp/src/engine/water_features.cpp cpp/src/engine/summary.cpp cpp/src/engine/process_serialization.cpp cpp/src/engine/hydrology.cpp
+    cpp/src/engine/entity_serialization.cpp cpp/src/engine/numeric_serialization.cpp)
+  target_include_directories(magic_geo_social_availability_test PRIVATE cpp/include cpp/src/engine)
+  if(OpenMP_CXX_FOUND)
+    target_link_libraries(magic_geo_social_availability_test PRIVATE OpenMP::OpenMP_CXX)
+  endif()
+  if(MSVC)
+    target_compile_options(magic_geo_social_availability_test PRIVATE /Gy /Gw)
+    target_link_options(magic_geo_social_availability_test PRIVATE /OPT:REF)
+  elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_social_availability_test PRIVATE -Wall -Wextra -Werror -ffunction-sections -fdata-sections -ffp-contract=off)
+    if(APPLE)
+      target_link_options(magic_geo_social_availability_test PRIVATE -Wl,-dead_strip)
+    else()
+      target_link_options(magic_geo_social_availability_test PRIVATE -Wl,--gc-sections)
+    endif()
+  endif()
+  add_test(NAME magic_geo_social_availability COMMAND magic_geo_social_availability_test "${CMAKE_CURRENT_BINARY_DIR}/native_social_unit_worlds.json")
+
+  add_executable(
+    magic_geo_settlement_climate_support_test
+    cpp/tests/settlement_climate_support_test.cpp
+    cpp/src/engine/environment.cpp
+    cpp/src/engine/settlements.cpp
+    cpp/src/engine/civilization.cpp
+    cpp/src/engine/climate.cpp
+    cpp/src/engine/core.cpp
+    cpp/src/engine/entity_serialization.cpp
+    cpp/src/engine/numeric_serialization.cpp
+  )
+  target_include_directories(magic_geo_settlement_climate_support_test PRIVATE cpp/include cpp/src/engine)
+  if(MSVC)
+    target_compile_options(magic_geo_settlement_climate_support_test PRIVATE /Gy /Gw)
+    target_link_options(magic_geo_settlement_climate_support_test PRIVATE /OPT:REF)
+  elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_settlement_climate_support_test PRIVATE
+      -ffunction-sections -fdata-sections -ffp-contract=off)
+    if(APPLE)
+      target_link_options(magic_geo_settlement_climate_support_test PRIVATE -Wl,-dead_strip)
+    else()
+      target_link_options(magic_geo_settlement_climate_support_test PRIVATE -Wl,--gc-sections)
+    endif()
+  endif()
+  add_test(
+    NAME magic_geo_settlement_climate_support
+    COMMAND magic_geo_settlement_climate_support_test
+      "${CMAKE_CURRENT_BINARY_DIR}/settlement_climate_unit_worlds.json"
+  )
+
+  # Keep the four seasonal ABI success routes in one CTest invocation. The
+  # older native_api executable is intentionally invoked twice for KNN checks.
+  add_executable(magic_geo_c_api_v4_test cpp/tests/c_api_v4_test.cpp)
+  target_include_directories(magic_geo_c_api_v4_test PRIVATE cpp/include)
+  target_link_libraries(magic_geo_c_api_v4_test PRIVATE magic_geo_native)
+  add_test(
+    NAME magic_geo_c_api_v4
+    COMMAND magic_geo_c_api_v4_test "${CMAKE_CURRENT_BINARY_DIR}/c_api_v4_world.json"
+  )
+
+  # Recompile the exact C boundary with cheap generator stubs and executable-
+  # local allocation faults; no failure-injection API enters the shared library.
+  add_executable(
+    magic_geo_c_api_v4_allocation_test
+    cpp/tests/c_api_v4_allocation_test.cpp
+    cpp/src/c_api.cpp
+    cpp/src/engine/messagepack.cpp
+  )
+  target_include_directories(magic_geo_c_api_v4_allocation_test PRIVATE cpp/include cpp/src)
+  target_compile_definitions(magic_geo_c_api_v4_allocation_test PRIVATE magic_geo_native_EXPORTS)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_definitions(magic_geo_c_api_v4_allocation_test PRIVATE MAGIC_GEO_TEST_WRAP_MALLOC=1)
+    target_link_options(magic_geo_c_api_v4_allocation_test PRIVATE -Wl,--wrap=malloc)
+  endif()
+  add_test(NAME magic_geo_c_api_v4_allocation COMMAND magic_geo_c_api_v4_allocation_test)
+
+  add_executable(
+    magic_geo_seasonal_climate_pipeline_test
+    cpp/tests/seasonal_climate_pipeline_test.cpp
+  )
+  target_include_directories(magic_geo_seasonal_climate_pipeline_test PRIVATE cpp/include)
+  target_link_libraries(magic_geo_seasonal_climate_pipeline_test PRIVATE magic_geo_native Threads::Threads)
+  if(OpenMP_CXX_FOUND)
+    target_link_libraries(magic_geo_seasonal_climate_pipeline_test PRIVATE OpenMP::OpenMP_CXX)
+  endif()
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_seasonal_climate_pipeline_test PRIVATE -ffp-contract=off)
+  endif()
+  add_test(
+    NAME magic_geo_seasonal_climate_pipeline
+    COMMAND magic_geo_seasonal_climate_pipeline_test
+      "${CMAKE_CURRENT_BINARY_DIR}/seasonal_climate_pipeline_world.json"
+  )
+
+  add_executable(
+    magic_geo_seasonal_climate_serialization_test
+    cpp/tests/seasonal_climate_serialization_test.cpp
+    cpp/src/engine/seasonal_climate_serialization.cpp
+    cpp/src/engine/seasonal_climate_cache.cpp
+    cpp/src/engine/seasonal_climate.cpp
+    cpp/src/engine/physical_columns.cpp
+    cpp/src/engine/climate_transport.cpp
+    cpp/src/engine/mesh.cpp
+    cpp/src/engine/core.cpp
+    cpp/src/engine/numeric_serialization.cpp
+    cpp/src/engine/messagepack.cpp
+    cpp/src/engine/adaptive_energy_balance.cpp
+    cpp/src/engine/periodic_energy_balance.cpp
+    cpp/src/engine/time_integrated_energy.cpp
+    cpp/src/engine/seasonal_energy_balance.cpp
+    cpp/src/engine/solar_insolation.cpp
+  )
+  target_include_directories(magic_geo_seasonal_climate_serialization_test PRIVATE cpp/include cpp/src)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_seasonal_climate_serialization_test PRIVATE -ffp-contract=off)
+  endif()
+  add_test(NAME magic_geo_seasonal_climate_serialization COMMAND magic_geo_seasonal_climate_serialization_test)
+
+  add_executable(
+    magic_geo_seasonal_climate_cache_test
+    cpp/tests/seasonal_climate_cache_test.cpp
+    cpp/src/engine/seasonal_climate_cache.cpp
+    cpp/src/engine/seasonal_climate.cpp
+    cpp/src/engine/physical_columns.cpp
+    cpp/src/engine/climate_transport.cpp
+    cpp/src/engine/mesh.cpp
+    cpp/src/engine/core.cpp
+    cpp/src/engine/adaptive_energy_balance.cpp
+    cpp/src/engine/periodic_energy_balance.cpp
+    cpp/src/engine/time_integrated_energy.cpp
+    cpp/src/engine/seasonal_energy_balance.cpp
+    cpp/src/engine/solar_insolation.cpp
+  )
+  target_include_directories(magic_geo_seasonal_climate_cache_test PRIVATE cpp/include cpp/src)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_seasonal_climate_cache_test PRIVATE -ffp-contract=off)
+  endif()
+  add_test(NAME magic_geo_seasonal_climate_cache COMMAND magic_geo_seasonal_climate_cache_test)
+
+  add_executable(
+    magic_geo_seasonal_climate_test
+    cpp/tests/seasonal_climate_test.cpp
+    cpp/src/engine/seasonal_climate.cpp
+    cpp/src/engine/physical_columns.cpp
+    cpp/src/engine/climate_transport.cpp
+    cpp/src/engine/mesh.cpp
+    cpp/src/engine/core.cpp
+    cpp/src/engine/adaptive_energy_balance.cpp
+    cpp/src/engine/periodic_energy_balance.cpp
+    cpp/src/engine/time_integrated_energy.cpp
+    cpp/src/engine/seasonal_energy_balance.cpp
+    cpp/src/engine/solar_insolation.cpp
+  )
+  target_include_directories(magic_geo_seasonal_climate_test PRIVATE cpp/include cpp/src)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_seasonal_climate_test PRIVATE -ffp-contract=off)
+  endif()
+  add_test(NAME magic_geo_seasonal_climate COMMAND magic_geo_seasonal_climate_test)
+
+  add_executable(
+    magic_geo_physical_columns_test
+    cpp/tests/physical_columns_test.cpp
+    cpp/src/engine/physical_columns.cpp
+  )
+  target_include_directories(magic_geo_physical_columns_test PRIVATE cpp/src)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_physical_columns_test PRIVATE -ffp-contract=off)
+  endif()
+  add_test(NAME magic_geo_physical_columns COMMAND magic_geo_physical_columns_test)
+
+  add_executable(
+    magic_geo_variable_climate_transport_test
+    cpp/tests/variable_climate_transport_test.cpp
+    cpp/src/engine/climate_transport.cpp
+    cpp/src/engine/mesh.cpp
+    cpp/src/engine/core.cpp
+  )
+  target_include_directories(magic_geo_variable_climate_transport_test PRIVATE cpp/include cpp/src)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_variable_climate_transport_test PRIVATE -ffp-contract=off)
+  endif()
+  add_test(NAME magic_geo_variable_climate_transport COMMAND magic_geo_variable_climate_transport_test)
+
+  add_executable(
+    magic_geo_adaptive_energy_balance_test
+    cpp/tests/adaptive_energy_balance_test.cpp
+    cpp/src/engine/adaptive_energy_balance.cpp
+    cpp/src/engine/periodic_energy_balance.cpp
+    cpp/src/engine/time_integrated_energy.cpp
+    cpp/src/engine/seasonal_energy_balance.cpp
+  )
+  target_include_directories(magic_geo_adaptive_energy_balance_test PRIVATE cpp/src)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_adaptive_energy_balance_test PRIVATE -ffp-contract=off)
+  endif()
+  add_test(NAME magic_geo_adaptive_energy_balance COMMAND magic_geo_adaptive_energy_balance_test)
+
+  add_executable(
+    magic_geo_time_integrated_energy_test
+    cpp/tests/time_integrated_energy_test.cpp
+    cpp/src/engine/time_integrated_energy.cpp
+    cpp/src/engine/seasonal_energy_balance.cpp
+  )
+  target_include_directories(magic_geo_time_integrated_energy_test PRIVATE cpp/src)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_time_integrated_energy_test PRIVATE -ffp-contract=off)
+  endif()
+  add_test(NAME magic_geo_time_integrated_energy COMMAND magic_geo_time_integrated_energy_test)
+
+  add_executable(
+    magic_geo_periodic_energy_balance_test
+    cpp/tests/periodic_energy_balance_test.cpp
+    cpp/src/engine/periodic_energy_balance.cpp
+    cpp/src/engine/time_integrated_energy.cpp
+    cpp/src/engine/seasonal_energy_balance.cpp
+  )
+  target_include_directories(magic_geo_periodic_energy_balance_test PRIVATE cpp/src)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_periodic_energy_balance_test PRIVATE -ffp-contract=off)
+  endif()
+  add_test(NAME magic_geo_periodic_energy_balance COMMAND magic_geo_periodic_energy_balance_test)
+
+  add_executable(
+    magic_geo_solar_insolation_test
+    cpp/tests/solar_insolation_test.cpp
+    cpp/src/engine/solar_insolation.cpp
+  )
+  target_include_directories(magic_geo_solar_insolation_test PRIVATE cpp/src)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_solar_insolation_test PRIVATE -ffp-contract=off)
+  endif()
+  add_test(NAME magic_geo_solar_insolation COMMAND magic_geo_solar_insolation_test)
+
+  add_executable(
+    magic_geo_climate_transport_test
+    cpp/tests/climate_transport_test.cpp
+    cpp/src/engine/climate_transport.cpp
+    cpp/src/engine/mesh.cpp
+    cpp/src/engine/core.cpp
+  )
+  target_include_directories(magic_geo_climate_transport_test PRIVATE cpp/include cpp/src)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_climate_transport_test PRIVATE -ffp-contract=off)
+  endif()
+  add_test(NAME magic_geo_climate_transport COMMAND magic_geo_climate_transport_test)
+
+  add_executable(
+    magic_geo_seasonal_energy_balance_test
+    cpp/tests/seasonal_energy_balance_test.cpp
+    cpp/src/engine/seasonal_energy_balance.cpp
+  )
+  target_include_directories(magic_geo_seasonal_energy_balance_test PRIVATE cpp/src)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_seasonal_energy_balance_test PRIVATE -ffp-contract=off)
+  endif()
+  add_test(NAME magic_geo_seasonal_energy_balance COMMAND magic_geo_seasonal_energy_balance_test)
+
   add_executable(
     magic_geo_initial_oceanic_age_test
     cpp/tests/initial_oceanic_age_test.cpp
@@ -322,6 +943,7 @@ if(BUILD_TESTING)
     cpp/tests/serialization_roundtrip_test.cpp
     cpp/src/engine/messagepack.cpp
     cpp/src/engine/numeric_serialization.cpp
+    cpp/src/engine/core.cpp
   )
   target_include_directories(
     magic_geo_serialization_roundtrip_test

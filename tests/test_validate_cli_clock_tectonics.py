@@ -118,45 +118,64 @@ class _TamperCase:
         return result.output
 
 
-CLIMATE_FAILURE = "climate model metadata invalid"
-
-
 class ClimateModelMetadataTest(_TamperCase, TestCase):
-    """The ``climate model metadata invalid`` gate."""
+    """The current model's independent native-certificate preflight gate."""
+
+    def assert_numeric_certificate_tamper(self, tamper: Tamper, field: str) -> None:
+        self.assert_control_passes()
+        result = self.run_tampered(tamper)
+        assert_no_cli_crash(self, result)
+        self.assertEqual(result.exit_code, 1, result.output)
+        # Values depend on the generated climate. Pin the whole diagnostic
+        # structure and exact field while allowing its numeric operands.
+        import re
+
+        number = r"[-+0-9.e]+"
+        self.assertRegex(
+            result.output,
+            rf"\AFAIL native climate energy: {re.escape(field)}: {number} differs from "
+            rf"{number} by {number} \(roundoff allowance {number}\)\n\Z",
+        )
 
     def test_non_numeric_climate_model_field_is_reported(self) -> None:
         def tamper(world: dict[str, Any]) -> None:
-            world["climate_model"]["lapse_rate_c_per_km"] = "not-a-number"
+            world["climate_model"]["reference_infrared_optical_depth"] = "not-a-number"
 
-        self.assert_tamper_fails(tamper, CLIMATE_FAILURE)
+        self.assert_tamper_fails(
+            tamper, "native climate energy: climate_model.reference_infrared_optical_depth: "
+            "expected a number, without coercion",
+        )
 
     def test_non_positive_stellar_luminosity_is_reported(self) -> None:
         def tamper(world: dict[str, Any]) -> None:
             world["planet_parameters"]["stellar_luminosity"] = -1.0
 
-        self.assert_tamper_fails(tamper, CLIMATE_FAILURE)
+        self.assert_numeric_certificate_tamper(tamper, "planet_parameters.stellar_luminosity")
 
     def test_missing_planet_temperature_control_is_reported(self) -> None:
         def tamper(world: dict[str, Any]) -> None:
             del world["planet_parameters"]["greenhouse_factor"]
 
-        self.assert_tamper_fails(tamper, CLIMATE_FAILURE)
+        self.assert_tamper_fails(
+            tamper, "native climate energy: malformed or unrepresentable native climate "
+            "certificate (KeyError): 'greenhouse_factor'",
+        )
 
-    def test_inconsistent_thermal_moisture_anomaly_is_reported(self) -> None:
+    def test_inconsistent_solved_mean_temperature_is_reported(self) -> None:
         def tamper(world: dict[str, Any]) -> None:
             climate_model = world["climate_model"]
-            climate_model["thermal_moisture_capacity_temperature_anomaly_c"] = (
-                float(climate_model["thermal_moisture_capacity_temperature_anomaly_c"])
+            climate_model["solved_area_time_mean_temperature_c"] = (
+                float(climate_model["solved_area_time_mean_temperature_c"])
                 + 1.0
             )
 
-        self.assert_tamper_fails(tamper, CLIMATE_FAILURE)
+        self.assert_numeric_certificate_tamper(tamper, "climate_model.solved_area_time_mean_temperature_c")
 
     def test_declared_model_type_mismatch_is_reported(self) -> None:
         def tamper(world: dict[str, Any]) -> None:
             world["climate_model"]["model_type"] = "hand_written_climate_v0"
 
-        self.assert_tamper_fails(tamper, CLIMATE_FAILURE)
+        self.assert_tamper_fails(tamper, "native climate energy: climate_model.model_type: unsupported declaration")
 
 
 CLOCK_STRUCTURE_FAILURE = "simulation_clock missing or incomplete"
@@ -340,19 +359,24 @@ CELL_VECTOR_FAILURE = "cell position_3d/normal_3d fields invalid"
 
 
 class CellOrientationVectorTest(_TamperCase, TestCase):
-    """Per-cell ``position_3d``/``normal_3d`` consistency."""
+    """Certified positions are checked before downstream normal consistency."""
 
     def test_wrong_length_position_vector_is_reported(self) -> None:
         def tamper(world: dict[str, Any]) -> None:
             world["cells"][0]["position_3d"] = [1.0, 0.0]
 
-        self.assert_tamper_fails(tamper, CELL_VECTOR_FAILURE)
+        self.assert_tamper_fails(
+            tamper, "native climate energy: cell[0].position_3d: expected 3 values",
+        )
 
     def test_non_numeric_position_component_is_reported(self) -> None:
         def tamper(world: dict[str, Any]) -> None:
             world["cells"][0]["position_3d"] = ["a", "b", "c"]
 
-        self.assert_tamper_fails(tamper, CELL_VECTOR_FAILURE)
+        self.assert_tamper_fails(
+            tamper, "native climate energy: cell[0].position_3d[0]: "
+            "expected a number, without coercion",
+        )
 
     def test_non_unit_position_vector_is_reported(self) -> None:
         def tamper(world: dict[str, Any]) -> None:
@@ -361,11 +385,24 @@ class CellOrientationVectorTest(_TamperCase, TestCase):
                 float(component) * 2.0 for component in cell["position_3d"]
             ]
 
-        self.assert_tamper_fails(tamper, CELL_VECTOR_FAILURE)
+        self.assert_tamper_fails(
+            tamper, "native climate energy: cell[0]: position is not unit spherical geometry",
+        )
 
     def test_degenerate_position_vector_is_reported(self) -> None:
         def tamper(world: dict[str, Any]) -> None:
             world["cells"][0]["position_3d"] = [0.0, 0.0, 0.0]
+
+        self.assert_tamper_fails(
+            tamper, "native climate energy: cell[0]: position is not unit spherical geometry",
+        )
+
+    def test_normal_disagreement_with_certified_position_is_reported(self) -> None:
+        def tamper(world: dict[str, Any]) -> None:
+            cell = world["cells"][0]
+            # Both vectors remain unit length. The retained climate position
+            # stays intact, so the separate orientation check must catch this.
+            cell["normal_3d"] = [-float(component) for component in cell["position_3d"]]
 
         self.assert_tamper_fails(tamper, CELL_VECTOR_FAILURE)
 

@@ -1,0 +1,20 @@
+{
+  "continental_realm": {
+    "source": "/tmp/ecosystem-consumer-migration/geo-integration/continental_realm.world.json.gz",
+    "compressed_sha256": "1612b1b7b034f417fbdc7b21770dba20f729fa2e7435776356139b3a82a7ecc7",
+    "uncompressed_sha256": "9beda1aec0ff658222b021329a350301208e3966fc7b346a7b0df83aa1c908c4",
+    "cell_count": 162
+  },
+  "cryogenic_slushball": {
+    "source": "/tmp/ecosystem-consumer-migration/geo-integration/cryogenic_slushball.world.json.gz",
+    "compressed_sha256": "e87c0ec698944b6a12e5e778c786f2197d22e16109de196499b341f1dbbb589f",
+    "uncompressed_sha256": "0f7c192ab8ffaa0506deb5d78260770aabcab38027011253427312a50dccfa46",
+    "cell_count": 128
+  },
+  "verdant_hothouse": {
+    "source": "/tmp/ecosystem-consumer-migration/geo-integration/verdant_hothouse.world.json.gz",
+    "compressed_sha256": "96ee4aabb222b5e88eed30ba30c0f0e936b4c2564a9bfa84b729d9f81eae3885",
+    "uncompressed_sha256": "8f411d22b47cb7520e8c2f08a96dbaa649c75c74d974e1ea3a3c62624a8c2ad9",
+    "cell_count": 128
+  }
+}

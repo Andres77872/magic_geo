@@ -2,6 +2,7 @@
 
 from .config import (
     ConfigError,
+    LegacyWorldConfig,
     WorldConfig,
     apply_config_overrides,
     config_schema,
@@ -13,12 +14,15 @@ from .config import (
     parse_config_yaml,
     write_config,
 )
+from .seasonal_config import SeasonalWorldConfig
 
 __version__ = "0.1.0"
 
 __all__ = [
     "ConfigError",
+    "LegacyWorldConfig",
     "WorldConfig",
+    "SeasonalWorldConfig",
     "apply_config_overrides",
     "config_schema",
     "create_config",

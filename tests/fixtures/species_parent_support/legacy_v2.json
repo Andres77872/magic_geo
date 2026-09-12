@@ -1,0 +1,158 @@
+{
+  "cells": [
+    {
+      "aquatic_primary_climate_supported": true,
+      "area_km2": 100.0,
+      "biome": "temperate_forest",
+      "biome_confidence_index": 1.0,
+      "dominant_species_guild": "freshwater_fish",
+      "ecosystem_disturbance_pressure_index": 0.0,
+      "fishery_productivity_index": 1.0,
+      "fishery_productivity_supported": true,
+      "forest_growth_index": 1.0,
+      "id": 0,
+      "is_lake": true,
+      "is_river": false,
+      "is_water": false,
+      "lat_deg": 20.0,
+      "lon_deg": 0.0,
+      "neighbors": [],
+      "precipitation_mm_y": 1000.0,
+      "primary_productivity_index": 1.0,
+      "river_channel_depth_m": 9.0,
+      "river_channel_width_m": 180.0,
+      "seasonal_aridity_index": 0.45,
+      "soil_moisture_index": 1.0,
+      "species_composition_confidence_index": 0.88,
+      "species_endemism_index": 0.24,
+      "species_freshwater_fish_score_supported": true,
+      "species_freshwater_fishery_input_mode": "standing_water_required",
+      "species_freshwater_habitat_eligible": true,
+      "species_guild_richness_count": 1,
+      "species_habitat_suitability_index": 1.0,
+      "species_marine_fish_score_supported": false,
+      "species_marine_habitat_eligible": false,
+      "species_range_fragmentation_index": 1.0,
+      "species_range_record_ids": [
+        0
+      ],
+      "species_richness_index": 1.0,
+      "species_terrestrial_habitat_eligible": false,
+      "temperature_c": 18.0,
+      "vegetation_biomass_index": 1.0,
+      "water_body_type": "fresh_lake"
+    }
+  ],
+  "species_range_records": [
+    {
+      "aquifer_system_ids": [],
+      "area_km2": 100.0,
+      "cell_count": 1,
+      "cell_ids": [
+        0
+      ],
+      "centroid_lat_deg": 20.0,
+      "centroid_lon_deg": 0.0,
+      "climate_envelope": {
+        "max_precipitation_mm_y": 1000.0,
+        "max_temperature_c": 18.0,
+        "mean_precipitation_mm_y": 1000.0,
+        "mean_temperature_c": 18.0,
+        "min_precipitation_mm_y": 1000.0,
+        "min_temperature_c": 18.0
+      },
+      "conservation_stress_index": 0.3423,
+      "dominant_biome": "temperate_forest",
+      "dominant_ecotone_type": "none",
+      "dominant_water_body_type": "fresh_lake",
+      "endemism_index": 0.532778,
+      "guild_type": "freshwater_fish",
+      "habitat_class": "freshwater",
+      "habitat_evidence": {
+        "coastal_cell_fraction": 0.0,
+        "mean_fishery_productivity_index": 1.0,
+        "mean_forest_growth_index": 1.0,
+        "mean_reef_growth_index": 0.0,
+        "mean_wetland_extent_index": 0.0,
+        "river_cell_fraction": 0.0,
+        "water_cell_fraction": 1.0
+      },
+      "id": 0,
+      "max_habitat_suitability_index": 1.0,
+      "mean_composition_confidence_index": 0.88,
+      "mean_disturbance_pressure_index": 0.0,
+      "mean_habitat_suitability_index": 1.0,
+      "mean_precipitation_mm_y": 1000.0,
+      "mean_primary_productivity_index": 1.0,
+      "mean_species_richness_index": 1.0,
+      "mean_temperature_c": 18.0,
+      "range_fragmentation_index": 1.0,
+      "reef_system_ids": [],
+      "river_basin_ids": [],
+      "trophic_role": "aquatic_consumer",
+      "wetland_system_ids": []
+    }
+  ],
+  "species_ranges_model": {
+    "aquatic_selector": "is_water_or_is_lake_or_fishery_water_body_type",
+    "fish_temperature_proxy": "annual_air_temperature_c",
+    "fish_temperature_support_c": {
+      "freshwater_fish": {
+        "lower_exclusive": -10.0,
+        "upper_exclusive": 38.0
+      },
+      "marine_fish": {
+        "lower_exclusive": -11.0,
+        "upper_exclusive": 37.0
+      }
+    },
+    "fish_temperature_support_policy": "positive_support_of_existing_guild_temperature_windows_not_species_survival_limits",
+    "fishery_habitat_evidence": "upstream_numeric_diagnostic_not_consumed_river_resource",
+    "freshwater_river_policy": "is_river_on_non_aquatic_non_saline_land",
+    "freshwater_water_body_types": [
+      "fresh_lake"
+    ],
+    "habitat_scope": "empirical_resident_habitat_not_species_survival_or_migration",
+    "marine_water_body_types": [
+      "continental_shelf",
+      "inland_sea",
+      "ocean"
+    ],
+    "model": "heuristic_species_habitat_support_v2",
+    "productivity_input_policy": "absent_is_unavailable_present_requires_finite_numeric_before_mutation",
+    "river_fishery_input_policy": "omit_fishery_term_regardless_upstream_numeric_diagnostic",
+    "standing_water_fish_input_policy": "requires_current_climate_support_true_primary_and_derived_fishery_flags_and_finite_indices",
+    "temperature_input_policy": "finite_numeric_annual_temperature_required_before_mutation",
+    "terrestrial_guilds": [
+      "alpine_tundra_specialist",
+      "canopy_tree",
+      "desert_specialist",
+      "grassland_grazer",
+      "large_predator"
+    ],
+    "unmigrated_guild_policy": "reef_builder_wetland_amphibian_mangrove_coastal_bird_legacy_scores",
+    "unsupported_fish_score_policy": "numeric_zero_with_false_score_support_flag"
+  },
+  "summary": {
+    "aquatic_species_range_count": 1,
+    "dominant_species_guild_counts": {
+      "freshwater_fish": 1
+    },
+    "high_conservation_stress_species_range_count": 0,
+    "high_endemism_species_range_count": 0,
+    "mean_species_composition_confidence_index": 0.88,
+    "mean_species_endemism_index": 0.24,
+    "mean_species_habitat_suitability_index": 1.0,
+    "species_guild_type_counts": {
+      "freshwater_fish": 1
+    },
+    "species_habitat_class_counts": {
+      "freshwater": 1
+    },
+    "species_range_cell_count": 1,
+    "species_range_record_count": 1,
+    "species_range_total_area_km2": 100.0,
+    "terrestrial_species_range_count": 0,
+    "wetland_species_range_count": 0
+  }
+}

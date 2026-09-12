@@ -6,7 +6,7 @@ from typing import Any
 HISTORICAL_EVENT_MODEL = "causal_region_culture_language_trade_site_timeline_v1"
 
 
-def enrich_world_with_historical_geography_model(world: dict[str, Any]) -> dict[str, Any]:
+def _legacy_enrich_world_with_historical_geography_model(world: dict[str, Any]) -> dict[str, Any]:
     eras = world.get("historical_eras", [])
     events = world.get("historical_events", [])
     if not isinstance(eras, list) or not isinstance(events, list):
@@ -77,3 +77,11 @@ def enrich_world_with_historical_geography_model(world: dict[str, Any]) -> dict[
     }
     world.setdefault("summary", {})["historical_event_model"] = HISTORICAL_EVENT_MODEL
     return world
+
+
+def enrich_world_with_historical_geography_model(world: dict[str, Any]) -> dict[str, Any]:
+    from .native_social_models import annotate_native_social_models
+
+    return annotate_native_social_models(
+        world, _legacy_enrich_world_with_historical_geography_model, ('historical_event_model',),
+    )

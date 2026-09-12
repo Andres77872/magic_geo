@@ -7,6 +7,8 @@ what it needs from the shared world, so they no longer depend on order.
 from __future__ import annotations
 
 import json
+from copy import deepcopy
+from functools import lru_cache
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
@@ -16,10 +18,28 @@ from typer.testing import CliRunner
 
 from magic_geo.api import generate_world
 from magic_geo.cli import app
+from magic_geo.cli.validators import _validate_political_regions, _validate_settlement_selection
 from magic_geo.config import load_config
 
 from support import worlds
 from support.cli import assert_no_cli_crash
+from support.legacy_human_water_worlds import legacy_human_water_world
+
+
+@lru_cache(maxsize=1)
+def _seasonal_settlement_route_witness() -> dict:
+    """Current 256-cell seasonal realization shared by the two route probes.
+
+    Keep the original seed, plates, erosion and physical forcing. The retired
+    lapse controls are not replaced by temperature-fitting coefficients. Each
+    caller copies the result before any metadata tamper.
+    """
+    config = load_config(Path("configs/earthlike_seed.yaml"))
+    data = config.model_dump(mode="python")
+    data["mesh"]["cell_count"] = 256
+    data["tectonics"]["plate_count"] = 8
+    data["erosion"]["iterations"] = 1
+    return generate_world(type(config).model_validate(data))
 
 
 class SmokeSettlementsRoutesTests(TestCase):
@@ -42,6 +62,22 @@ class SmokeSettlementsRoutesTests(TestCase):
     def test_navigable_waterways(self) -> None:
         world = worlds.cached_world_readonly("small_smoke")
         summary = world["summary"]
+        # This healthy configured witness retains complete estimates. Mixed
+        # availability is covered by test_settlement_available_human_water.
+        for key in (
+            "navigability_estimates_complete", "navigable_waterway_selection_complete",
+            "port_site_selection_complete", "mean_port_suitability_supported",
+            "mean_protected_bay_supported", "mean_river_mouth_port_supported",
+        ):
+            self.assertIs(summary[key], True, key)
+        for cell in world["cells"]:
+            for key in (
+                "navigability_supported", "navigability_classification_supported",
+                "harbor_suitability_supported", "navigable_waterway_membership_complete",
+                "port_suitability_supported", "port_site_selection_supported",
+                "protected_bay_supported", "river_mouth_port_supported",
+            ):
+                self.assertIs(cell[key], True, f"cell {cell['id']}: {key}")
         navigable_candidate_ids = {cell["id"] for cell in world["cells"] if cell["navigability_index"] >= 0.52}
         self.assertEqual(summary["navigable_waterway_count"], len(world["navigable_waterways"]))
         self.assertEqual(sum(summary["navigability_class_counts"].values()), summary["cell_count"])
@@ -121,6 +157,19 @@ class SmokeSettlementsRoutesTests(TestCase):
     def test_port_sites(self) -> None:
         world = worlds.cached_world_readonly("small_smoke")
         summary = world["summary"]
+        for key in (
+            "navigable_waterway_selection_complete", "port_site_selection_complete",
+            "route_path_selection_complete", "route_corridor_diagnostics_complete",
+            "route_corridor_membership_complete", "coastal_route_estimates_complete",
+        ):
+            self.assertIs(summary[key], True, key)
+        for cell in world["cells"]:
+            self.assertIs(cell["coastal_route_supported"], True)
+            self.assertIs(cell["route_corridor_membership_complete"], True)
+        for route in world["routes"]:
+            self.assertIs(route["route_path_supported"], True)
+            self.assertIs(route["route_corridor_diagnostics_supported"], True)
+            self.assertTrue(route["path_cell_ids"], f"route {route['id']}")
         first_cell = world["cells"][0]
         if world["port_sites"]:
             first_port_site = world["port_sites"][0]
@@ -320,28 +369,21 @@ class SmokeSettlementsRoutesTests(TestCase):
         self.assertLessEqual(first_cell["soil_profile_development_index"], 1.0)
         self.assertGreaterEqual(first_cell["soil_horizon_count"], 0)
     def test_validate_reports_every_river_and_coastal_replay_verdict(self) -> None:
-        """``validate`` reaches and reports all five river/coastal replays.
+        """Preserve all five historical inline replay verdicts on a full witness.
 
-        The 128-cell topology is too coarse to guarantee a port and a corridor
-        witness, so this fixture is generated at 256 cells; that regime, and the
-        wiring of these five replays into the public command, are what only this
-        test proves. The field-by-field tamper tables live in
-        ``test_water_validators`` (channel morphology, hydraulics, navigability)
-        and ``test_human_validators`` (port sites, route corridors), which call
-        the validators directly and can name the field that diverged.
+        This retained 256-cell world has real seasonal native climate and exact
+        WATER-v1 parents. No model dictionary is retagged. The current-model
+        control below separately checks the new strict chain through the CLI.
         """
 
-        config = load_config(Path("configs/earthlike_seed.yaml"))
-        data = config.model_dump(mode="python")
-        data["mesh"]["cell_count"] = 256
-        data["tectonics"]["plate_count"] = 8
-        data["erosion"]["iterations"] = 1
-        data["climate"]["lapse_rate_c_per_km"] = 4.0
-        world = generate_world(type(config).model_validate(data))
+        world = legacy_human_water_world("small_smoke")
 
+        self.assertEqual(world["climate_model"]["model_type"], "prescribed_seasonal_surface_energy_v1")
         self.assertTrue(
             [cell for cell in world["cells"] if cell["is_river"] and not cell["is_water"]]
         )
+        self.assertTrue(world["port_sites"])
+        self.assertTrue(world["route_corridors"])
         for model_key, model_type in (
             (
                 "river_channel_morphology_model",
@@ -376,11 +418,15 @@ class SmokeSettlementsRoutesTests(TestCase):
             assert_no_cli_crash(self, control, command="validate")
             self.assertEqual(control.exit_code, 0, control.output)
 
-            world["river_channel_morphology_model"]["slope_normalization"] += 0.001
-            world["river_hydraulics_model"]["gravity_m_s2"] += 0.1
-            world["navigability_model"]["navigable_threshold"] += 0.01
-            world["port_site_model"]["port_site_threshold"] += 0.01
-            world["route_corridor_model"]["feature_threshold"] += 0.01
+            # Exact known declarations are selected before legacy replay.
+            # Tamper owned numerical results to prove all five inline replays
+            # still run; malformed declarations have separate first-error tests.
+            for field in (
+                "mean_river_channel_width_m", "mean_flow_velocity_m_s",
+                "mean_navigability_index", "mean_port_suitability_index",
+            ):
+                world["summary"][field] += 1.0
+            world["route_corridors"][0]["path_length_km"] += 1.0
 
             result = validate_current()
 
@@ -396,6 +442,28 @@ class SmokeSettlementsRoutesTests(TestCase):
             with self.subTest(message=message):
                 self.assertIn(message, result.output)
 
+    def test_current_river_and_coastal_models_validate(self) -> None:
+        world = worlds.cached_world_readonly("small_smoke")
+        for model_key, model_type in (
+            ("river_channel_morphology_model", "causal_flow_sediment_wetland_baseflow_channel_morphology_v2"),
+            ("river_hydraulics_model", "manning_blended_diagnostic_river_hydraulics_v2"),
+            ("navigability_model", "causal_channel_hydraulic_coastal_navigability_v3"),
+            ("port_site_model", "causal_navigability_coastal_port_site_selection_v3"),
+            ("route_corridor_model", "causal_feature_weighted_dijkstra_route_corridors_v3"),
+        ):
+            with self.subTest(model=model_key):
+                self.assertEqual(world[model_key]["model_type"], model_type)
+                self.assertEqual(world["summary"][model_key], model_type)
+        self.assertTrue([c for c in world["cells"] if c["is_river"] and not c["is_water"]])
+        self.assertTrue(world["port_sites"])
+        self.assertTrue(world["route_corridors"])
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "world.json"
+            path.write_text(json.dumps(world), encoding="utf-8")
+            result = CliRunner().invoke(app, ["validate", "--world", str(path)])
+        assert_no_cli_crash(self, result, command="validate")
+        self.assertEqual(result.exit_code, 0, result.output)
+
     def test_two_settlement_regime_generates_a_valid_settlement_and_route_network(
         self,
     ) -> None:
@@ -410,19 +478,12 @@ class SmokeSettlementsRoutesTests(TestCase):
         settlement and route between them.
         """
 
-        config = load_config(Path("configs/earthlike_seed.yaml"))
-        data = config.model_dump(mode="python")
-        data["mesh"]["cell_count"] = 256
-        data["tectonics"]["plate_count"] = 8
-        data["erosion"]["iterations"] = 1
-        # Keep this fixture above the two-settlement threshold. Earth
-        # calibration is covered independently by the canonical matrix.
-        data["climate"]["lapse_rate_c_per_km"] = 2.0
-        world = generate_world(type(config).model_validate(data))
+        world = deepcopy(_seasonal_settlement_route_witness())
 
+        self.assertEqual(world["climate_model"]["model_type"], "prescribed_seasonal_surface_energy_v1")
         self.assertEqual(
             world["settlement_selection_model"]["model_type"],
-            "causal_native_score_local_max_separated_settlement_selection_v1",
+            "causal_native_score_local_max_separated_settlement_selection_v3",
         )
         self.assertEqual(world["settlement_selection_model"]["selection_score_precision"], 8)
         self.assertEqual(
@@ -431,6 +492,12 @@ class SmokeSettlementsRoutesTests(TestCase):
         )
         self.assertGreater(len(world["settlements"]), 1)
         self.assertTrue(world["routes"])
+        cells = {cell["id"]: cell for cell in world["cells"]}
+        for settlement in world["settlements"]:
+            cell = cells[settlement["cell_id"]]
+            self.assertIs(cell["is_water"], False)
+            self.assertIs(cell["is_lake"], False)
+            self.assertIs(cell["settlement_climate_supported"], True)
 
         with TemporaryDirectory() as temporary_directory:
             world_path = Path(temporary_directory) / "world.json"
@@ -439,6 +506,40 @@ class SmokeSettlementsRoutesTests(TestCase):
 
         assert_no_cli_crash(self, result, command="validate")
         self.assertEqual(result.exit_code, 0, result.output)
+
+    def test_settlement_cost_allegiance_can_differ_from_host_territory(self) -> None:
+        """The original seasonal witness exposes distinct declared assignments."""
+        world = deepcopy(_seasonal_settlement_route_witness())
+        cells = {cell["id"]: cell for cell in world["cells"]}
+        allegiance = next(
+            settlement for settlement in world["settlements"]
+            if settlement["region_id"] != cells[settlement["cell_id"]]["political_region_id"]
+        )
+        self.assertEqual(_validate_settlement_selection(world, world["summary"], cells), [])
+        self.assertEqual(_validate_political_regions(world, world["summary"], cells), [])
+
+        # In this witness the .72 settlement coastal discount favors a different
+        # capital than the .76 territorial discount; neither capital is directly
+        # linked to this settlement. Substituting the territorial assignment
+        # must fail both membership linkage and independent cost replay.
+        allegiance["region_id"] = cells[allegiance["cell_id"]]["political_region_id"]
+        self.assertTrue(_validate_settlement_selection(world, world["summary"], cells))
+        self.assertTrue(_validate_political_regions(world, world["summary"], cells))
+
+        for mutation in ("duplicate_member", "missing_member", "unknown_region", "foreign_capital"):
+            with self.subTest(mutation=mutation):
+                altered = deepcopy(_seasonal_settlement_route_witness())
+                regions = altered["political_regions"]
+                first = regions[0]
+                if mutation == "duplicate_member":
+                    regions[1]["settlement_ids"].append(first["settlement_ids"][0])
+                elif mutation == "missing_member":
+                    first["settlement_ids"].pop()
+                elif mutation == "unknown_region":
+                    altered["settlements"][0]["region_id"] = max(region["id"] for region in regions) + 1
+                else:
+                    first["capital_settlement_id"] = regions[1]["capital_settlement_id"]
+                self.assertTrue(_validate_settlement_selection(altered, altered["summary"], cells))
 
     def test_political_models_declare_their_documented_identities(self) -> None:
         """Region, border and trade-flow models name their documented replays.

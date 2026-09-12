@@ -367,6 +367,9 @@ std::string crust_material_shadow_history_json(
 }
 
 std::string climate_model_json(const Params& params) {
+    if (params.temperature_model != ClimateTemperatureModel::legacy_empirical) {
+        throw std::runtime_error("legacy climate metadata requires legacy_empirical temperatures");
+    }
     const int precision = std::max(6, params.float_precision);
     const double latitude_temperature_area_mean_offset_c =
         CLIMATE_LATITUDE_TEMPERATURE_GRADIENT_C /
@@ -797,6 +800,39 @@ std::string numeric_depression_correction_history_json(
     return out;
 }
 
+std::string grounded_ice_model_json() {
+    std::string out = "{";
+    bool first = true;
+    add_str(out, first, "model_type",
+        "exposed_land_annual_grounded_ice_diagnostic_v1");
+    add_str(out, first, "surface_domain",
+        "nonmarine_nonlake_cells_v1");
+    add_str(out, first, "thickness_model",
+        "annual_cold_moisture_latitude_elevation_proxy_v1");
+    add_str(out, first, "surface_mass_balance_model",
+        "annual_precipitation_temperature_proxy_v1");
+    add_str(out, first, "dynamics_model",
+        "local_downhill_velocity_erosion_proxy_v1");
+    add_str(out, first, "active_membership_model",
+        "eligible_cells_with_thickness_strictly_above_25m_v1");
+    add_str(out, first, "association_model",
+        "active_ice_or_one_edge_adjacent_glacial_terrain_v1");
+    add_str(out, first, "water_context_policy",
+        "lake_glacial_lake_or_marine_fjord_only");
+    add_bool(out, first, "lake_ice_resolved", false);
+    add_bool(out, first, "sea_ice_resolved", false);
+    add_bool(out, first, "physical_time_resolved", false);
+    add_bool(out, first, "water_mass_budget_resolved", false);
+    add_bool(out, first, "energy_budget_resolved", false);
+    add_str(out, first, "model_limitation",
+        "static_grounded_ice_diagnostic_without_seasonal_phase_change_perennial_mass_evolution_or_observed_glacier_calibration");
+    add_str(out, first, "active_thickness_field",
+        "grounded_ice_diagnostic_thickness_m");
+    add_str(out, first, "active_thickness_precision",
+        "roundtrip_binary64_decimal_v1");
+    return out + "}";
+}
+
 std::string glacial_sediment_transport_model_json(
     const std::vector<GlacialSedimentTransportStage>& history,
     int precision
@@ -846,11 +882,13 @@ std::string glacial_sediment_transport_model_json(
     std::string out = "{";
     bool first = true;
     add_str(out, first, "model_type",
-        "downhill_area_conserving_glacial_sediment_transport_v2");
+        "downhill_area_conserving_glacial_sediment_transport_v3");
     add_str(out, first, "routing_graph",
         "single_steepest_downhill_mesh_neighbor_v1");
     add_str(out, first, "source_state",
         "post_erosion_pre_cryosphere_feedback_cell_state_v1");
+    add_str(out, first, "source_grounded_ice_model",
+        "exposed_land_annual_grounded_ice_diagnostic_v1");
     add_str(out, first, "erosion_potential_model",
         "ice_thickness_times_local_slope_proxy_bounded_85m_v1");
     add_double(out, first, "mobile_sediment_fraction",
@@ -867,7 +905,7 @@ std::string glacial_sediment_transport_model_json(
     add_bool(out, first, "source_partition_audit_is_mass_claim", false);
     add_bool(out, first, "source_partition_audit_is_provenance_claim", false);
     add_str(out, first, "stage_input_snapshot",
-        "complete_cell_cryosphere_terrain_and_sediment_inventory_before_transport_v2");
+        "complete_cell_cryosphere_terrain_and_sediment_inventory_before_transport_v3");
     add_str(out, first, "volume_transfer_model",
         "source_depth_times_source_area_equals_target_depth_times_target_area");
     add_bool(out, first, "mass_conserving", true);
@@ -1019,6 +1057,8 @@ std::string glacial_sediment_transport_history_json(
                 input_cell.glacier_flow_to_cell_id);
             add_bool(input_cells_json, first_field, "is_water",
                 input_cell.is_water);
+            add_bool(input_cells_json, first_field, "is_lake",
+                input_cell.is_lake);
             add_double(input_cells_json, first_field, "elevation_m",
                 input_cell.elevation_m, surface_precision);
             add_double(input_cells_json, first_field, "ice_thickness_m",

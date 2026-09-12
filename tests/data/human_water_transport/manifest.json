@@ -1,0 +1,29 @@
+{
+  "legacy_full": {
+    "source": "/tmp/settlement-consumer-availability-review/baseline/full_world.json",
+    "source_file_sha256": "dc7f2b4c3ec2a13c3cfb65a249d5ac3aa6fd597a628b06eed6d44e15b117c221",
+    "uncompressed_sha256": "dc7f2b4c3ec2a13c3cfb65a249d5ac3aa6fd597a628b06eed6d44e15b117c221",
+    "fixture_sha256": "3f757dcd664100590bf00393c06444b6a2ec149aefa43e3ef4a00c474f8e922b",
+    "scope": "complete retained world; only declared natural parents upgraded where named",
+    "config_file": "source-config.yaml",
+    "config_sha256": "b294bedf369796881503a0069d7ab2388786a25a8fb6db46c45c7887b6ca8e49"
+  },
+  "natural_parents_full": {
+    "source": "/tmp/natural-groundwater-downstream-review/witnesses/full_world.world.json.gz",
+    "source_file_sha256": "fba2ca20211724879d790492e477f685f1a849cf861cefff5d846a2780972e29",
+    "uncompressed_sha256": "df47e4a92d3059948c00d2126941bef055850a17f0cfff6ed2fb2ac8d1114d47",
+    "fixture_sha256": "fba2ca20211724879d790492e477f685f1a849cf861cefff5d846a2780972e29",
+    "scope": "complete retained world; only declared natural parents upgraded where named",
+    "config_file": "source-config.yaml",
+    "config_sha256": "b294bedf369796881503a0069d7ab2388786a25a8fb6db46c45c7887b6ca8e49"
+  },
+  "natural_geo": {
+    "source": "/tmp/natural-groundwater-downstream-review/witnesses/geo_only.world.json.gz",
+    "source_file_sha256": "280f5ed9ca7c2b3446255d86873eb3c280822706fe8bc2d68ac880a6695318c1",
+    "uncompressed_sha256": "a31689c88500046b4446145dffa5dd4504d577a36af371c25425c49783a4ff4e",
+    "fixture_sha256": "280f5ed9ca7c2b3446255d86873eb3c280822706fe8bc2d68ac880a6695318c1",
+    "scope": "complete retained world; only declared natural parents upgraded where named",
+    "config_file": "source-config.yaml",
+    "config_sha256": "b294bedf369796881503a0069d7ab2388786a25a8fb6db46c45c7887b6ca8e49"
+  }
+}

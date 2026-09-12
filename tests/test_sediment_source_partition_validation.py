@@ -5,6 +5,8 @@ from copy import deepcopy
 from pathlib import Path
 from unittest import TestCase
 
+from support import worlds
+
 from magic_geo.api import generate_geo_world
 from magic_geo.config import WorldConfig, load_config
 from magic_geo.sediment_source_partition_validation import (
@@ -236,7 +238,11 @@ class SedimentSourcePartitionGeneratedTests(TestCase):
         self.assert_rejected(altered)
 
     def test_coherent_glacial_partition_mutation_fails_alluvium_first(self) -> None:
-        altered = deepcopy(self.world)
+        # The current replay_128 terrain has genuine glacial alluvium. The
+        # thread-determinism control is warmer and has no glacial entrainment.
+        altered = worlds.cached_world("replay_128")
+        baseline = validate_sediment_source_partitions(altered)
+        self.assertTrue(baseline["passed"], baseline["failures"])
         stage = altered["glacial_sediment_transport_history"][0]
         alluvium = stage["alluvium_entrainment_depth_m_by_cell"]
         bedrock = stage["bedrock_erosion_depth_m_by_cell"]

@@ -2,7 +2,9 @@
 
 [Wiki home](../README.md) > Features
 
-The civilization geography layer turns the native settlement and route graph into political regions, border segments, trade flows, cultures, language regions, sacred areas, ruins and era-scaled territorial snapshots — all inside one C++ translation unit (`cpp/src/engine/civilization.cpp`, 1010 lines) plus `generate_territorial_snapshots` in `cpp/src/engine/history.cpp`. Every one of these products is a *deterministic single-pass function of already-computed cell, settlement and route state*: there is no agent simulation, no time stepping, no contiguity constraint and no population feedback anywhere in this layer. On the Python side four modules (`political_geography.py`, `cultural_geography.py`, `civilization_geography.py`, `territorial_geography.py`) publish declaration-only model records and derive nothing; `phonology_history.py` is the one genuinely generative enricher in this layer, and its linguistics is explicitly synthetic template linguistics with no empirical calibration. Four further Python modules (`natural_frontiers.py`, `boundary_geometry.py`, `graph_diagnostics.py`, `worldbuilding_realism.py`) derive products *from* this layer and are covered under [Downstream consumers](#downstream-consumers-of-the-political-layer). This page is the field-level reference for all of it, and it never upgrades any of those hedges.
+**Current seasonal scope.** Read the [settlement and social availability contract](../../settlement_social_availability.md) alongside the formulas below. Current native social estimates use an explicit availability envelope and seven own contracts at v2; the native language, political-region, border and trade-flow contracts retain their v1 identities. Numeric estimates are finite only when their actual inputs are available; otherwise they are null with typed flags. Recorded counts and base geography remain distinct from unavailable inferred totals or scaled geometry. Explicit historical declarations retain their original branches, including the legacy fallbacks identified below. Original source-line references describe the earlier implementation layout rather than current line numbers.
+
+The civilization geography layer turns the native settlement and route graph into political regions, border segments, trade flows, cultures, language regions, sacred areas, ruins and era-scaled territorial snapshots — in `cpp/src/engine/civilization.cpp` plus `generate_territorial_snapshots` in `cpp/src/engine/history.cpp`. Every one of these products is a *deterministic single-pass function of already-computed cell, settlement and route state*: there is no agent simulation, no time stepping, no contiguity constraint and no population feedback anywhere in this layer. On the Python side four modules (`political_geography.py`, `cultural_geography.py`, `civilization_geography.py`, `territorial_geography.py`) publish model metadata and audit current sources without recomputing the native equations; `phonology_history.py` is the one genuinely generative enricher in this layer, and its linguistics is explicitly synthetic template linguistics with no empirical calibration. Four further Python modules (`natural_frontiers.py`, `boundary_geometry.py`, `graph_diagnostics.py`, `worldbuilding_realism.py`) derive products *from* this layer and are covered under [Downstream consumers](#downstream-consumers-of-the-political-layer). This page is the field-level reference for all of it, and it never upgrades any of those hedges.
 
 ## On this page
 
@@ -52,7 +54,7 @@ The whole layer lives inside the `if (include_society)` block of `simulate_world
 
 Stages 3 and 6 are the only ones in this layer that write back into the shared `Cell` array, and both do so *before* any consumer reads those fields — stage 4 reads `political_region_id` written by stage 3, stage 6 reads it again, and `generate_territorial_snapshots` reads it once more. That ordering is load-bearing and is one of the stated engine invariants ("preserve pipeline order").
 
-On the Python side, `generate_world` runs the four declaration-only enrichers of this layer at `src/magic_geo/api.py:236`, `:237`, `:239` and `:240` (with `enrich_world_with_historical_geography_model` interleaved at `:238`), then `natural_frontiers` (`api.py:255`), `worldbuilding_realism` (`api.py:256`), `graph_diagnostics` (`api.py:263`), `boundary_geometry` (`api.py:264`) and finally `phonology_history` (`api.py:265`, the last call before `return world` at `:266`).
+The Python declaration wrappers do not recompute the native physical equations, but on the current path they audit exact native social sources, coverage and owned outputs before publishing metadata. The historical call-site references below describe the original layout; the current dependency order is summarized in the [availability contract](../../settlement_social_availability.md#source-order), including the later social consumers and final graph links.
 
 ## Political region formation
 
@@ -302,7 +304,7 @@ estimated_age_years= clamp(420 + 1900*continuity_index + 520*barrier_isolation
                            + 260*min(1, settlement_count/8), 120, 4200)
 ```
 
-**Cultural continuity is computed twice.** The first evaluation at `civilization.cpp:767`–`782` runs before sacred areas and ruins exist, so its `sacred_area_count` and `ruin_count` terms are both zero. After site placement, `civilization.cpp:988`–`1005` recomputes `continuity_index` and `estimated_age_years` with the real counts, overwriting the first values. `migration_pressure` is **not** recomputed and therefore never sees site counts. The serialized `continuity_index` is always the second-pass value.
+**Cultural continuity is computed twice on the available path.** The original first evaluation at `civilization.cpp:767`–`782` precedes site placement; the second evaluation includes the real sacred/ruin counts. Current publication uses that second-pass value only when the relevant ruin inference is available; otherwise `ruin_count`, `continuity_index` and `estimated_age_years` are null under their dedicated flags. `recorded_ruin_count` remains the emitted count. A culture with no eligible local ruin candidates has a known zero even if another culture makes global selection incomplete. Independent `migration_pressure`, sacred-site and language quantities are retained.
 
 Note also the sequencing consequence: site placement uses `culture_region_id`, which depends on the political partition; culture continuity then depends on site counts; and territorial-snapshot stability depends on culture continuity. The chain is one-directional — nothing feeds back into the political partition.
 
@@ -320,7 +322,7 @@ Serialized by `cultures_json` (`cpp/src/engine/entity_serialization.cpp:655`) un
 | `dominant_resource` | enum str | Modal non-`none` resource over the culture's own cells |
 | `settlement_count` | int | Copied from the political region |
 | `sacred_area_count` | int | Sacred sites placed inside this culture |
-| `ruin_count` | int | Ruins placed inside this culture |
+| `ruin_count` | int or null | Inferred count when `ruin_count_available`; `recorded_ruin_count` separately counts emitted ruins |
 | `settlement_ids` | int[] | Copied from the political region |
 | `area_km2` | double | Sum of assigned non-water cell areas |
 | `agricultural_area_km2` | double | Sub-area under the agricultural predicate |
@@ -330,8 +332,8 @@ Serialized by `cultures_json` (`cpp/src/engine/entity_serialization.cpp:655`) un
 | `barrier_isolation` | double | Border-length-weighted mean barrier score across cross-culture borders |
 | `trade_contact_index` | double | `clamp(incident volume / (100 × max(1, settlements)), 0, 1)` |
 | `migration_pressure` | double | First-pass formula, never recomputed |
-| `continuity_index` | double | **Second-pass** value including sacred/ruin counts |
-| `estimated_age_years` | double | Second-pass value, bounded `[120, 4200]` |
+| `continuity_index` | double or null | **Second-pass** value when `continuity_estimate_available` |
+| `estimated_age_years` | double or null | Available second-pass value bounded `[120, 4200]`; shares the continuity flag |
 
 `mean_fertility` and `mean_elevation_m` are divided by `area_km2` only when `area_km2 > 0` (`civilization.cpp:735`–`738`); `barrier_isolation` is `0.0` when the culture has no cross-culture border length.
 
@@ -428,7 +430,7 @@ The Python `phonology_history` enricher **annotates these same records in place*
 
 ## Sacred areas and ruins
 
-Both site families use the same ranked-greedy-with-minimum-separation pattern (`causal_terrain_culture_ranked_sacred_ruin_sites_v1`).
+Both site families retain the ranked-greedy-with-minimum-separation equations (`causal_terrain_culture_ranked_sacred_ruin_sites_v2`). Sacred-site inputs remain independent. Current ruin selection additionally requires complete support over its actual global candidate domain; an incomplete ranking emits no partial selected list and publishes unavailable inference rather than a known-zero ruin result.
 
 Shared minimum separation (`civilization.cpp:898`–`900`):
 
@@ -556,7 +558,7 @@ Because `ring_quality` saturates at a ring of 24 points and rings are capped at 
 
 ```
 region_conflict    = clamp(Σ conflict.intensity for (region, era) / 2.0, 0, 1)
-continuity         = culture.continuity_index, or 0.5 when no culture is linked
+continuity         = culture.continuity_index  (legacy missing-culture default: 0.5)
 stability          = clamp(0.42 + 0.42*continuity - 0.30*region_conflict
                            + 0.10*era.mean_connectivity, 0, 1)
 region_area_factor = area_factors[clamp(era.id, 0, 3)] * (0.82 + 0.18*stability)
@@ -584,9 +586,11 @@ fragmentation_index    = clamp(0.72*(region_count > 1 ? 1 - largest_share : 0)
 
 ## Snapshot region record fields
 
+The scaled numerical fields below describe the available branch. Current records also preserve separately named `base_area_km2`, `base_dissolved_polygon_area_km2` and `base_boundary_perimeter_km` with the physical geometry. Unavailable scaled area, perimeter, polygon diagnostics and stability are null under `geometry_estimate_available`; population has its own `population_estimate_available` flag. IDs, physical membership and base geometry do not become unavailable merely because an era estimate is unavailable.
+
 `snapshot_regions_json` (`entity_serialization.cpp:904`) nested inside `territorial_snapshots_json` (`entity_serialization.cpp:935`); top-level key `territorial_snapshots` (`world_serialization.cpp:257`). Structs at `types/world.hpp:218` and `:239`.
 
-**`territorial_snapshots[]`** — 11 fields:
+**`territorial_snapshots[]`** — selected fields (numerical rows describe the available branch):
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -602,7 +606,7 @@ fragmentation_index    = clamp(0.72*(region_count > 1 ? 1 - largest_share : 0)
 | `largest_region_area_km2` | double | Scaled |
 | `fragmentation_index` | double | `[0, 1]` |
 
-**`territorial_snapshots[].regions[]`** — 18 fields:
+**`territorial_snapshots[].regions[]`** — selected fields (numerical rows describe the available branch):
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -629,7 +633,7 @@ The Python `boundary_geometry` enricher adds six further keys to each of these r
 
 ## Declaration-only model records
 
-Four Python enrichers write **no** derived data; they publish the model contract, its parameters, its counts and its declared limitation so that consumers and validators can compare against a frozen dictionary. Every one of them returns the world unchanged when its input arrays are absent (the geo-only path), and each also mirrors its `model_type` into `summary`.
+These Python wrappers publish model contracts, parameters, counts and limitations without replacing the native equations. Current social metadata publication first audits its actual native sources and output coverage; missing or malformed current declarations cannot select a historical branch. The table's original absent-input branches describe the retained legacy path. Geography-only generation has its separately declared no-social scope, and successful full publication mirrors each `model_type` into `summary`.
 
 | Enricher | Module | World keys written | Summary keys written | Guard |
 |---|---|---|---|---|
@@ -638,23 +642,24 @@ Four Python enrichers write **no** derived data; they publish the model contract
 | `enrich_world_with_civilization_geography_models` | `src/magic_geo/civilization_geography.py:11` | `population_region_model`, `conflict_model`, `dynasty_model` | same three | returns unchanged unless `population_regions` and `conflicts` are lists |
 | `enrich_world_with_territorial_geography_model` | `src/magic_geo/territorial_geography.py:9` | `territorial_snapshot_model` | `territorial_snapshot_model` | returns unchanged unless `territorial_snapshots` is a list |
 
-Model-type strings, all `_v1`:
+Current model-type strings (unchanged submodel equation labels can still end in `_v1`):
 
 | Key | `model_type` |
 |---|---|
 | `political_region_model` | `causal_capital_barrier_partition_political_regions_v1` |
 | `political_border_model` | `causal_adjacent_region_terrain_border_segments_v1` |
 | `trade_flow_model` | `causal_route_endpoint_complement_trade_flows_v1` |
-| `culture_region_model` | `causal_political_homeland_barrier_trade_culture_regions_v1` |
+| `culture_region_model` | `causal_political_homeland_barrier_trade_culture_regions_v2` |
 | `language_region_model` | `causal_trade_union_family_lineage_phonology_v1` |
-| `cultural_site_model` | `causal_terrain_culture_ranked_sacred_ruin_sites_v1` |
-| `population_region_model` | `causal_area_weighted_capacity_occupancy_population_regions_v1` |
-| `conflict_model` | `causal_border_pair_pressure_trade_conflict_selection_v1` |
-| `dynasty_model` | `causal_foundation_continuity_pressure_dynasty_lineages_v1` |
-| `territorial_snapshot_model` | `causal_era_scaled_spherical_region_territorial_snapshots_v1` |
-| `phonology_history_model` | `causal_language_era_sound_rule_lexical_diffusion_speaker_history_v1` |
+| `cultural_site_model` | `causal_terrain_culture_ranked_sacred_ruin_sites_v2` |
+| `population_region_model` | `causal_area_weighted_capacity_occupancy_population_regions_v2` |
+| `conflict_model` | `causal_border_pair_pressure_trade_conflict_selection_v2` |
+| `dynasty_model` | `causal_foundation_continuity_pressure_dynasty_lineages_v2` |
+| `historical_event_model` | `causal_region_culture_language_trade_site_timeline_v2` |
+| `territorial_snapshot_model` | `causal_era_scaled_spherical_region_territorial_snapshots_v2` |
+| `phonology_history_model` | `causal_language_era_sound_rule_lexical_diffusion_speaker_history_v2` |
 | `natural_frontier_model` | `causal_border_terrain_connected_natural_frontiers_v1` |
-| `worldbuilding_realism_model` | `causal_upstream_evidence_worldbuilding_realism_checks_v1` |
+| `worldbuilding_realism_model` | `causal_upstream_evidence_worldbuilding_realism_checks_v4` |
 
 The `political_region_model` record additionally carries three *recomputed cross-checks* — `target_count` (recomputed from `len(settlements)`), `capital_count` and `region_count` (both `len(regions)`) — at `political_geography.py:59`–`61`. `political_border_model` carries `border_count` and a sorted `border_type_counts` histogram; `trade_flow_model` carries `route_count`, `flow_count`, `interregional_flow_count`, a sorted `primary_good_counts` histogram and `total_volume_index` rounded to 6 decimals (`political_geography.py:131`–`147`).
 
@@ -678,13 +683,15 @@ Declared limitation strings, carried verbatim into the world document:
 
 **What civilization geography adds beyond political geography.** `civilization_geography.py` publishes the contracts for three *native* record families that consume the political layer but are generated in `cpp/src/engine/history.cpp`: population regions (density-capacity bounded to `[0.2, 90]` people/km² with `base_people_per_km2 = 1.5`, `agricultural_weight = 64.0`, `site_strength_weight = 12.0`), conflicts (one candidate per sorted region pair with `minimum_candidate_score = 0.24`, `maximum_conflicts_per_region = 2`, `resource_pressure_if_present = 0.72`, `hard_border_trade_bonus = 0.34`, `candidate_score_fertility_weight = 0.08`), and dynasties (`dynasty_count_thresholds = [0.36, 0.66]`, one linear chain per region). Those record families are documented on the [history, demography and economy page](history-demography-and-economy.md); what matters here is the direction of the dependency — borders and trade flows feed conflicts, and culture continuity feeds dynasties and snapshot stability.
 
-**What territorial geography adds.** `territorial_geography.py` is the smallest module in the layer (32 lines) and publishes only the snapshot geometry contract: `maximum_boundary_ring_points_before_closure: 64`, `maximum_boundary_cell_ids: 64`, `perimeter_model: great_circle_closed_ring_length_v1`, `dissolved_area_model: centered_orthographic_shoelace_proxy_v1`, and the two era factor arrays.
+The population summary is over modeled regions under `nonwater_political_region_cells_v1`. With no such regions, `estimated_world_population` can be an available zero empty sum even when unsupported dry land exists; a mean without a contributing region can still be unavailable. This is neither a claim that the world is uninhabited nor a human-survival inference. Read the declared membership and [availability scope](../../settlement_social_availability.md#reading-unknown-and-empty-results) before interpreting that zero.
+
+**What territorial geography adds.** `territorial_geography.py` publishes the snapshot geometry contract, including `maximum_boundary_ring_points_before_closure: 64`, `maximum_boundary_cell_ids: 64`, `perimeter_model: great_circle_closed_ring_length_v1`, `dissolved_area_model: centered_orthographic_shoelace_proxy_v1`, the era factor arrays and current availability policies.
 
 ## The phonology history model
 
-`enrich_world_with_phonology_history` (`src/magic_geo/phonology_history.py:273`) is the **last** call of `generate_world` (`api.py:265`) and the only Python enricher in this layer that generates records rather than declarations. It reads `language_regions`, `historical_eras` and `population_regions`, writes five new top-level arrays, annotates the language records in place, and publishes ~35 summary keys.
+`enrich_world_with_phonology_history` generates records rather than only declarations. It reads `language_regions`, `historical_eras` and `population_regions`, writes five top-level arrays, annotates the language records in place, and publishes summary values with availability. Its original last-call position (`api.py:265`) is historical; current final graph links follow the audited social consumers.
 
-**Era handling.** `_sorted_eras` (`phonology_history.py:228`) sorts eras by descending `start_year_bp` then ascending `id`. If `historical_eras` is missing or empty, a single synthetic era `{id: 0, start_year_bp: 1.0, end_year_bp: 0.0, dominant_process: "undated"}` is used.
+**Era handling.** `_sorted_eras` (`phonology_history.py:228`) sorts eras by descending `start_year_bp` then ascending `id`. Its synthetic `undated` era for a missing/empty history is a retained legacy fallback, not permission for a current payload to omit required native era coverage.
 
 **Rule count per language** (`_rule_count`, `phonology_history.py:248`):
 
@@ -778,7 +785,7 @@ borrowed = (parent_id >= 0) and contact >= 0.62
 
 Per-era diffusion steps aggregate every correspondence whose `diffusion_stage_index <= stage_index`, producing `adoption_fraction`, `innovation_fraction`, `contact_borrowing_index`, `regularization_index` and `semantic_shift_index` (`phonology_history.py:476`–`518`).
 
-**Speaker population histories** (`phonology_history.py:585`–`761`) join languages to `population_regions` by `language_region_id`. If no population region matches, the speaker count falls back to `max(1.0, language.area_km2 * 0.5)` (`phonology_history.py:598`–`599`). Initial speakers are
+**Speaker population histories** join languages to `population_regions` by `language_region_id`. The original `max(1.0, language.area_km2 * 0.5)` fallback (`phonology_history.py:598`–`599`) belongs to the explicit legacy path. Current speaker estimates require their actual associated population inputs; they do not substitute an area proxy for unavailable population. Global speaker-share quantities require the complete relevant language-population denominator, while independent sound rules and lexical structure remain available. The following interpolation applies only to available inputs. Initial speakers are
 
 ```
 initial = estimated_speakers * clamp(0.70 + 0.10*inherited - 0.08*drift
@@ -787,7 +794,7 @@ initial = estimated_speakers * clamp(0.70 + 0.10*inherited - 0.08*drift
 
 and each era step interpolates linearly to the final value, with the last step forced to exactly `estimated_speakers`. Nine per-step indices are derived (`allophonic_variation_index`, `syllable_pressure_index`, `phonetic_reduction_index`, `contact_pressure_index`, `lexical_diffusion_pressure_index`, `population_adoption_index`, `register_divergence_index`, `pronunciation_regularization_index`, plus `speaker_fraction_index`). A history is flagged `high_contact_speaker_history` when its mean contact index is `>= 0.65` or any step reaches `>= 0.75` (`phonology_history.py:734`).
 
-All emitted floats in this module are `round(..., 6)`.
+Available emitted floats in this module are rounded to six decimal places. Current speaker records and steps carry field availability maps; an unavailable estimate is null, including the nullable `high_contact_speaker_history` boolean. Summary availability is published separately from the number of retained history slots.
 
 ## Phonology record families
 
@@ -841,7 +848,7 @@ All native keys below are emitted by `summary_json` (`cpp/src/engine/summary.cpp
 | `culture_region_count` | `cultures.size()` | `:1832` |
 | `language_region_count` | `language_regions.size()` | `:1833` |
 | `language_lineage_count` | languages with `parent_language_region_id >= 0` | `:693`, `:1838` |
-| `sacred_area_count` / `ruin_count` | vector sizes | `:1894`–`:1895` |
+| `sacred_area_count` / `ruin_count` | Sacred vector size / available inferred ruin total; `recorded_ruin_count` is always the emitted ruin count | `:1894`–`:1895` |
 | `border_segment_count` | `borders.size()` | `:1896` |
 | `border_total_length_km` | Σ `length_km` | `:761`, `:1897` |
 | `natural_border_fraction` | count fraction with `type != open_lowland` | `:763`, `:1898` |

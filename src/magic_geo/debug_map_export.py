@@ -87,6 +87,13 @@ _UNIT_RULES: tuple[tuple[str, str], ...] = (
 )
 
 _FALLBACK_CURATED_DESCRIPTIONS = {
+    "ice_thickness_m": "Stored ice-thickness diagnostic in metres. Current grounded applicability excludes marine and lake surfaces; their zero does not establish absence of floating ice. Historical applicability is undeclared.",
+    "grounded_ice_surface_applicable": "Exposed-land applicability of the annual grounded-ice diagnostic; false means process inapplicability, not absence of lake or sea ice.",
+    "ice_sheet_id": "Sheet reference; current active membership requires applicability and raw grounded_ice_diagnostic_thickness_m >25 m. Adjacent glacial context is separate.",
+    "glacial_erosion_m": "Final grounded-ice erosion potential; actual bulk sediment removal belongs to the retained pre-transport stage, not elapsed-time ice dynamics.",
+    "settlement_score": "Annual settlement placement proxy. Unsupported dry stored zero is unavailable; aquatic zero is a structural contribution with placement inapplicable.",
+    "harbor_suitability_index": "Composite physical harbor and settlement-site estimate; unavailable site inputs do not remove independently known river/coastal transport.",
+    "mining_potential_index": "Surface mining estimate with separate exposed-land applicability and economic input support; geological deposits remain present when economics is unavailable.",
     "elevation_m": (
         "Surface elevation above the planetary datum, in metres. Negative values are below sea "
         "level; use the spatial pattern to guide relief, coastlines, and terrain transitions."
@@ -339,10 +346,18 @@ def _describe_layer(layer: dict[str, Any]) -> _LayerDoc:
     else:
         role = "measurement"
         fallback = "Continuous per-cell field; use the encoded spatial pattern and supplied scale as semantic guidance."
+    description = _CURATED_DESCRIPTIONS.get(name, fallback)
+    if name.startswith("species_guild_scores."):
+        role = "diagnostic"
+        description = "Relative guild score over supported habitat, inputs and annual air climate; not a population count or universal survival limit."
+    if layer.get("applicability"):
+        description += f" Surface applicability is separate from input support: {layer.get('inapplicable_cell_count', 0)} inapplicable cells and {layer.get('unavailable_cell_count', 0)} unavailable estimates. Both use the neutral color."
+    if layer.get("availability"):
+        description += " Unavailable estimates use the missing-data color and are excluded from the color range; supported zero values remain visible."
     return _LayerDoc(
         unit=_infer_unit(name, categorical),
         role=role,
-        description=_CURATED_DESCRIPTIONS.get(name, fallback),
+        description=description,
         family=_FAMILY_DESCRIPTIONS.get(source, source),
     )
 
@@ -498,6 +513,20 @@ def build_color_codex(layer: dict[str, Any], values: Sequence[float]) -> str:
         )
         return "\n".join(rows)
 
+    if layer.get("marine_distance") and summary["finite_count"] == 0:
+        return "No marine source in this world. Distance is undefined, not zero. No numeric color scale is inferred.\n\nNeutral cells indicate the absence of a marine distance source, not missing rainfall or total humidity."
+    if (layer.get("availability") or layer.get("applicability")) and summary["finite_count"] == 0:
+        return "\n".join([
+            "No available estimates in this layer slice. No numeric color scale is inferred.",
+            "",
+            "| Special color | Meaning | Cells | Share of slice |",
+            "|---|---|---:|---:|",
+            f"| {MISSING_COLOR_HEX} | Missing or unavailable cell; do not invent content | {summary['missing_count']} | {_share(summary['missing_count'], summary['total'])} |",
+            f"| {MAP_BACKGROUND_HEX} | Canvas background outside the mapped world; keep it outside the geography | — | — |",
+            "",
+            "Current slice: 0 finite cells; no available-value range.",
+        ])
+
     low, high = _layer_range(layer)
     rows = [
         f"The diagnostic image uses Viridis normalized over {_value_with_unit(low, doc.unit)} to {_value_with_unit(high, doc.unit)}. Values outside that display range are clamped to its endpoint colors. Interpolate continuously between listed anchors.",
@@ -535,7 +564,8 @@ def build_color_codex(layer: dict[str, Any], values: Sequence[float]) -> str:
     )
     stats = layer.get("stats") if isinstance(layer.get("stats"), dict) else {}
     if all(isinstance(stats.get(key), (int, float)) and math.isfinite(float(stats[key])) for key in ("min", "max")):
-        rows.append(f"Complete layer/time-axis raw range: {_value_with_unit(float(stats['min']), doc.unit)} to {_value_with_unit(float(stats['max']), doc.unit)}.")
+        scope = "available-value" if layer.get("availability") else "raw"
+        rows.append(f"Complete layer/time-axis {scope} range: {_value_with_unit(float(stats['min']), doc.unit)} to {_value_with_unit(float(stats['max']), doc.unit)}.")
     if all(isinstance(stats.get(key), (int, float)) and math.isfinite(float(stats[key])) for key in ("p2", "p98")):
         rows.append(f"Robust display range (2nd–98th percentile): {_value_with_unit(float(stats['p2']), doc.unit)} to {_value_with_unit(float(stats['p98']), doc.unit)}.")
     return "\n".join(rows)

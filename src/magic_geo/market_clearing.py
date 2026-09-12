@@ -117,7 +117,7 @@ def _route_multiplier(route: dict[str, Any]) -> float:
     return ROUTE_CAPACITY_MULTIPLIER.get(route_type, 0.76)
 
 
-def enrich_world_with_market_clearing(world: dict[str, Any]) -> dict[str, Any]:
+def _enrich_market_clearing_v1(world: dict[str, Any]) -> dict[str, Any]:
     _set_market_clearing_model(world)
     market_exchanges = world.get("market_exchanges", [])
     routes = world.get("routes", [])
@@ -613,3 +613,12 @@ def enrich_world_with_market_clearing(world: dict[str, Any]) -> dict[str, Any]:
     summary["mean_market_inventory_pressure_index"] = round(inventory_pressure_sum / market_inventory_history_count, 6) if market_inventory_history_count else 0.0
     summary["high_inventory_stress_market_count"] = high_inventory_stress_count
     return world
+
+
+
+def enrich_world_with_market_clearing(world: dict[str, Any]) -> dict[str, Any]:
+    from .market_availability_validation import market_version
+    if market_version(world)==1:
+        return _enrich_market_clearing_v1(world)
+    from .market_availability import enrich_market_availability
+    return enrich_market_availability(world)

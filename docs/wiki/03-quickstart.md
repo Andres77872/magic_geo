@@ -75,15 +75,15 @@ Those last two are not incidental. The README states the position directly: geom
 | `--set` | str, repeatable | none | no | `Override section.field=YAML_VALUE; repeat for multiple fields.` |
 | `--force` | bool flag (no `--no-force`) | `False` | no | `Overwrite the target file.` |
 
-The three registered profiles are defined at `src/magic_geo/config.py:507-529`:
+The three registered profiles are defined in `src/magic_geo/config.py`:
 
 | Profile | Description (verbatim from `_PROFILE_DESCRIPTIONS`) | Overrides applied on top of schema defaults |
 |---|---|---|
-| `default` | `Schema defaults suitable as a neutral editable starting point.` | none (`{}`) |
-| `earthlike` | `Calibrated 4,096-cell Earth-like reference configuration.` | `tectonics.plate_motion_scale_deg_per_step: 4.0`, `climate.precipitation_scale: 0.8` |
-| `smoke` | `Small deterministic CPU configuration for fast integration checks.` | `run.name: smoke`, `mesh.cell_count: 128`, `tectonics.plate_count: 8`, `tectonics.plate_motion_scale_deg_per_step: 4.0`, `climate.precipitation_scale: 0.8`, `erosion.iterations: 1`, `compute.backend: cpu`, `compute.threads: 1` |
+| `default` | `Prescribed seasonal energy model with neutral physical inputs.` | none (`{}`) |
+| `earthlike` | `4,096-cell Earth reference inputs for the seasonal model; new climate calibration is not established.` | `tectonics.plate_motion_scale_deg_per_step: 4.0`, `climate.precipitation_scale: 0.8` |
+| `smoke` | `Small deterministic CPU seasonal configuration for integration checks.` | `run.name: smoke`, `mesh.cell_count: 128`, `tectonics.plate_count: 8`, `tectonics.plate_motion_scale_deg_per_step: 4.0`, `climate.precipitation_scale: 0.8`, `erosion.iterations: 1`, `compute.backend: cpu`, `compute.threads: 1` |
 
-A configuration document has exactly **9 sections and 44 leaf fields** (verified against `WorldConfig().model_dump()`; `README.md:139` says the same). `configs/earthlike_seed.yaml` is a materialized copy of the `earthlike` profile with all 44 fields spelled out — that is the file the README quickstart, the geo validation suite default (`src/magic_geo/cli/commands/validate_geo.py:96`), and this page all use.
+A configuration document has **9 sections with 43 fields plus the required root `config_version: 2`**. `WorldConfig()` deliberately constructs a current seasonal model. Every YAML document must explicitly supply the exact integer version; empty or unversioned files receive migration errors. `configs/earthlike_seed.yaml` materializes all fields of the `earthlike` profile. Temperature comes from the seasonal energy solution with `climate.reference_infrared_optical_depth`, not from the retired imposed-mean/lapse controls. See the [configuration reference](05-configuration-reference.md) for physical meaning and migration limits.
 
 ```bash
 # Option A: use the checked-in Earth-like reference verbatim
@@ -107,7 +107,7 @@ Notes that will save you time later:
 | Unknown keys rejected | Every model sets `extra="forbid"` | `src/magic_geo/config.py` model configs |
 | NaN/Inf rejected | Every model sets `allow_inf_nan=False` | same |
 | Duplicate YAML keys rejected | `_UniqueKeySafeLoader` raises rather than applying last-wins | `src/magic_geo/config.py:85-89` |
-| Empty YAML document | Loads as `{}`, which is identical to the `default` profile | `src/magic_geo/config.py:612` pipeline |
+| Empty/unversioned YAML document | Rejected with required-version and migration guidance; the minimal document is `config_version: 2` | `src/magic_geo/config.py` |
 | Cross-field rule | `tectonics.plate_count` must be `< mesh.cell_count` | `src/magic_geo/config.py:501` |
 | Write safety | Atomic same-directory temp file, re-parsed for validation before commit; without `--force` it publishes with `os.link()` so a racing writer causes `FileExistsError` instead of a silent clobber | `src/magic_geo/config.py:800` |
 | Overwrite without `--force` | Exits **2** with `<path> already exists; pass --force to overwrite` (re-raised as `typer.BadParameter`) | `src/magic_geo/cli/commands/config.py:47-48` |
@@ -249,19 +249,19 @@ print(world["schema_version"], world["summary"]["cell_count"])
 
 ### 3b. The summary Markdown
 
-`write_summary_markdown` is **not** a dump of the `summary` dict. It is a curated ordered filter plus a fixed set of count sections plus the backend probe (`src/magic_geo/io/summary_markdown.py:9-1315`).
+`write_summary_markdown` is **not** a dump of the `summary` dict. It is a curated ordered filter plus count sections and the backend probe (`src/magic_geo/io/summary_markdown.py`). The following table records the earlier 512-cell artifact; its key counts and source line numbers are historical, not the current schema.
 
 | Part | How it is produced | Observed on a 512-cell full world |
 |---|---|---|
 | `# <name>` | `world.get("name", "magic-geo world")` (`:15`) | `# earthlike_mvp` |
-| `## Summary` | one `- \`key\`: value` bullet for each of **1,243** curated keys, emitted only `if key in summary` (`:20-1266`) | all 1,243 present |
+| `## Summary` | one `- \`key\`: value` bullet for each of the then **1,243** curated keys, emitted only `if key in summary` (`:20-1266`) | all 1,243 present |
 | Count sections | 35 candidate section names (`boundary_counts` … `natural_frontier_type_counts`), each rendered as its own `## <section>` heading with sorted `key: value` bullets, and **skipped entirely when empty** (`:1268-1309`) | 35 of 35 rendered |
 | `## Backend` | every `world["backend"]` key, sorted (`:1311-1313`) | 178 bullets |
 | Total | — | 37 `##` headings, 1,629 bullets, 73,743 bytes |
 
 Because the curated list is a filter, the Markdown is a strict subset of `summary`: 1,243 of 1,293 keys appeared in the observed run. If a metric you need is missing from the Markdown, read it from the world document, not from here.
 
-The opening bullets are the model identity block, which is the fastest way to confirm which model versions produced an artifact. Abridged — the real file has no gaps, and `…` below marks omitted intervening bullets:
+The earlier artifact's opening bullets show its model identity block, which identifies the versions that produced it. Abridged — the real file has no gaps, and `…` below marks omitted intervening bullets:
 
 ```
 - `seed`: 424242
@@ -278,23 +278,29 @@ The opening bullets are the model identity block, which is the fastest way to co
 - `river_extraction_model`: flow_accumulation_percentile_on_conditioned_hydrologic_surface_v1
 ```
 
-The first five bullets (`seed` through `output_float_precision`) are the literal head of the curated list at `src/magic_geo/io/summary_markdown.py:21-25`; the rest of the identity block runs through the depression, hydrologic-surface, water-budget, and river-extraction model names in that source order.
+In that export, the first five bullets (`seed` through `output_float_precision`) headed the curated list; the remaining identity block followed the depression, hydrologic-surface, water-budget, and river-extraction model names in source order. Consult the current writer for the current selection of summary keys.
 
 ### 3c. The cells CSV
 
-`write_cells_csv` writes a **fixed 397-column projection** of `world["cells"]` using `csv.DictWriter(fieldnames=…, extrasaction="ignore")` (`src/magic_geo/io/cells_csv.py:14-416`).
+`write_cells_csv` writes an ordered projection of `world["cells"]` using `csv.DictWriter(fieldnames=…, extrasaction="ignore")` (`src/magic_geo/io/cells_csv.py`). The header starts with the curated column list and appends any missing settlement, surface-applicability, and human-estimate support fields in a deterministic order. It is the same for full and geo-only worlds at a given software version; use the emitted header rather than a fixed column count.
 
-| Property | Value | Consequence |
+The writer also creates a schema sidecar: `cells.csv` produces `cells.csv.schema.json`. Its `magic_geo_cell_csv_estimate_profile_v1` payload records the exact `columns`, `column_types`, `availability_fields`, scope, and model declarations. This describes the export; it does not independently validate the estimates.
+
+| Property | Current behavior | Consequence |
 |---|---|---|
-| Columns | 397, in the hard-coded `fieldnames` order | The header is identical for every world, regardless of scope |
-| Rows | one per cell, plus the header | 512 cells → 513 lines |
-| Extra cell keys | dropped (`extrasaction="ignore"`) | JSON-only fields never appear |
-| Missing cell keys | written as the `DictWriter` default `restval`, i.e. the empty string | geo-only worlds leave civilization columns blank rather than omitting them |
-| Column order stability | positional; the r1 audit records historical field indices against this list (`docs/r1_status_audit.md:126`, `:142`, `:212`) | treat column order as an interface |
+| Columns | Curated list plus deduplicated support/applicability additions | Read the header or sidecar `columns` for the exact order |
+| Rows | One CSV record per cell, plus the header | An empty `cells` list produces a header-only CSV |
+| Extra cell keys | Dropped (`extrasaction="ignore"`) | Use the world document for fields outside the projection |
+| Missing or null cell values | Both written as empty fields | Consult availability flags and model declarations; JSON distinguishes a missing key from explicit `null` |
+| Boolean values | `True` / `False` | The sidecar records these lexical values and column types |
+| `species_guild_scores` | Compact JSON object text within a CSV field | Parse that field as JSON rather than treating it as a scalar |
+| Linked records | Not included in this cell projection | Resource deposits, histories, and other record families require JSON or record exports |
 
-A full 512-cell world had 419 keys per cell against those 397 columns, so **22 cell fields exist only in the world document**:
+A numeric zero is preserved. For settlement v3, interpret `settlement_score` together with `settlement_climate_supported`, `is_water`, and `is_lake`: water/lake zero is structural, supported terrestrial zero is known, and unsupported terrestrial zero is the retained unavailable sentinel. Existing ecology and agriculture contracts also retain their declared zero sentinels and support flags. New derived human estimates use null plus their own typed support or availability fields; do not convert their blank CSV fields into zero. Missing legacy flags remain undeclared. The native seasonal coefficient and annual-budget columns are blank in explicit legacy-climate output, while current native seasonal output leaves retired post-hoc energy and bleaching estimates blank.
 
-| Omitted cell field | Why it cannot be a CSV column |
+The earlier 512-cell measurement below had 419 keys per cell against the former 397 columns, with **22 cell fields then present only in the world document**. It predates the ecology support additions:
+
+| Historically omitted cell field | Reason omitted in that export |
 |---|---|
 | `neighbors`, `cell_adjacency_edge_ids`, `control_volume_edge_neighbor_ids` | variable-length ID lists |
 | `boundary_ring`, `control_volume_vertices_3d`, `position_3d`, `normal_3d` | vector/polygon geometry |
@@ -303,9 +309,11 @@ A full 512-cell world had 419 keys per cell against those 397 columns, so **22 c
 | `area_km2`, `is_water`, `fertility`, `soil_depth_m`, `bedrock_surface_elevation_m` | scalars simply not in the curated list |
 | `boundary_convergent`, `boundary_divergent`, `boundary_transform` | boundary flags not in the curated list |
 
-If you need any of those, use the world document, the debug cache (Step 7), or `export-debug`'s cell-details JSONL sidecar.
+This is a historical omission list: for example, `is_water` is now included. For fields absent from the current sidecar's `columns`, use the world document, the debug cache (Step 7), or `export-debug`'s cell-details JSONL sidecar.
 
-### Observed artifact sizes (512-cell full world, this checkout)
+### Earlier observed artifact sizes (512-cell full world)
+
+These measurements predate the ecology and settlement/social availability additions and the CSV schema sidecar. They describe the original artifacts, not current output sizes or column counts.
 
 | File | Bytes | Shape |
 |---|---|---|
@@ -477,25 +485,29 @@ magic-geo generate \
 
 ### What differs, precisely
 
-| Aspect | `generate_world` (`src/magic_geo/api.py:195-266`) | `generate_geo_world` (`src/magic_geo/api.py:287-375`) |
+| Aspect | `generate_world` | `generate_geo_world` |
 |---|---|---|
-| Native entry point | `native_generate_world` | `native_generate_geo_world` — civilization simulation is skipped natively |
-| Placeholder cleanup | none | `_strip_native_civilization_outputs` removes stable empty/default civilization schema fields **before** any natural enricher can observe them (`api.py:269-284`) |
-| Scope marker | *(no `generation_scope` key at all)* | `world["generation_scope"] = "geo_only"` (`api.py:305`) |
-| `output.include_cells` | may be false | **must** be true, else `ValueError` (`api.py:296-300`) |
-| Enricher count | 66 `enrich_world_with_*` calls | 48 `enrich_world_with_*` calls |
-| Graph/boundary enrichers | `enrich_world_with_graph_diagnostics`, `enrich_world_with_boundary_geometry` | the physical-only variants `enrich_world_with_physical_graph_diagnostics`, `enrich_world_with_physical_boundary_geometry` |
-| Extra output | — | `enrich_world_with_geo_evolution_provenance` adds `geo_evolution_provenance` |
+| Native entry point | Current seasonal config: `native.generate_seasonal_world`; explicit legacy config: `native.generate_world` | Corresponding `native.generate_seasonal_geo_world` or `native.generate_geo_world`; civilization simulation is skipped natively |
+| Placeholder cleanup | Full human records remain available to their consumers | `_strip_native_civilization_outputs` removes native human placeholders before natural enrichment |
+| Scope marker | No `generation_scope` key added by this API | `world["generation_scope"] = "geo_only"` |
+| `output.include_cells` | May be false; native cells are retained through the full enrichment sequence, then cleared for output | Must be true, otherwise `ValueError` |
+| Enrichment scope | Shared physical/ecosystem/resource stages plus human transport, land use, society, and history | Shared natural stages with their declared geo scope; no human enrichment sequence |
+| Graph/boundary enrichers | Full graph diagnostics and boundary geometry | Physical-only graph diagnostics and boundary geometry |
+| Extra output | — | `geo_evolution_provenance` |
 
-The three stripping constants are explicit lists in the source, not heuristics:
+The current sequences and stripping sets are defined in `src/magic_geo/api.py`. The sets include the shared native-social registries from `src/magic_geo/native_social_public_validation.py`; they are not inferred from a field-name heuristic.
 
-| Constant | Size | Source |
-|---|---|---|
-| `NATIVE_CIVILIZATION_TOP_LEVEL_FIELDS` | 15 names (`borders`, `conflicts`, `cultures`, `dynasties`, `historical_eras`, `historical_events`, `language_regions`, `political_regions`, `population_regions`, `routes`, `ruins`, `sacred_areas`, `settlements`, `territorial_snapshots`, `trade_flows`) | `api.py:86-104` |
-| `NATIVE_CIVILIZATION_CELL_FIELDS` | 4 names (`culture_region_id`, `language_region_id`, `political_region_id`, `settlement_score`) | `api.py:106-113` |
-| `NATIVE_CIVILIZATION_SUMMARY_FIELDS` | 58 names | `api.py:115-176` |
+| Stripping set | What it removes |
+|---|---|
+| `NATIVE_CIVILIZATION_TOP_LEVEL_FIELDS` | Native human collections such as settlements, routes, cultures, populations, and snapshots; model declarations in `NATIVE_SOCIAL_PUBLIC_MODELS`, including `native_social_availability_model`; and the `native_social_availability` envelope |
+| `NATIVE_CIVILIZATION_CELL_FIELDS` | `culture_region_id`, `language_region_id`, `political_region_id`, `settlement_score`, `settlement_climate_supported`, and `settlement_climate_temperature_c` |
+| `NATIVE_CIVILIZATION_SUMMARY_FIELDS` | Native human counts/estimates and model mirrors, plus recorded-count and availability fields in `RECORDED_SUMMARY_FIELDS`, including `native_social_summary_availability` |
+
+Geo-only absence is an explicit scope boundary, not an available zero-valued human estimate. Current seasonal geo resource deposits and commodities retain their material records, but full economic access/viability is unavailable in that scope: the corresponding values are null with false support. Separately named geographic accessibility/viability baselines remain numeric. The natural resource stages still apply their own biological support rules; geo scope does not make unsupported biological estimates available.
 
 ### Measured difference on a 512-cell run (same config, same seed)
+
+This earlier measurement predates the ecology and settlement/social availability additions. The recorded sizes and field counts below describe the original artifacts. Current full and geo-only exports share a header whose exact columns are recorded in the CSV schema sidecar.
 
 | Measure | Full world | Geo-only world | Delta |
 |---|---|---|---|
@@ -513,7 +525,7 @@ The three stripping constants are explicit lists in the source, not heuristics:
 
 The counter-intuitive result is real and worth remembering: **geo-only is not automatically a smaller world document.** In the observed run the added `geo_evolution_provenance` registry plus the extra physical-boundary/graph products more than offset the 80 removed civilization families. Geo-only is a *scope* switch (and a validation-surface switch), not a size optimization. Use `--cells` for size.
 
-The 80 removed top-level families are the entire civilization stack: settlements, routes and corridors, ports, navigability, borders and political regions, territorial snapshots, cultures and language regions, phonology, historical eras/events, dynasties and cadet branches, population and economy histories, demographic and firm agents, logistics networks, market clearing/orders/exchanges/prices/inventories, campaign plans/movements/fronts/engagements, land-use and mining/agricultural zones, natural frontiers, worldbuilding realism checks, and the `trade_route_graph` / `political_region_graph` exports.
+In that recorded comparison, the 80 removed top-level families covered the civilization stack: settlements, routes and corridors, ports, navigability, borders and political regions, territorial snapshots, cultures and language regions, phonology, historical eras/events, dynasties and cadet branches, population and economy histories, demographic and firm agents, logistics networks, market clearing/orders/exchanges/prices/inventories, campaign plans/movements/fronts/engagements, land-use and mining/agricultural zones, natural frontiers, worldbuilding realism checks, and the `trade_route_graph` / `political_region_graph` exports.
 
 ### `geo_evolution_provenance` and the time caveat
 
@@ -707,7 +719,7 @@ Because a first-hour reader needs *some* sense of scale, the table below records
 | 512 | 2.6 s | 61,966,781 | 3.5 s | `ocean=0.629 rivers=14` |
 | 4,096 | 18.4 s | 384,779,654 | 16.7 s | `ocean=0.608 rivers=90`; see the validate caveat below |
 
-Related single observations at 512 and 4,096 cells:
+Related earlier single observations at 512 and 4,096 cells (before the ecology support additions):
 
 | Operation | Observation |
 |---|---|

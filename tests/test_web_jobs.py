@@ -315,7 +315,7 @@ class WorkspaceSandboxTests(TestCase):
             outside = Path(other_dir).resolve()
             (outside / "external.json").write_text("{}", encoding="utf-8")
             (root / "configs").mkdir()
-            (root / "configs" / "world.yaml").write_text("{}", encoding="utf-8")
+            (root / "configs" / "world.yaml").write_text("config_version: 2\n", encoding="utf-8")
             manager = JobManager(root, Path("runs"))
             try:
                 self.assertEqual(
@@ -396,12 +396,12 @@ class ArgumentValidationTests(TestCase):
         self.world = self.root / "runs" / "world.json"
         self.world.write_text("{}", encoding="utf-8")
         self.config = self.root / "configs" / "world.yaml"
-        self.config.write_text("mesh: {}\n", encoding="utf-8")
+        self.config.write_text("config_version: 2\nmesh: {}\n", encoding="utf-8")
         # The catalog default for ``config`` is workspace-relative; several
         # operations resolve it when the caller supplies only required fields.
         default_config = self.root / "runs" / "configs" / "world.yaml"
         default_config.parent.mkdir()
-        default_config.write_text("mesh: {}\n", encoding="utf-8")
+        default_config.write_text("config_version: 2\nmesh: {}\n", encoding="utf-8")
         self.targets = self.root / "configs" / "targets.json"
         self.targets.write_text("{}", encoding="utf-8")
         self.data = self.root / "configs" / "data.asc"
@@ -505,6 +505,7 @@ class ArgumentValidationTests(TestCase):
             ("render", "width", 100, r"^width must be >= 320$"),
             ("render", "width", 9000, r"^width must be <= 6400$"),
             ("render", "contour_interval", "abc", r"^contour_interval must be a number$"),
+            ("export-debug", "elevation_exaggeration", True, r"^elevation_exaggeration must be a number$"),
             ("render", "contour_interval", float("inf"), r"^contour_interval must be finite$"),
             ("render", "contour_interval", 10.0, r"^contour_interval must be >= 50\.0$"),
             (
@@ -1516,6 +1517,119 @@ class JobLifecycleTests(TestCase):
             self.assertIsNone(JobManager._terminate_process(job._process, force=True))
         self.assertEqual(reaped.call_count, 2)
 
+    def _assert_stubborn_spawn_is_cancelled(self, *, shutdown: bool) -> None:
+        if os.name != "posix":
+            raise SkipTest("process-group cancellation is asserted on POSIX only")
+        manager = self.manager()
+        real_popen = subprocess.Popen
+        real_timer = threading.Timer
+        spawned = threading.Event()
+        release_spawn = threading.Event()
+        release_escalation = threading.Event()
+        escalation_scheduled = threading.Event()
+        children = []
+        timers = []
+        shutdown_thread = None
+        child = [
+            sys.executable, "-c",
+            "import signal, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "print('ready', flush=True)\n"
+            "time.sleep(30)\n",
+        ]
+
+        def delayed_popen(command, **kwargs):
+            if children:
+                process = real_popen(
+                    [sys.executable, "-c", "print('next-job-finished')"], **kwargs
+                )
+                children.append(process)
+                return process
+            process = real_popen(child, **kwargs)
+            children.append(process)
+            # The handler is installed before cancel(), while _spawn has not
+            # yet received the child handle. No scheduler timing is assumed.
+            self.assertEqual(process.stdout.readline(), "ready\n")
+            spawned.set()
+            if not release_spawn.wait(5.0):
+                raise AssertionError("test did not release Popen")
+            return process
+
+        def short_timer(interval, function):
+            self.assertEqual(interval, 5.0)
+
+            def fire():
+                if release_escalation.wait(5.0):
+                    function()
+
+            timer = real_timer(0.05, fire)
+            timers.append(timer)
+            escalation_scheduled.set()
+            return timer
+
+        try:
+            with patch("magic_geo.web_jobs.subprocess.Popen", side_effect=delayed_popen), patch(
+                "magic_geo.web_jobs.threading.Timer", side_effect=short_timer
+            ):
+                submitted = manager.submit("validate", {"world": str(self.world)})
+                self.assertTrue(spawned.wait(5.0))
+                job = manager._jobs[submitted["id"]]
+                self.assertIsNone(job._process)
+                queued = manager.submit("validate", {"world": str(self.other_world)})
+                if shutdown:
+                    shutdown_thread = threading.Thread(target=manager.close)
+                    shutdown_thread.start()
+                    self.assertTrue(wait_until(lambda: job._cancel_requested, timeout=2.0))
+                else:
+                    manager.cancel(job.id)
+                self.assertTrue(job._cancel_requested)
+                release_spawn.set()
+                self.assertTrue(
+                    escalation_scheduled.wait(1.0),
+                    "cancellation during Popen did not schedule forced termination",
+                )
+                manager.cancel(job.id)
+                manager.cancel(job.id)
+                self.assertEqual(len(timers), 1)
+                self.assertEqual(manager.get(job.id)["status"], "running")
+                self.assertIsNone(children[0].poll())
+                release_escalation.set()
+                finished = wait_for_job(manager, job.id, timeout=3.0)
+                self.assertEqual(finished["status"], "cancelled")
+                self.assertEqual(finished["exit_code"], -signal.SIGKILL)
+                self.assertIsNone(job._process)
+                self.assertEqual(children[0].returncode, -signal.SIGKILL)
+                if shutdown_thread is not None:
+                    shutdown_thread.join(timeout=2.0)
+                    self.assertFalse(shutdown_thread.is_alive())
+                    self.assertEqual(manager.get(queued["id"])["status"], "cancelled")
+                    self.assertEqual(len(children), 1)
+                else:
+                    next_finished = wait_for_job(manager, queued["id"], timeout=3.0)
+                    self.assertEqual(next_finished["status"], "succeeded")
+                    self.assertIn("next-job-finished", next_finished["log"])
+                    self.assertEqual(len(children), 2)
+        finally:
+            release_spawn.set()
+            release_escalation.set()
+            # The unfixed implementation must fail without leaving its
+            # deliberately TERM-ignoring child or executor alive.
+            for process in children:
+                if process.poll() is None:
+                    JobManager._terminate_process(process, force=True)
+                process.wait(timeout=3.0)
+            for timer in timers:
+                timer.join(timeout=2.0)
+            if shutdown_thread is not None:
+                shutdown_thread.join(timeout=3.0)
+            manager.close()
+
+    def test_cancellation_during_spawn_escalates_for_a_term_ignoring_child(self) -> None:
+        self._assert_stubborn_spawn_is_cancelled(shutdown=False)
+
+    def test_shutdown_during_spawn_escalates_and_reaps_a_term_ignoring_child(self) -> None:
+        self._assert_stubborn_spawn_is_cancelled(shutdown=True)
+
     def test_children_run_in_the_project_root_with_unbuffered_output(self) -> None:
         manager = self.manager()
         job = WebJob(id="environment", operation="validate", arguments={}, command=[])
@@ -2096,7 +2210,7 @@ class DebugCachePublicationTests(TestCase):
         manager = self.manager()
         config = self.root / "runs" / "configs" / "world.yaml"
         config.parent.mkdir()
-        config.write_text("mesh: {}\n", encoding="utf-8")
+        config.write_text("config_version: 2\nmesh: {}\n", encoding="utf-8")
 
         def spawn(job: WebJob, command: list[str]) -> int:
             target = Path(command[command.index("--output") + 1])
@@ -2142,7 +2256,7 @@ class DebugCachePublicationTests(TestCase):
         manager = self.manager()
         config = self.root / "runs" / "configs" / "world.yaml"
         config.parent.mkdir()
-        config.write_text("mesh: {}\n", encoding="utf-8")
+        config.write_text("config_version: 2\nmesh: {}\n", encoding="utf-8")
         commands: list[list[str]] = []
 
         def spawn(job: WebJob, command: list[str]) -> int:

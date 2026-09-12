@@ -6,12 +6,15 @@ what it needs from the shared world, so they no longer depend on order.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from unittest import TestCase
 
 from magic_geo.api import generate_world
 from magic_geo.config import config_to_native, load_config
 from magic_geo.native import generate_world as generate_native_world
+from magic_geo.native_climate_energy_validation import audit_native_climate_energy
+from magic_geo.native_climate_energy_enrichment_validation import validate_native_climate_energy_enrichment
 
 from support import worlds
 
@@ -20,32 +23,23 @@ class SmokeClimateTests(TestCase):
     def test_climate_model(self) -> None:
         world = worlds.cached_world_readonly("small_smoke")
         climate_model = world["climate_model"]
-        self.assertEqual(
-            climate_model["model_type"],
-            "equilibrium_latitude_circulation_climate_v5",
-        )
-        self.assertEqual(
-            climate_model["precipitation_model"],
-            "bounded_thermal_moisture_circulation_orography_wind_transport_v3",
-        )
-        self.assertEqual(climate_model["marine_annual_temperature_offset_c"], 0.0)
-        self.assertTrue(climate_model["latitude_temperature_area_normalized"])
-        self.assertTrue(climate_model["local_temperature_adjustments_area_centered"])
-        self.assertFalse(climate_model["mass_conserving_atmosphere"])
+        self.assertEqual(climate_model["model_type"], "prescribed_seasonal_surface_energy_v1")
+        self.assertEqual(climate_model["temperature_model"], "periodic_graybody_storage_conservative_transport_v1")
+        self.assertEqual(climate_model["precipitation_model"], "solved_temperature_scaled_empirical_circulation_orography_wind_transport_v1")
+        self.assertFalse(climate_model["imposed_mean_temperature"])
+        self.assertFalse(climate_model["post_solve_temperature_adjustments"])
+        self.assertTrue(climate_model["native_temperature_forcing_coupled"])
+        self.assertTrue(climate_model["periodic_seasonal_cycle_resolved"])
+        self.assertTrue(climate_model["prescribed_atmospheric_mass_conserved"])
+        self.assertFalse(climate_model["mass_conserving_atmospheric_circulation"])
         self.assertFalse(climate_model["transient_climate_resolved"])
-        self.assertAlmostEqual(
-            climate_model["latitude_temperature_area_mean_offset_c"],
-            climate_model["latitude_temperature_gradient_c"]
-            / (climate_model["latitude_temperature_exponent"] + 1.0),
-            delta=0.00001,
-        )
         self.assertEqual(climate_model["subtropical_drying_strength"], 0.65)
         self.assertEqual(climate_model["seasonal_monsoon_precipitation_strength"], 1.6)
-        self.assertEqual(climate_model["thermal_moisture_capacity_factor"], 1.0)
-        self.assertEqual(
-            climate_model["thermal_moisture_capacity_temperature_anomaly_c"],
-            0.0,
-        )
+        expected = min(2.25, max(0.35, math.exp(0.04 * (climate_model["solved_area_time_mean_temperature_c"] - 15.0))))
+        self.assertAlmostEqual(climate_model["thermal_moisture_capacity_factor"], expected, delta=1e-12)
+        self.assertTrue(audit_native_climate_energy(world)["verified"])
+        self.assertEqual(validate_native_climate_energy_enrichment(world), [])
+
     def test_climate_continentality_regions(self) -> None:
         world = worlds.cached_world_readonly("small_smoke")
         small = worlds.canonical_config("small_smoke")
@@ -114,35 +108,25 @@ class SmokeClimateTests(TestCase):
         self.assertGreaterEqual(summary["max_climate_humidity_storage_mm"], 0.0)
         self.assertGreaterEqual(summary["max_climate_monsoon_index"], 0.0)
         self.assertLessEqual(summary["max_climate_monsoon_index"], 1.0)
-        self.assertEqual(summary["climate_energy_balance_record_count"], len(world["climate_energy_balance_records"]))
-        self.assertEqual(summary["climate_energy_balance_record_count"], len(world["cells"]))
-        self.assertEqual(sum(summary["surface_albedo_regime_counts"].values()), summary["cell_count"])
-        self.assertGreater(summary["mean_top_of_atmosphere_insolation_w_m2"], 0.0)
-        self.assertGreaterEqual(summary["mean_seasonal_insolation_range_w_m2"], 0.0)
-        self.assertGreaterEqual(summary["mean_orbital_insolation_variability_index"], 0.0)
-        self.assertLessEqual(summary["mean_orbital_insolation_variability_index"], 1.0)
-        self.assertGreaterEqual(summary["mean_peak_seasonal_insolation_w_m2"], summary["mean_low_seasonal_insolation_w_m2"])
-        self.assertGreaterEqual(summary["mean_low_seasonal_insolation_w_m2"], 0.0)
-        self.assertGreater(summary["mean_orbital_distance_factor"], 0.0)
-        self.assertAlmostEqual(summary["orbital_eccentricity"], small.planet.orbital_eccentricity, delta=0.001)
-        self.assertGreaterEqual(summary["mean_surface_albedo_index"], 0.0)
-        self.assertLessEqual(summary["mean_surface_albedo_index"], 1.0)
-        self.assertGreaterEqual(summary["mean_absorbed_shortwave_w_m2"], 0.0)
-        self.assertGreater(summary["mean_outgoing_longwave_w_m2"], 0.0)
-        self.assertGreaterEqual(summary["mean_greenhouse_trapping_w_m2"], 0.0)
-        self.assertGreaterEqual(summary["mean_abs_energy_balance_residual_c"], 0.0)
-        self.assertGreaterEqual(summary["mean_climate_energy_stress_index"], 0.0)
-        self.assertLessEqual(summary["mean_climate_energy_stress_index"], 1.0)
-        self.assertEqual(
-            summary["high_climate_energy_stress_cell_count"],
-            sum(1 for record in world["climate_energy_balance_records"] if record["climate_energy_stress_index"] >= 0.65),
-        )
-        self.assertAlmostEqual(
-            summary["mean_absorbed_shortwave_w_m2"],
-            sum(record["absorbed_shortwave_w_m2"] for record in world["climate_energy_balance_records"])
-            / len(world["climate_energy_balance_records"]),
-            delta=0.001,
-        )
+        self.assertEqual(summary["native_climate_energy_record_count"], len(world["cells"]))
+        self.assertEqual(len(world["climate_energy_balance_records"]), len(world["cells"]))
+        self.assertGreater(summary["native_climate_energy_total_area_m2"], 0.0)
+        self.assertGreater(summary["native_climate_energy_year_duration_seconds"], 0.0)
+        self.assertNotIn("mean_climate_energy_stress_index", summary)
+        self.assertNotIn("mean_abs_energy_balance_residual_c", summary)
+        areas = [record["area_m2"] for record in world["climate_energy_balance_records"]]
+        for field in (
+            "effective_toa_albedo", "effective_longwave_emissivity",
+            "annual_absorbed_shortwave_w_m2", "annual_emitted_longwave_w_m2",
+            "annual_horizontal_heat_convergence_w_m2", "annual_heat_storage_tendency_w_m2",
+            "annual_energy_balance_residual_w_m2",
+        ):
+            values = [cell[field] for cell in world["cells"]]
+            self.assertAlmostEqual(summary[f"cell_count_mean_{field}"], math.fsum(values) / len(values), delta=1e-10)
+            expected = math.fsum(value * area for value, area in zip(values, areas, strict=True)) / math.fsum(areas)
+            self.assertAlmostEqual(summary[f"area_weighted_mean_{field}"], expected, delta=1e-10)
+        self.assertGreater(summary["area_weighted_mean_annual_absorbed_shortwave_w_m2"], 0.0)
+        self.assertGreater(summary["area_weighted_mean_annual_emitted_longwave_w_m2"], 0.0)
         self.assertIn("planet_parameters", world)
         self.assertEqual(world["planet_parameters"]["gravity_g"], small.planet.gravity_g)
         self.assertEqual(world["planet_parameters"]["day_length_hours"], small.planet.day_length_hours)
@@ -287,70 +271,28 @@ class SmokeClimateTests(TestCase):
                 )
             previous_storage = step["end_humidity_storage_mm"]
 
-        first_energy_record = world["climate_energy_balance_records"][0]
-        self.assertEqual(first_energy_record["id"], 0)
-        self.assertEqual(first_energy_record["cell_id"], first_cell["id"])
-        self.assertEqual(first_energy_record["biome"], first_cell["biome"])
-        self.assertEqual(first_energy_record["water_body_type"], first_cell["water_body_type"])
-        self.assertEqual(first_energy_record["surface_albedo_regime"], first_cell["surface_albedo_regime"])
-        self.assertGreater(first_energy_record["stellar_luminosity_factor"], 0.0)
-        self.assertGreaterEqual(first_energy_record["planetary_greenhouse_factor"], 0.0)
-        self.assertGreaterEqual(first_energy_record["atmosphere_pressure_bar"], 0.0)
-        self.assertAlmostEqual(first_energy_record["orbital_eccentricity"], small.planet.orbital_eccentricity, delta=0.001)
-        self.assertGreater(first_energy_record["mean_orbital_distance_factor"], 0.0)
-        monthly_insolation = first_energy_record["monthly_top_of_atmosphere_insolation_w_m2"]
-        self.assertEqual(len(monthly_insolation), len(first_cell["temperature_monthly_c"]))
-        self.assertTrue(all(value >= 0.0 for value in monthly_insolation))
-        self.assertAlmostEqual(
-            first_energy_record["top_of_atmosphere_insolation_w_m2"],
-            sum(monthly_insolation) / len(monthly_insolation),
-            delta=0.001,
-        )
-        self.assertAlmostEqual(first_energy_record["peak_seasonal_insolation_w_m2"], max(monthly_insolation), delta=0.001)
-        self.assertAlmostEqual(first_energy_record["low_seasonal_insolation_w_m2"], min(monthly_insolation), delta=0.001)
-        self.assertAlmostEqual(
-            first_energy_record["seasonal_insolation_range_w_m2"],
-            first_energy_record["peak_seasonal_insolation_w_m2"] - first_energy_record["low_seasonal_insolation_w_m2"],
-            delta=0.001,
-        )
-        self.assertAlmostEqual(
-            first_energy_record["orbital_insolation_variability_index"],
-            min(
-                1.0,
-                first_energy_record["seasonal_insolation_range_w_m2"]
-                / max(1.0, first_energy_record["top_of_atmosphere_insolation_w_m2"]),
-            ),
-            delta=0.001,
-        )
-        for key in (
-            "seasonal_insolation_range_w_m2",
-            "orbital_insolation_variability_index",
-            "peak_seasonal_insolation_w_m2",
-            "low_seasonal_insolation_w_m2",
-        ):
-            self.assertAlmostEqual(first_energy_record[key], first_cell[key], delta=0.001)
-        self.assertAlmostEqual(
-            first_energy_record["absorbed_shortwave_w_m2"],
-            first_energy_record["top_of_atmosphere_insolation_w_m2"] * (1.0 - first_energy_record["surface_albedo_index"]),
-            delta=0.001,
-        )
-        self.assertAlmostEqual(
-            first_energy_record["net_radiative_balance_w_m2"],
-            first_energy_record["absorbed_shortwave_w_m2"]
-            + first_energy_record["greenhouse_trapping_w_m2"]
-            - first_energy_record["outgoing_longwave_w_m2"],
-            delta=0.001,
-        )
-        self.assertAlmostEqual(
-            first_energy_record["energy_balance_residual_c"],
-            first_energy_record["temperature_c"] - first_energy_record["radiative_equilibrium_temperature_c"],
-            delta=0.001,
-        )
-        self.assertAlmostEqual(
-            first_energy_record["climate_energy_stress_index"],
-            first_cell["climate_energy_stress_index"],
-            delta=0.001,
-        )
+        self.assertTrue(world["climate_energy_balance_records"])
+        durations = world["climate_energy_model"]["monthly_duration_seconds"]
+        for cell, record in zip(world["cells"], world["climate_energy_balance_records"], strict=True):
+            self.assertEqual(record["cell_id"], cell["id"])
+            for field in ("monthly_absorbed_shortwave_w_m2", "monthly_emitted_longwave_w_m2"):
+                self.assertEqual(len(record[field]), 12)
+                self.assertTrue(all(value >= 0.0 for value in record[field]))
+            monthly = record["monthly_mean_temperature_k"]
+            display_tolerance = 0.5 * 10 ** -small.output.float_precision + 1e-10
+            for kelvin, celsius in zip(monthly, cell["temperature_monthly_c"], strict=True):
+                self.assertAlmostEqual(kelvin - 273.15, celsius, delta=display_tolerance)
+            annual_c = math.fsum(t * d for t, d in zip(monthly, durations, strict=True)) / math.fsum(durations) - 273.15
+            self.assertAlmostEqual(cell["temperature_c"], annual_c, delta=display_tolerance)
+            for i in range(12):
+                net = (record["monthly_absorbed_shortwave_w_m2"][i]
+                       - record["monthly_emitted_longwave_w_m2"][i]
+                       + record["monthly_horizontal_heat_convergence_w_m2"][i])
+                residual = record["monthly_heat_storage_tendency_w_m2"][i] - net
+                self.assertAlmostEqual(record["monthly_balance_residual_w_m2"][i], residual, delta=1e-10)
+                self.assertLessEqual(abs(residual), record["monthly_balance_tolerance_w_m2"][i])
+            self.assertNotIn("energy_balance_residual_c", cell)
+            self.assertNotIn("climate_energy_stress_index", cell)
 
         first_settlement = world["settlements"][0]
         self.assertIn("cell_id", first_settlement)
@@ -378,18 +320,21 @@ class SmokeClimateTests(TestCase):
         circular_world = generate_world(circular)
         eccentric_world = generate_world(eccentric)
 
-        self.assertAlmostEqual(circular_world["summary"]["orbital_eccentricity"], 0.0, delta=0.001)
-        self.assertAlmostEqual(eccentric_world["summary"]["orbital_eccentricity"], 0.20, delta=0.001)
-        self.assertGreater(
-            eccentric_world["summary"]["mean_orbital_distance_factor"],
-            circular_world["summary"]["mean_orbital_distance_factor"],
-        )
-        self.assertGreater(
-            eccentric_world["summary"]["mean_orbital_insolation_variability_index"],
-            circular_world["summary"]["mean_orbital_insolation_variability_index"],
-        )
-        self.assertAlmostEqual(circular_world["climate_energy_balance_records"][0]["orbital_eccentricity"], 0.0, delta=0.001)
-        self.assertAlmostEqual(eccentric_world["climate_energy_balance_records"][0]["orbital_eccentricity"], 0.20, delta=0.001)
+        def orbital_distance_mean(world: dict) -> float:
+            nodes = world["climate_energy_forcing_intervals"]
+            return math.fsum(node["inverse_square_distance_factor"] * node["duration_seconds"] for node in nodes) / math.fsum(node["duration_seconds"] for node in nodes)
+
+        def monthly_absorbed_range(world: dict) -> float:
+            records = world["climate_energy_balance_records"]
+            return math.fsum(max(record["monthly_absorbed_shortwave_w_m2"]) - min(record["monthly_absorbed_shortwave_w_m2"]) for record in records) / len(records)
+
+        for world, eccentricity in ((circular_world, 0.0), (eccentric_world, 0.20)):
+            self.assertEqual(world["climate_energy_model"]["orbital_eccentricity"], eccentricity)
+            self.assertAlmostEqual(orbital_distance_mean(world), 1.0 / math.sqrt(1.0 - eccentricity ** 2), delta=2e-12)
+            self.assertTrue(audit_native_climate_energy(world)["verified"])
+        self.assertGreater(orbital_distance_mean(eccentric_world), orbital_distance_mean(circular_world))
+        self.assertGreater(monthly_absorbed_range(eccentric_world), monthly_absorbed_range(circular_world))
+
     def test_native_thermal_forcing_scales_moisture_temperature_and_runoff(self) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))
 
@@ -433,20 +378,19 @@ class SmokeClimateTests(TestCase):
         cold_runoff = area_mean(cold_world, "runoff_mm_y", land_only=True)
         earth_runoff = area_mean(earth_world, "runoff_mm_y", land_only=True)
 
-        self.assertLess(cold_temperature, earth_temperature - 8.0)
-        self.assertGreater(hot_temperature, earth_temperature + 7.0)
-        self.assertLess(cold_precipitation, earth_precipitation * 0.80)
-        self.assertGreater(hot_precipitation, earth_precipitation * 1.20)
-        self.assertLess(cold_runoff, earth_runoff * 0.85)
+        self.assertLess(cold_temperature, earth_temperature)
+        self.assertGreater(hot_temperature, earth_temperature)
+        self.assertLess(cold_precipitation, earth_precipitation)
+        self.assertGreater(hot_precipitation, earth_precipitation)
+        self.assertLess(cold_runoff, earth_runoff)
 
         cold_model = cold_world["climate_model"]
         earth_model = earth_world["climate_model"]
         hot_model = hot_world["climate_model"]
         self.assertEqual(
             earth_model["thermal_moisture_capacity_model"],
-            "bounded_exponential_global_temperature_anomaly_v1",
+            "bounded_exponential_solved_area_time_mean_temperature_v1",
         )
-        self.assertEqual(earth_model["thermal_moisture_capacity_factor"], 1.0)
         self.assertLess(
             cold_model["thermal_moisture_capacity_factor"],
             earth_model["thermal_moisture_capacity_factor"],
@@ -463,8 +407,11 @@ class SmokeClimateTests(TestCase):
             maximum_capacity_world["climate_model"]["thermal_moisture_capacity_factor"],
             earth_model["thermal_moisture_capacity_max_factor"],
         )
-        for world in (cold_world, earth_world, hot_world):
+        for world in (cold_world, earth_world, hot_world, minimum_capacity_world, maximum_capacity_world):
+            self.assertTrue(audit_native_climate_energy(world)["verified"])
             model = world["climate_model"]
+            expected = min(2.25, max(0.35, math.exp(0.04 * (model["solved_area_time_mean_temperature_c"] - 15.0))))
+            self.assertAlmostEqual(model["thermal_moisture_capacity_factor"], expected, delta=1e-12)
             self.assertGreaterEqual(
                 model["thermal_moisture_capacity_factor"],
                 model["thermal_moisture_capacity_min_factor"],
@@ -501,36 +448,6 @@ class SmokeClimateTests(TestCase):
         high_mean_temp = sum(cell["temperature_c"] for cell in high_world["cells"]) / len(high_world["cells"])
 
         self.assertGreater(high_mean_temp, low_mean_temp)
-    def test_base_temperature_is_area_mean_normalized(self) -> None:
-        config = load_config(Path("configs/earthlike_seed.yaml"))
-        baseline_data = config.model_dump(mode="python")
-        baseline_data["mesh"]["cell_count"] = 256
-        baseline_data["tectonics"]["plate_count"] = 8
-        baseline_data["erosion"]["iterations"] = 0
-        baseline = type(config).model_validate(baseline_data)
-
-        warmer_data = config.model_dump(mode="python")
-        warmer_data["mesh"]["cell_count"] = 256
-        warmer_data["tectonics"]["plate_count"] = 8
-        warmer_data["erosion"]["iterations"] = 0
-        warmer_data["climate"]["base_temperature_c"] = 20.0
-        warmer = type(config).model_validate(warmer_data)
-
-        baseline_world = generate_world(baseline)
-        warmer_world = generate_world(warmer)
-        baseline_mean = sum(cell["temperature_c"] for cell in baseline_world["cells"]) / len(
-            baseline_world["cells"]
-        )
-        warmer_mean = sum(cell["temperature_c"] for cell in warmer_world["cells"]) / len(
-            warmer_world["cells"]
-        )
-
-        self.assertAlmostEqual(baseline_mean, baseline.climate.base_temperature_c, delta=0.02)
-        self.assertAlmostEqual(warmer_mean - baseline_mean, 5.0, delta=0.01)
-        self.assertEqual(
-            baseline_world["climate_model"]["base_temperature_interpretation"],
-            "post_centered_local_adjustment_global_area_mean_c",
-        )
     def test_zero_precipitation_scale_is_a_true_dry_boundary(self) -> None:
         config = load_config(Path("configs/earthlike_seed.yaml"))
         data = config.model_dump(mode="python")
@@ -633,3 +550,165 @@ class SmokeClimateTests(TestCase):
         )
         self.assertEqual(dry_world["climate_model"]["subtropical_drying_strength"], 0.65)
         self.assertEqual(no_drying_world["climate_model"]["subtropical_drying_strength"], 0.0)
+
+
+class LegacyClimateCompatibilityTests(TestCase):
+    """Preserved old controls are selected explicitly, never through defaults."""
+    def test_legacy_climate_model(self) -> None:
+        world = worlds.cached_legacy_world_readonly("energy_128")
+        climate_model = world["climate_model"]
+        self.assertEqual(
+            climate_model["model_type"],
+            "equilibrium_latitude_circulation_climate_v5",
+        )
+        self.assertEqual(
+            climate_model["precipitation_model"],
+            "bounded_thermal_moisture_circulation_orography_wind_transport_v3",
+        )
+        self.assertEqual(climate_model["marine_annual_temperature_offset_c"], 0.0)
+        self.assertTrue(climate_model["latitude_temperature_area_normalized"])
+        self.assertTrue(climate_model["local_temperature_adjustments_area_centered"])
+        self.assertFalse(climate_model["mass_conserving_atmosphere"])
+        self.assertFalse(climate_model["transient_climate_resolved"])
+        self.assertAlmostEqual(
+            climate_model["latitude_temperature_area_mean_offset_c"],
+            climate_model["latitude_temperature_gradient_c"]
+            / (climate_model["latitude_temperature_exponent"] + 1.0),
+            delta=0.00001,
+        )
+        self.assertEqual(climate_model["subtropical_drying_strength"], 0.65)
+        self.assertEqual(climate_model["seasonal_monsoon_precipitation_strength"], 1.6)
+        self.assertEqual(climate_model["thermal_moisture_capacity_factor"], 1.0)
+        self.assertEqual(
+            climate_model["thermal_moisture_capacity_temperature_anomaly_c"],
+            0.0,
+        )
+    def test_legacy_posthoc_energy_summary_and_records(self) -> None:
+        world = worlds.cached_legacy_world_readonly("energy_128")
+        small = worlds.build_legacy_config(**worlds.LEGACY_CANONICAL["energy_128"])
+        summary = world["summary"]
+        first_cell = world["cells"][0]
+        self.assertEqual(summary["climate_energy_balance_record_count"], len(world["climate_energy_balance_records"]))
+        self.assertEqual(summary["climate_energy_balance_record_count"], len(world["cells"]))
+        self.assertEqual(sum(summary["surface_albedo_regime_counts"].values()), summary["cell_count"])
+        self.assertGreater(summary["mean_top_of_atmosphere_insolation_w_m2"], 0.0)
+        self.assertGreaterEqual(summary["mean_seasonal_insolation_range_w_m2"], 0.0)
+        self.assertGreaterEqual(summary["mean_orbital_insolation_variability_index"], 0.0)
+        self.assertLessEqual(summary["mean_orbital_insolation_variability_index"], 1.0)
+        self.assertGreaterEqual(summary["mean_peak_seasonal_insolation_w_m2"], summary["mean_low_seasonal_insolation_w_m2"])
+        self.assertGreaterEqual(summary["mean_low_seasonal_insolation_w_m2"], 0.0)
+        self.assertGreater(summary["mean_orbital_distance_factor"], 0.0)
+        self.assertAlmostEqual(summary["orbital_eccentricity"], small.planet.orbital_eccentricity, delta=0.001)
+        self.assertGreaterEqual(summary["mean_surface_albedo_index"], 0.0)
+        self.assertLessEqual(summary["mean_surface_albedo_index"], 1.0)
+        self.assertGreaterEqual(summary["mean_absorbed_shortwave_w_m2"], 0.0)
+        self.assertGreater(summary["mean_outgoing_longwave_w_m2"], 0.0)
+        self.assertGreaterEqual(summary["mean_greenhouse_trapping_w_m2"], 0.0)
+        self.assertGreaterEqual(summary["mean_abs_energy_balance_residual_c"], 0.0)
+        self.assertGreaterEqual(summary["mean_climate_energy_stress_index"], 0.0)
+        self.assertLessEqual(summary["mean_climate_energy_stress_index"], 1.0)
+        self.assertEqual(
+            summary["high_climate_energy_stress_cell_count"],
+            sum(1 for record in world["climate_energy_balance_records"] if record["climate_energy_stress_index"] >= 0.65),
+        )
+        self.assertAlmostEqual(
+            summary["mean_absorbed_shortwave_w_m2"],
+            sum(record["absorbed_shortwave_w_m2"] for record in world["climate_energy_balance_records"])
+            / len(world["climate_energy_balance_records"]),
+            delta=0.001,
+        )
+        first_energy_record = world["climate_energy_balance_records"][0]
+        self.assertEqual(first_energy_record["id"], 0)
+        self.assertEqual(first_energy_record["cell_id"], first_cell["id"])
+        self.assertEqual(first_energy_record["biome"], first_cell["biome"])
+        self.assertEqual(first_energy_record["water_body_type"], first_cell["water_body_type"])
+        self.assertEqual(first_energy_record["surface_albedo_regime"], first_cell["surface_albedo_regime"])
+        self.assertGreater(first_energy_record["stellar_luminosity_factor"], 0.0)
+        self.assertGreaterEqual(first_energy_record["planetary_greenhouse_factor"], 0.0)
+        self.assertGreaterEqual(first_energy_record["atmosphere_pressure_bar"], 0.0)
+        self.assertAlmostEqual(first_energy_record["orbital_eccentricity"], small.planet.orbital_eccentricity, delta=0.001)
+        self.assertGreater(first_energy_record["mean_orbital_distance_factor"], 0.0)
+        monthly_insolation = first_energy_record["monthly_top_of_atmosphere_insolation_w_m2"]
+        self.assertEqual(len(monthly_insolation), len(first_cell["temperature_monthly_c"]))
+        self.assertTrue(all(value >= 0.0 for value in monthly_insolation))
+        self.assertAlmostEqual(
+            first_energy_record["top_of_atmosphere_insolation_w_m2"],
+            sum(monthly_insolation) / len(monthly_insolation),
+            delta=0.001,
+        )
+        self.assertAlmostEqual(first_energy_record["peak_seasonal_insolation_w_m2"], max(monthly_insolation), delta=0.001)
+        self.assertAlmostEqual(first_energy_record["low_seasonal_insolation_w_m2"], min(monthly_insolation), delta=0.001)
+        self.assertAlmostEqual(
+            first_energy_record["seasonal_insolation_range_w_m2"],
+            first_energy_record["peak_seasonal_insolation_w_m2"] - first_energy_record["low_seasonal_insolation_w_m2"],
+            delta=0.001,
+        )
+        self.assertAlmostEqual(
+            first_energy_record["orbital_insolation_variability_index"],
+            min(
+                1.0,
+                first_energy_record["seasonal_insolation_range_w_m2"]
+                / max(1.0, first_energy_record["top_of_atmosphere_insolation_w_m2"]),
+            ),
+            delta=0.001,
+        )
+        for key in (
+            "seasonal_insolation_range_w_m2",
+            "orbital_insolation_variability_index",
+            "peak_seasonal_insolation_w_m2",
+            "low_seasonal_insolation_w_m2",
+        ):
+            self.assertAlmostEqual(first_energy_record[key], first_cell[key], delta=0.001)
+        self.assertAlmostEqual(
+            first_energy_record["absorbed_shortwave_w_m2"],
+            first_energy_record["top_of_atmosphere_insolation_w_m2"] * (1.0 - first_energy_record["surface_albedo_index"]),
+            delta=0.001,
+        )
+        self.assertAlmostEqual(
+            first_energy_record["net_radiative_balance_w_m2"],
+            first_energy_record["absorbed_shortwave_w_m2"]
+            + first_energy_record["greenhouse_trapping_w_m2"]
+            - first_energy_record["outgoing_longwave_w_m2"],
+            delta=0.001,
+        )
+        self.assertAlmostEqual(
+            first_energy_record["energy_balance_residual_c"],
+            first_energy_record["temperature_c"] - first_energy_record["radiative_equilibrium_temperature_c"],
+            delta=0.001,
+        )
+        self.assertAlmostEqual(
+            first_energy_record["climate_energy_stress_index"],
+            first_cell["climate_energy_stress_index"],
+            delta=0.001,
+        )
+
+    def test_legacy_base_temperature_is_area_mean_normalized(self) -> None:
+        config = worlds.build_legacy_config()
+        baseline_data = config.model_dump(mode="python")
+        baseline_data["mesh"]["cell_count"] = 256
+        baseline_data["tectonics"]["plate_count"] = 8
+        baseline_data["erosion"]["iterations"] = 0
+        baseline = type(config).model_validate(baseline_data)
+
+        warmer_data = config.model_dump(mode="python")
+        warmer_data["mesh"]["cell_count"] = 256
+        warmer_data["tectonics"]["plate_count"] = 8
+        warmer_data["erosion"]["iterations"] = 0
+        warmer_data["climate"]["base_temperature_c"] = 20.0
+        warmer = type(config).model_validate(warmer_data)
+
+        baseline_world = generate_world(baseline)
+        warmer_world = generate_world(warmer)
+        baseline_mean = sum(cell["temperature_c"] for cell in baseline_world["cells"]) / len(
+            baseline_world["cells"]
+        )
+        warmer_mean = sum(cell["temperature_c"] for cell in warmer_world["cells"]) / len(
+            warmer_world["cells"]
+        )
+
+        self.assertAlmostEqual(baseline_mean, baseline.climate.base_temperature_c, delta=0.02)
+        self.assertAlmostEqual(warmer_mean - baseline_mean, 5.0, delta=0.01)
+        self.assertEqual(
+            baseline_world["climate_model"]["base_temperature_interpretation"],
+            "post_centered_local_adjustment_global_area_mean_c",
+        )

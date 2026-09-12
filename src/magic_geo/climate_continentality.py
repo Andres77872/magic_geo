@@ -3,7 +3,10 @@ from __future__ import annotations
 import heapq
 import math
 from collections import Counter, deque
+from copy import deepcopy
 from typing import Any
+
+from .marine_distance_validation import MODEL, require_marine_distance, source_graph
 
 
 MARINE_WATER_TYPES = {"ocean", "continental_shelf", "inland_sea"}
@@ -83,13 +86,13 @@ def _distance_graph(world: dict[str, Any], cells: list[dict[str, Any]]) -> dict[
     return graph
 
 
-def _nearest_marine_distances(world: dict[str, Any], cells: list[dict[str, Any]]) -> dict[int, float]:
+def _nearest_marine_distances(world: dict[str, Any], cells: list[dict[str, Any]]) -> dict[int, float | None]:
     graph = _distance_graph(world, cells)
     distances = {cell_id: float("inf") for cell_id in graph}
     heap: list[tuple[float, int]] = []
     marine_sources = [_cell_id(cell) for cell in cells if _is_marine(cell)]
     if not marine_sources:
-        marine_sources = [_cell_id(cell) for cell in cells if bool(cell.get("is_water", False))]
+        return dict.fromkeys(graph, None)
     for cell_id in marine_sources:
         if cell_id in distances:
             distances[cell_id] = 0.0
@@ -103,11 +106,14 @@ def _nearest_marine_distances(world: dict[str, Any], cells: list[dict[str, Any]]
             if next_distance < distances[neighbor_id]:
                 distances[neighbor_id] = next_distance
                 heapq.heappush(heap, (next_distance, neighbor_id))
-    fallback = max((distance for distance in distances.values() if math.isfinite(distance)), default=0.0)
-    return {cell_id: (distance if math.isfinite(distance) else fallback) for cell_id, distance in distances.items()}
+    if any(not math.isfinite(distance) for distance in distances.values()):
+        raise ValueError("marine distance: marine source unreachable in declared graph")
+    return distances
 
 
-def _marine_influence_class(cell: dict[str, Any], distance_km: float, continentality: float) -> str:
+def _marine_influence_class(cell: dict[str, Any], distance_km: float | None, continentality: float) -> str:
+    if distance_km is None:
+        return "no_marine_source"
     if _is_marine(cell):
         return "marine"
     if distance_km <= 250.0 or continentality < 0.24:
@@ -124,6 +130,7 @@ def _region_record(region_id: int, component: list[dict[str, Any]], region_class
     divisor = max(1, len(component))
     centroid_lat, centroid_lon = _lat_lon_centroid(component)
     atmospheric_counts = Counter(str(cell.get("atmospheric_cell", "unknown")) for cell in component)
+    distances = [cell["distance_to_marine_water_km"] for cell in component if cell["distance_to_marine_water_km"] is not None]
     return {
         "id": region_id,
         "region_class": region_class,
@@ -132,7 +139,9 @@ def _region_record(region_id: int, component: list[dict[str, Any]], region_class
         "area_km2": _round(area_km2),
         "centroid_lat_deg": centroid_lat,
         "centroid_lon_deg": centroid_lon,
-        "mean_distance_to_marine_water_km": _round(sum(float(cell.get("distance_to_marine_water_km", 0.0)) for cell in component) / divisor),
+        "mean_distance_to_marine_water_km": _round(sum(distances) / len(distances)) if distances else None,
+        "marine_distance_defined_cell_count": len(distances),
+        "no_marine_source_cell_count": len(component) - len(distances),
         "mean_continentality_index": _round(sum(float(cell.get("continentality_index", 0.0)) for cell in component) / divisor),
         "mean_oceanic_humidity_availability_index": _round(
             sum(float(cell.get("oceanic_humidity_availability_index", 0.0)) for cell in component) / divisor
@@ -175,7 +184,7 @@ def _connected_regions(cells: list[dict[str, Any]], cells_by_id: dict[int, dict[
     return records
 
 
-def enrich_world_with_climate_continentality(world: dict[str, Any]) -> dict[str, Any]:
+def _build_climate_continentality(world: dict[str, Any]) -> dict[str, Any]:
     cells = world.get("cells", [])
     if not isinstance(cells, list) or not cells:
         return world
@@ -192,23 +201,24 @@ def enrich_world_with_climate_continentality(world: dict[str, Any]) -> dict[str,
 
     for cell in cells:
         cell_id = _cell_id(cell)
-        distance_km = max(0.0, float(distances.get(cell_id, 0.0)))
+        distance_km = distances[cell_id]
         temperature_range = _temperature_range(cell)
         transport = _clamp(float(cell.get("humidity_transport_index", 0.0)))
-        distance_term = _clamp(distance_km / 3000.0)
+        distance_term = 1.0 if distance_km is None else _clamp(distance_km / 3000.0)
         temperature_term = _clamp(temperature_range / 34.0)
         continentality = _clamp(distance_term * 0.58 + temperature_term * 0.30 + (1.0 - transport) * 0.12)
 
-        proximity = math.exp(-distance_km / 1200.0)
+        proximity = 0.0 if distance_km is None else math.exp(-distance_km / 1200.0)
         fetch = _clamp(float(cell.get("upwind_ocean_fetch_km", 0.0)) / 2500.0)
         advected = _clamp((float(cell.get("advected_moisture_factor", 1.0)) - 0.65) / 0.85)
-        humidity = _clamp(proximity * 0.36 + fetch * 0.30 + advected * 0.20 + transport * 0.14)
+        humidity = 0.0 if distance_km is None else _clamp(proximity * 0.36 + fetch * 0.30 + advected * 0.20 + transport * 0.14)
         if _is_marine(cell):
             humidity = max(humidity, 0.75)
             continentality = min(continentality, 0.18)
         influence_class = _marine_influence_class(cell, distance_km, continentality)
 
-        cell["distance_to_marine_water_km"] = _round(distance_km)
+        cell["distance_to_marine_water_km"] = _round(distance_km) if distance_km is not None else None
+        cell["marine_distance_status"] = "no_marine_source" if distance_km is None else "reachable_marine"
         cell["continentality_index"] = _round(continentality)
         cell["oceanic_humidity_availability_index"] = _round(humidity)
         cell["marine_influence_class"] = influence_class
@@ -216,7 +226,7 @@ def enrich_world_with_climate_continentality(world: dict[str, Any]) -> dict[str,
 
         continentality_sum += continentality
         humidity_sum += humidity
-        distance_sum += distance_km
+        distance_sum += distance_km if distance_km is not None else 0.0
         max_continentality = max(max_continentality, continentality)
         high_continentality += 1 if continentality >= 0.65 else 0
         low_humidity += 1 if humidity <= 0.25 else 0
@@ -225,7 +235,10 @@ def enrich_world_with_climate_continentality(world: dict[str, Any]) -> dict[str,
     regions = _connected_regions(cells, cells_by_id)
     summary = world.setdefault("summary", {})
     divisor = float(len(cells))
-    summary["mean_distance_to_marine_water_km"] = _round(distance_sum / divisor)
+    defined_count = sum(distance is not None for distance in distances.values())
+    summary["mean_distance_to_marine_water_km"] = _round(distance_sum / defined_count) if defined_count else None
+    summary["marine_distance_defined_cell_count"] = defined_count
+    summary["no_marine_source_cell_count"] = len(cells) - defined_count
     summary["mean_continentality_index"] = _round(continentality_sum / divisor)
     summary["max_continentality_index"] = _round(max_continentality)
     summary["high_continentality_cell_count"] = high_continentality
@@ -238,4 +251,28 @@ def enrich_world_with_climate_continentality(world: dict[str, Any]) -> dict[str,
         1 for region in regions if region["region_class"] in {"marine", "coastal", "maritime_influenced"}
     )
     world["climate_continentality_regions"] = regions
+    world["climate_continentality_model"] = deepcopy(MODEL)
+    return world
+
+
+def enrich_world_with_climate_continentality(world: dict[str, Any]) -> dict[str, Any]:
+    cells = world.get("cells", [])
+    if not isinstance(cells, list) or not cells:
+        return world
+    if "climate_continentality_model" in world and world["climate_continentality_model"] != MODEL:
+        raise ValueError("marine distance: unknown model declaration")
+    source_graph(world)
+    # Geography may have changed since a previous diagnostic. Rebuild privately
+    # from current sources, then validate before publishing any new values.
+    staged = {**world, "cells": [dict(c) for c in cells], "summary": dict(world.get("summary", {}))}
+    _build_climate_continentality(staged)
+    require_marine_distance(staged)
+    fields = ("distance_to_marine_water_km", "marine_distance_status", "continentality_index",
+              "oceanic_humidity_availability_index", "marine_influence_class", "climate_continentality_region_id")
+    for cell, update in zip(cells, staged["cells"], strict=True):
+        for field in fields:
+            cell[field] = update[field]
+    world.setdefault("summary", {}).update(staged["summary"])
+    world["climate_continentality_regions"] = staged["climate_continentality_regions"]
+    world["climate_continentality_model"] = staged["climate_continentality_model"]
     return world

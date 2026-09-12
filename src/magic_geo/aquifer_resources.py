@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from collections import Counter
 from typing import Any
 
@@ -55,9 +56,9 @@ def _primary_key(counter: Counter[str], fallback: str) -> str:
     return sorted(counter.items(), key=lambda item: (-item[1], item[0]))[0][0]
 
 
-def enrich_world_with_aquifer_resources(world: dict[str, Any]) -> dict[str, Any]:
+def _build_aquifer(world: dict[str, Any], *, natural: bool = False) -> dict[str, Any]:
     cells = world.get("cells", [])
-    if not isinstance(cells, list) or not cells:
+    if not isinstance(cells, list) or (not cells and not natural):
         return world
 
     basin_groups: dict[int, list[dict[str, Any]]] = {}
@@ -104,7 +105,7 @@ def enrich_world_with_aquifer_resources(world: dict[str, Any]) -> dict[str, Any]
             aridity = _clamp(float(cell.get("seasonal_aridity_index", 0.0)))
             ice = _clamp(float(cell.get("ice_thickness_m", 0.0)) / 1600.0)
             flow = _clamp(float(cell.get("flow_accumulation", 0.0)) / 40_000_000.0)
-            settlement = _clamp(float(cell.get("settlement_score", 0.0)))
+            settlement = 0.0 if natural else _clamp(float(cell.get("settlement_score", 0.0)))
             closed_basin = bool(cell.get("is_closed_basin", False))
             fresh_lake_bonus = 0.16 if water_body == "fresh_lake" else 0.0
             alluvial_bonus = 0.15 if landform in ALLUVIAL_LANDFORMS else 0.0
@@ -188,7 +189,7 @@ def enrich_world_with_aquifer_resources(world: dict[str, Any]) -> dict[str, Any]
         cell["aquifer_storage_index"] = round(storage, 6)
         cell["aquifer_quality_index"] = round(quality, 6)
         cell["aquifer_productivity_index"] = round(productivity, 6)
-        cell["aquifer_extraction_risk_index"] = round(extraction_risk, 6)
+        cell[("aquifer_natural_limitation_index" if natural else "aquifer_extraction_risk_index")] = round(extraction_risk, 6)
         cell["aquifer_class"] = aquifer_class
         cell["aquifer_system_id"] = -1
 
@@ -231,7 +232,7 @@ def enrich_world_with_aquifer_resources(world: dict[str, Any]) -> dict[str, Any]
         storage_group_sum = sum(float(cell.get("aquifer_storage_index", 0.0)) for cell in group)
         quality_group_sum = sum(float(cell.get("aquifer_quality_index", 0.0)) for cell in group)
         productivity_group_sum = sum(float(cell.get("aquifer_productivity_index", 0.0)) for cell in group)
-        risk_group_sum = sum(float(cell.get("aquifer_extraction_risk_index", 0.0)) for cell in group)
+        risk_group_sum = sum(float(cell.get(("aquifer_natural_limitation_index" if natural else "aquifer_extraction_risk_index"), 0.0)) for cell in group)
         class_counter = Counter(str(cell.get("aquifer_class", "unknown")) for cell in group)
         lithology_counter = Counter(str(cell.get("lithology", "unknown")) for cell in group)
         landform_counter = Counter(str(cell.get("landform", "unknown")) for cell in group)
@@ -251,10 +252,10 @@ def enrich_world_with_aquifer_resources(world: dict[str, Any]) -> dict[str, Any]
                 "mean_aquifer_storage_index": round(storage_group_sum / group_count, 6),
                 "mean_aquifer_quality_index": round(quality_group_sum / group_count, 6),
                 "mean_aquifer_productivity_index": round(productivity_group_sum / group_count, 6),
-                "mean_aquifer_extraction_risk_index": round(risk_group_sum / group_count, 6),
+                ("mean_aquifer_natural_limitation_index" if natural else "mean_aquifer_extraction_risk_index"): round(risk_group_sum / group_count, 6),
                 "recharge_cell_count": sum(1 for cell in group if float(cell.get("groundwater_recharge_mm_y", 0.0)) >= 50.0),
                 "high_productivity_cell_count": sum(1 for cell in group if float(cell.get("aquifer_productivity_index", 0.0)) >= 0.65),
-                "stressed_cell_count": sum(1 for cell in group if float(cell.get("aquifer_extraction_risk_index", 0.0)) >= 0.65),
+                ("high_natural_limitation_cell_count" if natural else "stressed_cell_count"): sum(1 for cell in group if float(cell.get(("aquifer_natural_limitation_index" if natural else "aquifer_extraction_risk_index"), 0.0)) >= 0.65),
                 "closed_basin_fraction": round(sum(1 for cell in group if bool(cell.get("is_closed_basin", False))) / group_count, 6),
                 "aquifer_class_counts": dict(sorted(class_counter.items())),
             }
@@ -318,7 +319,7 @@ def enrich_world_with_aquifer_resources(world: dict[str, Any]) -> dict[str, Any]
     summary["aquifer_system_count"] = len(systems)
     summary["groundwater_recharge_cell_count"] = recharge_cell_count
     summary["high_productivity_aquifer_cell_count"] = high_productivity_count
-    summary["groundwater_stressed_cell_count"] = stressed_cell_count
+    summary[("high_natural_limitation_aquifer_cell_count" if natural else "groundwater_stressed_cell_count")] = stressed_cell_count
     summary["total_groundwater_recharge_km3_y"] = round(recharge_sum_km3, 6)
     summary["total_groundwater_recharge_source_infiltration_km3_y"] = round(
         source_infiltration_sum_km3, 6
@@ -333,6 +334,72 @@ def enrich_world_with_aquifer_resources(world: dict[str, Any]) -> dict[str, Any]
     summary["mean_aquifer_storage_index"] = round(storage_sum / divisor, 6) if aquifer_cell_count else 0.0
     summary["mean_aquifer_quality_index"] = round(quality_sum / divisor, 6) if aquifer_cell_count else 0.0
     summary["mean_aquifer_productivity_index"] = round(productivity_sum / divisor, 6) if aquifer_cell_count else 0.0
-    summary["mean_aquifer_extraction_risk_index"] = round(risk_sum / divisor, 6) if aquifer_cell_count else 0.0
+    summary[("mean_aquifer_natural_limitation_index" if natural else "mean_aquifer_extraction_risk_index")] = round(risk_sum / divisor, 6) if aquifer_cell_count else 0.0
     summary["aquifer_class_counts"] = dict(sorted(class_counts.items()))
+    return world
+
+
+NATURAL_AQUIFER_POLICY = {'model_type': 'natural_recharge_causal_aquifer_resources_v2',
+ 'natural_limitation_model': 'aridity_low_recharge_salinity_ice_closed_basin_v1',
+ 'natural_limitation_field': 'aquifer_natural_limitation_index',
+ 'productivity_model': 'storage_recharge_quality_flow_natural_limitation_v2',
+ 'natural_input_policy': 'independent_of_settlement_suitability_population_and_human_records',
+ 'human_withdrawals_modelled': False,
+ 'natural_limitation_count_policy': 'summary_raw_and_system_six_decimal_indices_greater_than_or_equal_0_65',
+ 'model_limitation': 'heuristic_annual_natural_resource_properties_not_measured_storativity_conductivity_potability_or_sustainable_yield'}
+
+
+def enrich_world_with_aquifer_resources(world: dict[str, Any]) -> dict[str, Any]:
+    """Publish an independently audited natural v2 stage; declared v1 stays v1."""
+    from .natural_groundwater_validation import (
+        NaturalGroundwaterError, natural_groundwater_model_version,
+        validate_natural_groundwater_inputs, validate_natural_aquifer_resources,
+    )
+    version = natural_groundwater_model_version(world, "aquifer")
+    if version == 1:
+        return _build_aquifer(world)
+    validate_natural_groundwater_inputs(world, "aquifer")
+    staged = {**world, "cells": [dict(c) for c in world["cells"]], "summary": dict(world.get("summary", {}))}
+    for c in staged["cells"]:
+        c.pop("aquifer_extraction_risk_index", None)
+    staged["summary"].pop("mean_aquifer_extraction_risk_index", None)
+    staged["summary"].pop("groundwater_stressed_cell_count", None)
+    try:
+        _build_aquifer(staged, natural=True)
+        staged["aquifer_resource_model"].update(deepcopy(NATURAL_AQUIFER_POLICY))
+        staged["aquifer_resource_model"].pop("extraction_risk_model")
+        staged["summary"]["aquifer_resource_model"] = NATURAL_AQUIFER_POLICY["model_type"]
+        errors = validate_natural_aquifer_resources(staged)
+        if errors:
+            raise NaturalGroundwaterError(errors[0])
+    except (TypeError, KeyError, ValueError, OverflowError, ArithmeticError) as exc:
+        if isinstance(exc, NaturalGroundwaterError):
+            raise
+        raise NaturalGroundwaterError("natural groundwater: malformed or unrepresentable aquifer result") from exc
+    cell_fields = ('aquifer_class',
+ 'aquifer_extraction_risk_index',
+ 'aquifer_natural_limitation_index',
+ 'aquifer_productivity_index',
+ 'aquifer_quality_index',
+ 'aquifer_storage_index',
+ 'aquifer_system_id',
+ 'groundwater_recharge_fraction',
+ 'groundwater_recharge_km3_y',
+ 'groundwater_recharge_mass_balance_residual_mm_y',
+ 'groundwater_recharge_mm_y',
+ 'groundwater_recharge_source_infiltration_mm_y',
+ 'vadose_zone_retention_km3_y',
+ 'vadose_zone_retention_mm_y')
+    for original, result in zip(world["cells"], staged["cells"]):
+        for key in cell_fields:
+            if key in result:
+                original[key] = result[key]
+            else:
+                original.pop(key, None)
+    for key in ('aquifer_resource_model', 'aquifer_systems', 'groundwater_recharge_model'):
+        world[key] = staged[key]
+    summary = world.setdefault("summary", {})
+    summary.pop("mean_aquifer_extraction_risk_index", None)
+    summary.pop("groundwater_stressed_cell_count", None)
+    summary.update(staged["summary"])
     return world

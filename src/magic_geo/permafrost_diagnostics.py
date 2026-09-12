@@ -18,6 +18,12 @@ def _monthly_temperatures(cell: dict[str, Any]) -> list[float]:
     return [float(value) for value in values]
 
 
+def _frost_month_count(cell: dict[str, Any]) -> int:
+    # Monthly climate is the source state. A cached biome diagnostic may be
+    # absent, or stale if a caller changed climate before re-enriching.
+    return sum(temperature < 0.0 for temperature in _monthly_temperatures(cell))
+
+
 def _permafrost_class(extent: float, ice_thickness_m: float) -> str:
     if extent < 0.15:
         return "no_permafrost"
@@ -47,7 +53,7 @@ def _permafrost_components(cell: dict[str, Any]) -> tuple[float, float, float, s
     warmest_month = max(monthly_temperature)
     freezing_degree_index = sum(max(0.0, -temperature) for temperature in monthly_temperature) / 12.0
     thawing_degree_index = sum(max(0.0, temperature) for temperature in monthly_temperature) / 12.0
-    frost_months = int(cell.get("frost_months", sum(1 for temperature in monthly_temperature if temperature < 0.0)))
+    frost_months = sum(temperature < 0.0 for temperature in monthly_temperature)
     lat_abs = abs(float(cell.get("lat_deg", 0.0))) / 90.0
     elevation = max(0.0, float(cell.get("elevation_m", 0.0)))
     ice_thickness = max(0.0, float(cell.get("ice_thickness_m", 0.0)))
@@ -164,7 +170,7 @@ def enrich_world_with_permafrost_diagnostics(world: dict[str, Any]) -> dict[str,
         extent_region_sum = sum(float(cell.get("permafrost_extent_index", 0.0)) for cell in component)
         active_region_sum = sum(float(cell.get("active_layer_depth_m", 0.0)) for cell in component)
         ground_ice_region_sum = sum(float(cell.get("ground_ice_content_index", 0.0)) for cell in component)
-        frost_months_sum = sum(float(cell.get("frost_months", 0.0)) for cell in component)
+        frost_months_sum = sum(_frost_month_count(cell) for cell in component)
         class_counter = Counter(str(cell.get("permafrost_class", "unknown")) for cell in component)
         biome_counter = Counter(str(cell.get("biome", "unknown")) for cell in component)
         group_count = len(component)

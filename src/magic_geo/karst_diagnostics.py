@@ -118,9 +118,9 @@ def _connected_components(candidate_ids: set[int], cells_by_id: dict[int, dict[s
     return components
 
 
-def enrich_world_with_karst_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
+def _build_karst(world: dict[str, Any], *, natural: bool = False) -> dict[str, Any]:
     cells = world.get("cells", [])
-    if not isinstance(cells, list) or not cells:
+    if not isinstance(cells, list) or (not cells and not natural):
         return world
 
     cells_by_id = {int(cell.get("id", -1)): cell for cell in cells}
@@ -189,7 +189,7 @@ def enrich_world_with_karst_diagnostics(world: dict[str, Any]) -> dict[str, Any]
         )
 
     summary = world.setdefault("summary", {})
-    cell_count = len(cells)
+    cell_count = max(1, len(cells)) if natural else len(cells)
     summary["karst_cell_count"] = len(candidate_ids)
     summary["karst_system_count"] = len(systems)
     summary["mean_karst_potential_index"] = round(karst_sum / cell_count, 6)
@@ -199,4 +199,59 @@ def enrich_world_with_karst_diagnostics(world: dict[str, Any]) -> dict[str, Any]
         round(limestone_karst_count / limestone_land_count, 6) if limestone_land_count else 0.0
     )
     world["karst_systems"] = systems
+    return world
+
+
+NATURAL_MODEL = {'model_type': 'carbonate_water_soil_aquifer_karst_diagnostics_v2',
+ 'source_aquifer_model': 'natural_recharge_causal_aquifer_resources_v2',
+ 'domain': 'non_is_water_and_non_marine_water_body_type_cells',
+ 'marine_water_body_types': ['continental_shelf', 'inland_sea', 'ocean'],
+ 'carbonate_model': 'lithology_with_soil_ph_acidity_bonus_v1',
+ 'water_solution_model': 'precipitation_runoff_recharge_soil_moisture_index_v1',
+ 'relief_model': 'maximum_neighbor_absolute_elevation_difference_over_1800m_v1',
+ 'potential_model': 'carbonate_water_relief_soil_aquifer_storage_temperature_aridity_ice_index_v1',
+ 'cave_model': 'karst_relief_aquifer_storage_soil_profile_index_v1',
+ 'subterranean_model': 'karst_aquifer_productivity_soil_drainage_relief_index_v1',
+ 'system_grouping_model': 'mesh_neighbor_components_raw_karst_threshold_v1',
+ 'minimum_system_karst_potential_index': 0.45,
+ 'system_means': 'arithmetic_means_of_six_decimal_cell_outputs',
+ 'summary_means': 'arithmetic_means_of_unrounded_cell_diagnostics',
+ 'deterministic': True,
+ 'model_limitation': 'empirical_carbonate_water_soil_aquifer_diagnostic_without_dissolution_kinetics_saturation_conduit_geometry_or_transient_flow'}
+
+
+def enrich_world_with_karst_diagnostics(world: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild only owned diagnostics after exact independently audited ancestry.
+
+    Explicit historical parents/own declarations keep the original output.
+    Natural v2 stages all output and replays it before touching the caller.
+    """
+    from .natural_channel_validation import validate_natural_downstream_inputs
+    from .natural_karst_validation import validate_natural_karst_diagnostics
+
+    version = validate_natural_downstream_inputs(world, 'karst')
+    if version == 1:
+        return _build_karst(world)
+    staged = dict(world)
+    staged['cells'] = [dict(cell) for cell in world['cells']]
+    staged['summary'] = dict(world.get('summary', {}))
+    try:
+        _build_karst(staged, natural=True)
+        staged['karst_diagnostics_model'] = {**NATURAL_MODEL,
+            'candidate_cell_count': staged['summary']['karst_cell_count'],
+            'system_count': len(staged['karst_systems'])}
+        staged['summary']['karst_diagnostics_model'] = NATURAL_MODEL['model_type']
+        errors = validate_natural_karst_diagnostics(staged)
+        if errors:
+            raise ValueError(errors[0])
+    except (TypeError, KeyError, OverflowError, ArithmeticError) as exc:
+        raise ValueError('natural karst: unrepresentable or malformed computed output') from exc
+    for cell, result in zip(world['cells'], staged['cells']):
+        for key in ('cave_development_index', 'karst_potential_index', 'karst_system_id', 'subterranean_drainage_fraction'):
+            cell[key] = result[key]
+    for key in ('karst_diagnostics_model', 'karst_systems'):
+        world[key] = staged[key]
+    summary = world.setdefault('summary', {})
+    for key in ('karst_cell_count', 'karst_diagnostics_model', 'karst_system_count', 'limestone_karst_cell_fraction', 'mean_cave_development_index', 'mean_karst_potential_index', 'mean_subterranean_drainage_fraction'):
+        summary[key] = staged['summary'][key]
     return world

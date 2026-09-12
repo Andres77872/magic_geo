@@ -173,7 +173,7 @@ def _waterway_ids_near_cell(cell: dict[str, Any], cells_by_id: dict[int, dict[st
     return sorted(waterway_id for waterway_id in waterway_ids if waterway_id >= 0)
 
 
-def enrich_world_with_port_sites(world: dict[str, Any]) -> dict[str, Any]:
+def _enrich_legacy_equations(world: dict[str, Any]) -> dict[str, Any]:
     cells = world.get("cells", [])
     if not isinstance(cells, list) or not cells:
         return world
@@ -339,3 +339,28 @@ def enrich_world_with_port_sites(world: dict[str, Any]) -> dict[str, Any]:
     summary["port_site_type_counts"] = dict(sorted(type_counts.items()))
     world["port_sites"] = records
     return world
+
+
+NATURAL_MODEL = {'model_type': 'causal_navigability_coastal_port_site_selection_v2',
+ 'source_navigability_model': 'causal_channel_hydraulic_coastal_navigability_v2',
+ 'domain': 'all_cells_with_land_only_selection',
+ 'protected_bay_model': 'marine_contact_protected_water_enclosure_depth_harbor_v1',
+ 'river_mouth_model': 'river_landform_flow_runoff_delta_harbor_v1',
+ 'strait_access_model': 'adjacent_marine_chokepoint_constriction_and_coastal_access_v1',
+ 'suitability_model': 'harbor_bay_river_strait_coastal_settlement_climate_ice_relief_v1',
+ 'classification_model': 'strait_river_mouth_protected_bay_harbor_coastal_priority_v1',
+ 'selection_model': 'raw_suitability_without_severe_ice_or_port_settlement_override_v1',
+ 'record_order': 'ascending_candidate_cell_id',
+ 'link_model': 'cell_settlement_route_marine_region_chokepoint_nearby_waterway_links_v1',
+ 'port_site_threshold': 0.58,
+ 'protected_bay_threshold': 0.55,
+ 'river_mouth_threshold': 0.5,
+ 'strait_access_threshold': 0.55,
+ 'threshold_semantics': 'unrounded_pre_serialization_values_except_record_flags_use_serialized_fields',
+ 'deterministic': True,
+ 'model_limitation': 'diagnostic_port_suitability_without_harbor_bathymetry_tides_waves_sedimentation_engineering_or_economic_optimization'}
+
+def enrich_world_with_port_sites(world: dict[str, Any]) -> dict[str, Any]:
+    """Publish exact v1/v2 or settlement-available v3 after independent audit."""
+    from ._human_water_publication import publish_human_water_stage
+    return publish_human_water_stage(world, 'ports', _enrich_legacy_equations, NATURAL_MODEL)

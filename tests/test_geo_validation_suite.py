@@ -1159,12 +1159,12 @@ relations:
         self.assertNotIn("## External Empirical Calibration Failures", rendered)
 
         # Shifting every cell by +4 C without re-running the climate model
-        # breaks the configured temperature response, so the same section must
+        # breaks the retained native temperature linkage, so the same section must
         # also carry the structural failure of the `warmer` scenario.
         temperature_failure = next(
             failure
             for failure in members["warmer"]["validation_failures"]
-            if failure["name"] == "configured_global_temperature_response"
+            if failure["name"] == "native_solved_temperature_linkage"
         )
         self.assertEqual(temperature_failure["severity"], "error")
         self.assertEqual(temperature_failure["domain"], "climate")
@@ -1174,7 +1174,7 @@ relations:
         self.assertEqual(members["warmer"]["realism_deviations"], [])
         self.assertNotIn("## Nonfatal Realism Deviations", rendered)
         self.assertIn(
-            "- `warmer` / `climate.configured_global_temperature_response`: "
+            "- `warmer` / `climate.native_solved_temperature_linkage`: "
             f"{temperature_failure['message']}",
             rendered,
         )

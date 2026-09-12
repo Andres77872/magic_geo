@@ -27,12 +27,58 @@ from xml.sax.saxutils import quoteattr
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .public_estimate_display import (CELL_SUPPORT, nullable_kind, layer_applicability,
+    applicability_fields, inapplicable, display_contract, family_coverage,
+    NULLABLE_LIST_FIELDS, field_support, marine_distance_layer_metadata)
+
 FORMAT_NAME = "magic-geo-debug-cache"
 FORMAT_VERSION = 1
 
 _SCALAR_TYPES = (str, int, float, bool, type(None))
 _CATEGORY_LIMIT = 64
 _VEC3_FIELDS = ("position_3d", "normal_3d")
+
+_ECOLOGY_ESTIMATE_SUPPORT = {
+    "agricultural_potential_index": "agricultural_potential_supported",
+    "mining_potential_index": "mining_surface_applicable",
+    "primary_productivity_index": "primary_productivity_supported",
+    "fishery_productivity_index": "fishery_productivity_supported",
+    "vegetation_biomass_index": "vegetation_biomass_supported",
+    "forest_growth_index": "forest_growth_supported",
+    "species_richness_index": "species_richness_supported",
+    "wildfire_spread_risk_index": "ecosystem_wildfire_spread_risk_supported",
+    "ecosystem_disturbance_pressure_index": "ecosystem_disturbance_pressure_supported",
+    "vegetation_recovery_years": "vegetation_recovery_supported",
+    "species_composition_confidence_index": "species_composition_confidence_supported",
+    "species_endemism_index": "species_endemism_supported",
+    "species_range_fragmentation_index": "species_record_descriptors_supported",
+    "wildfire_fuel_continuity_index": "wildfire_fuel_continuity_supported",
+    "wildfire_firebreak_index": "wildfire_firebreak_supported",
+    "wildfire_ignition_potential_index": "wildfire_ignition_potential_supported",
+}
+_SPECIES_GUILDS = (
+    "canopy_tree", "grassland_grazer", "desert_specialist", "alpine_tundra_specialist",
+    "large_predator", "wetland_amphibian", "freshwater_fish", "marine_fish",
+    "reef_builder", "mangrove_coastal_bird",
+)
+
+
+def _cell_layer_availability(name: str, columns: dict[str, list[Any]]) -> dict[str, str] | None:
+    field = CELL_SUPPORT.get(name)
+    if field not in columns:
+        field = _ECOLOGY_ESTIMATE_SUPPORT.get(name)
+    if name.startswith("species_guild_scores."):
+        field = "species_" + name.split(".", 1)[1] + "_score_supported"
+    if field in columns:
+        return {"field": field, "unavailable_when": "false"}
+    if name in {"dominant_species_guild", "species_habitat_suitability_index", "species_guild_richness_count"} and "species_supported_guild_count" in columns:
+        return {"field": "species_supported_guild_count", "unavailable_when": "zero"}
+    return None
+
+
+def _availability_masked_values(values: list[Any], support: list[Any], rule: str) -> list[Any]:
+    return [None if (flag is False if rule == "false" else type(flag) is int and flag == 0) else value
+            for value, flag in zip(values, support)]
 
 
 def _storage_stem(logical_name: str) -> str:
@@ -191,7 +237,7 @@ def _export_cells(
                 columns[f"{key}_{axis}"] = axis_values
                 kinds[f"{key}_{axis}"] = "float"
             continue
-        kind = _field_kind(values)
+        kind = _field_kind(values) or nullable_kind(cells, key)
         if kind is None:
             skipped[key] = "all null"
             detail_keys.append(key)
@@ -217,14 +263,67 @@ def _export_cells(
             skipped[key] = "non-scalar field retained in indexed cell details"
             detail_keys.append(key)
 
+    derived_fields = {}
+    score_dicts = [cell.get("species_guild_scores") for cell in cells]
+    for guild in _SPECIES_GUILDS:
+        if not any(isinstance(scores, dict) and guild in scores for scores in score_dicts):
+            continue
+        name = f"species_guild_scores.{guild}"
+        if name in seen:
+            raise ValueError(f"derived guild score column collides with cell field {name}")
+        values = [scores.get(guild) if isinstance(scores, dict) else None for scores in score_dicts]
+        kind = _field_kind(values)
+        if kind not in ("int", "float"):
+            continue
+        columns[name], kinds[name] = values, kind
+        derived_fields[name] = {"field": "species_guild_scores", "key": guild}
+
     cells_path = tables_dir / "cells.parquet"
     rows = _write_parquet(cells_path, columns, kinds)
 
     layers = []
     skipped_layers: dict[str, str] = {}
     for name, kind in kinds.items():
+        if name == "grounded_ice_diagnostic_thickness_m":
+            skipped_layers[name] = "roundtrip source authority retained in cells.parquet; use ice_thickness_m for the map layer"
+            continue
         entry = _layer_entry(f"cells/{name}", "cells", name, kind, columns[name])
+        availability = _cell_layer_availability(name, columns)
+        marine_distance = marine_distance_layer_metadata(name, cells)
+        if entry is None and (availability is not None or marine_distance is not None) and kind in ("int", "float"):
+            entry = {"id": f"cells/{name}", "source": "cells", "name": name, "kind": "numeric"}
         if entry is not None:
+            if marine_distance is not None:
+                entry["marine_distance"] = marine_distance
+            applicability = layer_applicability(name, columns)
+            excluded = [False] * len(cells)
+            if applicability is not None:
+                fields = applicability_fields(applicability)
+                excluded = [inapplicable(applicability, tuple(columns[field][i] for field in fields)) for i in range(len(cells))]
+                entry["applicability"] = applicability
+                entry["inapplicable_cell_count"] = sum(excluded)
+                if availability is None:
+                    entry["unavailable_cell_count"] = 0
+            masked = list(columns[name])
+            if availability is not None:
+                masked = _availability_masked_values(masked, columns[availability["field"]], availability["unavailable_when"])
+                entry["availability"] = availability
+                entry["unavailable_cell_count"] = sum(
+                    not excluded[i] and (flag is False if availability["unavailable_when"] == "false" else type(flag) is int and flag == 0)
+                    for i, flag in enumerate(columns[availability["field"]])
+                )
+            if availability is not None or applicability is not None:
+                masked = [None if excluded[i] else value for i, value in enumerate(masked)]
+                if entry["kind"] == "numeric":
+                    stats = _numeric_stats(masked)
+                    if stats is None:
+                        entry.pop("stats", None)
+                    else:
+                        entry["stats"] = stats
+                else:
+                    entry["categories"] = _categories(masked) or []
+            if name in derived_fields:
+                entry["derived_from"] = derived_fields[name]
             layers.append(entry)
         elif kind in ("str", "bool"):
             skipped_layers[name] = f"more than {_CATEGORY_LIMIT} distinct values (column kept in cells.parquet)"
@@ -238,6 +337,8 @@ def _export_cells(
         "skipped_fields": skipped,
         "skipped_layers": skipped_layers,
     }
+    if derived_fields:
+        manifest["cells"]["derived_fields"] = derived_fields
 
     if detail_keys:
         events_dir.mkdir(parents=True, exist_ok=True)
@@ -516,7 +617,7 @@ def _export_family(name: str, records: list[dict], tables_dir: Path, events_dir:
     for record in records:
         for key, value in record.items():
             field_values.setdefault(key, [])
-            if not _is_scalar(value):
+            if not _is_scalar(value) or (key in NULLABLE_LIST_FIELDS and field_support(record, key)):
                 flat = False
     for record in records:
         for key in field_values:
@@ -525,8 +626,24 @@ def _export_family(name: str, records: list[dict], tables_dir: Path, events_dir:
     scalar_fields = {
         key: kind
         for key, values in field_values.items()
-        if (kind := _field_kind(values)) in ("str", "bool", "int", "float")
+        if (kind := (_field_kind(values) or nullable_kind(records, key))) in ("str", "bool", "int", "float")
     }
+
+    # Keep per-field availability maps in scalar views without losing the
+    # original nested maps retained by the JSONL family.
+    derived_flags = {}
+    for record in records:
+        for map_name, flags in record.items():
+            if map_name.endswith("availability") and isinstance(flags, dict):
+                for key, flag in flags.items():
+                    if type(flag) is bool:
+                        name_key = map_name + "." + key
+                        if name_key in field_values:
+                            raise ValueError("derived estimate support column collision")
+                        derived_flags[name_key] = (map_name, key)
+    for key, (map_name, source_key) in derived_flags.items():
+        scalar_fields[key] = "bool"
+        field_values[key] = [record.get(map_name, {}).get(source_key) for record in records]
 
     if flat:
         rows = _write_parquet(
@@ -832,6 +949,7 @@ def export_debug_cache(
     if not isinstance(cells, list) or not cells:
         raise ValueError("world payload has no cells; generate with output.include_cells enabled")
 
+    contract = display_contract(world)
     out_dir.mkdir(parents=True, exist_ok=True)
     tables_dir = out_dir / "tables"
     events_dir = out_dir / "events"
@@ -853,6 +971,7 @@ def export_debug_cache(
         "sections": [],
         "scalars": {},
         "skipped_sections": {},
+        "estimate_display": contract,
     }
     if source_path is not None:
         data = Path(source_path).read_bytes()
@@ -875,11 +994,16 @@ def export_debug_cache(
             sections[key] = value
         elif isinstance(value, list):
             if not value:
-                manifest["skipped_sections"][key] = "empty list"
+                coverage = family_coverage(world, key)
+                if coverage["complete"] is not None or coverage["scope"] == "field_specific_availability":
+                    manifest["families"][key] = {"kind": "empty", "row_count": 0, "availability": coverage}
+                else:
+                    manifest["skipped_sections"][key] = "empty list"
             elif _is_stage_history(value):
                 _export_stage_history(key, value, tables_dir, events_dir, manifest)
             elif all(isinstance(record, dict) for record in value):
                 _export_family(key, value, tables_dir, events_dir, manifest)
+                manifest["families"][key]["availability"] = family_coverage(world, key)
             else:
                 sections[key] = value
         else:

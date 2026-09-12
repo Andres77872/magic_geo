@@ -3,12 +3,15 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .grounded_ice_validation import require_grounded_ice
+
 
 def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
 
 
 def enrich_world_with_ice_sheet_history(world: dict[str, Any], step_count: int = 8) -> dict[str, Any]:
+    grounded_current = require_grounded_ice(world)
     ice_sheets = world.get("ice_sheets", [])
     if not isinstance(ice_sheets, list):
         return world

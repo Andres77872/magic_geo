@@ -1,0 +1,12 @@
+{
+  "scope": "retained actual native V4 C API control; no Python-tail closure; copied without generation",
+  "original_path": "/tmp/settlement-availability-integration/full-native/c_api_v4_world.json",
+  "raw_sha256": "f9618558b55c266a02d9d1454f8f067d40761158b164022db9642ff31a6dc08c",
+  "raw_bytes": 2270672,
+  "stored_sha256": "20413cdb9d58e5df5a804039fd08d1f0788e964eb01a5075114a07020078e8de",
+  "stored_bytes": 458431,
+  "source_pins": {
+    "/tmp/settlement-availability-integration/work/cpp/tests/c_api_v4_test.cpp": "25ce4e8ae66c8d86bb7a08066bf97f1f72fe5400083fabc4ab1eb0a1993de504",
+    "/tmp/settlement-availability-integration/native-social-implementation/source-freeze.json": "c0c9324652739586fb2b4b8d2909f57c5ca2c3710a2fbf93a9888c1f06cd43d2"
+  }
+}

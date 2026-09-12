@@ -4,6 +4,7 @@ from collections import Counter
 from typing import Any
 
 from .settlement_routes import ROUTE_NETWORK_MODEL, SETTLEMENT_SELECTION_MODEL
+from .settlement_climate_support import SEASONAL_SETTLEMENT_SELECTION_MODEL, seasonal_settlement_inputs
 
 
 POLITICAL_REGION_MODEL = "causal_capital_barrier_partition_political_regions_v1"
@@ -14,6 +15,9 @@ TRADE_FLOW_MODEL = "causal_route_endpoint_complement_trade_flows_v1"
 def enrich_world_with_political_geography_models(
     world: dict[str, Any],
 ) -> dict[str, Any]:
+    selection_model = (SEASONAL_SETTLEMENT_SELECTION_MODEL if seasonal_settlement_inputs(world) is not None else SETTLEMENT_SELECTION_MODEL)
+    if selection_model == SEASONAL_SETTLEMENT_SELECTION_MODEL and world.get("settlement_selection_model", {}).get("model_type") != selection_model:
+        raise ValueError("political geography requires matching settlement selection metadata")
     cells = world.get("cells", [])
     if not isinstance(cells, list) or not cells:
         return world
@@ -35,7 +39,7 @@ def enrich_world_with_political_geography_models(
 
     world["political_region_model"] = {
         "model_type": POLITICAL_REGION_MODEL,
-        "source_settlement_model": SETTLEMENT_SELECTION_MODEL,
+        "source_settlement_model": selection_model,
         "source_route_network_model": ROUTE_NETWORK_MODEL,
         "target_model": "clamp_floor_settlement_count_div_5_plus_1_1_min_10_count_v1",
         "capital_selection_model": "settlement_order_greedy_angular_separation_v1",

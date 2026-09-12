@@ -3,10 +3,45 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from typing import Any
 
+from .worldbuilding_fishery_validation import (
+    WorldbuildingFisheryValidationError,
+    WORLDBUILDING_SUMMARY_FIELDS,
+    audit_worldbuilding_fishery_inputs,
+    validate_worldbuilding_fishery_context,
+    worldbuilding_fishery_contract,
+)
+
 
 MARINE_WATER_TYPES = {"ocean", "continental_shelf", "inland_sea"}
 WATER_ACCESS_TYPES = MARINE_WATER_TYPES | {"fresh_lake", "saline_basin"}
 WORLDBUILDING_REALISM_MODEL = "causal_upstream_evidence_worldbuilding_realism_checks_v1"
+WORLDBUILDING_FISHERY_MODEL = {'model_type': 'causal_upstream_evidence_worldbuilding_realism_checks_v2',
+ 'resource_support_model': 'material_geology_or_supported_fishery_parent_and_habitat_v2',
+ 'source_ecosystem_model': 'heuristic_ecosystem_climate_support_v4',
+ 'source_resource_deposit_model': 'causal_geologic_resource_deposit_diagnostics_v3',
+ 'fishery_water_body_types': ['continental_shelf', 'fresh_lake', 'inland_sea', 'ocean'],
+ 'fishery_support_policy': 'require_independently_replayed_resource_deposit_v3_primary_and_derived_fishery_support',
+ 'resource_check_scope': 'emitted_deposits_only_unsupported_fishery_sources_reported_separately',
+ 'empty_resource_deposit_policy': 'conditional_fraction_one_not_global_resource_availability'}
+
+
+WORLDBUILDING_PRESCRIBED_NATURAL_MODEL = {
+    **WORLDBUILDING_FISHERY_MODEL,
+    'full_world_cell_source_policy': 'nonempty_full_world_cells_required_geo_scope_omits_stage',
+    "model_type": "causal_upstream_evidence_worldbuilding_realism_checks_v3",
+    "source_ecosystem_model": "heuristic_ecosystem_climate_support_v5",
+    "source_resource_deposit_model": "causal_geologic_resource_deposit_diagnostics_v4",
+    "fishery_support_policy": "require_independently_replayed_resource_deposit_v4_primary_and_derived_fishery_support",
+}
+
+WORLDBUILDING_SETTLEMENT_AVAILABILITY_MODEL = {
+    **WORLDBUILDING_PRESCRIBED_NATURAL_MODEL,
+    "model_type": "causal_upstream_evidence_worldbuilding_realism_checks_v4",
+    "source_resource_deposit_model": "causal_geologic_resource_deposit_diagnostics_v5",
+    "source_settlement_model": "causal_native_score_local_max_separated_settlement_selection_v3",
+    "fishery_support_policy": "require_independently_replayed_resource_deposit_v5_primary_and_derived_fishery_support",
+    "economic_access_scope": "natural_resource_context_check_independent_of_economic_access_availability",
+}
 
 
 def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
@@ -142,7 +177,9 @@ def _resource_has_geologic_support(deposit: dict[str, Any], cell: dict[str, Any]
     return float(deposit.get("geologic_confidence_index", 0.0)) >= 0.25
 
 
-def enrich_world_with_worldbuilding_realism(world: dict[str, Any]) -> dict[str, Any]:
+def _enrich_world_with_worldbuilding_realism(
+    world: dict[str, Any], fishery_support: dict[int, tuple[bool, bool]] | None = None
+) -> dict[str, Any]:
     cells = world.get("cells", [])
     if not isinstance(cells, list) or not cells:
         return world
@@ -308,7 +345,12 @@ def enrich_world_with_worldbuilding_realism(world: dict[str, Any]) -> dict[str, 
         cell = cells_by_id.get(int(deposit.get("cell_id", -1)))
         resource = str(deposit.get("resource", "none"))
         resource_counts[resource] += 1
-        if cell is not None and _resource_has_geologic_support(deposit, cell):
+        context_supported = (
+            fishery_support[int(cell["id"])][1]
+            if cell is not None and fishery_support is not None and resource == "coastal_fisheries"
+            else cell is not None and _resource_has_geologic_support(deposit, cell)
+        )
+        if context_supported:
             supported_deposits += 1
             supported_resource_counts[resource] += 1
     resource_geology_index = supported_deposits / len(deposits) if deposits else 1.0
@@ -327,6 +369,21 @@ def enrich_world_with_worldbuilding_realism(world: dict[str, Any]) -> dict[str, 
             "supported_resource_counts": dict(sorted(supported_resource_counts.items())),
         },
     )
+
+    if fishery_support is not None:
+        check = checks[-1]
+        check["question"] = "Do emitted resources have material geology or supported fishery source context?"
+        check["metric"] = "fraction_emitted_resource_deposits_with_material_or_supported_fishery_context"
+        evidence = check["evidence"]
+        evidence["source_context_supported_resource_deposit_count"] = evidence.pop("geologically_supported_resource_deposit_count")
+        applicable_count = sum(applicable for applicable, _ in fishery_support.values())
+        supported_count = sum(supported for _, supported in fishery_support.values())
+        evidence.update({
+            "emitted_resource_evidence_available": bool(deposits),
+            "fishery_resource_proxy_applicable_cell_count": applicable_count,
+            "fishery_resource_proxy_supported_cell_count": supported_count,
+            "unsupported_fishery_resource_proxy_cell_count": applicable_count - supported_count,
+        })
 
     pass_count = sum(1 for check in checks if check["passed"])
     score_sum = sum(float(check["score"]) for check in checks)
@@ -377,5 +434,51 @@ def enrich_world_with_worldbuilding_realism(world: dict[str, Any]) -> dict[str, 
         "resource_support_model": "resource_specific_geology_and_physical_context_predicates_v1",
         "model_limitation": "internal_generated_evidence_checks_without_external_historical_geographic_calibration",
     }
-    summary["worldbuilding_realism_model"] = WORLDBUILDING_REALISM_MODEL
+    if fishery_support is not None:
+        # This changes only the fifth check's context policy. Marine navigation,
+        # material rules, and the four human checks retain their existing scope.
+        from copy import deepcopy
+        world["worldbuilding_realism_model"].update(deepcopy(WORLDBUILDING_FISHERY_MODEL))
+    summary["worldbuilding_realism_model"] = world["worldbuilding_realism_model"]["model_type"]
+    return world
+
+
+def enrich_world_with_worldbuilding_realism(world: dict[str, Any]) -> dict[str, Any]:
+    """Preserve declared historical models; publish the new chain atomically."""
+    support = audit_worldbuilding_fishery_inputs(world)
+    if support is None:
+        return _enrich_world_with_worldbuilding_realism(world)
+    model = worldbuilding_fishery_contract(world)
+    natural = model["model_type"] in (WORLDBUILDING_PRESCRIBED_NATURAL_MODEL["model_type"], WORLDBUILDING_SETTLEMENT_AVAILABILITY_MODEL["model_type"])
+    natural_model = WORLDBUILDING_SETTLEMENT_AVAILABILITY_MODEL if model["model_type"] == WORLDBUILDING_SETTLEMENT_AVAILABILITY_MODEL["model_type"] else WORLDBUILDING_PRESCRIBED_NATURAL_MODEL
+    if natural and not world["cells"]:
+        raise WorldbuildingFisheryValidationError("worldbuilding-v3 requires a nonempty full-world cell source; geo scope omits this stage")
+    staged = dict(world)
+    staged["summary"] = dict(world.get("summary", {}))
+    _enrich_world_with_worldbuilding_realism(staged, support)
+    if natural:
+        from copy import deepcopy
+        staged["worldbuilding_realism_model"].update(deepcopy(natural_model))
+        staged["summary"]["worldbuilding_realism_model"] = natural_model["model_type"]
+        errors = validate_worldbuilding_fishery_context(staged)
+        if errors:
+            raise WorldbuildingFisheryValidationError(errors[0])
+        # Existing independent replay owns the first four human equations; it
+        # never calls this producer. Its fifth check delegates to the independent
+        # source-context helper above, rather than copying producer formulas.
+        from .human_geography_validation import _worldbuilding_replay_valid
+        try:
+            valid = _worldbuilding_replay_valid(staged)
+        except (TypeError, ValueError, KeyError, OverflowError, ArithmeticError, AttributeError) as exc:
+            raise WorldbuildingFisheryValidationError("worldbuilding-v3 human replay input is malformed: " + type(exc).__name__) from exc
+        if not valid:
+            raise WorldbuildingFisheryValidationError("worldbuilding-v3 independent full human replay failed before publication")
+        world["worldbuilding_realism_model"] = staged["worldbuilding_realism_model"]
+        world["worldbuilding_realism_checks"] = staged["worldbuilding_realism_checks"]
+        world["summary"].update({key: staged["summary"][key] for key in WORLDBUILDING_SUMMARY_FIELDS})
+    else:
+        # Exact established WB2 behavior, including its historical source scope.
+        world.update({key: staged[key] for key in (
+            "worldbuilding_realism_model", "worldbuilding_realism_checks", "summary"
+        )})
     return world

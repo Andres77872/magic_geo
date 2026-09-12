@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "social_availability.hpp"
 
 namespace magic_geo::detail {
 
@@ -73,9 +74,22 @@ HistoricalLayers generate_historical_layers(
     const std::vector<PoliticalRegion>& political_regions,
     const std::vector<BorderSegment>& borders,
     const std::vector<TradeFlow>& trade_flows,
-    const CulturalLayers& cultural_layers
+    const CulturalLayers& cultural_layers,
+    SocialAvailability* availability
 ) {
     (void)cells;
+    const bool native = social_mode(availability);
+    if (native) {
+        availability->historical_event_inference_available = true;
+        availability->historical_event_family_coverage = {};
+    }
+    const auto coverage = [&](int type, bool available) {
+        if (!native) return;
+        auto& family = availability->historical_event_family_coverage[static_cast<std::size_t>(type)];
+        ++family.applicable_source_count;
+        if (available) ++family.available_source_count;
+        else family.inference_available = false;
+    };
     HistoricalLayers history;
     history.eras = default_historical_eras();
     if (political_regions.empty() || cultural_layers.cultures.empty()) {
@@ -112,7 +126,8 @@ HistoricalLayers generate_historical_layers(
                 region.capital_settlement_id < static_cast<int>(settlements.size()) ?
             settlements[static_cast<std::size_t>(region.capital_settlement_id)].cell_id :
             -1;
-        const double continuity = culture != nullptr ? culture->continuity_index : 0.5;
+        const bool complete = !native || (culture != nullptr && culture->continuity_estimate_available);
+        const double continuity = complete && culture != nullptr ? culture->continuity_index : 0.5;
         const double pressure = clamp(
             0.18 + region.barrier_pressure * 0.32 +
                 (region_border_length[region.id] > 0.0 ? region_border_pressure[region.id] / region_border_length[region.id] : 0.0) * 0.28 +
@@ -120,7 +135,9 @@ HistoricalLayers generate_historical_layers(
             0.0,
             1.0
         );
-        const double foundation_year = clamp(380.0 + 0.72 * (culture != nullptr ? culture->estimated_age_years : 1800.0), 260.0, 3800.0);
+        coverage(0, complete);
+        const double foundation_year = complete ? clamp(380.0 + 0.72 * (culture != nullptr ? culture->estimated_age_years : 1800.0), 260.0, 3800.0) : 0.0;
+        if (complete) {
         add_historical_event(
             history.events,
             0,
@@ -135,8 +152,11 @@ HistoricalLayers generate_historical_layers(
             pressure,
             continuity
         );
+        }
         const double trade_contact = region_trade_volume[region.id] / (100.0 * std::max(1, region.settlement_count));
         if (pressure > 0.34 || trade_contact > 0.55 || region.route_count == 0) {
+            coverage(1, complete);
+            if (!complete) continue;
             add_historical_event(
                 history.events,
                 1,
@@ -158,6 +178,7 @@ HistoricalLayers generate_historical_layers(
         if (culture.migration_pressure < 0.42 && culture.trade_contact_index < 0.28) {
             continue;
         }
+        coverage(2, !native || culture.continuity_estimate_available);
         int cell_id = -1;
         if (!culture.settlement_ids.empty()) {
             const int settlement_id = culture.settlement_ids.front();
@@ -189,14 +210,16 @@ HistoricalLayers generate_historical_layers(
             -1,
             cell_id,
             culture.migration_pressure,
-            culture.continuity_index
+            (!native || culture.continuity_estimate_available) ? culture.continuity_index : 0.0
         );
+        history.events.back().continuity_estimate_available = !native || culture.continuity_estimate_available;
     }
 
     for (const LanguageRegion& language : cultural_layers.language_regions) {
         if (language.parent_language_region_id < 0) {
             continue;
         }
+        coverage(3, true);
         const int culture_id = language.culture_ids.empty() ? -1 : language.culture_ids.front();
         int cell_id = -1;
         int region_id = -1;
@@ -236,6 +259,7 @@ HistoricalLayers generate_historical_layers(
     const int trade_event_target = std::min(12, static_cast<int>(ranked_flows.size()));
     for (int i = 0; i < trade_event_target; ++i) {
         const TradeFlow& flow = ranked_flows[static_cast<std::size_t>(i)];
+        coverage(4, true);
         int culture_id = region_to_culture.count(flow.region_from) > 0 ? region_to_culture[flow.region_from] : -1;
         int related_culture = region_to_culture.count(flow.region_to) > 0 ? region_to_culture[flow.region_to] : -1;
         int language_id = culture_id >= 0 ? cultural_layers.cultures[static_cast<std::size_t>(culture_id)].language_region_id : -1;
@@ -276,13 +300,22 @@ HistoricalLayers generate_historical_layers(
             -1,
             site.cell_id,
             site.significance,
-            culture != nullptr ? culture->continuity_index : 0.5
+            culture != nullptr && (!native || culture->continuity_estimate_available) ? culture->continuity_index : (native ? 0.0 : 0.5)
         );
+        const bool complete = !native || (culture != nullptr && culture->continuity_estimate_available);
+        coverage(5, complete);
+        history.events.back().continuity_estimate_available = complete;
     }
 
+    if (native && !availability->ruin_inference_available) {
+        auto& family = availability->historical_event_family_coverage[6];
+        family.inference_available = false;
+        family.applicable_source_count = -1;
+    }
     const int ruin_event_target = std::min(16, static_cast<int>(cultural_layers.ruins.size()));
     for (int i = 0; i < ruin_event_target; ++i) {
         const Ruin& ruin = cultural_layers.ruins[static_cast<std::size_t>(i)];
+        coverage(6, true);
         const CultureRegion* culture = ruin.culture_region_id >= 0 ?
             &cultural_layers.cultures[static_cast<std::size_t>(ruin.culture_region_id)] :
             nullptr;
@@ -319,7 +352,9 @@ HistoricalLayers generate_historical_layers(
         HistoricalEra& era = history.eras[static_cast<std::size_t>(event.era_id)];
         era.event_count += 1;
         era.mean_instability += event.pressure_index;
-        era.mean_connectivity += event.continuity_index;
+        if (!native || event.continuity_estimate_available) era.mean_connectivity += event.continuity_index;
+        else era.mean_connectivity_available = false;
+        if (native) ++availability->historical_event_family_coverage[static_cast<std::size_t>(event.type)].recorded_event_count;
         if (event.type == 0 || event.type == 1) {
             era.state_event_count += 1;
         } else if (event.type == 2) {
@@ -328,7 +363,20 @@ HistoricalLayers generate_historical_layers(
             era.language_event_count += 1;
         }
     }
+    if (native) {
+        for (const auto& family : availability->historical_event_family_coverage) {
+            availability->historical_event_inference_available &= family.inference_available;
+        }
+    }
     for (HistoricalEra& era : history.eras) {
+        if (native) {
+            const auto& family = availability->historical_event_family_coverage;
+            era.recorded_event_count = era.event_count;
+            era.state_event_count_available = family[0].inference_available && family[1].inference_available;
+            era.event_count_available = era.state_event_count_available && family[6].inference_available;
+            era.mean_instability_available = era.event_count_available;
+            era.mean_connectivity_available &= era.event_count_available;
+        }
         if (era.event_count > 0) {
             era.mean_instability /= static_cast<double>(era.event_count);
             era.mean_connectivity /= static_cast<double>(era.event_count);
@@ -367,8 +415,11 @@ double population_water_security(const std::vector<Cell>& cells, const Cell& cel
 std::vector<PopulationRegion> generate_population_regions(
     const std::vector<Cell>& cells,
     const std::vector<PoliticalRegion>& political_regions,
-    const CulturalLayers& cultural_layers
+    const CulturalLayers& cultural_layers,
+    SocialAvailability* availability
 ) {
+    const bool native = social_mode(availability);
+    if (native) social_cells_preflight(cells);
     const std::map<int, int> region_to_culture = region_to_culture_map(cultural_layers);
     std::vector<PopulationRegion> populations;
     populations.reserve(political_regions.size());
@@ -377,10 +428,12 @@ std::vector<PopulationRegion> generate_population_regions(
         pop.id = static_cast<int>(populations.size());
         pop.region_id = region.id;
         pop.settlement_count = region.settlement_count;
+        if (native) pop.migration_balance_available = false;
         if (region_to_culture.count(region.id) > 0) {
             pop.culture_region_id = region_to_culture.at(region.id);
             const CultureRegion& culture = cultural_layers.cultures[static_cast<std::size_t>(pop.culture_region_id)];
             pop.language_region_id = culture.language_region_id;
+            pop.migration_balance_available = true;
             pop.migration_balance = clamp(0.5 - culture.migration_pressure, -1.0, 1.0);
         }
 
@@ -394,6 +447,25 @@ std::vector<PopulationRegion> generate_population_regions(
         for (const Cell& cell : cells) {
             if (cell.is_water || cell.political_region_id != region.id) {
                 continue;
+            }
+            if (native) {
+                if (!std::isfinite(cell.area_km2) || cell.area_km2 < 0.0) throw std::runtime_error("invalid social territory area");
+                ++pop.territory_cell_count;
+                pop.territory_area_km2 += cell.area_km2;
+                if (cell.area_km2 > 0.0) {
+                    const bool supported = social_site_available(cell);
+                    if (cell.is_lake) {
+                        ++pop.structural_zero_site_cell_count;
+                        pop.structural_zero_site_area_km2 += cell.area_km2;
+                    } else {
+                        ++pop.site_input_applicable_cell_count;
+                        pop.site_input_applicable_area_km2 += cell.area_km2;
+                        if (supported) {
+                            ++pop.site_input_supported_cell_count;
+                            pop.site_input_supported_area_km2 += cell.area_km2;
+                        } else pop.site_input_complete = false;
+                    }
+                }
             }
             const double water = population_water_security(cells, cell);
             const double climate = clamp(
@@ -414,8 +486,17 @@ std::vector<PopulationRegion> generate_population_regions(
             water_sum += water * cell.area_km2;
             climate_sum += climate * cell.area_km2;
             hazard_sum += hazard * cell.area_km2;
-            urban_site_sum += cell.settlement_score * cell.area_km2;
+            if (!native || cell.area_km2 == 0.0 || cell.is_lake || cell.settlement_climate_supported)
+                urban_site_sum += cell.settlement_score * cell.area_km2;
             cell_count++;
+        }
+        if (native) {
+            pop.physical_means_available = area > 0.0 && cell_count > 0;
+            pop.site_strength_available = pop.physical_means_available && pop.site_input_complete;
+            pop.capacity_estimate_available = pop.site_strength_available;
+            pop.population_estimate_available = pop.capacity_estimate_available && pop.culture_region_id >= 0 &&
+                cultural_layers.cultures.at(static_cast<std::size_t>(pop.culture_region_id)).continuity_estimate_available;
+            pop.estimate_scope_status = !pop.physical_means_available ? 2 : (pop.population_estimate_available ? 0 : 1);
         }
         if (area <= 0.0 || cell_count == 0) {
             populations.push_back(pop);
@@ -426,13 +507,23 @@ std::vector<PopulationRegion> generate_population_regions(
         const double climate = climate_sum / area;
         const double hazard = hazard_sum / area;
         const double site_strength = urban_site_sum / area;
+        if (!native || pop.site_strength_available) pop.site_strength_index = site_strength;
         const double route_factor = clamp(static_cast<double>(region.route_count) / std::max(1.0, static_cast<double>(region.settlement_count)), 0.0, 1.0);
-        const double density_capacity = clamp(1.5 + 64.0 * fertility * water * climate + 12.0 * site_strength, 0.2, 90.0);
+
         pop.agricultural_capacity_index = clamp(fertility * climate * (0.55 + 0.45 * water), 0.0, 1.0);
         pop.water_security_index = water;
         pop.hazard_mortality_index = hazard;
+        if (native && !pop.capacity_estimate_available) {
+            populations.push_back(pop);
+            continue;
+        }
+        const double density_capacity = clamp(1.5 + 64.0 * fertility * water * climate + 12.0 * site_strength, 0.2, 90.0);
         pop.urbanization_fraction = clamp(0.04 + 0.025 * region.settlement_count + 0.16 * route_factor + 0.12 * site_strength, 0.02, 0.62);
         pop.carrying_capacity = area * density_capacity;
+        if (native && !pop.population_estimate_available) {
+            populations.push_back(pop);
+            continue;
+        }
         const double continuity = pop.culture_region_id >= 0 ?
             cultural_layers.cultures[static_cast<std::size_t>(pop.culture_region_id)].continuity_index :
             0.5;
@@ -456,7 +547,8 @@ std::vector<ConflictRecord> generate_conflicts(
     const std::vector<BorderSegment>& borders,
     const std::vector<TradeFlow>& trade_flows,
     const CulturalLayers& cultural_layers,
-    const std::vector<PopulationRegion>& population_regions
+    const std::vector<PopulationRegion>& population_regions,
+    SocialAvailability* availability
 ) {
     const std::map<int, int> region_to_culture = region_to_culture_map(cultural_layers);
     std::map<int, const PopulationRegion*> population_by_region;
@@ -474,6 +566,35 @@ std::vector<ConflictRecord> generate_conflicts(
         }
         const std::pair<int, int> key = std::minmax(flow.region_from, flow.region_to);
         trade_chokepoint_by_pair[key] += flow.volume_index * flow.friction / 100.0;
+    }
+
+    if (social_mode(availability)) {
+        std::set<std::pair<int, int>> pairs;
+        std::set<int> candidate_regions;
+        availability->conflict_unavailable_region_pairs.clear();
+        for (const BorderSegment& border : borders) {
+            if (border.region_a < 0 || border.region_b < 0 || border.cell_a < 0 || border.cell_b < 0) continue;
+            if (border.cell_a >= static_cast<int>(cells.size()) || border.cell_b >= static_cast<int>(cells.size()) ||
+                region_by_id.count(border.region_a) == 0 || region_by_id.count(border.region_b) == 0)
+                throw std::runtime_error("invalid native social border source");
+            pairs.insert(std::minmax(border.region_a, border.region_b));
+            candidate_regions.insert(border.region_a);
+            candidate_regions.insert(border.region_b);
+        }
+        availability->conflict_candidate_region_ids.assign(candidate_regions.begin(), candidate_regions.end());
+        availability->conflict_candidate_pair_count = static_cast<int>(pairs.size());
+        availability->conflict_supported_pair_count = 0;
+        for (const auto& pair : pairs) {
+            const auto a = population_by_region.find(pair.first);
+            const auto b = population_by_region.find(pair.second);
+            if (a != population_by_region.end() && b != population_by_region.end() &&
+                a->second->population_estimate_available && b->second->population_estimate_available &&
+                a->second->capacity_estimate_available && b->second->capacity_estimate_available)
+                ++availability->conflict_supported_pair_count;
+            else availability->conflict_unavailable_region_pairs.push_back(pair);
+        }
+        availability->conflict_inference_available = availability->conflict_unavailable_region_pairs.empty();
+        if (!availability->conflict_inference_available) return {};
     }
 
     struct Candidate {
@@ -643,7 +764,8 @@ std::vector<DynastyRecord> generate_dynasties(
     const CulturalLayers& cultural_layers,
     const HistoricalLayers& historical_layers,
     const std::vector<PopulationRegion>& population_regions,
-    const std::vector<ConflictRecord>& conflicts
+    const std::vector<ConflictRecord>& conflicts,
+    SocialAvailability* availability
 ) {
     const std::map<int, int> region_to_culture = region_to_culture_map(cultural_layers);
     std::map<int, const PopulationRegion*> population_by_region;
@@ -667,9 +789,29 @@ std::vector<DynastyRecord> generate_dynasties(
         }
     }
 
+    if (social_mode(availability)) {
+        availability->dynasty_applicable_region_count = static_cast<int>(political_regions.size());
+        availability->dynasty_available_region_count = 0;
+        availability->dynasty_unavailable_region_ids.clear();
+        availability->dynasty_inference_available = true;
+    }
     std::vector<DynastyRecord> dynasties;
     for (const PoliticalRegion& region : political_regions) {
         const int culture_id = region_to_culture.count(region.id) > 0 ? region_to_culture.at(region.id) : -1;
+        if (social_mode(availability)) {
+            const auto pop = population_by_region.find(region.id);
+            const bool complete = culture_id >= 0 &&
+                cultural_layers.cultures.at(static_cast<std::size_t>(culture_id)).continuity_estimate_available &&
+                pop != population_by_region.end() && pop->second->population_estimate_available &&
+                social_conflict_exposure_available(*availability, region.id) &&
+                founding_event_by_region.count(region.id) > 0;
+            if (!complete) {
+                availability->dynasty_unavailable_region_ids.push_back(region.id);
+                availability->dynasty_inference_available = false;
+                continue;
+            }
+            ++availability->dynasty_available_region_count;
+        }
         const int language_id = culture_id >= 0 ?
             cultural_layers.cultures[static_cast<std::size_t>(culture_id)].language_region_id :
             -1;
@@ -741,6 +883,7 @@ std::vector<DynastyRecord> generate_dynasties(
             parent_id = dynasty.id;
         }
     }
+    if (social_mode(availability)) std::sort(availability->dynasty_unavailable_region_ids.begin(), availability->dynasty_unavailable_region_ids.end());
     for (DynastyRecord& dynasty : dynasties) {
         if (dynasty.parent_dynasty_id < 0 ||
             dynasty.parent_dynasty_id >= static_cast<int>(dynasties.size())) {
@@ -778,8 +921,10 @@ std::vector<TerritorialSnapshot> generate_territorial_snapshots(
     const CulturalLayers& cultural_layers,
     const HistoricalLayers& historical_layers,
     const std::vector<PopulationRegion>& population_regions,
-    const std::vector<ConflictRecord>& conflicts
+    const std::vector<ConflictRecord>& conflicts,
+    SocialAvailability* availability
 ) {
+    if (social_mode(availability)) availability->territorial_snapshot_inference_available = true;
     const std::map<int, int> region_to_culture = region_to_culture_map(cultural_layers);
     std::map<int, const PopulationRegion*> population_by_region;
     for (const PopulationRegion& population : population_regions) {
@@ -898,12 +1043,31 @@ std::vector<TerritorialSnapshot> generate_territorial_snapshots(
         const double era_population_factor = population_factors[static_cast<std::size_t>(clamp(era.id, 0, 3))];
         double conflict_sum = 0.0;
         for (SnapshotRegion base_region : base_regions) {
-            if (base_region.region_id < 0 || base_region.cell_count == 0) {
+            if (base_region.region_id < 0 || (!social_mode(availability) && base_region.cell_count == 0)) {
                 continue;
             }
             const PopulationRegion* population = population_by_region.count(base_region.region_id) > 0 ?
                 population_by_region[base_region.region_id] :
                 nullptr;
+            if (social_mode(availability)) {
+                base_region.base_area_km2 = base_region.area_km2;
+                base_region.base_dissolved_polygon_area_km2 = base_region.dissolved_polygon_area_km2;
+                base_region.base_boundary_perimeter_km = base_region.boundary_perimeter_km;
+                base_region.geometry_estimate_available = base_region.area_km2 > 0.0 &&
+                    base_region.culture_region_id >= 0 &&
+                    cultural_layers.cultures.at(static_cast<std::size_t>(base_region.culture_region_id)).continuity_estimate_available &&
+                    social_conflict_exposure_available(*availability, base_region.region_id) && era.mean_connectivity_available;
+                base_region.population_estimate_available = base_region.geometry_estimate_available &&
+                    population != nullptr && population->population_estimate_available;
+                snapshot.geometry_estimate_available &= base_region.geometry_estimate_available;
+                snapshot.population_estimate_available &= base_region.population_estimate_available;
+                if (!base_region.geometry_estimate_available) {
+                    // Base geometry remains in its explicitly named fields. Internal
+                    // scalar defaults are never published as historical estimates.
+                    snapshot.regions.push_back(base_region);
+                    continue;
+                }
+            }
             const double region_conflict = clamp(conflict_by_region_era[{base_region.region_id, era.id}] / 2.0, 0.0, 1.0);
             const double continuity = base_region.culture_region_id >= 0 ?
                 cultural_layers.cultures[static_cast<std::size_t>(base_region.culture_region_id)].continuity_index :
@@ -928,7 +1092,7 @@ std::vector<TerritorialSnapshot> generate_territorial_snapshots(
             const double ring_quality = clamp(static_cast<double>(base_region.boundary_ring.size()) / 24.0, 0.0, 1.0);
             const double area_quality = clamp(1.0 - base_region.polygon_area_error_fraction, 0.0, 1.0);
             base_region.geometry_quality = clamp(0.62 * area_quality + 0.38 * ring_quality, 0.0, 1.0);
-            base_region.estimated_population = (population != nullptr ? population->estimated_population : 0.0) *
+            if (!social_mode(availability) || base_region.population_estimate_available) base_region.estimated_population = (population != nullptr ? population->estimated_population : 0.0) *
                 era_population_factor * (0.82 + 0.22 * stability);
             base_region.stability_index = stability;
             snapshot.estimated_population += base_region.estimated_population;
@@ -939,6 +1103,11 @@ std::vector<TerritorialSnapshot> generate_territorial_snapshots(
             }
             conflict_sum += region_conflict;
             snapshot.regions.push_back(base_region);
+        }
+        if (social_mode(availability)) {
+            snapshot.geometry_estimate_available &= land_area > 0.0 && !snapshot.regions.empty();
+            snapshot.population_estimate_available &= !snapshot.regions.empty();
+            availability->territorial_snapshot_inference_available &= snapshot.geometry_estimate_available && snapshot.population_estimate_available;
         }
         snapshot.region_count = static_cast<int>(snapshot.regions.size());
         snapshot.assigned_land_fraction = land_area > 0.0 ? clamp(snapshot.assigned_land_fraction / land_area, 0.0, 1.0) : 0.0;

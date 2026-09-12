@@ -42,15 +42,15 @@ def ppm_geometry(data: bytes) -> tuple[str, int, int, int, int]:
 
 
 class StaleNativeLibrary:
-    """A symbol-complete native library whose generation payload is a stale schema."""
+    """A V4 library whose current-default generation payload is a stale schema."""
 
     @staticmethod
-    def magic_geo_generate_json_v3(*_args: object) -> int:
+    def magic_geo_generate_json_v4(*_args: object) -> int:
         return 1
 
-    magic_geo_generate_geo_json_v3 = magic_geo_generate_json_v3
-    magic_geo_generate_msgpack_v3 = magic_geo_generate_json_v3
-    magic_geo_generate_geo_msgpack_v3 = magic_geo_generate_json_v3
+    magic_geo_generate_geo_json_v4 = magic_geo_generate_json_v4
+    magic_geo_generate_msgpack_v4 = magic_geo_generate_json_v4
+    magic_geo_generate_geo_msgpack_v4 = magic_geo_generate_json_v4
 
 
 class GenerateCliTests(TestCase):
@@ -292,6 +292,7 @@ class GenerateCliTests(TestCase):
                     with patch_generation_payload(
                         StaleNativeLibrary(),
                         {"schema_version": 1},
+                        model="seasonal",
                     ):
                         result = CliRunner().invoke(
                             app,

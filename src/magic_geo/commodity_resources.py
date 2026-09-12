@@ -1,7 +1,43 @@
 from __future__ import annotations
 
 from collections import Counter
+from copy import deepcopy
 from typing import Any
+
+from .biological_resource_validation import (
+    BiologicalResourceValidationError,
+    audit_biological_resource_deposits,
+    biological_resource_contract,
+    commodity_expected_model,
+    resource_access_v5,
+    audit_biological_commodity_inputs,
+    COMMODITY_SUMMARY_FIELDS,
+    validate_biological_resources,
+)
+
+
+COMMODITY_OCCURRENCE_MODEL = {
+    "model_type": "causal_resource_commodity_occurrences_with_parent_support_v1",
+    "source_resource_deposit_model": "causal_geologic_resource_deposit_diagnostics_v3",
+    "source_ecosystem_model": "heuristic_ecosystem_climate_support_v4",
+    "fishery_parent_policy": "supported_matching_deposit_primary_and_derived_fishery_required",
+    "unsupported_fishery_occurrence_policy": "no_record_not_observed_zero_biomass",
+    "fertile_soils_scope": "soil_material_descriptor_not_current_crop_yield",
+    "material_commodity_policy": "preserve_existing_nonfishery_equations_and_mapping",
+    "summary_support_scope": "emitted_record_means_with_unsupported_fishery_source_counts",
+}
+
+
+COMMODITY_PRESCRIBED_NATURAL_MODEL = {
+    **COMMODITY_OCCURRENCE_MODEL,
+    "model_type": "causal_resource_commodity_occurrences_with_parent_support_v2",
+    "source_resource_deposit_model": "causal_geologic_resource_deposit_diagnostics_v4",
+    "source_ecosystem_model": "heuristic_ecosystem_climate_support_v5",
+}
+_COMMODITY_MODELS = {
+    "heuristic_ecosystem_climate_support_v4": COMMODITY_OCCURRENCE_MODEL,
+    "heuristic_ecosystem_climate_support_v5": COMMODITY_PRESCRIBED_NATURAL_MODEL,
+}
 
 
 COMMODITY_BY_RESOURCE = {
@@ -112,13 +148,13 @@ def _formation_evidence(deposit: dict[str, Any], cell: dict[str, Any], sedimenta
     return payload
 
 
-def _base_indices(deposit: dict[str, Any], cell: dict[str, Any]) -> dict[str, float]:
+def _base_indices(deposit: dict[str, Any], cell: dict[str, Any], *, economic_availability: bool = False) -> dict[str, float]:
     return {
         "reserve": _clamp(float(deposit.get("reserve_potential_index", 0.0))),
         "confidence": _clamp(float(deposit.get("geologic_confidence_index", 0.0))),
-        "accessibility": _clamp(float(deposit.get("accessibility_index", 0.0))),
+        **({"accessibility": _clamp(float(deposit.get("accessibility_index", 0.0))),
+            "viability": _clamp(float(deposit.get("economic_viability_index", 0.0)))} if not economic_availability else {}),
         "hazard": _clamp(float(deposit.get("extraction_hazard_index", 0.0))),
-        "viability": _clamp(float(deposit.get("economic_viability_index", 0.0))),
         "convergent": _clamp(float(cell.get("boundary_convergent", 0.0))),
         "divergent": _clamp(float(cell.get("boundary_divergent", 0.0))),
         "volcanic": _clamp(float(cell.get("volcanic_potential_index", 0.0))),
@@ -135,8 +171,9 @@ def _commodity_potential(
     deposit: dict[str, Any],
     cell: dict[str, Any],
     sedimentary_system: dict[str, Any] | None,
+    *, economic_availability: bool = False,
 ) -> float:
-    index = _base_indices(deposit, cell)
+    index = _base_indices(deposit, cell, economic_availability=economic_availability)
     resource = str(deposit.get("resource", "none"))
     lithology = str(cell.get("lithology", "unknown"))
     crust = str(cell.get("crust_type", "unknown"))
@@ -192,10 +229,10 @@ def _commodity_potential(
     return _clamp(index["reserve"] * 0.70 + index["confidence"] * 0.30) if resource != "none" else 0.0
 
 
-def enrich_world_with_commodity_occurrences(world: dict[str, Any]) -> dict[str, Any]:
+def _build_commodity_occurrences(world: dict[str, Any], *, allow_empty: bool = False, economic_availability: bool = False) -> dict[str, Any]:
     cells = world.get("cells", [])
     deposits = world.get("resource_deposits", [])
-    if not isinstance(cells, list) or not cells or not isinstance(deposits, list):
+    if not isinstance(cells, list) or (not cells and not allow_empty) or not isinstance(deposits, list):
         return world
 
     cells_by_id = {int(cell.get("id", -1)): cell for cell in cells if isinstance(cell, dict)}
@@ -219,7 +256,7 @@ def enrich_world_with_commodity_occurrences(world: dict[str, Any]) -> dict[str, 
         cell = cells_by_id.get(cell_id, {})
         sedimentary_system = sedimentary_systems_by_basin.get(int(deposit.get("basin_id", -1)))
         for commodity in commodities:
-            potential = _commodity_potential(commodity, deposit, cell, sedimentary_system)
+            potential = _commodity_potential(commodity, deposit, cell, sedimentary_system, economic_availability=economic_availability)
             confidence = _clamp(
                 float(deposit.get("geologic_confidence_index", 0.0)) * 0.54
                 + potential * 0.30
@@ -252,7 +289,8 @@ def enrich_world_with_commodity_occurrences(world: dict[str, Any]) -> dict[str, 
                     "area_km2": _round(area),
                     "occurrence_potential_index": _round(potential),
                     "market_value_index": _round(COMMODITY_VALUE_INDEX.get(commodity, 0.50)),
-                    "accessibility_index": _round(_clamp(float(deposit.get("accessibility_index", 0.0)))),
+                    "accessibility_index": deposit["accessibility_index"] if economic_availability else _round(_clamp(float(deposit.get("accessibility_index", 0.0)))),
+                    **({key: deposit[key] for key in ("accessibility_supported", "geographic_accessibility_baseline_index")} if economic_availability else {}),
                     "extraction_hazard_index": _round(_clamp(float(deposit.get("extraction_hazard_index", 0.0)))),
                     "geologic_confidence_index": _round(confidence),
                     "formation_evidence": _formation_evidence(deposit, cell, sedimentary_system),
@@ -277,4 +315,39 @@ def enrich_world_with_commodity_occurrences(world: dict[str, Any]) -> dict[str, 
     summary["mean_commodity_occurrence_confidence_index"] = _round(confidence_sum / divisor) if occurrences else 0.0
     summary["commodity_occurrence_type_counts"] = dict(sorted(commodity_counts.items()))
     summary["commodity_occurrence_group_counts"] = dict(sorted(group_counts.items()))
+    return world
+
+
+def _enrich_world_with_commodity_occurrences_legacy(world: dict[str, Any]) -> dict[str, Any]:
+    """Historical absent-model mapping and equations, including empty behavior."""
+    return _build_commodity_occurrences(world)
+
+
+def enrich_world_with_commodity_occurrences(world: dict[str, Any]) -> dict[str, Any]:
+    chain = biological_resource_contract(world)
+    if chain is None:
+        return _enrich_world_with_commodity_occurrences_legacy(world)
+    # Missing supported sources are incomplete input, never zero-confidence
+    # substitutes. Validate every source before touching any caller-owned value.
+    support = audit_biological_resource_deposits(world)
+    audit_biological_commodity_inputs(world)
+    staged = {**world, "cells": [dict(cell) for cell in world["cells"]], "summary": dict(world["summary"])}
+    _build_commodity_occurrences(staged, allow_empty=True, economic_availability=resource_access_v5(world) and chain == "heuristic_ecosystem_climate_support_v5")
+    staged["commodity_occurrence_model"] = deepcopy(commodity_expected_model(world, chain))
+    for cell in staged["cells"]:
+        cell["fishery_commodity_applicable"], cell["fishery_commodity_supported"] = support[cell["id"]]
+    staged["summary"].update({
+        "fishery_commodity_applicable_cell_count": sum(a for a, _ in support.values()),
+        "fishery_commodity_supported_cell_count": sum(s for _, s in support.values()),
+        "unsupported_fishery_commodity_cell_count": sum(a and not s for a, s in support.values()),
+    })
+    errors = validate_biological_resources(staged)
+    if errors:
+        raise BiologicalResourceValidationError(errors[0])
+    for cell, patch in zip(world["cells"], staged["cells"]):
+        for key in ("fishery_commodity_applicable", "fishery_commodity_supported"):
+            cell[key] = patch[key]
+    world["commodity_occurrences"] = staged["commodity_occurrences"]
+    world["commodity_occurrence_model"] = staged["commodity_occurrence_model"]
+    world["summary"].update({key: staged["summary"][key] for key in COMMODITY_SUMMARY_FIELDS})
     return world

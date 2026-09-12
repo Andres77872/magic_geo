@@ -3,6 +3,11 @@ from __future__ import annotations
 from collections import Counter, defaultdict, deque
 from typing import Any
 
+from .graph_corridor_validation import (
+    CORRIDOR_MODEL as _CORRIDOR_MODEL,
+    corridor_graph_link as _corridor_graph_link,
+)
+
 
 def _round(value: float, digits: int = 6) -> float:
     return round(float(value), digits)
@@ -310,7 +315,9 @@ def _build_watershed_graph(world: dict[str, Any], cells_by_id: dict[int, dict[st
     }
 
 
-def _build_trade_route_graph(world: dict[str, Any]) -> dict[str, Any]:
+def _build_trade_route_graph(
+    world: dict[str, Any], *, corridor_availability: bool = False
+) -> dict[str, Any]:
     settlements = _index_records(world.get("settlements", []))
     routes = _index_records(world.get("routes", []))
     trade_by_route = {int(flow.get("route_id", -1)): flow for flow in world.get("trade_flows", []) if isinstance(flow, dict)}
@@ -349,7 +356,11 @@ def _build_trade_route_graph(world: dict[str, Any]) -> dict[str, Any]:
                 "from_region_id": region_from,
                 "to_region_id": region_to,
                 "route_type": str(route.get("type", "unknown")),
-                "route_corridor_id": int(route.get("route_corridor_id", -1)),
+                **(
+                    _corridor_graph_link(route)
+                    if corridor_availability
+                    else {"route_corridor_id": int(route.get("route_corridor_id", -1))}
+                ),
                 "route_capacity_constraint_id": int(route.get("route_capacity_constraint_id", -1)),
                 "trade_flow_id": int(trade.get("id", -1)) if trade else -1,
                 "primary_good": str(trade.get("primary_good", "none")) if trade else "none",
@@ -376,7 +387,8 @@ def _build_trade_route_graph(world: dict[str, Any]) -> dict[str, Any]:
     ]
     node_ids = set(settlements)
     return {
-        "graph_type": "trade_route_graph_v0",
+        "graph_type": "trade_route_graph_v1" if corridor_availability else "trade_route_graph_v0",
+        **({"source_route_corridor_model": _CORRIDOR_MODEL} if corridor_availability else {}),
         "node_count": len(nodes),
         "edge_count": len(edges),
         "connected_component_count": _component_count(node_ids, graph_adjacency) if node_ids else 0,
@@ -549,9 +561,12 @@ def enrich_world_with_graph_diagnostics(world: dict[str, Any]) -> dict[str, Any]
     if not isinstance(cells, list) or not cells:
         return world
 
-    enrich_world_with_physical_graph_diagnostics(world)
-    trade_route_graph = _build_trade_route_graph(world)
+    from .graph_corridor_validation import require_trade_graph_corridor_inputs
+
+    corridor_availability = require_trade_graph_corridor_inputs(world)
+    trade_route_graph = _build_trade_route_graph(world, corridor_availability=corridor_availability)
     political_region_graph = _build_political_region_graph(world)
+    enrich_world_with_physical_graph_diagnostics(world)
 
     world["trade_route_graph"] = trade_route_graph
     world["political_region_graph"] = political_region_graph

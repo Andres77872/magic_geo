@@ -2,7 +2,7 @@
 
 [Wiki home](./README.md) > Configuration Reference
 
-Every magic-geo generation run is driven by a single validated YAML document whose authoritative schema is `WorldConfig` in `src/magic_geo/config.py:458`. There are exactly nine sections and 44 leaf properties; there are no hidden knobs, no environment-variable fallbacks for physical parameters, and no per-enricher configuration. This page enumerates all 44 properties with their real types, defaults, and pydantic bounds, explains what each one physically means and which pipeline stage consumes it, and then documents the profile system, the `--set` override grammar, YAML strictness, the JSON Schema export, atomic validated writes, and the config-to-native marshaling boundary.
+Every magic-geo generation run is driven by a single validated YAML document whose authoritative schema is `WorldConfig` in `src/magic_geo/config.py`. There are nine sections with 43 leaf properties plus the required root `config_version: 2`; there are no hidden knobs, no environment-variable fallbacks for physical parameters, and no per-enricher configuration. This page enumerates all 44 properties with their real types, defaults, and pydantic bounds, explains what each one physically means and which pipeline stage consumes it, and then documents the profile system, the `--set` override grammar, YAML strictness, the JSON Schema export, atomic validated writes, and the config-to-native marshaling boundary.
 
 ## On this page
 
@@ -32,24 +32,19 @@ Every magic-geo generation run is driven by a single validated YAML document who
 
 ## Document structure and a complete example
 
-The document root must be a YAML **mapping** (`src/magic_geo/config.py:637`). Its keys are the nine section names, in the declaration order of `WorldConfig` (`src/magic_geo/config.py:463`–`495`):
+The document root must be a YAML **mapping** (`src/magic_geo/config.py`). Its keys are `config_version` and the nine section names, in the declaration order of `WorldConfig` (`src/magic_geo/config.py`):
 
 ```text
 run → planet → mesh → tectonics → climate → hydrology → erosion → compute → output
 ```
 
-Every section and every field has a default, so all of these are valid and equivalent to the `default` profile:
-
-- an empty file
-- `{}`
-- a document that supplies only `mesh.cell_count`
-
-An empty document is deliberately normalized to `{}` and therefore to the `default` profile, not to `earthlike` (`src/magic_geo/config.py:635`, documented at `src/magic_geo/config.py:615`).
+Every section field has a default, but YAML documents require the exact integer `config_version: 2`. The minimal valid document is `config_version: 2`. Empty, unversioned, old-version and future-version documents receive source-aware migration errors; they cannot silently acquire new physical semantics. `WorldConfig()` deliberately constructs a new seasonal configuration, while `SeasonalWorldConfig` requires its version even in direct construction.
 
 The checked-in Earth-like reference is `configs/earthlike_seed.yaml`. It is a fully materialized copy of the `earthlike` profile — `create_config("earthlike") == load_config("configs/earthlike_seed.yaml")` holds exactly.
 
 ```yaml
-# configs/earthlike_seed.yaml — every one of the 44 properties spelled out
+# configs/earthlike_seed.yaml — all 43 section fields and the document version
+config_version: 2
 run:
   seed: 424242
   name: earthlike_mvp
@@ -85,8 +80,7 @@ tectonics:
 
 climate:
   months: 12
-  lapse_rate_c_per_km: 6.5
-  base_temperature_c: 15.0
+  reference_infrared_optical_depth: 1.0
   precipitation_scale: 0.8
   subtropical_drying_strength: 0.65
 
@@ -136,13 +130,13 @@ Ranges below are the literal pydantic `Field` bounds. `[a, b]` is inclusive (`ge
 
 ```text
 YAML file
-  │ load_config()                     src/magic_geo/config.py:829
+  │ load_config()                     src/magic_geo/config.py
   ▼
-WorldConfig (validated pydantic model) src/magic_geo/config.py:458
-  │ config_to_native() → model_dump(mode="json")   src/magic_geo/config.py:840
+WorldConfig (validated pydantic model) src/magic_geo/config.py
+  │ config_to_native() → model_dump(mode="json")   src/magic_geo/config.py
   ▼
-_native_config() → NativeConfigV3 ctypes struct    src/magic_geo/native.py:281
-  │ magic_geo_generate_msgpack_v3 / _json_v3
+_native_seasonal_config() → NativeConfigV4 ctypes struct
+  │ magic_geo_generate_msgpack_v4 / _json_v4
   ▼
 C++ params_from_c_config → magic_geo::Params       cpp/src/c_api.cpp:13
   │ validate_params() re-checks every bound         cpp/src/engine/core.cpp:239
@@ -160,16 +154,16 @@ The native engine re-validates every numeric bound independently in `validate_pa
 
 ## `run` — run identity
 
-Model: `RunConfig`, `src/magic_geo/config.py:124`. Section description: "Run identity and deterministic seed settings."
+Model: `RunConfig`, `src/magic_geo/config.py`. Section description: "Run identity and deterministic seed settings."
 
 | Property | Type | Default | Valid range / choices | Description |
 | --- | --- | --- | --- | --- |
-| `seed` | int | `424242` | `[0, 18446744073709551615]` (`MAX_SEED` = 2⁶⁴−1, `src/magic_geo/config.py:24`) | Unsigned 64-bit master seed used by every deterministic random process. |
+| `seed` | int | `424242` | `[0, 18446744073709551615]` (`MAX_SEED` = 2⁶⁴−1, `src/magic_geo/config.py`) | Unsigned 64-bit master seed used by every deterministic random process. |
 | `name` | str | `"earthlike_mvp"` | 1–256 characters; additionally must contain no NUL, be UTF-8 encodable, and be ≤ 1024 UTF-8 bytes | Human-readable world name recorded in generated payload metadata. |
 
 ### `run.seed`
 
-**What it is.** The single 64-bit entropy source for the whole generator. It is declared at `src/magic_geo/config.py:129` with `ge=0, le=MAX_SEED`, and marshals to a `c_uint64` (`src/magic_geo/native.py:49`).
+**What it is.** The single 64-bit entropy source for the whole generator. It is declared at `src/magic_geo/config.py` with `ge=0, le=MAX_SEED`, and marshals to a `c_uint64` (`src/magic_geo/native.py:49`).
 
 **Where it is consumed.** Only in the tectonic seeding stage. `generate_plates` uses `std::mt19937_64 rng(params.seed ^ 0xC0FFEEULL)` (`cpp/src/engine/tectonics.cpp:15`) to draw each plate's crust bias and angular speed; `choose_plate_seeds` uses `rng(params.seed ^ 0xBAD5EEDULL)` (`cpp/src/engine/tectonics.cpp:42`); and the crust/topography derivation draws per-cell values with `signed_noise(params.seed, i, salt)` at `cpp/src/engine/tectonics.cpp:300`, `:303`, `:368`, and `:373`, and with `hash01(params.seed, i, salt)` at `:396` and `:432` (both helpers are defined at `cpp/src/engine/core.cpp:132` and `:136`). It is then echoed verbatim into the payload summary at `cpp/src/engine/summary.cpp:1319`. `params.seed` appears nowhere else in `cpp/src/` beyond the C-ABI copy in `cpp/src/c_api.cpp:15`. Every later stage — mesh construction, climate, hydrology, erosion, cryosphere, all Python enrichers — is a deterministic function of state, not of the seed directly.
 
@@ -181,7 +175,7 @@ Model: `RunConfig`, `src/magic_geo/config.py:124`. Section description: "Run ide
 
 ### `run.name`
 
-**What it is.** A metadata label. Declared at `src/magic_geo/config.py:135` with `min_length=1, max_length=256`, then narrowed by the `validate_name_for_native_boundary` field validator (`src/magic_geo/config.py:142`–`153`), which rejects three things with these exact messages:
+**What it is.** A metadata label. Declared at `src/magic_geo/config.py` with `min_length=1, max_length=256`, then narrowed by the `validate_name_for_native_boundary` field validator (`src/magic_geo/config.py`), which rejects three things with these exact messages:
 
 | Condition | Message |
 | --- | --- |
@@ -201,7 +195,7 @@ Model: `RunConfig`, `src/magic_geo/config.py:124`. Section description: "Run ide
 
 ## `planet` — bulk planetary properties
 
-Model: `PlanetConfig`, `src/magic_geo/config.py:156`. Section description: "Planet size, gravity, orbit, atmosphere, water, heat, and age."
+Model: `PlanetConfig`, `src/magic_geo/config.py`. Section description: "Planet size, gravity, orbit, atmosphere, water, heat, and age."
 
 These twelve values are also duplicated as a literal default table in `PLANET_PARAMETER_DEFAULTS` (`src/magic_geo/planet_parameters.py:10`), which is snapshotted into the payload as the top-level `planet_parameters` object. `api.py` asserts the native engine reproduced that snapshot exactly before any enricher runs (`_require_configured_planet_snapshot`, `src/magic_geo/api.py:185`) — a mismatch raises `native planet_parameters do not match the configured planet snapshot`.
 
@@ -222,7 +216,7 @@ These twelve values are also duplicated as a literal default table in `PLANET_PA
 
 ### `planet.radius_km`
 
-**What it is.** The mean spherical radius. Declared at `src/magic_geo/config.py:161`.
+**What it is.** The mean spherical radius. Declared at `src/magic_geo/config.py`.
 
 **Where it is consumed.** It is the conversion factor from the unit sphere to physical units. `build_fibonacci_mesh` multiplies each control volume's solid angle by `radius_km²` to obtain `area_km2` (`cpp/src/engine/mesh.cpp:823`); the same conversion runs for the geodesic backend. From there it reaches crust transport (`cpp/src/engine/crust_transport.cpp`), plate boundary segment geometry and nominal km/Ma velocity labelling (`cpp/src/engine/plate_boundary_segments.cpp`), water feature geometry (`cpp/src/engine/water_features.cpp`), and settlement spacing (`cpp/src/engine/settlements.cpp`). On the Python side, twelve modules read it through `planet_radius_km(world)` (`src/magic_geo/planet_parameters.py:73`): `cell_geometry.py`, `hydrology_dynamics.py`, `sediment_routing.py`, `river_channel_morphology.py`, `river_network_evolution.py`, `watershed_diagnostics.py`, `ocean_circulation.py`, `cryosphere_flow.py`, `route_corridors.py`, `logistics_history.py`, `petroleum_migration.py`, and `campaign_operations_validation.py`. The strict reader `_positive_world_parameter` (`src/magic_geo/planet_parameters.py:49`) requires the value to be present, non-bool numeric, finite and `> 0`, otherwise it raises `planet_parameters.radius_km must be finite and positive` (`src/magic_geo/planet_parameters.py:69`).
 
@@ -230,11 +224,11 @@ These twelve values are also duplicated as a literal default table in `PLANET_PA
 
 **Interactions.** Radius is strongly coupled to `ocean_water_inventory_km3`: the volume that floods a given fraction of the surface scales with surface area, i.e. with `radius_km²`. `configs/seeds/ironroot_super_earth.yaml` is the worked example — at `radius_km: 9500.0` it uses `ocean_water_inventory_km3: 3020000000.0` and its own comment records that naive Earth-area scaling "fell inside a connectivity jump", so the value had to be chosen on a solvable interval instead.
 
-**Tuning.** Low (say 3000 km) gives a small world where a 4,096-cell mesh resolves fine detail and ocean basins close with modest inventories. High (say 10000 km) gives large cells, coarse coastlines, and requires re-solving the water inventory. Anything far from 6371 km leaves the calibrated Earth regime, and the geo-validation target bands stop being meaningful.
+**Tuning.** Low (say 3000 km) gives a small world where a 4,096-cell mesh resolves fine detail and ocean basins close with modest inventories. High (say 10000 km) gives large cells, coarse coastlines, and requires re-solving the water inventory. Earth-reference target bands are not a calibration claim for changed radius or the new seasonal climate.
 
 ### `planet.gravity_g`
 
-**What it is.** Surface gravity as a multiple of Earth's. Declared at `src/magic_geo/config.py:167` with `gt=0.05, lt=5.0` (both bounds strict).
+**What it is.** Surface gravity as a multiple of Earth's. Declared at `src/magic_geo/config.py` with `gt=0.05, lt=5.0` (both bounds strict).
 
 **Where it is consumed.** In the native engine it enters the crust/topography relief scale: `relief_scale = clamp(1.0 / sqrt(max(0.08, gravity_g)), 0.55, 1.60)` (`cpp/src/engine/tectonics.cpp:294`), and the precipitation multiplier `gravity_precip_factor = clamp(1.08 - 0.10 * (gravity_g - 1.0), 0.65, 1.35)` (`cpp/src/engine/climate.cpp:259`). On the Python side it is converted to absolute units by `surface_gravity_m_s2(world) = gravity_g * 9.80665` (`src/magic_geo/planet_parameters.py:85`) and read by `cryosphere_flow.py` (ice driving stress) and `river_hydraulics.py`.
 
@@ -246,7 +240,7 @@ These twelve values are also duplicated as a literal default table in `PLANET_PA
 
 ### `planet.day_length_hours`
 
-**What it is.** The rotation period in hours. Declared at `src/magic_geo/config.py:173` with `gt=1.0, le=MAX_DAY_LENGTH_HOURS` (10000.0, `src/magic_geo/config.py:26`).
+**What it is.** The rotation period in hours. Declared at `src/magic_geo/config.py` with `gt=1.0, le=MAX_DAY_LENGTH_HOURS` (10000.0, `src/magic_geo/config.py`).
 
 **Where it is consumed.** Entirely in `cpp/src/engine/climate.cpp`. It parameterizes the prevailing wind field (`prevailing_wind_components(cell.lat, params.day_length_hours)`, `cpp/src/engine/climate.cpp:110` and `:302`), the ocean current field (`ocean_current_components(...)`, `cpp/src/engine/climate.cpp:273` and `:365`), and the circulation-band displacement `rotation_band_shift = clamp((day_length_hours - 24.0) / 24.0 * 5.0, -7.0, 9.0)` (`cpp/src/engine/climate.cpp:266`).
 
@@ -254,71 +248,31 @@ These twelve values are also duplicated as a literal default table in `PLANET_PA
 
 **Interactions.** The band shift is clamped asymmetrically: −7 (reached at ≈ −9.6 h, unreachable) and +9 (reached at 67.2 h). Beyond ~67 h, further slowing has no additional band-shift effect, though the wind and current field functions still see the raw value.
 
-**Tuning.** Low (12–20 h) gives a banded, zonal, Jupiter-ish circulation feel. Default 24 h is the calibrated Earth case. High (30–48 h) widens the Hadley-like belt and pushes the dry latitudes; `configs/seeds/oldstone_stagnant.yaml` uses 36 h, `configs/seeds/glasswind_desert.yaml` and `configs/seeds/solstice_extreme.yaml` use 30 h. Values in the hundreds or thousands of hours are inside the schema but far outside anything calibrated.
+**Tuning.** Low (12–20 h) gives a banded, zonal, Jupiter-ish circulation feel. Default 24 h is the Earth reference input. High (30–48 h) widens the Hadley-like belt and pushes the dry latitudes; `configs/seeds/oldstone_stagnant.yaml` uses 36 h, `configs/seeds/glasswind_desert.yaml` and `configs/seeds/solstice_extreme.yaml` use 30 h. Values in the hundreds or thousands of hours are inside the schema but far outside anything calibrated.
 
 ### `planet.axial_tilt_deg`
 
-**What it is.** Obliquity in degrees. Declared at `src/magic_geo/config.py:179`, `[0, 90]`.
-
-**Where it is consumed.** Two places in `cpp/src/engine/climate.cpp`: the seasonal wind factor `axial_wind_factor = clamp(axial_tilt_deg / 23.5, 0.12, 2.4) * eccentricity_season_factor` (`:395`) and the monthly seasonal temperature amplitude `seasonal_amp = (9.0 + 16.0 * continentality) * (axial_tilt_deg / 23.5) * eccentricity_season_factor * sin(cell.lat)` (`:403`–`404`). Note the tilt ratio is clamped only in the wind term; the temperature term uses it raw. It is also read by the Python energy-balance enricher (`_planet_value(planet, "axial_tilt_deg", 23.5)`, `src/magic_geo/climate_energy.py:124`, clamped to `[0, 90]`).
-
-**How changes propagate.** It is the master seasonality control. Zero tilt gives a perpetually zonal climate with no monthly temperature swing from obliquity; the twelve monthly arrays become nearly flat. High tilt drives extreme summer/winter contrast, which propagates into snow cover, ice extent, permafrost, seasonal aridity, biome classification, and the seasonal-wind reversal diagnostics.
-
-**Interactions.** The wind factor is clamped at 2.4, which is reached at 56.4°, so beyond that only the (unclamped) `seasonal_amp` term keeps growing linearly; below 2.82° the same factor floors at 0.12. `axial_tilt_deg` multiplies with `orbital_eccentricity` through `eccentricity_season_factor` in **both** the wind and the temperature-amplitude terms. `configs/seeds/solstice_extreme.yaml` sets 75° as its defining premise.
-
-**Tuning.** Low (0–10°) gives an aseasonal world with strong latitude banding. Default 23.5° reproduces Earth-like seasonality. High (40–75°) gives violent seasonal reversals; the seed gallery notes that this is *not* a model of irregular or multi-year fantasy seasons, because the engine always uses twelve months.
+Obliquity in degrees, range `[0, 90]`, default 23.5. The native orbital/insolation calculation uses it to obtain solar declination and daily mean incident flux at each cell latitude. Temperature follows the periodic radiation, storage and transport solution. A zero tilt does not suppress distance-driven seasonal forcing on an eccentric orbit. Empirical wind seasonality still uses its separately bounded tilt factor in `climate.cpp`; those winds do not supply the conservative thermal transport graph.
 
 ### `planet.orbital_eccentricity`
 
-**What it is.** Orbit ellipticity. Declared at `src/magic_geo/config.py:185`, `[0, 1)`.
-
-**Where it is consumed.** One native derived factor, used twice: `eccentricity_season_factor = 1.0 + 1.8 * clamp(orbital_eccentricity, 0.0, 0.8)` (`cpp/src/engine/climate.cpp:267`) multiplies the seasonal wind factor at `cpp/src/engine/climate.cpp:395` **and** the monthly seasonal temperature amplitude `seasonal_amp` at `cpp/src/engine/climate.cpp:403`–`404`. It is also read by the Python energy-balance enricher, clamped to `[0, 0.8]` (`src/magic_geo/climate_energy.py:125`).
-
-**How changes propagate.** It amplifies seasonality on both paths: eccentricity → seasonal wind strength → seasonal moisture advection and reversal indices → precipitation seasonality, and eccentricity → monthly temperature amplitude → snow, ice, and seasonal biome contrast. It is a seasonality multiplier, not a star-distance model — the engine has no orbital-position solver, so this is a scalar amplitude, not a computed insolation asymmetry.
-
-**Interactions.** Both native uses and the Python enricher clamp at 0.8, so any value in `[0.8, 1.0)` behaves identically to 0.8. Its temperature path vanishes at `axial_tilt_deg: 0` (because `seasonal_amp` carries an unclamped `axial_tilt_deg / 23.5` factor), but its wind path does **not**: `axial_wind_factor` clamps the tilt ratio at a floor of 0.12, so eccentricity still scales seasonal winds on a zero-obliquity world.
-
-**Tuning.** Low (0.0–0.02) is the near-circular Earth case. High (0.08–0.12) gives noticeably stronger seasonal winds and a larger monthly temperature swing; `configs/seeds/solstice_extreme.yaml` uses 0.08 and `configs/seeds/young_volcanic.yaml` uses 0.12. Anything above 0.8 is a no-op.
+Orbit ellipticity, range `[0, 1)`, default 0.016. The native solar calculation solves orbital position and inverse-square stellar distance through the year, with twelve equal elapsed-time export months. The seasonal energy producer does not clamp eccentricity to 0.8. Near-parabolic cases can require more work or fail explicitly if numerical accuracy or representability cannot be maintained. The empirical wind modifier retains its separate 0.8 clamp; it must not be confused with orbital forcing. See [native climate integration](../seasonal_climate_native_integration.md) for independent-check scope.
 
 ### `planet.stellar_luminosity`
 
-**What it is.** Incident stellar flux relative to the Sun. Declared at `src/magic_geo/config.py:191` with `gt=0.01, le=MAX_STELLAR_LUMINOSITY` (100.0, `src/magic_geo/config.py:27`).
-
-**Where it is consumed.** Through a single quarter-power law: `climate_stellar_temperature_forcing_c = 38.0 * (stellar_luminosity^0.25 - 1.0)` (`cpp/src/engine/core.cpp:9`–`12`, with `CLIMATE_STELLAR_TEMPERATURE_RESPONSE_C = 38.0` at `cpp/src/engine/constants.hpp:14`). That forcing is added to the base temperature and also feeds `climate_thermal_moisture_temperature_anomaly_c` (`cpp/src/engine/core.cpp:19`), which drives the moisture-capacity multiplier. It is separately read by the Python energy-balance enricher (`src/magic_geo/climate_energy.py:121`).
-
-**How changes propagate.** Because of the `^0.25`, response is strongly compressed: `L = 0.55` gives ≈ −5.3 °C, `L = 1.35` gives ≈ +3.0 °C, `L = 2.0` gives ≈ +7.2 °C. The temperature shift then feeds the thermal-moisture factor `clamp(exp(clamp(0.04 * ΔT, ln 0.35, ln 2.25)), 0.35, 2.25)` (`cpp/src/engine/core.cpp:26`–`37`), so warming a world also wets it until the factor saturates at 2.25 (≈ +20.3 °C anomaly) or dries it to 0.35 (≈ −26.2 °C anomaly).
-
-**Interactions.** It is one of three inputs to the same temperature anomaly: `base_temperature_c`, `stellar_luminosity`, and `greenhouse_factor` all sum into `climate_thermal_moisture_temperature_anomaly_c`. Do not tune all three in the same direction unless you intend a saturated moisture factor.
-
-**Tuning.** Low (0.55, as in `configs/seeds/cryogenic_slushball.yaml`) plus low greenhouse produces a snowball/slushball premise. High (1.25–1.35, as in `verdant_hothouse` and `young_volcanic`) warms modestly. Reaching the schema ceiling of 100 would add only ≈ +82 °C of forcing before clamping downstream — the quarter-power makes luminosity a coarse, saturating knob.
+Incident stellar flux relative to the Sun, range `(0.01, 100]`, default 1. It multiplies incoming radiation in the native energy model. The producer computes absorbed shortwave radiation with prescribed albedo 0.3 and solves temperature against outgoing longwave radiation, storage and horizontal heat convergence. It does not add a quarter-power Celsius offset. Rainfall uses the solved global area/time mean temperature through the empirical factor `clamp(exp(0.04 * (mean_temperature_c - 15)), 0.35, 2.25)`; 15°C is a rainfall reference, not an imposed temperature.
 
 ### `planet.atmosphere_pressure_bar`
 
-**What it is.** Mean surface pressure in bar. Declared at `src/magic_geo/config.py:197`, `[0, 1000]`.
-
-**Where it is consumed.** In `compute_climate`, floored at 0.01 (`pressure = max(0.01, atmosphere_pressure_bar)`, `cpp/src/engine/climate.cpp:256`) and used twice: a temperature adjustment `pressure_temp_adj = 4.5 * log(pressure)` (`:257`) and a precipitation multiplier `pressure_precip_factor = clamp(pow(pressure, 0.35), 0.35, 1.85)` (`:258`). It is also read by the Python energy-balance enricher (`src/magic_geo/climate_energy.py:123`).
-
-**How changes propagate.** Pressure warms logarithmically and wets sub-linearly. At 0.7 bar, `pressure_temp_adj ≈ −1.6 °C` and `pressure_precip_factor ≈ 0.88`; at 1.8 bar, `≈ +2.6 °C` and `≈ 1.23`. The precipitation factor saturates at 1.85, reached at ≈ 5.8 bar, and floors at 0.35, reached at ≈ 0.05 bar.
-
-**Interactions.** A configured value of exactly `0.0` is legal in the schema but the engine floors it to 0.01 bar internally — there is no true vacuum branch. Pressure and `greenhouse_factor` are independent knobs here; pressure does not scale greenhouse trapping.
-
-**Tuning.** Low (0.7–0.9, as in `glasswind_desert` and `oldstone_stagnant`) reads as thin-air, cooler and drier. High (1.4–1.8, as in `young_volcanic`, `verdant_hothouse`, `ironroot_super_earth`) reads as a dense, warm, wet atmosphere. Above ~5.8 bar the precipitation response stops moving.
+Area-weighted mean surface pressure in bar, range `[0, 1000]`, default 1. Normalized hydrostatic columns preserve this mean across the terrain. Local pressure determines atmospheric heat capacity `1004 * p / g`, the pressure/gravity scaling of gray opacity, and thermal transport diffusivity `2.2e6 * atmospheric_heat_capacity`. The hydrostatic reference profile is prescribed at 288.15 K; it is not a solved vertical atmosphere. Exactly zero pressure gives zero atmospheric storage, opacity, atmospheric heat transport and rainfall. The prescribed land/marine slab still stores heat. Nonzero pressure also enters a separate bounded empirical rainfall factor.
 
 ### `planet.greenhouse_factor`
 
-**What it is.** A dimensionless trapping multiplier. Declared at `src/magic_geo/config.py:203`, `[0, 100]`.
-
-**Where it is consumed.** `climate_greenhouse_temperature_forcing_c = 11.0 * (greenhouse_factor - 1.0)` (`cpp/src/engine/core.cpp:14`–`17`, constant at `cpp/src/engine/constants.hpp:15`), added to the temperature field and to the thermal-moisture anomaly. The Python energy-balance enricher reads it directly and it appears in `greenhouse_trapping_w_m2` diagnostics (`src/magic_geo/climate_energy.py:122`).
-
-**How changes propagate.** This is the sharpest temperature lever in the schema: it is *linear* at 11 °C per unit, versus luminosity's quarter-power. `greenhouse_factor: 0.5` is −5.5 °C, `1.55` is +6.05 °C, and `2.0` is +11 °C. Because it also flows into the moisture-capacity factor, raising it warms *and* wets until saturation.
-
-**Interactions.** With `base_temperature_c` and `stellar_luminosity` it forms the three-term temperature anomaly of `cpp/src/engine/core.cpp:19`. `greenhouse_factor: 0.0` is legal and yields exactly −11 °C. Values near the ceiling of 100 would produce +1089 °C of nominal forcing, far outside any regime the model was fitted for.
-
-**Tuning.** Low (0.5, `cryogenic_slushball`) with low luminosity is the ice-world recipe. High (1.5–1.55, `young_volcanic`, `verdant_hothouse`) is the hothouse recipe. Prefer moving greenhouse over luminosity when you want a *predictable* temperature offset.
+Dimensionless reference-opacity multiplier, range `[0, 100]`, default 1. Local optical depth is `tau_ref * greenhouse_factor * (p / 100000 Pa) * (9.80665 m/s² / g)`, and effective longwave emissivity is `1 / (1 + 0.75 * optical_depth)`. Higher opacity changes the energy solution; it is not a fixed Celsius increment. Zero opacity gives emissivity 1 while leaving the slab and atmospheric storage and transport otherwise present. Pressure and gravity therefore interact with this control. These are prescribed gray coefficients, without spectral radiation, evolving composition, cloud, water-vapour or ice feedback. Accepted schema bounds are not a claim of physical applicability or Earth calibration.
 
 ### `planet.ocean_fraction_target`
 
-**What it is.** A **diagnostic** target area fraction, not a driver. Declared at `src/magic_geo/config.py:209`, `[0, 0.95]`.
+**What it is.** A **diagnostic** target area fraction, not a driver. Declared at `src/magic_geo/config.py`, `[0, 0.95]`.
 
 **Where it is consumed.** Only in reporting. `sea_level_model_json` computes `target_ocean_cell_count = round(clamp(ocean_fraction_target, 0, 0.98) * cell_count)` and `target_ocean_area_km2 = clamp(...) * surface_area_km2`, and serializes the raw value (`cpp/src/engine/process_serialization.cpp:3354`, `:3375`, `:3413`). The summary emits it as `target_ocean_fraction` (`cpp/src/engine/summary.cpp:1624`). It never appears in `apply_sea_level` (`cpp/src/engine/ocean.cpp`).
 
@@ -330,7 +284,7 @@ These twelve values are also duplicated as a literal default table in `PLANET_PA
 
 ### `planet.ocean_water_inventory_km3`
 
-**What it is.** The volume of water available to the connected-ocean sea-level solve. Declared at `src/magic_geo/config.py:215`, `[0, 1e10]`, default `1.338e9` (Earth's ocean volume).
+**What it is.** The volume of water available to the connected-ocean sea-level solve. Declared at `src/magic_geo/config.py`, `[0, 1e10]`, default `1.338e9` (Earth's ocean volume).
 
 **Where it is consumed.** `apply_sea_level` reads it as `target_volume_km3` (`cpp/src/engine/ocean.cpp:29`) and solves for the sea level whose largest connected water component holds that volume, using a union-find sweep over cells sorted by elevation. A value of `0.0` (or anything `≤ 0`) takes an explicit dry branch: the datum is set just below the lowest cell, every cell is marked non-water with zero depth, and the sediment interface datum is shifted with the reason `"zero-ocean sea-level datum"` (`cpp/src/engine/ocean.cpp:30`–`47`). The achieved volume and the absolute residual against the target are reported at `cpp/src/engine/summary.cpp:1625`–`1630`. The model type is `volume_constrained_connectivity_ocean_flood_v3` (`cpp/src/engine/process_serialization.cpp:3405`).
 
@@ -342,7 +296,7 @@ These twelve values are also duplicated as a literal default table in `PLANET_PA
 
 ### `planet.internal_heat`
 
-**What it is.** Internal heat flow relative to Earth. Declared at `src/magic_geo/config.py:221`, `[0, 100]`.
+**What it is.** Internal heat flow relative to Earth. Declared at `src/magic_geo/config.py`, `[0, 100]`.
 
 **Where it is consumed.** It is one of the two inputs to the tectonic activity index used across `cpp/src/engine/tectonics.cpp`:
 
@@ -360,7 +314,7 @@ tectonic_activity = clamp(internal_heat * sqrt(4.5 / max(0.05, geological_age_ga
 
 ### `planet.geological_age_ga`
 
-**What it is.** Planet age in billions of years. Declared at `src/magic_geo/config.py:227`, `[0.01, 100]`.
+**What it is.** Planet age in billions of years. Declared at `src/magic_geo/config.py`, `[0.01, 100]`.
 
 **Where it is consumed.** Two distinct roles. First, it attenuates tectonic activity through `sqrt(4.5 / max(0.05, geological_age_ga))` (`cpp/src/engine/tectonics.cpp:19`). Second, it bounds crust age: `crust_age_ceiling_ma(params, model_ceiling) = max(0, min(model_ceiling, geological_age_ga * 1000))` (`cpp/src/engine/core.cpp:39`–`42`), and it scales the initial crust-age draw `450.0 + 900.0 * geological_age_ga * hash01(seed, i, 41)` (`cpp/src/engine/tectonics.cpp:432`). Like every planet parameter it is subject to the strict positive-and-finite reader on the Python side (`src/magic_geo/planet_parameters.py:49`, required `> 0`).
 
@@ -374,7 +328,7 @@ tectonic_activity = clamp(internal_heat * sqrt(4.5 / max(0.05, geological_age_ga
 
 ## `mesh` — spherical discretisation
 
-Model: `MeshConfig`, `src/magic_geo/config.py:235`. Section description: "Spherical mesh backend, resolution, and process-neighbour settings."
+Model: `MeshConfig`, `src/magic_geo/config.py`. Section description: "Spherical mesh backend, resolution, and process-neighbour settings."
 
 | Property | Type | Default | Valid range / choices | Description |
 | --- | --- | --- | --- | --- |
@@ -384,7 +338,7 @@ Model: `MeshConfig`, `src/magic_geo/config.py:235`. Section description: "Spheri
 
 ### `mesh.backend`
 
-**What it is.** The tessellation algorithm. Declared at `src/magic_geo/config.py:240` as a two-value `Literal`.
+**What it is.** The tessellation algorithm. Declared at `src/magic_geo/config.py` as a two-value `Literal`.
 
 **Where it is consumed.** It is marshalled to an integer via `MESH_BACKEND_IDS = {"fibonacci_sphere": 0, "geodesic_icosahedron": 1}` (`src/magic_geo/native.py:17`) into the `mesh_backend` field of `NativeConfigV1` (`src/magic_geo/native.py:64`). `build_mesh` dispatches on it at `cpp/src/engine/mesh.cpp:1048`; `validate_params` rejects any other integer with `unknown mesh backend` (`cpp/src/engine/core.cpp:290`). The name is echoed back through `mesh_backend_name` (`cpp/src/engine/core.cpp:104`) and the control-volume model is named accordingly: `spherical_voronoi_control_volume_v1` for Fibonacci, `spherical_barycentric_control_volume_v2` for geodesic (`cpp/src/engine/core.cpp:115`).
 
@@ -392,11 +346,11 @@ Model: `MeshConfig`, `src/magic_geo/config.py:235`. Section description: "Spheri
 
 **Interactions.** `neighbor_count` is only read by the Fibonacci path. `cell_count` is an exact request on the Fibonacci path and a *rounded target* on the geodesic path (see below).
 
-**Tuning.** Use `fibonacci_sphere` (the default) for the calibrated Earth reference and for exact control over cell count. Use `geodesic_icosahedron` when you want the icosahedral structure and can accept a snapped resolution; `configs/seeds/continental_realm.yaml` is the shipped example, and it picks `cell_count: 2562` precisely because that is an exact geodesic count.
+**Tuning.** Use `fibonacci_sphere` (the default) for the Earth reference inputs and exact control over cell count. Use `geodesic_icosahedron` when you want the icosahedral structure and can accept a snapped resolution; `configs/seeds/continental_realm.yaml` is the shipped example, and it picks `cell_count: 2562` precisely because that is an exact geodesic count.
 
 ### `mesh.cell_count`
 
-**What it is.** The requested number of control volumes. Declared at `src/magic_geo/config.py:244`, `[128, 200000]`.
+**What it is.** The requested number of control volumes. Declared at `src/magic_geo/config.py`, `[128, 200000]`.
 
 **Where it is consumed.** On the Fibonacci path it is the exact number of cells built (`cpp/src/engine/mesh.cpp:777`). On the geodesic path it is a target: `geodesic_frequency_for_target(cell_count) = max(1, ceil(sqrt(max(0, (max(12, cell_count) - 2) / 10)) - 1e-9))` (`cpp/src/engine/mesh.cpp:840`), and the realized mesh has `10·f² + 2` vertices:
 
@@ -415,13 +369,13 @@ Model: `MeshConfig`, `src/magic_geo/config.py:235`. Section description: "Spheri
 
 **How changes propagate.** Resolution touches everything. It sets the number of degrees of freedom in every field, the granularity of coastlines and drainage, the length of every per-cell array in the payload, and the runtime and memory cost. It also sets the effective spatial scale together with `radius_km`: at 4,096 cells on an Earth-radius sphere an equivalent-area cell is roughly 400 km across.
 
-**Interactions.** `tectonics.plate_count` must be strictly smaller (validated in Python at `src/magic_geo/config.py:500` against the *requested* count, and in the native pipeline at `cpp/src/engine/pipeline.cpp:13` against the *generated* count — which differ on the geodesic path). It also interacts with `compute.backend: auto`: acceleration thresholds are evaluated against the *actual* generated cell count (`ensure_auto_backend`, `cpp/src/opencl_compute.cpp:952`), with 8,192 cells for a CUDA sm_120 device, 32,768 for an uncalibrated CUDA device, and 32,768 for OpenCL (`cpp/src/opencl_compute.cpp:99`–`101`). Sea-level connectivity is resolution-sensitive: seed presets note that a working `ocean_water_inventory_km3` is tied to a declared mesh size.
+**Interactions.** `tectonics.plate_count` must be strictly smaller (validated in Python at `src/magic_geo/config.py` against the *requested* count, and in the native pipeline at `cpp/src/engine/pipeline.cpp:13` against the *generated* count — which differ on the geodesic path). It also interacts with `compute.backend: auto`: acceleration thresholds are evaluated against the *actual* generated cell count (`ensure_auto_backend`, `cpp/src/opencl_compute.cpp:952`), with 8,192 cells for a CUDA sm_120 device, 32,768 for an uncalibrated CUDA device, and 32,768 for OpenCL (`cpp/src/opencl_compute.cpp:99`–`101`). Sea-level connectivity is resolution-sensitive: seed presets note that a working `ocean_water_inventory_km3` is tied to a declared mesh size.
 
 **Tuning.** Low (128–512) is the smoke/CI regime — `smoke` uses 128 and the CLI exposes `--cells` on `generate` (min 128) for exactly this (`src/magic_geo/cli/commands/generate.py:28`). Default 4,096 is the canonical Earth validation reference. High (16k–200k) gives detailed coastlines and drainage at superlinear cost and payload size, and is the only regime where accelerators are selected automatically.
 
 ### `mesh.neighbor_count`
 
-**What it is.** The target degree of the process-stencil graph. Declared at `src/magic_geo/config.py:250`, `[4, 16]`.
+**What it is.** The target degree of the process-stencil graph. Declared at `src/magic_geo/config.py`, `[4, 16]`.
 
 **Where it is consumed.** Exactly once, in `build_fibonacci_mesh`: `const int k = params.neighbor_count;` then `cells[i].neighbors = index.nearest_neighbor_ids(i, k)` (`cpp/src/engine/mesh.cpp:790`–`794`). The graph is then symmetrized — every `j` in `i`'s list gets `i` appended if missing (`cpp/src/engine/mesh.cpp:807`–`814`) — so realized degrees can exceed `k`. Range-checked natively at `cpp/src/engine/core.cpp:302`.
 
@@ -435,7 +389,7 @@ Model: `MeshConfig`, `src/magic_geo/config.py:235`. Section description: "Spheri
 
 ## `tectonics` — plates and solid earth
 
-Model: `TectonicsConfig`, `src/magic_geo/config.py:258`. Section description: "Plate count, crust allocation, motion, and boundary smoothing."
+Model: `TectonicsConfig`, `src/magic_geo/config.py`. Section description: "Plate count, crust allocation, motion, and boundary smoothing."
 
 | Property | Type | Default | Valid range / choices | Description |
 | --- | --- | --- | --- | --- |
@@ -450,19 +404,19 @@ Model: `TectonicsConfig`, `src/magic_geo/config.py:258`. Section description: "P
 
 ### `tectonics.plate_count`
 
-**What it is.** The number of rigid plate domains. Declared at `src/magic_geo/config.py:263`, `[2, 256]`.
+**What it is.** The number of rigid plate domains. Declared at `src/magic_geo/config.py`, `[2, 256]`.
 
 **Where it is consumed.** `generate_plates` allocates exactly this many plates (`cpp/src/engine/tectonics.cpp:18`–`20`); `choose_plate_seeds` draws that many distinct seed cells (`cpp/src/engine/tectonics.cpp:46`); every cell is then assigned to its nearest plate centre. It also bounds the plate-origin key space that the dry-rock accounting counter-model validates every packet against — `origin_plate_id >= plate_count` is rejected in `validate_packet_key` (`cpp/src/engine/crust_reservoir.cpp:43`–`48`). The native pipeline enforces `plate_count < generated cell count` and throws `plate_count must be smaller than generated mesh cell count` otherwise (`cpp/src/engine/pipeline.cpp:13`).
 
 **How changes propagate.** Plate count sets boundary density. More plates means more boundary length per unit area, hence more convergence/divergence forcing, more mountain belts and ridges, and a more fragmented land distribution. Fewer plates means broad interiors, long quiet regions, and a few very large orogens.
 
-**Interactions.** Hard constraint against `mesh.cell_count` (`src/magic_geo/config.py:500`). Also interacts with `boundary_smoothing_steps`: at high plate counts on a coarse mesh, boundaries are only a few cells wide and heavy smoothing can erase them.
+**Interactions.** Hard constraint against `mesh.cell_count` (`src/magic_geo/config.py`). Also interacts with `boundary_smoothing_steps`: at high plate counts on a coarse mesh, boundaries are only a few cells wide and heavy smoothing can erase them.
 
 **Tuning.** Low (6, `oldstone_stagnant`; 8, `glasswind_desert` and the `smoke` profile) gives broad, stable domains. Default 14 is the Earth-like reference. High (24, `pelagic_archipelago`; 28, `young_volcanic`) gives dense boundaries and a shattered, high-relief surface.
 
 ### `tectonics.continental_plate_fraction`
 
-**What it is.** The probability that a plate is seeded with a continental bias. Declared at `src/magic_geo/config.py:269`, `[0, 1]`.
+**What it is.** The probability that a plate is seeded with a continental bias. Declared at `src/magic_geo/config.py`, `[0, 1]`.
 
 **Where it is consumed.** In `generate_plates`, as a threshold on a uniform draw: `if (draw < continental_plate_fraction) { … continental … } else if (draw < continental_plate_fraction + 0.22) { … }` (`cpp/src/engine/tectonics.cpp:23`–`25`). Note the second branch adds a fixed 0.22 band, so the class assignment is a three-way split, not a binary one.
 
@@ -474,7 +428,7 @@ Model: `TectonicsConfig`, `src/magic_geo/config.py:258`. Section description: "P
 
 ### `tectonics.continental_crust_fraction_target`
 
-**What it is.** The target share of total surface control-volume **area** assigned continental crust. Declared at `src/magic_geo/config.py:275`, `[0, 0.95]`.
+**What it is.** The target share of total surface control-volume **area** assigned continental crust. Declared at `src/magic_geo/config.py`, `[0, 0.95]`.
 
 **Where it is consumed.** In the crust/topography derivation, converted to a cell count: `static_cast<int>(llround(continental_crust_fraction_target * n))` (`cpp/src/engine/tectonics.cpp:342`), which the crust allocator aims for. Range-checked natively at `cpp/src/engine/core.cpp:382`.
 
@@ -486,19 +440,19 @@ Model: `TectonicsConfig`, `src/magic_geo/config.py:258`. Section description: "P
 
 ### `tectonics.min_angular_speed`
 
-**What it is.** The lower bound of the procedural intrinsic plate angular-speed **index**. Declared at `src/magic_geo/config.py:281`, `[0, 100]`.
+**What it is.** The lower bound of the procedural intrinsic plate angular-speed **index**. Declared at `src/magic_geo/config.py`, `[0, 100]`.
 
 **Where it is consumed.** Each plate draws `angular_speed = (min_angular_speed + (max_angular_speed - min_angular_speed) * uniform) * tectonic_activity` (`cpp/src/engine/tectonics.cpp:31`–`32`).
 
 **How changes propagate.** It guarantees a floor on plate mobility. Raising it removes the possibility of a nearly-stationary plate, so every boundary carries some convergence/divergence forcing and no plate interior stays fully quiet.
 
-**Interactions.** It is multiplied by the clamped `tectonic_activity` index (from `internal_heat` and `geological_age_ga`), and the resulting `angular_speed` is later multiplied by `plate_motion_scale_deg_per_step` and the timestep scale to obtain an actual rotation (`cpp/src/engine/tectonics.cpp:1127`–`1128`). The cross-field validator `validate_speeds` (`src/magic_geo/config.py:312`) rejects `max_angular_speed < min_angular_speed` with `max_angular_speed must be >= min_angular_speed`; the native side repeats this at `cpp/src/engine/core.cpp:364`–`366`.
+**Interactions.** It is multiplied by the clamped `tectonic_activity` index (from `internal_heat` and `geological_age_ga`), and the resulting `angular_speed` is later multiplied by `plate_motion_scale_deg_per_step` and the timestep scale to obtain an actual rotation (`cpp/src/engine/tectonics.cpp:1127`–`1128`). The cross-field validator `validate_speeds` (`src/magic_geo/config.py`) rejects `max_angular_speed < min_angular_speed` with `max_angular_speed must be >= min_angular_speed`; the native side repeats this at `cpp/src/engine/core.cpp:364`–`366`.
 
 **Tuning.** Low (0.0–0.02) permits nearly-frozen plates; `oldstone_stagnant` sets both bounds to `0.0` for a fully stagnant premise. Default 0.03 is a light floor. High (0.30, `young_volcanic`) forces universal motion. This is **not** calibrated in degrees per million years — it is a dimensionless index.
 
 ### `tectonics.max_angular_speed`
 
-**What it is.** The upper bound of the same procedural index. Declared at `src/magic_geo/config.py:287`, `[0, 100]`.
+**What it is.** The upper bound of the same procedural index. Declared at `src/magic_geo/config.py`, `[0, 100]`.
 
 **Where it is consumed.** Same draw as above (`cpp/src/engine/tectonics.cpp:31`–`32`).
 
@@ -510,7 +464,7 @@ Model: `TectonicsConfig`, `src/magic_geo/config.py:258`. Section description: "P
 
 ### `tectonics.boundary_smoothing_steps`
 
-**What it is.** The number of deterministic label-smoothing iterations applied to the boundary forcing fields. Declared at `src/magic_geo/config.py:293`, `[0, 32]`.
+**What it is.** The number of deterministic label-smoothing iterations applied to the boundary forcing fields. Declared at `src/magic_geo/config.py`, `[0, 32]`.
 
 **Where it is consumed.** In `classify_boundaries`, to smooth the convergence, divergence, and transform fields. The engine first offers the three fields to `try_accelerated_smooth_three_fields(cells, conv, div, trans, boundary_smoothing_steps, 0.58, 0.58, 0.62, …)` (`cpp/src/engine/tectonics.cpp:163`–`174`); if that declines, the CPU fallback runs `smooth_field(cells, conv, boundary_smoothing_steps, 0.58)`, `smooth_field(cells, div, …, 0.58)`, and `smooth_field(cells, trans, …, 0.62)` (`cpp/src/engine/tectonics.cpp:180`–`182`). Both paths use the same iteration count and weights; note the transform field uses a different weight from the other two.
 
@@ -522,7 +476,7 @@ Model: `TectonicsConfig`, `src/magic_geo/config.py:258`. Section description: "P
 
 ### `tectonics.plate_motion_scale_deg_per_step`
 
-**What it is.** The displacement multiplier at the 5 Ma reference step. Declared at `src/magic_geo/config.py:299`, `[0, 10]`.
+**What it is.** The displacement multiplier at the 5 Ma reference step. Declared at `src/magic_geo/config.py`, `[0, 10]`.
 
 **Where it is consumed.** In `advance_plate_motion_and_crust`: `rotation_deg = plate.angular_speed * plate_motion_scale_deg_per_step * timestep_scale`, applied by rotating the plate centre about its Euler axis (`cpp/src/engine/tectonics.cpp:1127`–`1131`). `timestep_scale` is `maturation_timestep_ma / 5.0` (`cpp/src/engine/core.cpp:44`, with `MATURATION_REFERENCE_TIMESTEP_MA = 5.0` at `cpp/src/engine/constants.hpp:72`). The plate boundary segment ledger also uses it to label nominal km/Ma velocities (`cpp/src/engine/plate_boundary_segments.cpp`).
 
@@ -530,11 +484,11 @@ Model: `TectonicsConfig`, `src/magic_geo/config.py:258`. Section description: "P
 
 **Interactions.** Multiplied by the per-plate `angular_speed` (itself the product of the min/max draw and `tectonic_activity`) and by `erosion.maturation_timestep_ma / 5`. It only has an effect when `erosion.iterations > 0`. Both the `earthlike` and `smoke` profiles raise it from the schema default of 2.0 to **4.0**.
 
-**Tuning.** `0.0` freezes plate motion entirely (`oldstone_stagnant`). Low (1.5, `glasswind_desert`) gives slow drift. The profile value 4.0 is the calibrated Earth-like setting. High (4.5, `young_volcanic`) is aggressive. This remains a heuristic kinematic scale, **not** a calibrated angular velocity, and the derived km/Ma labels are nominal.
+**Tuning.** `0.0` freezes plate motion entirely (`oldstone_stagnant`). Low (1.5, `glasswind_desert`) gives slow drift. The profile value 4.0 is retained from the previous Earth reference inputs. High (4.5, `young_volcanic`) is aggressive. This remains a heuristic kinematic scale, **not** a calibrated angular velocity, and the derived km/Ma labels are nominal.
 
 ### `tectonics.oceanic_crust_aging_ma_per_step`
 
-**What it is.** The age increment applied to quiet oceanic crust at the 5 Ma reference step. Declared at `src/magic_geo/config.py:305`, `[0, 50]`.
+**What it is.** The age increment applied to quiet oceanic crust at the 5 Ma reference step. Declared at `src/magic_geo/config.py`, `[0, 50]`.
 
 **Where it is consumed.** Only inside the quiet-oceanic branch of the crust process: when a cell is old-oceanic and both divergence and convergence are below 0.10, `crust_age += oceanic_crust_aging_ma_per_step * timestep_scale * quiet_fraction`, where `quiet_fraction = clamp(1.0 - max(div, conv) / 0.10, 0, 1)` (`cpp/src/engine/tectonics.cpp:1327`–`1331`). The reason code is `CRUST_PROCESS_QUIET_OCEANIC_AGING`.
 
@@ -548,55 +502,28 @@ Model: `TectonicsConfig`, `src/magic_geo/config.py:258`. Section description: "P
 
 ## `climate` — temperature and precipitation drivers
 
-Model: `ClimateConfig`, `src/magic_geo/config.py:319`. Section description: "Temperature, precipitation, seasonality, and subtropical drying controls."
+The current `ClimateConfig` is the strict `SeasonalClimateConfig` in `src/magic_geo/seasonal_config.py`.
 
-| Property | Type | Default | Valid range / choices | Description |
+| Property | Type | Default | Valid range | Meaning |
 | --- | --- | --- | --- | --- |
-| `months` | `Literal[12]` | `12` | `12` only | Fixed number of monthly climate samples in one generated year. |
-| `lapse_rate_c_per_km` | float | `6.5` | `[0.0, 15.0]` | Atmospheric temperature lapse rate in degrees Celsius per kilometre. |
-| `base_temperature_c` | float | `15.0` | `[-100.0, 100.0]` | Global mean sea-level temperature anchor in degrees Celsius. |
-| `precipitation_scale` | float | `1.0` | `[0.0, 10.0]` | Dimensionless global precipitation multiplier; zero creates a dry boundary. |
-| `subtropical_drying_strength` | float | `0.65` | `[0.0, 0.9]` | Dimensionless strength of subtropical descending-air dry belts. |
+| `months` | integer literal | `12` | exactly integer `12` | Twelve equal elapsed-time export months. |
+| `reference_infrared_optical_depth` | float | `1.0` | finite, nonnegative | Gray optical depth at one bar and Earth gravity before greenhouse scaling. |
+| `precipitation_scale` | float | `1.0` | `[0, 10]` | Empirical rainfall multiplier; zero is an exact dry boundary. |
+| `subtropical_drying_strength` | float | `0.65` | `[0, 0.9]` | Empirical descending-air drying strength. |
 
 ### `climate.months`
 
-**What it is.** The number of monthly samples per year. Declared at `src/magic_geo/config.py:324` as `Literal[12]` — twelve is the only accepted value.
+Fixed to the integer 12. The native solution exports monthly mean temperature and monthly means of `T⁴`, radiation, storage and transport together with thirteen boundary temperatures. Monthly temperatures are not a fitted cosine. Boolean, string and floating-point lookalikes for `months` are rejected.
 
-**Where it is consumed.** It is the loop bound and normalization divisor for every seasonal quantity in `compute_climate`: the monthly loop at `cpp/src/engine/climate.cpp:401`, the seasonal phase `cos(2π(month - 6)/months)` at `:402`, the monthly precipitation split at `:468`, and the annual means for temperature, wind speed, and wind reversal at `:477`–`:481`. Natively re-checked with `if (params.months != 12)` at `cpp/src/engine/core.cpp:376`.
+### `climate.reference_infrared_optical_depth`
 
-**How changes propagate.** It cannot. The literal type makes any other value a validation error, and the payload's monthly arrays are 12-long by contract.
+Finite nonnegative gray optical depth at one bar and Earth gravity, default 1. It combines with local pressure, gravity and `planet.greenhouse_factor` as described above. There is no arbitrary finite upper bound; unrepresentable coefficients or failure to converge produce generation errors. The shipped scenarios explicitly use 1 as a declared baseline, not a fit to their former imposed mean temperatures.
 
-**Interactions.** None — it exists as an explicit, versioned constant in the schema rather than an implicit magic number, so downstream consumers can assert against it.
-
-**Tuning.** Not tunable. Include it in materialized configs for clarity; omitting it is equally valid.
-
-### `climate.lapse_rate_c_per_km`
-
-**What it is.** The environmental lapse rate: temperature drop per kilometre of elevation. Declared at `src/magic_geo/config.py:328`, `[0, 15]`.
-
-**Where it is consumed.** Twice in `compute_climate`: in the orographic/advection pre-pass as `lapse_rate_c_per_km / 1000.0` per metre (`cpp/src/engine/climate.cpp:281`), and in the per-cell temperature as `lapse = max(0, elevation_m) * lapse_rate_c_per_km / 1000.0` (`cpp/src/engine/climate.cpp:390`). Note the `max(0, …)`: below-sea-level land receives no lapse *warming*.
-
-**How changes propagate.** It converts relief into temperature contrast, which sets snowlines, alpine biome boundaries, ice extent and glacier viability, and the orographic condensation profile. A 4,000 m peak is 26 °C colder than sea level at the default rate.
-
-**Interactions.** Its impact is proportional to relief, which is set by `tectonics` uplift and by `planet.gravity_g` (through `relief_scale`). On a flat world it does nothing. It combines with `base_temperature_c` to place the freezing isotherm.
-
-**Tuning.** Low (5.5, `verdant_hothouse`) produces warm, humid highlands with high snowlines. Default 6.5 is the Earth standard. High (7.0–7.5, `young_volcanic`, `glasswind_desert`) produces sharp alpine gradients. `0.0` removes elevation from the temperature field entirely — legal, and a clean way to isolate latitudinal effects.
-
-### `climate.base_temperature_c`
-
-**What it is.** The global mean sea-level temperature anchor. Declared at `src/magic_geo/config.py:334`, `[-100, 100]`.
-
-**Where it is consumed.** It is the additive base of the latitudinal temperature field: `latitude_temp = base_temperature_c + …` (`cpp/src/engine/climate.cpp:385`), and it is the reference term of the thermal-moisture anomaly `base_temperature_c - 15.0 + stellar_forcing + greenhouse_forcing` (`cpp/src/engine/core.cpp:19`–`23`, with `CLIMATE_THERMAL_MOISTURE_REFERENCE_BASE_TEMPERATURE_C = 15.0` at `cpp/src/engine/constants.hpp:16`).
-
-**How changes propagate.** It shifts the entire temperature field rigidly, which moves the ice line, permafrost extent, biome bands, evaporation, and — via the thermal-moisture factor — total precipitation. It is the most direct climate lever there is.
-
-**Interactions.** It is one of the three additive terms in the moisture anomaly alongside `stellar_luminosity` and `greenhouse_factor`. The moisture factor is `clamp(exp(clamp(0.04·ΔT, ln 0.35, ln 2.25)), 0.35, 2.25)` (`cpp/src/engine/core.cpp:26`–`37`), so ΔT saturates at +20.3 °C and −26.2 °C. A `base_temperature_c` of −10 with default luminosity and greenhouse gives ΔT = −25 °C, just inside the dry saturation point.
-
-**Tuning.** Low (−10.0, `cryogenic_slushball`; 8.0, `oldstone_stagnant`) gives cold worlds. Default 15.0 is Earth. High (30–32, `verdant_hothouse`, `young_volcanic`, `glasswind_desert`) gives hothouses. Prefer this over luminosity when you want a *linear, predictable* temperature offset.
+The retired `climate.base_temperature_c` and `climate.lapse_rate_c_per_km` fields are rejected individually with migration guidance. Remove them and choose opacity under its physical meaning; no equivalent automatic conversion exists. Elevation affects hydrostatic columns and associated thermal coefficients, but a free lapse correction is not added to the solved surface temperature. The explicit Python `LegacyWorldConfig` and old C ABI versions preserve old-model behavior for compatibility callers.
 
 ### `climate.precipitation_scale`
 
-**What it is.** A global multiplier on annual precipitation. Declared at `src/magic_geo/config.py:340`, `[0, 10]`.
+**What it is.** A global multiplier on annual precipitation. Declared at `src/magic_geo/config.py`, `[0, 10]`.
 
 **Where it is consumed.** In the annual precipitation product: `annual *= precipitation_scale * pressure_precip_factor * gravity_precip_factor * orographic_factor * rain_shadow_factor * ocean_current_moisture_factor * advected_moisture_factor * circulation_precip_factor * subtropical_drying_factor * monsoon_precipitation_factor` (`cpp/src/engine/climate.cpp:460`–`463`). The result is clamped at zero (`max(0.0, annual)`, `cpp/src/engine/climate.cpp:468`) before being divided across the twelve months, and only then is the thermal-moisture capacity factor applied (`cpp/src/engine/climate.cpp:469`+).
 
@@ -604,11 +531,11 @@ Model: `ClimateConfig`, `src/magic_geo/config.py:319`. Section description: "Tem
 
 **Interactions.** `0.0` is an exact dry boundary — every cell gets zero precipitation, so there is no runoff and no fluvial incision, regardless of `erosion.stream_power_coefficient`. Because it multiplies a sum that can be negative (the empirical latitudinal combination at `cpp/src/engine/climate.cpp:451` includes `-610 * subtropic`), the zero clamp happens after scaling, so near-zero positive values stay proportional instead of crossing a discontinuous floor. Both the `earthlike` and `smoke` profiles set it to **0.8**, drier than the schema default.
 
-**Tuning.** Very low (0.08, `glasswind_desert`) with high `subtropical_drying_strength` is the desert-world recipe. Low (0.5–0.65, `young_volcanic`, `cryogenic_slushball`, `oldstone_stagnant`) gives arid worlds. The profile value 0.8 is calibrated. High (1.4, `pelagic_archipelago`; 1.8, `verdant_hothouse`) gives a wet world with large rivers and vigorous incision.
+**Tuning.** Very low (0.08, `glasswind_desert`) with high `subtropical_drying_strength` is the desert-world recipe. Low (0.5–0.65, `young_volcanic`, `cryogenic_slushball`, `oldstone_stagnant`) gives arid worlds. The profile value 0.8 is retained from the previous inputs; seasonal climate calibration is not established. High (1.4, `pelagic_archipelago`; 1.8, `verdant_hothouse`) gives a wet world with large rivers and vigorous incision.
 
 ### `climate.subtropical_drying_strength`
 
-**What it is.** The intensity of the descending-air dry belts. Declared at `src/magic_geo/config.py:346`, `[0, 0.9]` — note the ceiling is 0.9, not 1.0.
+**What it is.** The intensity of the descending-air dry belts. Declared at `src/magic_geo/config.py`, `[0, 0.9]` — note the ceiling is 0.9, not 1.0.
 
 **Where it is consumed.** As the subtropical drying factor:
 
@@ -630,7 +557,7 @@ subtropical_drying_factor = clamp(
 
 ## `hydrology` — routing and river classification
 
-Model: `HydrologyConfig`, `src/magic_geo/config.py:354`. Section description: "River classification and closed-basin routing policy."
+Model: `HydrologyConfig`, `src/magic_geo/config.py`. Section description: "River classification and closed-basin routing policy."
 
 | Property | Type | Default | Valid range / choices | Description |
 | --- | --- | --- | --- | --- |
@@ -639,7 +566,7 @@ Model: `HydrologyConfig`, `src/magic_geo/config.py:354`. Section description: "R
 
 ### `hydrology.river_percentile`
 
-**What it is.** The percentile of the sorted flow-accumulation distribution above which a land cell is labelled a river. Declared at `src/magic_geo/config.py:359`, `[0.50, 0.995]`.
+**What it is.** The percentile of the sorted flow-accumulation distribution above which a land cell is labelled a river. Declared at `src/magic_geo/config.py`, `[0.50, 0.995]`.
 
 **Where it is consumed.** In the river classification step: `idx = clamp(river_percentile, 0.5, 0.999) * (accum.size() - 1)` over the sorted accumulation array (`cpp/src/engine/hydrology.cpp:712`). The same clamped expression is recomputed for summary diagnostics (`cpp/src/engine/summary.cpp:1300`–`1307`), and the raw value is echoed as the summary key `river_extraction_percentile` with at least six decimals (`cpp/src/engine/summary.cpp:1356`–`1357`), alongside `river_extraction_model` = `flow_accumulation_percentile_on_conditioned_hydrologic_surface_v1` and the derived `river_flow_accumulation_threshold`. Range-checked natively at `cpp/src/engine/core.cpp:403`.
 
@@ -651,7 +578,7 @@ Model: `HydrologyConfig`, `src/magic_geo/config.py:354`. Section description: "R
 
 ### `hydrology.preserve_geologic_depressions`
 
-**What it is.** The closed-basin policy. Declared at `src/magic_geo/config.py:365`, default `true`.
+**What it is.** The closed-basin policy. Declared at `src/magic_geo/config.py`, default `true`.
 
 **Where it is consumed.** In depression handling: a sink is treated as a preserved geologic depression only when `preserve_geologic_depressions && is_geologic_depression(sink_cell)` (`cpp/src/engine/hydrology.cpp:556`). When true, qualifying sinks stay endorheic instead of entering numeric-depression correction; when false, depressions are filled toward an outlet.
 
@@ -665,7 +592,7 @@ Model: `HydrologyConfig`, `src/magic_geo/config.py:354`. Section description: "R
 
 ## `erosion` — landscape maturation
 
-Model: `ErosionConfig`, `src/magic_geo/config.py:371`. Section description: "Landscape maturation timestep, incision, diffusion, and uplift settings."
+Model: `ErosionConfig`, `src/magic_geo/config.py`. Section description: "Landscape maturation timestep, incision, diffusion, and uplift settings."
 
 The loop this section controls is `erode(...)` in `cpp/src/engine/earth_system.cpp:928`. Each iteration advances plate motion and crust, transports hillslope sediment, applies stream-power incision, routes fluvial sediment, and records a feedback and plate-motion history entry.
 
@@ -681,7 +608,7 @@ The loop this section controls is `erode(...)` in `cpp/src/engine/earth_system.c
 
 ### `erosion.iterations`
 
-**What it is.** The number of coupled maturation transitions. Declared at `src/magic_geo/config.py:376`, `[0, 250]`.
+**What it is.** The number of coupled maturation transitions. Declared at `src/magic_geo/config.py`, `[0, 250]`.
 
 **Where it is consumed.** The loop bound: `for (int iter = 0; iter < params.erosion_iterations; ++iter)` (`cpp/src/engine/earth_system.cpp:928`). It also determines the length of the plate-motion, feedback, sediment-routing, hillslope-transport, crust-material-shadow, and dry-rock-accounting histories (`cpp/src/engine/process_serialization.cpp` references `erosion_iterations` in twelve places). Range-checked natively at `cpp/src/engine/core.cpp:406`.
 
@@ -693,7 +620,7 @@ The loop this section controls is `erode(...)` in `cpp/src/engine/earth_system.c
 
 ### `erosion.maturation_timestep_ma`
 
-**What it is.** The nominal millions of years each transition represents. Declared at `src/magic_geo/config.py:382` with `gt=0.0, le=5.0` — refinement below 5 Ma is allowed, coarsening above it is **rejected**.
+**What it is.** The nominal millions of years each transition represents. Declared at `src/magic_geo/config.py` with `gt=0.0, le=5.0` — refinement below 5 Ma is allowed, coarsening above it is **rejected**.
 
 **Where it is consumed.** Through a single scale factor `maturation_timestep_scale(params) = maturation_timestep_ma / MATURATION_REFERENCE_TIMESTEP_MA` where the reference is 5.0 (`cpp/src/engine/core.cpp:44`–`46`, `cpp/src/engine/constants.hpp:72`). That scale multiplies: plate rotation (`cpp/src/engine/tectonics.cpp:1128`), quiet oceanic crust ageing (`:1329`), the uplift rate (`:502`, `:1611`), the hillslope effective diffusivity (`cpp/src/engine/earth_system.cpp:361`), and the applied fluvial incision depth (`cpp/src/engine/earth_system.cpp:987`). Fractional per-step responses are converted through `timestep_scaled_fraction`, which uses `-expm1(scale · log1p(-fraction))` so that repeated sub-steps compose correctly rather than summing linearly (`cpp/src/engine/core.cpp:48`–`64`). Natively re-checked with `maturation_timestep_ma <= 0.0 || > 5.0` at `cpp/src/engine/core.cpp:388`.
 
@@ -705,7 +632,7 @@ The loop this section controls is `erode(...)` in `cpp/src/engine/earth_system.c
 
 ### `erosion.stream_power_coefficient`
 
-**What it is.** The erodibility coefficient K of the stream-power incision law. Declared at `src/magic_geo/config.py:388`, `[0, 1000]`.
+**What it is.** The erodibility coefficient K of the stream-power incision law. Declared at `src/magic_geo/config.py`, `[0, 1000]`.
 
 **Where it is consumed.** In the incision term:
 
@@ -726,7 +653,7 @@ cell.erosion_rate = stream          // reference-normalized, not the applied dep
 
 ### `erosion.drainage_exponent`
 
-**What it is.** The exponent m on normalized drainage area in `E ∝ Aᵐ Sⁿ`. Declared at `src/magic_geo/config.py:394`, `[0, 2]`.
+**What it is.** The exponent m on normalized drainage area in `E ∝ Aᵐ Sⁿ`. Declared at `src/magic_geo/config.py`, `[0, 2]`.
 
 **Where it is consumed.** `pow(acc_norm, drainage_exponent)` at `cpp/src/engine/earth_system.cpp:985`, where `acc_norm` is flow accumulation normalized by the 95th percentile and clamped to `[0, 3]`.
 
@@ -738,7 +665,7 @@ cell.erosion_rate = stream          // reference-normalized, not the applied dep
 
 ### `erosion.slope_exponent`
 
-**What it is.** The exponent n on slope in `E ∝ Aᵐ Sⁿ`. Declared at `src/magic_geo/config.py:400`, `[0, 3]`.
+**What it is.** The exponent n on slope in `E ∝ Aᵐ Sⁿ`. Declared at `src/magic_geo/config.py`, `[0, 3]`.
 
 **Where it is consumed.** `pow(max(0.0, slope * 900.0), slope_exponent)` at `cpp/src/engine/earth_system.cpp:985`, where `slope` is the hydrologic flow slope toward the downstream cell (`cpp/src/engine/earth_system.cpp:980`) and 900.0 is a fixed internal scale factor.
 
@@ -750,7 +677,7 @@ cell.erosion_rate = stream          // reference-normalized, not the applied dep
 
 ### `erosion.hillslope_diffusion`
 
-**What it is.** The hillslope sediment-diffusion coefficient. Declared at `src/magic_geo/config.py:406`, `[0, 1]`.
+**What it is.** The hillslope sediment-diffusion coefficient. Declared at `src/magic_geo/config.py`, `[0, 1]`.
 
 **Where it is consumed.** In `transport_hillslope_sediment`, per source→target neighbour pair with a positive elevation drop:
 
@@ -770,7 +697,7 @@ effective_diffusivity = min(HILLSLOPE_MAX_EFFECTIVE_DIFFUSIVITY,
 
 ### `erosion.tectonic_uplift_scale`
 
-**What it is.** A dimensionless multiplier on the uplift supplied to maturation. Declared at `src/magic_geo/config.py:412`, `[0, 10]`.
+**What it is.** A dimensionless multiplier on the uplift supplied to maturation. Declared at `src/magic_geo/config.py`, `[0, 10]`.
 
 **Where it is consumed.** In the uplift rate, both at initial crust derivation and at each motion step:
 
@@ -792,19 +719,19 @@ cell.uplift_rate = tectonic_uplift_scale * tectonic_activity
 
 ## `compute` — execution backend
 
-Model: `ComputeConfig`, `src/magic_geo/config.py:420`. Section description: "Native execution backend and worker scheduling preferences."
+Model: `ComputeConfig`, `src/magic_geo/config.py`. Section description: "Native execution backend and worker scheduling preferences."
 
 This section is operational: it changes *how* the world is computed, not *what* is generated — with the important exception that thread count currently affects reproducibility.
 
 | Property | Type | Default | Valid range / choices | Description |
 | --- | --- | --- | --- | --- |
 | `backend` | enum (str) | `"auto"` | `auto`, `cpu`, `opencl`, `cuda` | Requested compute backend; explicit accelerator choices fail if unavailable. |
-| `threads` | int | `0` | `[0, 1024]` (`MAX_COMPUTE_THREADS`, `src/magic_geo/config.py:33`) | CPU worker-thread count; zero asks the runtime to select automatically. |
+| `threads` | int | `0` | `[0, 1024]` (`MAX_COMPUTE_THREADS`, `src/magic_geo/config.py`) | CPU worker-thread count; zero asks the runtime to select automatically. |
 | `opencl_prefer_gpu` | bool | `true` | `true`, `false` | Prefer a qualifying GPU when selecting among available OpenCL devices. |
 
 ### `compute.backend`
 
-**What it is.** The requested execution backend. Declared at `src/magic_geo/config.py:425` as a four-value `Literal`.
+**What it is.** The requested execution backend. Declared at `src/magic_geo/config.py` as a four-value `Literal`.
 
 **Where it is consumed.** Mapped to an integer by `COMPUTE_BACKEND_IDS = {"auto": 0, "cpu": 1, "opencl": 2, "cuda": 3}` (`src/magic_geo/native.py:22`) into `NativeConfigV2.compute_backend` (`src/magic_geo/native.py:97`), which maps to `CConfigV2.compute_backend`. `validate_compute_options` rejects anything outside `[0, 3]` with `compute_backend must be auto, cpu, opencl, or cuda` (`cpp/src/engine/core.cpp:233`–`236`). Selection happens in `ComputeSession::Impl` (`cpp/src/opencl_compute.cpp:807`):
 
@@ -833,7 +760,7 @@ Below every applicable threshold, `auto` selects CPU with the reason "automatic 
 
 ### `compute.threads`
 
-**What it is.** The OpenMP worker-thread count. Declared at `src/magic_geo/config.py:429`, `[0, 1024]`, `0` meaning "let the runtime decide".
+**What it is.** The OpenMP worker-thread count. Declared at `src/magic_geo/config.py`, `[0, 1024]`, `0` meaning "let the runtime decide".
 
 **Where it is consumed.** Through `ScopedThreadConfiguration` (`cpp/src/engine/core.cpp:213`–`223`), constructed at the top of each of the four public generation entry points (`cpp/src/engine.cpp:22`, `:33`, `:44`, `:57`). If `requested_threads > 0` it records `omp_get_max_threads()`, calls `omp_set_num_threads(requested_threads)`, and restores the previous value in the destructor (`cpp/src/engine/core.cpp:225`–`231`). When `_OPENMP` is not defined the argument is discarded. Range-checked at `cpp/src/engine/core.cpp:427`.
 
@@ -845,7 +772,7 @@ Below every applicable threshold, `auto` selects CPU with the reason "automatic 
 
 ### `compute.opencl_prefer_gpu`
 
-**What it is.** A device-ranking preference. Declared at `src/magic_geo/config.py:435`, default `true`.
+**What it is.** A device-ranking preference. Declared at `src/magic_geo/config.py`, default `true`.
 
 **Where it is consumed.** Marshalled to `NativeConfigV2.opencl_prefer_gpu` as `1`/`0` (`src/magic_geo/native.py:338`), read into `ComputeOptions::opencl_prefer_gpu` and stored as `prefer_gpu` in the compute session (`cpp/src/opencl_compute.cpp:814`), then echoed into the backend telemetry JSON (`cpp/src/opencl_compute.cpp:2325`). The `ComputeOptions` declaration notes it is "Retained for ABI compatibility and OpenCL device ranking" and that automatic mode tries a qualifying native CUDA device before OpenCL (`cpp/include/magic_geo/native.hpp:76`–`77`).
 
@@ -859,7 +786,7 @@ Below every applicable threshold, `auto` selects CPU with the reason "automatic 
 
 ## `output` — payload shape and numeric formatting
 
-Model: `OutputConfig`, `src/magic_geo/config.py:441`. Section description: "Payload detail and general floating-point output formatting."
+Model: `OutputConfig`, `src/magic_geo/config.py`. Section description: "Payload detail and general floating-point output formatting."
 
 | Property | Type | Default | Valid range / choices | Description |
 | --- | --- | --- | --- | --- |
@@ -868,19 +795,19 @@ Model: `OutputConfig`, `src/magic_geo/config.py:441`. Section description: "Payl
 
 ### `output.include_cells`
 
-**What it is.** Whether the per-cell arrays are serialized into the payload. Declared at `src/magic_geo/config.py:446`, default `true`.
+**What it is.** Whether the per-cell arrays are serialized into the payload. Declared at `src/magic_geo/config.py`, default `true`.
 
-**Where it is consumed.** Marshalled to `1`/`0` (`src/magic_geo/native.py:331`) and read once in world serialization (`cpp/src/engine/world_serialization.cpp:290`), which emits the cells array only when set.
+**Where it is consumed.** The low-level native API marshals the flag to `1`/`0` and the native serializer emits `cells: []` when disabled. The public full-world API requests cells internally, completes every enrichment, and clears the cells array at the output boundary when disabled. It does not modify the caller's configuration.
 
 **How changes propagate.** Turning it off shrinks the payload dramatically and leaves only summaries, histories, and models. It also breaks most downstream consumers: `generate_geo_world` raises `generate_geo_world requires output.include_cells=true because natural enrichers and layer validation consume per-cell state` (`src/magic_geo/api.py:295`–`300`), and the debug exporter raises `world payload has no cells; generate with output.include_cells enabled` (`src/magic_geo/debug_export.py:833`).
 
-**Interactions.** Hard requirement for `generate_geo_world` / `magic-geo generate --geo-only`, for `magic-geo export-debug`, for cell CSV export, and for the layer validators. `generate_world` (the full path) does not raise, but the Python enrichers that build the layer catalogue all read cells — the checked-in 4,096-cell full-scope reference exposes 439 layers (`docs/layers_reference.md:56`).
+**Interactions.** Hard requirement for `generate_geo_world` / `magic-geo generate --geo-only`, for `magic-geo export-debug`, for meaningful cell CSV export, and for the layer validators. `generate_world` preserves all other records and summaries exactly when cells are omitted; their cell IDs still require the complete payload for validation and spatial inspection. This option does not reduce enrichment work or its peak memory.
 
 **Tuning.** Keep it `true`. Set it `false` only for a summary-only run where you want the histories and models without the per-cell arrays, and accept that the debugger, geo-only API, and validators are unavailable for that payload.
 
 ### `output.float_precision`
 
-**What it is.** The default number of decimal places for general/display floats. Declared at `src/magic_geo/config.py:450`, `[0, 8]`.
+**What it is.** The default number of decimal places for general/display floats. Declared at `src/magic_geo/config.py`, `[0, 8]`.
 
 **Where it is consumed.** It is threaded through the serializers as the `precision` argument of `add_double` (`cpp/src/engine/core.cpp:206`) and of the per-collection JSON builders. `params.float_precision` is referenced 165 times in `cpp/src/engine/summary.cpp`, 36 times in `cpp/src/engine/world_serialization.cpp` (which calls no `add_double` directly — it forwards the precision into `plates_json`, `watersheds_json`, `lake_basins_json`, `coastal_features_json`, `ice_sheets_json` and their siblings), and 20 times in `cpp/src/engine/process_serialization.cpp`. Range-checked at `cpp/src/engine/core.cpp:430`. Because the MessagePack path is produced by `json_to_messagepack(serialize_world(...))` (`cpp/src/engine.cpp:46`, `:59`), the same precision governs both `.json` and `.mgeo` outputs.
 
@@ -906,8 +833,8 @@ Two validators run after field-level validation and produce distinct error shape
 
 | Validator | Location | Condition | Message | Reported path |
 | --- | --- | --- | --- | --- |
-| `TectonicsConfig.validate_speeds` | `src/magic_geo/config.py:312` | `max_angular_speed < min_angular_speed` | `max_angular_speed must be >= min_angular_speed` | `tectonics` |
-| `WorldConfig.validate_plate_density` | `src/magic_geo/config.py:500` | `tectonics.plate_count >= mesh.cell_count` | `plate_count must be smaller than mesh.cell_count` | `<root>` |
+| `TectonicsConfig.validate_speeds` | `src/magic_geo/config.py` | `max_angular_speed < min_angular_speed` | `max_angular_speed must be >= min_angular_speed` | `tectonics` |
+| `WorldConfig.validate_plate_density` | `src/magic_geo/config.py` | `tectonics.plate_count >= mesh.cell_count` | `plate_count must be smaller than mesh.cell_count` | `<root>` |
 
 ```console
 $ magic-geo init-config --profile default \
@@ -922,9 +849,9 @@ The native engine repeats both checks independently, but with its own message wo
 
 ## The profile system
 
-Profiles are explicit **starting points**, not hidden defaults applied by the loader. They are defined by two parallel dictionaries, `_PROFILE_DESCRIPTIONS` (`src/magic_geo/config.py:507`) and `_PROFILE_OVERRIDES` (`src/magic_geo/config.py:513`), and enumerated in stable order by `list_config_profiles()` (`src/magic_geo/config.py:704`), which returns `("default", "earthlike", "smoke")`.
+Profiles are explicit **starting points**, not hidden defaults applied by the loader. They are defined by two parallel dictionaries, `_PROFILE_DESCRIPTIONS` (`src/magic_geo/config.py`) and `_PROFILE_OVERRIDES` (`src/magic_geo/config.py`), and enumerated in stable order by `list_config_profiles()` (`src/magic_geo/config.py`), which returns `("default", "earthlike", "smoke")`.
 
-`create_config(profile, overrides)` (`src/magic_geo/config.py:754`) builds a bare `WorldConfig()`, applies the profile's dotted overrides with `source=f"<profile:{name}>"`, then applies the caller's overrides with the default `source="<overrides>"`. An unknown name raises:
+`create_config(profile, overrides)` (`src/magic_geo/config.py`) builds a bare `WorldConfig()`, applies the profile's dotted overrides with `source=f"<profile:{name}>"`, then applies the caller's overrides with the default `source="<overrides>"`. An unknown name raises:
 
 ```text
 <profile>: unknown configuration profile 'nope'; choose one of: default, earthlike, smoke
@@ -945,17 +872,17 @@ Only fields that differ from the schema defaults are listed; every other field t
 | `compute.backend` | `auto` | `auto` | `auto` | **`cpu`** |
 | `compute.threads` | `0` | `0` | `0` | **`1`** |
 
-| Profile | Description string (`src/magic_geo/config.py:507`) | Override count |
+| Profile | Description string (`src/magic_geo/config.py`) | Override count |
 | --- | --- | --- |
-| `default` | "Schema defaults suitable as a neutral editable starting point." | 0 |
-| `earthlike` | "Calibrated 4,096-cell Earth-like reference configuration." | 2 |
-| `smoke` | "Small deterministic CPU configuration for fast integration checks." | 8 |
+| `default` | "Prescribed seasonal energy model with neutral physical inputs." | 0 |
+| `earthlike` | "4,096-cell Earth reference inputs for the seasonal model; new climate calibration is not established." | 2 |
+| `smoke` | "Small deterministic CPU seasonal configuration for integration checks." | 8 |
 
 ### Profile facts worth knowing
 
-- **An empty YAML document is the `default` profile, not `earthlike`.** `parse_config_yaml` normalizes `None` to `{}` (`src/magic_geo/config.py:635`).
-- **`magic-geo init-config` defaults to `--profile earthlike`** (`src/magic_geo/cli/commands/config.py:28`), while the Python `create_config()` defaults to `"default"` (`src/magic_geo/config.py:755`). The web UI also reports `earthlike` as its default (`src/magic_geo/debug_server.py:965`).
-- **`configs/earthlike_seed.yaml` is exactly the `earthlike` profile**, materialized with all 44 fields spelled out.
+- **Every YAML document requires `config_version: 2`.** Empty or unversioned documents are rejected; `WorldConfig()` and `create_config()` deliberately create new version-2 inputs.
+- **`magic-geo init-config` defaults to `--profile earthlike`** (`src/magic_geo/cli/commands/config.py:28`), while the Python `create_config()` defaults to `"default"` (`src/magic_geo/config.py`). The web UI also reports `earthlike` as its default (`src/magic_geo/debug_server.py:965`).
+- **`configs/earthlike_seed.yaml` is exactly the `earthlike` profile**, materialized with all 43 section fields and the version spelled out.
 - **`configs/seeds/*.yaml` are data files, not registered profiles.** The nine presets (`continental_realm`, `cryogenic_slushball`, `glasswind_desert`, `ironroot_super_earth`, `oldstone_stagnant`, `pelagic_archipelago`, `solstice_extreme`, `verdant_hothouse`, `young_volcanic`) cannot be named with `--profile`; pass them with `--config`.
 - **Materialize, do not reference.** A profile name is not generation provenance; treat a later profile revision as a new input and save the complete YAML beside the artifacts.
 
@@ -974,7 +901,7 @@ magic-geo init-config --profile smoke     --output runs/configs/smoke.yaml
 
 ## The `--set` override syntax
 
-`--set` is exposed on exactly one command, `magic-geo init-config` (`src/magic_geo/cli/commands/config.py:32`). It is repeatable and its values are parsed by `parse_config_overrides` (`src/magic_geo/config.py:665`), then applied by `apply_config_overrides` (`src/magic_geo/config.py:710`) through `create_config`.
+`--set` is exposed on exactly one command, `magic-geo init-config` (`src/magic_geo/cli/commands/config.py:32`). It is repeatable and its values are parsed by `parse_config_overrides` (`src/magic_geo/config.py`), then applied by `apply_config_overrides` (`src/magic_geo/config.py`) through `create_config`.
 
 ```bash
 magic-geo init-config \
@@ -993,14 +920,14 @@ magic-geo init-config \
 
 | Rule | Behaviour | Source |
 | --- | --- | --- |
-| Form | `section.field=YAML_VALUE` | `src/magic_geo/config.py:681` |
-| Split | on the **first** `=` only, so values may contain `=` | `assignment.split("=", 1)`, `src/magic_geo/config.py:681` |
-| Path whitespace | stripped | `path.strip()`, `src/magic_geo/config.py:682` |
-| Value whitespace | **not** stripped — passed verbatim to YAML | `src/magic_geo/config.py:692` |
-| Depth | traversal supports arbitrary depth, but the schema is exactly two levels, so every valid path is `section.field` | `src/magic_geo/config.py:726`–`742` |
-| Ordering | insertion order is preserved and applied in that order | `dict` in `src/magic_geo/config.py:674`, iteration at `:723` |
-| Mutation | each value is `deepcopy`d; the input model and caller mapping are never mutated | `src/magic_geo/config.py:749` |
-| Revalidation | the entire document is re-validated after all overrides, so cross-field constraints still apply | `_validate_config_data`, `src/magic_geo/config.py:751` |
+| Form | `section.field=YAML_VALUE` | `src/magic_geo/config.py` |
+| Split | on the **first** `=` only, so values may contain `=` | `assignment.split("=", 1)`, `src/magic_geo/config.py` |
+| Path whitespace | stripped | `path.strip()`, `src/magic_geo/config.py` |
+| Value whitespace | **not** stripped — passed verbatim to YAML | `src/magic_geo/config.py` |
+| Depth | traversal supports arbitrary depth, but the schema is exactly two levels, so every valid path is `section.field` | `src/magic_geo/config.py` |
+| Ordering | insertion order is preserved and applied in that order | `dict` in `src/magic_geo/config.py`, iteration at `:723` |
+| Mutation | each value is `deepcopy`d; the input model and caller mapping are never mutated | `src/magic_geo/config.py` |
+| Revalidation | the entire document is re-validated after all overrides, so cross-field constraints still apply | `_validate_config_data`, `src/magic_geo/config.py` |
 
 ### Type coercion rules
 
@@ -1011,7 +938,7 @@ The value is passed to `yaml.safe_load`, so YAML scalar rules apply exactly:
 | `128` | `128` | `int` |
 | `0.8` | `0.8` | `float` |
 | `1.0e+9` | `1000000000.0` | `float` |
-| `1e9` | `"1e9"` | `str` — PyYAML's YAML 1.1 float resolver needs both a decimal point and a signed exponent, so `1e9`, `1.0e9`, and `1e+9` all stay strings (pydantic then coerces them to `float`) |
+| `1e9` | `"1e9"` | `str` — PyYAML's YAML 1.1 float resolver needs both a decimal point and a signed exponent, so `1e9`, `1.0e9`, and `1e+9` all stay strings (strict numeric fields reject these strings) |
 | `true` / `false` | `True` / `False` | `bool` |
 | `geodesic_icosahedron` | `"geodesic_icosahedron"` | `str` |
 | `'large ocean world'` | `"large ocean world"` | `str` |
@@ -1020,7 +947,7 @@ The value is passed to `yaml.safe_load`, so YAML scalar rules apply exactly:
 | `[a, b]` | `["a", "b"]` | `list` |
 | `{k: v}` | `{"k": "v"}` | `dict` |
 
-Pydantic then applies its normal scalar coercion, so `--set mesh.cell_count="128"` still validates (string → int), while `--set output.include_cells=yes` parses as the boolean `True` under YAML 1.1 rules. Prefer canonical `true` / `false`.
+Strict validation rejects numeric strings, floats for integer fields and booleans for numeric fields. An integer is accepted for a float field. Shell quotes delimit arguments and are not retained automatically: to actually test a YAML numeric string, include literal quotes in the value. YAML 1.1 still parses `yes` as boolean `True`; prefer canonical `true` / `false`.
 
 ### Error cases
 
@@ -1069,34 +996,34 @@ variant = apply_config_overrides(
 
 ## YAML strictness and complexity limits
 
-`parse_config_yaml(text, *, source="<string>")` (`src/magic_geo/config.py:612`) runs a fixed five-stage pipeline. Every failure is a `ConfigError` (a `ValueError` subclass, `src/magic_geo/config.py:41`) whose `str()` is `"{source}[:{line}[:{column}]]: {message}"` and whose `.to_dict()` (`src/magic_geo/config.py:70`) is JSON-safe.
+`parse_config_yaml(text, *, source="<string>")` (`src/magic_geo/config.py`) runs a fixed five-stage pipeline. Every failure is a `ConfigError` (a `ValueError` subclass, `src/magic_geo/config.py`) whose `str()` is `"{source}[:{line}[:{column}]]: {message}"` and whose `.to_dict()` (`src/magic_geo/config.py`) is JSON-safe.
 
 ### Stage 1 — UTF-8 well-formedness
 
-`text.encode("utf-8")` inside `_check_yaml_complexity` (`src/magic_geo/config.py:561`). A `UnicodeEncodeError` becomes `YAML text must be well-formed UTF-8 Unicode`.
+`text.encode("utf-8")` inside `_check_yaml_complexity` (`src/magic_geo/config.py`). A `UnicodeEncodeError` becomes `YAML text must be well-formed UTF-8 Unicode`.
 
 ### Stage 2 — complexity pre-pass
 
-`_check_yaml_complexity` (`src/magic_geo/config.py:557`) streams `yaml.parse` **events** before any object is constructed, so a malicious document is rejected before it can allocate. The three numeric limits are module constants:
+`_check_yaml_complexity` (`src/magic_geo/config.py`) streams `yaml.parse` **events** before any object is constructed, so a malicious document is rejected before it can allocate. The three numeric limits are module constants:
 
 | Limit | Constant | Value | Message on violation | Source |
 | --- | --- | --- | --- | --- |
-| Total parse events | `MAX_YAML_EVENTS` | `20000` | `YAML exceeds the 20000 event complexity limit` | `src/magic_geo/config.py:35`, check at `:570` |
-| Collection nesting depth | `MAX_YAML_NESTING_DEPTH` | `64` | `YAML nesting exceeds the 64-level limit` | `src/magic_geo/config.py:34`, check at `:577` |
-| Alias references | `MAX_YAML_ALIASES` | `64` | `YAML exceeds the 64 alias limit` | `src/magic_geo/config.py:36`, check at `:586` |
+| Total parse events | `MAX_YAML_EVENTS` | `20000` | `YAML exceeds the 20000 event complexity limit` | `src/magic_geo/config.py`, check at `:570` |
+| Collection nesting depth | `MAX_YAML_NESTING_DEPTH` | `64` | `YAML nesting exceeds the 64-level limit` | `src/magic_geo/config.py`, check at `:577` |
+| Alias references | `MAX_YAML_ALIASES` | `64` | `YAML exceeds the 64 alias limit` | `src/magic_geo/config.py`, check at `:586` |
 
-The alias cap is the billion-laughs defence. A `yaml.MarkedYAMLError` here becomes `invalid YAML: {problem}` with **one-based** `line = mark.line + 1` and `column = mark.column + 1` (`src/magic_geo/config.py:593`–`600`); `yaml.YAMLError`, `RecursionError`, `MemoryError`, `ValueError`, and `OverflowError` become `invalid or excessively complex YAML: {exc}` (`src/magic_geo/config.py:601`). Because this pass emits events only, duplicate keys are **not** detected here.
+The alias cap is the billion-laughs defence. A `yaml.MarkedYAMLError` here becomes `invalid YAML: {problem}` with **one-based** `line = mark.line + 1` and `column = mark.column + 1` (`src/magic_geo/config.py`); `yaml.YAMLError`, `RecursionError`, `MemoryError`, `ValueError`, and `OverflowError` become `invalid or excessively complex YAML: {exc}` (`src/magic_geo/config.py`). Because this pass emits events only, duplicate keys are **not** detected here.
 
 There is **no byte-size cap on the YAML text in `config.py` itself**. The 1,000,000-byte cap is imposed only by the web workbench (`_MAX_CONFIG_BYTES`, `src/magic_geo/debug_server.py:45`, enforced in `_check_web_yaml_size` at `:861` with HTTP 413). File and Python paths are bounded only indirectly, by the 20,000-event limit.
 
 ### Stage 3 — strict loading
 
-Loading uses `_UniqueKeySafeLoader` (`src/magic_geo/config.py:85`), a `yaml.SafeLoader` subclass whose default mapping constructor is replaced by `_construct_unique_mapping` (`src/magic_geo/config.py:89`, registered at `:118`):
+Loading uses `_UniqueKeySafeLoader` (`src/magic_geo/config.py`), a `yaml.SafeLoader` subclass whose default mapping constructor is replaced by `_construct_unique_mapping` (`src/magic_geo/config.py`, registered at `:118`):
 
 | Condition | Raised as | Surfaces as |
 | --- | --- | --- |
-| Duplicate mapping key | `ConstructorError("while constructing a mapping", …, f"found duplicate key {key!r}")` (`src/magic_geo/config.py:107`–`113`) | `w.yaml:3:3: invalid YAML: found duplicate key 'seed'` |
-| Unhashable key (a list or mapping used as a key) | `ConstructorError(… "found an unhashable mapping key")` (`src/magic_geo/config.py:100`–`106`) | `invalid YAML: found an unhashable mapping key` |
+| Duplicate mapping key | `ConstructorError("while constructing a mapping", …, f"found duplicate key {key!r}")` (`src/magic_geo/config.py`) | `w.yaml:3:3: invalid YAML: found duplicate key 'seed'` |
+| Unhashable key (a list or mapping used as a key) | `ConstructorError(… "found an unhashable mapping key")` (`src/magic_geo/config.py`) | `invalid YAML: found an unhashable mapping key` |
 | Arbitrary Python object tags | blocked by the `SafeLoader` base | `invalid YAML: …` |
 
 PyYAML's default last-wins duplicate-key behaviour is deliberately disabled. Both constructor errors are `MarkedYAMLError`s, so they carry one-based line/column.
@@ -1113,11 +1040,11 @@ PyYAML's default last-wins duplicate-key behaviour is deliberately disabled. Bot
 
 ### Stage 4 — root shape
 
-`None` (an empty document) becomes `{}` (`src/magic_geo/config.py:635`). A non-mapping root is rejected with `config root must be a YAML mapping` and a single structured issue `{"path": "<root>", "location": [], "message": "config root must be a YAML mapping", "type": "mapping_type"}` (`src/magic_geo/config.py:637`–`649`).
+`None` (an empty document) becomes `{}` and then fails the required-version check (`src/magic_geo/config.py`). A non-mapping root is rejected with `config root must be a YAML mapping` and a single structured issue `{"path": "<root>", "location": [], "message": "config root must be a YAML mapping", "type": "mapping_type"}` (`src/magic_geo/config.py`).
 
 ### Stage 5 — model validation
 
-`_validate_config_data` calls `WorldConfig.model_validate` (`src/magic_geo/config.py:605`). A pydantic `ValidationError` is reshaped by `_config_validation_error` (`src/magic_geo/config.py:532`) using `exc.errors(include_url=False, include_context=False, include_input=False)`. The message is `configuration validation failed:` followed by one `  - {path}: {msg}` line per issue, and `.issues` carries `{path, location, message, type}` per issue with `path` dotted or `<root>`.
+`_validate_config_data` first requires `config_version`, then calls `WorldConfig.model_validate(..., strict=True)` (`src/magic_geo/config.py`). A pydantic `ValidationError` is reshaped by `_config_validation_error` (`src/magic_geo/config.py`) using `exc.errors(include_url=False, include_context=False, include_input=False)`. The message is `configuration validation failed:` followed by one `  - {path}: {msg}` line per issue, and `.issues` carries `{path, location, message, type}` per issue with `path` dotted or `<root>`.
 
 | Rejection | Cause | Example message |
 | --- | --- | --- |
@@ -1129,52 +1056,38 @@ PyYAML's default last-wins duplicate-key behaviour is deliberately disabled. Bot
 
 ### `load_config` exception contract
 
-`load_config` (`src/magic_geo/config.py:829`) calls `Path(path).read_text(encoding="utf-8")` and deliberately **does not** wrap it. `FileNotFoundError`, `PermissionError`, `IsADirectoryError`, and `UnicodeDecodeError` propagate untouched (documented at `src/magic_geo/config.py:833`–`835`). `ConfigError` is reserved for YAML-syntax and model-validation failures that occur after bytes were successfully read. The error `source` is the stringified path, so CLI and web clients get file-anchored `path:line:column` diagnostics.
+`load_config` (`src/magic_geo/config.py`) calls `Path(path).read_text(encoding="utf-8")` and deliberately **does not** wrap it. `FileNotFoundError`, `PermissionError`, `IsADirectoryError`, and `UnicodeDecodeError` propagate untouched (documented at `src/magic_geo/config.py`). `ConfigError` is reserved for YAML-syntax and model-validation failures that occur after bytes were successfully read. The error `source` is the stringified path, so CLI and web clients get file-anchored `path:line:column` diagnostics.
 
 ### `dump_config_yaml`
 
-`dump_config_yaml` (`src/magic_geo/config.py:653`) is `yaml.safe_dump(config.model_dump(mode="python"), allow_unicode=True, default_flow_style=False, sort_keys=False, width=100)`. Consequences: schema section and field order is preserved (not alphabetized), output is block style, Unicode is emitted literally rather than escaped, lines wrap at 100 columns, no anchors or aliases are produced, and comments from the input file are **not** preserved.
+`dump_config_yaml` (`src/magic_geo/config.py`) is `yaml.safe_dump(config.model_dump(mode="python"), allow_unicode=True, default_flow_style=False, sort_keys=False, width=100)`. Consequences: schema section and field order is preserved (not alphabetized), output is block style, Unicode is emitted literally rather than escaped, lines wrap at 100 columns, no anchors or aliases are produced, and comments from the input file are **not** preserved.
 
 ---
 
 ## JSON Schema export
 
-`config_schema()` (`src/magic_geo/config.py:780`) returns `WorldConfig.model_json_schema()` augmented with two keys.
-
-| Key | Value | Source |
-| --- | --- | --- |
-| `$id` | `"urn:magic-geo:schema:world-config:v1"` | `src/magic_geo/config.py:784` |
-| `x-magic-geo.schema_version` | `1` | `src/magic_geo/config.py:786` |
-| `x-magic-geo.section_order` | `list(WorldConfig.model_fields)` — the nine section names in declaration order | `src/magic_geo/config.py:787` |
-| `x-magic-geo.profiles` | one entry per profile: `{name, description, values}` where `values` is `create_config(name).model_dump(mode="json")` | `src/magic_geo/config.py:788`–`795` |
-
-The observed top-level keys are `$defs`, `$id`, `additionalProperties`, `description`, `properties`, `title`, `type`, and `x-magic-geo`. `title` is `"WorldConfig"`; `additionalProperties` is `false`. The nine root `properties` are `$ref` entries into `$defs`, which holds `ClimateConfig`, `ComputeConfig`, `ErosionConfig`, `HydrologyConfig`, `MeshConfig`, `OutputConfig`, `PlanetConfig`, `RunConfig`, and `TectonicsConfig`. **Applications must follow `$ref` rather than assuming the section schemas are inlined.**
+`config_schema()` returns the current model schema with `$id` `urn:magic-geo:schema:world-config:v2` and `x-magic-geo.schema_version: 2`. Its `required` array includes `config_version`, whose property is integer `const: 2`. Nine section properties reference `Seasonal*Config` definitions through `$ref`; sibling descriptions must also be preserved. The root version is a scalar, not a section model. `x-magic-geo.section_order` includes all declared root fields, and `profiles` carries the complete current values for each profile.
 
 ```python
-import json
 from magic_geo import config_schema
 
 schema = config_schema()
-print(schema["$id"])                                  # urn:magic-geo:schema:world-config:v1
-print(schema["x-magic-geo"]["section_order"])         # ['run', 'planet', ..., 'output']
-print(json.dumps(schema["$defs"]["MeshConfig"]["properties"]["cell_count"], indent=1))
-# {"default": 4096, "description": "...", "maximum": 200000, "minimum": 128,
-#  "title": "Cell Count", "type": "integer"}
+assert schema['properties']['config_version']['const'] == 2
+mesh_ref = schema['properties']['mesh']['$ref'].split('/')[-1]
+print(schema['$defs'][mesh_ref]['properties']['cell_count'])
 ```
 
-Each leaf carries `default`, `description`, `title`, `type`, and — where applicable — `minimum`/`maximum` (from `ge`/`le`), `exclusiveMinimum`/`exclusiveMaximum` (from `gt`/`lt`), `enum` (multi-value `Literal` fields: `mesh.backend`, `compute.backend`), `const` (the single-value `Literal[12]` on `climate.months`, which emits `{"const": 12, "default": 12, "type": "integer"}` and **not** an `enum`), and `minLength`/`maxLength` (only `run.name`). No `multipleOf` or `pattern` constraint appears anywhere in the schema.
-
-The same document is served by the web workbench at `GET /api/config/schema` (`src/magic_geo/debug_server.py:953`), and a trimmed name/description list at `GET /api/config/profiles` (`src/magic_geo/debug_server.py:957`), which also reports `"default": "earthlike"`.
+Fields retain descriptions, defaults, numeric bounds and enum/const declarations. API clients should follow `$ref` and use the schema instead of hard-coding the section definition names. The workbench serves this document at `GET /api/config/schema`, uses version-2 templates and validates saved YAML through the same strict parser. Server validation is authoritative.
 
 ---
 
 ## Atomic validated writes
 
-`write_config(path, config, *, force=False)` (`src/magic_geo/config.py:800`) is the only supported way to publish a config file. Its steps:
+`write_config(path, config, *, force=False)` (`src/magic_geo/config.py`) is the only supported way to publish a config file. Its steps:
 
 | Step | Action | Source |
 | --- | --- | --- |
-| 1 | Early guard: if the target exists and `force` is false, raise `FileExistsError(f"{target} already exists; pass --force to overwrite")` | `src/magic_geo/config.py:804`–`805` |
+| 1 | Early guard: if the target exists and `force` is false, raise `FileExistsError(f"{target} already exists; pass --force to overwrite")` | `src/magic_geo/config.py` |
 | 2 | `target.parent.mkdir(parents=True, exist_ok=True)` | `:806` |
 | 3 | Create a temp file **in the same directory** named `.{target.name}.{uuid4().hex}.tmp` — hidden, collision-free, and on the same filesystem so link/replace stay atomic | `:807` |
 | 4 | Write `dump_config_yaml(config)` as UTF-8 | `:809` |
@@ -1199,73 +1112,15 @@ The web workbench layers additional path constraints on top of `write_config` at
 
 ## Config-to-native mapping
 
-### Layer 1 — `config_to_native`
+`config_to_native(config)` preserves the version and all named values in a JSON-compatible model mapping. The API selects V4 for current `WorldConfig` / `SeasonalWorldConfig`; the low-level native entry points also dispatch any mapping containing `config_version` through strict seasonal validation. No obsolete Celsius value is converted to opacity.
 
-`config_to_native(config)` (`src/magic_geo/config.py:840`) is a one-liner: `return config.model_dump(mode="json")`. It produces the nested nine-section mapping with **identical section and field names** — no renames, no flattening. `mode="json"` means every value is a JSON primitive and every `Literal` is its raw string. It is called at `src/magic_geo/api.py:198` (`generate_world`) and `src/magic_geo/api.py:302` (`generate_geo_world`).
+`_native_seasonal_config` revalidates the input before constructing the standalone `NativeConfigV4`. It carries 43 fields, with fixed-width `c_int32` integral controls, `c_uint64` seed, UTF-8 name and binary64 floating controls. `config_version` selects the document contract and is not a C struct field. Booleans become exactly 0 or 1; backend enums retain their declared IDs. The [ABI migration record](../seasonal_climate_migration_plan.md#implemented-standalone-v4-layout) lists every field and checked offset. On the tested 64-bit ABI V4 has size 312 and alignment 8; coincident size with V2 does not imply compatible layout.
 
-### Layer 2 — `_native_config`
+The seasonal loader requires all four full/geography JSON/MessagePack V4 symbols. A missing symbol produces a rebuild error; it does not downgrade to V3. `serialization="auto"` selects MessagePack. Each buffer is freed with its matching native free function, including decoding and validation failures.
 
-`_native_config(data)` (`src/magic_geo/native.py:281`) flattens the nine sections into the versioned ctypes structs. The struct family mirrors the C++ ABI exactly:
+Before returning, Python checks the world schema, planet snapshot, exact seasonal model identities, retained forcing/edge/cell budget arrays and configured physical inputs. It then independently audits native radiation, coefficients, transport, storage and balance. Full internal cell data remains present until dependent enrichers finish; final output omission happens afterward. Annual energy enrichment preserves solved temperatures and the certificate. This audit does not reconstruct unexported solver trajectories or independently derive the orbital nodes and geometric edges.
 
-| Python struct | C++ struct | Adds | Source |
-| --- | --- | --- | --- |
-| `NativeConfigV1` | `magic_geo::CConfig` | 41 fields | `src/magic_geo/native.py:47`, `cpp/include/magic_geo/native.hpp:81` |
-| `NativeConfigV2` | `magic_geo::CConfigV2` | `compute_backend`, `opencl_prefer_gpu` | `src/magic_geo/native.py:93`, `cpp/include/magic_geo/native.hpp:128` |
-| `NativeConfigV3` | `magic_geo::CConfigV3` | `maturation_timestep_ma` | `src/magic_geo/native.py:102`, `cpp/include/magic_geo/native.hpp:136` |
-
-The only generation entry points bound are the four V3 symbols `magic_geo_generate_json_v3`, `magic_geo_generate_geo_json_v3`, `magic_geo_generate_msgpack_v3`, and `magic_geo_generate_geo_msgpack_v3` (alongside `magic_geo_backend_info_json`, `magic_geo_free_string`, and `magic_geo_free_buffer`); a library missing any of them raises `native library does not expose the current V3 JSON and MessagePack ABI; rebuild magic_geo_native from the current source tree` (`src/magic_geo/native.py:141`–`144`).
-
-### Field renames and type conversions
-
-Only these eight of the 44 fields are renamed or transformed. The other 36 keep their exact leaf name with `float → c_double`, `int → c_int`.
-
-| YAML path | Native field | C type | Transform |
-| --- | --- | --- | --- |
-| `run.seed` | `seed` | `c_uint64` | `int(...)` |
-| `run.name` | `name` | `c_char_p` | `str(...).encode("utf-8")` — the reason `RunConfig` bans NUL and caps at 1024 UTF-8 bytes |
-| `mesh.backend` | `mesh_backend` | `c_int` | renamed + enum→int via `MESH_BACKEND_IDS` (`fibonacci_sphere` → 0, `geodesic_icosahedron` → 1) |
-| `erosion.iterations` | `erosion_iterations` | `c_int` | renamed (prefixed to disambiguate) |
-| `compute.backend` | `compute_backend` | `c_int` | renamed + enum→int via `COMPUTE_BACKEND_IDS` (`auto` → 0, `cpu` → 1, `opencl` → 2, `cuda` → 3) |
-| `hydrology.preserve_geologic_depressions` | `preserve_geologic_depressions` | `c_int` | bool → `1`/`0` |
-| `compute.opencl_prefer_gpu` | `opencl_prefer_gpu` | `c_int` | bool → `1`/`0` |
-| `output.include_cells` | `include_cells` | `c_int` | bool → `1`/`0` |
-
-### Field-order differences
-
-The struct field order is **not** the YAML order in two places (`src/magic_geo/native.py:48`–`90`):
-
-| Section | YAML order | Struct order |
-| --- | --- | --- |
-| `mesh` | `backend`, `cell_count`, `neighbor_count` | `cell_count`, `mesh_backend`, `neighbor_count` |
-| `hydrology` | `river_percentile`, `preserve_geologic_depressions` | `preserve_geologic_depressions`, `river_percentile` |
-
-Additionally, `maturation_timestep_ma` is not part of the flat erosion block — it lives in the V3 extension (`src/magic_geo/native.py:106`), so a caller using the V1 or V2 ABI receives the historical 5 Ma nominal reference step (`cpp/include/magic_geo/native.hpp:134`–`135`).
-
-### Return-trip validation
-
-`_require_current_world_schema` (`src/magic_geo/native.py:234`) is applied to every payload before it reaches an enricher. It requires:
-
-| Check | Failure message |
-| --- | --- |
-| `schema_version` is an `int` equal to `CURRENT_WORLD_SCHEMA_VERSION` | `native library returned unsupported world schema_version …; rebuild magic_geo_native from the current source tree` |
-| No retired schema fields present | `native library returned retired fields in a schema-2 world: …` |
-| `planet_parameters` is a dict | `native library returned schema 2 without explicit planet_parameters` |
-| Its keys cover all of `PLANET_PARAMETER_DEFAULTS` | `native library returned an incomplete planet_parameters snapshot: …` |
-| Each value is non-bool numeric and finite; `radius_km`, `gravity_g`, `geological_age_ga` additionally `> 0` | `native library returned invalid planet_parameters.{key}` |
-
-On top of that, `api.py` compares the returned `planet_parameters` against `planet_parameter_snapshot(config.planet)` and raises `native planet_parameters do not match the configured planet snapshot` on any mismatch (`src/magic_geo/api.py:185`–`192`).
-
-### Duplicated defaults to keep in sync
-
-Three tables encode the same 12 planet defaults independently and are **not** derived from one another:
-
-| Table | Location |
-| --- | --- |
-| `PlanetConfig` field defaults | `src/magic_geo/config.py:161`–`232` |
-| `PLANET_PARAMETER_DEFAULTS` | `src/magic_geo/planet_parameters.py:10` |
-| `magic_geo::Params` member initializers | `cpp/include/magic_geo/native.hpp:22`–`67` |
-
-Likewise, every numeric bound in the pydantic schema is duplicated as an independent runtime check in `validate_params` (`cpp/src/engine/core.cpp:239`–`432`). This is defence in depth — the native library is callable directly from C++ without the Python schema — but it means a bound change must be applied in both places.
+`LegacyWorldConfig` is an explicit Python compatibility type. Old CConfig/V2/V3 layouts remain unchanged at the tested 304/312/320 bytes, and old adapters explicitly select their original temperature model. Unversioned YAML is rejected; file loading never selects this compatibility path.
 
 ---
 

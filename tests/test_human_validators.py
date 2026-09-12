@@ -1,7 +1,10 @@
 """Focused human-geography validator coverage.
 
 Branch cases call the extracted political, settlement, port, and corridor
-validators directly. A single combined public-CLI check proves those validators
+validators directly on complete retained WATER-v1 seasonal worlds. These preserve
+the historical equation/error contract; controlled inputs are not asserted to
+remain full-world consistent after mutation. Current controls use version-aware
+water replay and generic current-model fixtures. A combined public-CLI check proves those validators
 remain wired into ``validate`` without rerunning the entire command for every
 mutation.
 
@@ -14,6 +17,7 @@ so rather than implying more than it proves.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Callable
@@ -21,7 +25,6 @@ from unittest import TestCase
 
 from typer.testing import CliRunner
 
-from magic_geo.api import generate_world
 from magic_geo.cli import app
 from magic_geo.cli.validators import (
     _validate_political_borders,
@@ -33,8 +36,16 @@ from magic_geo.cli.validators import (
     _validate_trade_flows,
 )
 from magic_geo.io import write_json
+from magic_geo.human_water_transport_validation import (
+    validate_versioned_port_sites,
+    validate_versioned_route_corridors,
+)
 
 from support import worlds
+from support.legacy_human_water_worlds import (
+    legacy_human_water_world,
+    legacy_human_water_world_readonly,
+)
 
 REGION_FAILURE = "political region model or causal replay invalid"
 BORDER_FAILURE = "political border model or causal replay invalid"
@@ -162,7 +173,7 @@ def lowland_pair_cell(
 
 
 class HumanValidatorTestCase(TestCase):
-    """Run focused validator replays, with an opt-in public CLI helper."""
+    """Historical equation replays; current controls override the water replay."""
 
     def run_validate(self, world: dict[str, Any]) -> tuple[int, list[str], str]:
         """The exit code, every replayed ``FAIL`` message, and the raw output.
@@ -212,7 +223,7 @@ class HumanValidatorTestCase(TestCase):
     def tampered(self, key: str, mutation: Mutation) -> dict[str, Any]:
         """A private copy of the canonical world ``key`` with one tamper applied."""
 
-        world = worlds.cached_world(key)
+        world = legacy_human_water_world(key)
         mutation(world, cells_by_id(world))
         return world
 
@@ -228,30 +239,74 @@ class HumanValidatorTestCase(TestCase):
 
 
 class ControlWorldTests(HumanValidatorTestCase):
+    def replay_failures(self, world: dict[str, Any]) -> list[str]:
+        cells = cells_by_id(world)
+        return [
+            *validate_versioned_port_sites(world),
+            *validate_versioned_route_corridors(world),
+            *(failure for validator in HUMAN_VALIDATORS[2:]
+              for failure in validator(world, world["summary"], cells)),
+        ]
+
     def test_small_world_passes_validation(self) -> None:
         self.assert_world_valid(worlds.cached_world_readonly("small_smoke"))
 
     def test_mid_world_passes_validation(self) -> None:
         self.assert_world_valid(worlds.cached_world_readonly("mid_512"))
 
-    def test_large_world_stops_selecting_settlements_at_the_target(self) -> None:
-        # The canonical worlds run out of candidates before the settlement
-        # target, so only a denser mesh exercises the greedy stop.
-        world = generate_world(
-            worlds.build_config(
-                **{
-                    "mesh.cell_count": 1024,
-                    "tectonics.plate_count": 8,
-                    "erosion.iterations": 1,
-                }
-            )
-        )
+    def test_current_frontier_control_has_the_reclassification_prerequisites(self) -> None:
+        from magic_geo.native_climate_energy_validation import audit_native_climate_energy
+
+        world = worlds.cached_world_readonly("frontier_default_128")
+        self.assert_world_valid(world)
+        self.assertTrue(audit_native_climate_energy(world)["verified"])
+        cells = cells_by_id(world)
+        cell = settlement_cell(world, cells, "frontier_town")
+        self.assertFalse(marine_neighbours(cell, cells))
+        self.assertFalse(cell["is_water"])
+        self.assertFalse(cell["is_lake"])
+        self.assertFalse(cell["is_river"])
+        self.assertNotIn(cell["resource"], MINING_RESOURCES | {"fertile_alluvium"})
+        self.assertLessEqual(cell["fertility"], 0.66)
+        self.assertNotIn(cell["biome"], DESERT_BIOMES)
+        self.assertGreater(cell["runoff_mm_y"], 120.0)
+
+    def test_selection_stops_at_target_with_remaining_eligible_candidates(self) -> None:
+        # The current seasonal mid fixture reaches the cap and still has
+        # separated candidates. Reuse it instead of generating a 1,024-cell
+        # world solely to reach this stopping branch.
+        world = worlds.cached_world_readonly("mid_512")
         model = world["settlement_selection_model"]
         self.assertGreater(
             int(model["candidate_cell_count"]), int(model["target_count"])
         )
         self.assertEqual(len(world["settlements"]), int(model["target_count"]))
         self.assert_world_valid(world)
+        cells = cells_by_id(world)
+        selected = {settlement["cell_id"] for settlement in world["settlements"]}
+        candidates = [
+            cell for cell in world["cells"]
+            if not cell["is_water"] and not cell["is_lake"]
+            and cell["settlement_score"] >= 0.48
+            and all(
+                cells[n]["is_water"] or cells[n]["is_lake"]
+                or cells[n]["settlement_score"] <= cell["settlement_score"]
+                for n in cell["neighbors"]
+            )
+        ]
+        minimum_separation = 2.4 * math.sqrt(4.0 * math.pi / len(cells))
+
+        def distance(first: dict[str, Any], second: dict[str, Any]) -> float:
+            dot = math.fsum(a * b for a, b in zip(
+                first["position_3d"], second["position_3d"], strict=True,
+            ))
+            return math.acos(max(-1.0, min(1.0, dot)))
+
+        self.assertTrue(any(
+            candidate["id"] not in selected
+            and all(distance(candidate, cells[cell_id]) >= minimum_separation for cell_id in selected)
+            for candidate in candidates
+        ), "the cap must leave a candidate that selection could otherwise accept")
 
 
 class ModelDescriptorTests(HumanValidatorTestCase):
@@ -311,17 +366,22 @@ class ModelDescriptorTests(HumanValidatorTestCase):
                 self.assert_tamper_is_sole_failure("small_smoke", mutation, message)
 
     def test_public_validate_wires_every_extracted_human_validator(self) -> None:
-        world = worlds.cached_world("small_smoke")
+        world = legacy_human_water_world("small_smoke")
+        self.assert_world_valid(world)
+        control_code, _, control_output = self.run_validate(world)
+        self.assertEqual(control_code, 0, control_output)
         for model_key, field in (
-            ("port_site_model", "domain"),
             ("settlement_selection_model", "record_order"),
             ("route_network_model", "record_order"),
             ("political_region_model", "record_order"),
             ("political_border_model", "record_order"),
             ("trade_flow_model", "record_model"),
-            ("route_corridor_model", "record_order"),
         ):
             world[model_key][field] = "not_the_documented_model"
+        # Keep exact water declarations intact so the historical numeric
+        # validators run after the new model-selection preflight.
+        world["summary"]["mean_port_suitability_index"] += 0.1
+        world["route_corridors"][0]["path_length_km"] += 1.0
 
         exit_code, failures, output = self.run_validate(world)
 
@@ -337,6 +397,13 @@ class ModelDescriptorTests(HumanValidatorTestCase):
         ):
             with self.subTest(message=message):
                 self.assertIn(message, failures)
+
+    def test_public_validate_rejects_malformed_historical_water_declaration(self) -> None:
+        world = legacy_human_water_world("small_smoke")
+        world["port_site_model"]["domain"] = "not_the_documented_model"
+        exit_code, failures, output = self.run_validate(world)
+        self.assertEqual(exit_code, 1, output)
+        self.assertEqual(failures, ["human water transport: unknown or malformed port_site_model"])
 
 
 class PortSiteValidatorTests(HumanValidatorTestCase):
@@ -474,7 +541,12 @@ class SettlementSelectionValidatorTests(HumanValidatorTestCase):
         def desert_oasis(
             world: dict[str, Any], cells: dict[int, dict[str, Any]]
         ) -> None:
-            settlement_cell(world, cells, "frontier_town")["biome"] = "hot_desert"
+            cell = settlement_cell(world, cells, "frontier_town")
+            # The unmodified current climate/hydrology already supplies the
+            # runoff needed by the oasis rung. Only this policy input changes.
+            self.assertGreater(cell["runoff_mm_y"], 120.0)
+            self.assertLessEqual(cell["fertility"], 0.66)
+            cell["biome"] = "hot_desert"
 
         for name, mutation in (
             ("mining resource retypes the settlement", mining_resource),
@@ -482,7 +554,7 @@ class SettlementSelectionValidatorTests(HumanValidatorTestCase):
         ):
             with self.subTest(name):
                 self.assert_tamper_rejected(
-                    "small_smoke", mutation, SETTLEMENT_FAILURE
+                    "frontier_default_128", mutation, SETTLEMENT_FAILURE
                 )
 
 
@@ -560,59 +632,66 @@ class PoliticalRegionValidatorTests(HumanValidatorTestCase):
             with self.subTest(name):
                 self.assert_tamper_rejected("small_smoke", mutation, REGION_FAILURE)
 
-    def assert_capital_type_maps_to(
-        self, key: str, settlement_type: str, region_type: str
-    ) -> None:
-        """Retype a capital, patch its region record, and expect acceptance.
-
-        Asserting only that the region replay *rejects* a retyped capital would
-        pass for any disagreement at all. Patching the stored region record to
-        the rung the documented ladder assigns instead makes the region replay
-        accept again, so the absent region failure is what pins the mapping: a
-        replay that derived any other rung would still reject. The settlement
-        mirror necessarily disagrees, which also proves the run reached the
-        replay gate rather than crashing before it.
-        """
-
-        world = worlds.cached_world(key)
-        cells = cells_by_id(world)
-        region = world["political_regions"][-1]
-        capital = world["settlements"][int(region["capital_settlement_id"])]
-        cell = cells[int(capital["cell_id"])]
-        # Every rung above the one under test must stay shut for this capital.
-        self.assertFalse(bool(cell["is_river"]))
-        self.assertNotIn(str(cell["resource"]), MINING_RESOURCES)
-        if region_type != "mining_domain":
-            self.assertLessEqual(float(cell["elevation_m"]), 1200.0)
-            self.assertNotIn(str(cell["landform"]), MOUNTAIN_BORDER_LANDFORMS)
-        if region_type == "frontier_territory":
-            self.assertLessEqual(float(cell["fertility"]), 0.68)
-            self.assertNotEqual(str(cell["resource"]), "fertile_alluvium")
-
-        capital["type"] = settlement_type
-        region["type"] = region_type
-        exit_code, failures, output = self.run_validate(world)
-        self.assertEqual(exit_code, 1, output)
-        self.assertIn(SETTLEMENT_FAILURE, failures)
-        self.assertNotIn(REGION_FAILURE, failures)
-
     def test_capital_type_drives_region_type(self) -> None:
-        # The small world's last capital sits above the mountain-march
-        # elevation, so only the mining rung is reachable there.
-        with self.subTest("mining capital"):
-            self.assert_capital_type_maps_to(
-                "small_smoke", "mining_town", "mining_domain"
-            )
-        # The mid world's last capital sits below the mountain-march elevation,
-        # so it reaches the agrarian and frontier tail of the priority ladder.
+        """Direct policy replay on explicit human-stage inputs, not a world.
+
+        Current generated capitals have river/mountain/resource prerequisites
+        that intentionally outrank the tail of this classifier. A one-cell
+        flat region makes every aggregate exact and isolates those remaining
+        priorities without editing a native temperature/elevation certificate.
+        This payload is never submitted to the full-world CLI validator.
+        """
+        reference = legacy_human_water_world_readonly("frontier_default_128")
+        model = dict(reference["political_region_model"], target_count=1,
+                     capital_count=1, region_count=1)
+        cell = {
+            "id": 0, "position_3d": [1.0, 0.0, 0.0], "neighbors": [],
+            "is_water": False, "is_lake": False, "is_river": False,
+            "elevation_m": 0.0, "landform": "stable_lowland",
+            "fertility": 0.5, "resource": "none",
+            "biome": "temperate_grassland", "area_km2": 1.0,
+            "political_region_id": 0,
+        }
+        capital = {"id": 0, "cell_id": 0, "region_id": 0,
+                   "type": "port", "score": 0.6}
+        region = {
+            "id": 0, "capital_settlement_id": 0, "type": "maritime_league",
+            "dominant_biome": "temperate_grassland", "dominant_resource": "none",
+            "settlement_count": 1, "route_count": 0, "settlement_ids": [0],
+            "area_km2": 1.0, "mean_settlement_score": 0.6,
+            "mean_elevation_m": 0.0, "barrier_pressure": 0.0,
+        }
+        summary = {"political_region_model": model["model_type"],
+                   "political_region_count": 1, "output_float_precision": 6}
+        stage_input = {
+            "planet_parameters": {"radius_km": 6371.0},
+            "political_region_model": model, "settlements": [capital],
+            "routes": [], "political_regions": [region],
+        }
+        self.assertNotIn("climate_model", stage_input)
+        self.assertNotIn("climate_energy_balance_records", stage_input)
+        self.assertEqual(_validate_political_regions(stage_input, summary, {0: cell}), [])
         for name, settlement_type, region_type in (
+            ("mining capital", "mining_town", "mining_domain"),
             ("agrarian capital", "agricultural_town", "agrarian_state"),
             ("frontier capital", "frontier_town", "frontier_territory"),
         ):
             with self.subTest(name):
-                self.assert_capital_type_maps_to(
-                    "mid_512", settlement_type, region_type
+                # Higher river, mineral and mountain predicates stay false;
+                # fertility cannot independently force the agrarian branch.
+                self.assertFalse(cell["is_river"])
+                self.assertNotIn(cell["resource"], MINING_RESOURCES | {"fertile_alluvium"})
+                self.assertLessEqual(cell["elevation_m"], 1200.0)
+                self.assertNotIn(cell["landform"], MOUNTAIN_BORDER_LANDFORMS)
+                self.assertLessEqual(cell["fertility"], 0.68)
+                capital["type"] = settlement_type
+                region["type"] = "maritime_league"
+                self.assertEqual(
+                    _validate_political_regions(stage_input, summary, {0: cell}),
+                    [REGION_FAILURE],
                 )
+                region["type"] = region_type
+                self.assertEqual(_validate_political_regions(stage_input, summary, {0: cell}), [])
 
     def test_capitals_closer_than_the_separation_are_skipped(self) -> None:
         def pull_capitals_together(
@@ -628,7 +707,7 @@ class PoliticalRegionValidatorTests(HumanValidatorTestCase):
             second["position_3d"] = [value / norm for value in blended]
 
         self.assert_tamper_rejected(
-            "small_smoke", pull_capitals_together, REGION_FAILURE
+            "mid_512", pull_capitals_together, REGION_FAILURE
         )
 
 
@@ -655,7 +734,7 @@ class PoliticalBorderValidatorTests(HumanValidatorTestCase):
             ("border cell position_3d truncated", truncated_border_cell_position),
         ):
             with self.subTest(name):
-                self.assert_tamper_rejected("small_smoke", mutation, BORDER_FAILURE)
+                self.assert_tamper_rejected("mid_512", mutation, BORDER_FAILURE)
 
     def test_lowland_border_type_ladder(self) -> None:
         """Every rung below `mountain` for a freshly created border segment.
@@ -727,9 +806,10 @@ class TradeFlowValidatorTests(HumanValidatorTestCase):
     def test_primary_good_falls_back_when_no_endpoint_resource(self) -> None:
         """Each fallback rung once the endpoints carry no tradeable resource.
 
-        The stripped resource already makes the flow replay disagree, so like the
-        border ladder these pin the objecting validator rather than the selected
-        good: the good is only visible inside the flow record the replay rebuilds.
+        Coastal and empty fallbacks change the recorded good. The current
+        nonport route already trades fertile alluvium, so stripping its resource
+        tags preserves that good through the fertility fallback. Prove that
+        replay remains valid before independently corrupting the recorded good.
         """
 
         def strip_resources(port_endpoint: bool, fertile: bool) -> Mutation:
@@ -754,11 +834,28 @@ class TradeFlowValidatorTests(HumanValidatorTestCase):
 
         for name, mutation in (
             ("coastal fisheries fallback", strip_resources(True, True)),
-            ("fertile alluvium fallback", strip_resources(False, True)),
             ("no primary good at all", strip_resources(False, False)),
         ):
             with self.subTest(name):
-                self.assert_tamper_rejected("small_smoke", mutation, TRADE_FAILURE)
+                self.assert_tamper_rejected("mid_512", mutation, TRADE_FAILURE)
+
+        world = legacy_human_water_world("mid_512")
+        cells = cells_by_id(world)
+        settlements = {int(item["id"]): item for item in world["settlements"]}
+        route = next(item for item in world["routes"] if all(
+            settlements[int(item[key])]["type"] != "port" for key in ("from", "to")
+        ))
+        endpoints = [cells[int(settlements[int(route[key])]["cell_id"])] for key in ("from", "to")]
+        flow = next(item for item in world["trade_flows"] if item["route_id"] == route["id"])
+        self.assertEqual(flow["primary_good"], "fertile_alluvium")
+        self.assertGreater(max(float(cell["fertility"]) for cell in endpoints), 0.62)
+        for cell in endpoints:
+            cell["resource"] = "none"
+        # This is an isolated trade-stage input, not a claim that changing native
+        # resource tags preserves every physical and settlement certificate.
+        self.assertEqual(_validate_trade_flows(world, world["summary"], cells), [])
+        flow["primary_good"] = "none"
+        self.assertEqual(_validate_trade_flows(world, world["summary"], cells), [TRADE_FAILURE])
 
 
 class RouteCorridorValidatorTests(HumanValidatorTestCase):
@@ -917,21 +1014,18 @@ class NeighbourShapeViolationTests(HumanValidatorTestCase):
 
 
 class UnreachableThroughCliGuardTests(TestCase):
-    """Guards that `validate` can never reach, exercised on the validators.
+    """Historical inline guards exercised on their preserved replay functions.
 
-    ``magic-geo validate`` re-reads the same cells with its own unguarded
-    accessors, so every tamper below aborts the command before the collected
-    failures are echoed: a non-dict record and an unknown neighbour id raise
-    ``AttributeError``/``KeyError``, a non-numeric record or cell field raises
-    ``ValueError``, and a non-positive radius is refused by the planet-parameter
-    gate with its own message. Through the CLI they would all be indistinguishable
-    from a crash, so these call the validators directly and assert the exact
-    returned failure list; the payload is still a real generated world with a
-    single tamper.
+    The current public boundary can reject malformed source shapes or model
+    declarations before these historical inline helpers run. Direct calls keep
+    their exact numerical/type guard coverage without bypassing that boundary in
+    any full-CLI test. Each control is a complete retained generated world; each
+    tamper tests only the named historical replay and its exact failure list.
     """
 
     def world(self) -> tuple[dict[str, Any], dict[str, Any], dict[int, dict[str, Any]]]:
-        world = worlds.cached_world("small_smoke")
+        # Direct border mutations require the two-region generated fixture.
+        world = legacy_human_water_world("mid_512")
         return world, world["summary"], cells_by_id(world)
 
     def assert_replay_failure(

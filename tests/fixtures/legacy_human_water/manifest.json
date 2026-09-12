@@ -1,0 +1,492 @@
+{
+  "small_smoke": {
+    "fixture": "small_smoke.json.gz",
+    "fixture_gzip_sha256": "bed93b4825f06d73a67d33c89a3bffbdf0d14342b1c4636abd7432c72df09e7b",
+    "world_sha256": "342e6e1d3e79f7c5440d6b5ab1d70c5475c3cb244bf99a14c9fbcfb464c7e0f4",
+    "source_archive": "runs/review-default-seasonal-sweep-04-remaining",
+    "source_entry": {
+      "utc": "2026-09-10T17:45:26.859106+00:00",
+      "trigger": "tests/test_smoke_biosphere.py::SmokeBiosphereTests::test_biome_diagnostics:call",
+      "module": "support.worlds",
+      "cache": "_cache",
+      "key": "small_smoke",
+      "object_id": 137832165819712,
+      "world_file": "worlds/342e6e1d3e79f7c5440d6b5ab1d70c5475c3cb244bf99a14c9fbcfb464c7e0f4.json.gz",
+      "uncompressed_sha256": "342e6e1d3e79f7c5440d6b5ab1d70c5475c3cb244bf99a14c9fbcfb464c7e0f4",
+      "uncompressed_bytes": 12371394,
+      "config_file": "configs/6a8b0ba5dbbcfed8d7f13b13cc3775f8edde945bef933195db3f6024cdcc7c7a.json",
+      "config_recipe": {
+        "function": "canonical_config",
+        "key": "small_smoke"
+      },
+      "config_provenance": "reconstructed_at_archive_time_with_existing_fixture_builder",
+      "cache_module_source_sha256": "8ec3546e9d7f00c544c93933a1ef85bb2e592b451b56020362bb92ac2f92b74d"
+    },
+    "config": {
+      "run": {
+        "seed": 424242,
+        "name": "earthlike_mvp"
+      },
+      "planet": {
+        "radius_km": 6371.0,
+        "gravity_g": 1.0,
+        "day_length_hours": 24.0,
+        "axial_tilt_deg": 23.5,
+        "orbital_eccentricity": 0.016,
+        "stellar_luminosity": 1.0,
+        "atmosphere_pressure_bar": 1.0,
+        "greenhouse_factor": 1.0,
+        "ocean_fraction_target": 0.7,
+        "ocean_water_inventory_km3": 1338000000.0,
+        "internal_heat": 1.0,
+        "geological_age_ga": 4.5
+      },
+      "mesh": {
+        "backend": "fibonacci_sphere",
+        "cell_count": 256,
+        "neighbor_count": 7
+      },
+      "tectonics": {
+        "plate_count": 8,
+        "continental_plate_fraction": 0.38,
+        "continental_crust_fraction_target": 0.34,
+        "min_angular_speed": 0.03,
+        "max_angular_speed": 0.95,
+        "boundary_smoothing_steps": 5,
+        "plate_motion_scale_deg_per_step": 4.0,
+        "oceanic_crust_aging_ma_per_step": 5.0
+      },
+      "climate": {
+        "months": 12,
+        "reference_infrared_optical_depth": 1.0,
+        "precipitation_scale": 0.8,
+        "subtropical_drying_strength": 0.65
+      },
+      "hydrology": {
+        "river_percentile": 0.92,
+        "preserve_geologic_depressions": true
+      },
+      "erosion": {
+        "iterations": 2,
+        "maturation_timestep_ma": 5.0,
+        "stream_power_coefficient": 7.5,
+        "drainage_exponent": 0.5,
+        "slope_exponent": 1.0,
+        "hillslope_diffusion": 0.055,
+        "tectonic_uplift_scale": 0.85
+      },
+      "compute": {
+        "backend": "auto",
+        "threads": 0,
+        "opencl_prefer_gpu": true
+      },
+      "output": {
+        "include_cells": true,
+        "float_precision": 4
+      },
+      "config_version": 2
+    },
+    "cell_count": 256,
+    "water_models": {
+      "aquifer_resource_model": "finite_recharge_causal_aquifer_resources_v1",
+      "groundwater_flow_model": "descending_head_recharge_conserving_groundwater_flow_v1",
+      "river_channel_morphology_model": "causal_flow_sediment_wetland_baseflow_channel_morphology_v1",
+      "river_hydraulics_model": "manning_blended_diagnostic_river_hydraulics_v1",
+      "navigability_model": "causal_channel_hydraulic_coastal_navigability_v1",
+      "port_site_model": "causal_navigability_coastal_port_site_selection_v1",
+      "route_corridor_model": "causal_feature_weighted_dijkstra_route_corridors_v1"
+    }
+  },
+  "mid_512": {
+    "fixture": "mid_512.json.gz",
+    "fixture_gzip_sha256": "94ace3688939fbaa1fe71a367e4ea23b97c9a0afd2f63fb844c1af4f74dfba7a",
+    "world_sha256": "e2af7d6699af819e697e5e128969b88fb75c038c1701e4776a9eb5b312548cec",
+    "source_archive": "runs/review-default-seasonal-sweep-04-remaining",
+    "source_entry": {
+      "utc": "2026-09-10T18:54:07.945175+00:00",
+      "trigger": "tests/test_smoke_culture_history.py::SmokeCultureHistoryTests::test_culture_history_models_declare_their_documented_identities:call",
+      "module": "support.worlds",
+      "cache": "_cache",
+      "key": "mid_512",
+      "object_id": 137831332704768,
+      "world_file": "worlds/e2af7d6699af819e697e5e128969b88fb75c038c1701e4776a9eb5b312548cec.json.gz",
+      "uncompressed_sha256": "e2af7d6699af819e697e5e128969b88fb75c038c1701e4776a9eb5b312548cec",
+      "uncompressed_bytes": 20331470,
+      "config_file": "configs/3f3d149d13bd819b8b22bc65ec9632e894f0df492fb05e694d61a936ade66517.json",
+      "config_recipe": {
+        "function": "canonical_config",
+        "key": "mid_512"
+      },
+      "config_provenance": "reconstructed_at_archive_time_with_existing_fixture_builder",
+      "cache_module_source_sha256": "8ec3546e9d7f00c544c93933a1ef85bb2e592b451b56020362bb92ac2f92b74d"
+    },
+    "config": {
+      "run": {
+        "seed": 424242,
+        "name": "earthlike_mvp"
+      },
+      "planet": {
+        "radius_km": 6371.0,
+        "gravity_g": 1.0,
+        "day_length_hours": 24.0,
+        "axial_tilt_deg": 23.5,
+        "orbital_eccentricity": 0.016,
+        "stellar_luminosity": 1.0,
+        "atmosphere_pressure_bar": 1.0,
+        "greenhouse_factor": 1.0,
+        "ocean_fraction_target": 0.7,
+        "ocean_water_inventory_km3": 1338000000.0,
+        "internal_heat": 1.0,
+        "geological_age_ga": 4.5
+      },
+      "mesh": {
+        "backend": "fibonacci_sphere",
+        "cell_count": 512,
+        "neighbor_count": 7
+      },
+      "tectonics": {
+        "plate_count": 8,
+        "continental_plate_fraction": 0.38,
+        "continental_crust_fraction_target": 0.34,
+        "min_angular_speed": 0.03,
+        "max_angular_speed": 0.95,
+        "boundary_smoothing_steps": 5,
+        "plate_motion_scale_deg_per_step": 4.0,
+        "oceanic_crust_aging_ma_per_step": 5.0
+      },
+      "climate": {
+        "months": 12,
+        "reference_infrared_optical_depth": 1.0,
+        "precipitation_scale": 0.8,
+        "subtropical_drying_strength": 0.65
+      },
+      "hydrology": {
+        "river_percentile": 0.92,
+        "preserve_geologic_depressions": true
+      },
+      "erosion": {
+        "iterations": 1,
+        "maturation_timestep_ma": 5.0,
+        "stream_power_coefficient": 7.5,
+        "drainage_exponent": 0.5,
+        "slope_exponent": 1.0,
+        "hillslope_diffusion": 0.055,
+        "tectonic_uplift_scale": 0.85
+      },
+      "compute": {
+        "backend": "auto",
+        "threads": 0,
+        "opencl_prefer_gpu": true
+      },
+      "output": {
+        "include_cells": true,
+        "float_precision": 4
+      },
+      "config_version": 2
+    },
+    "cell_count": 512,
+    "water_models": {
+      "aquifer_resource_model": "finite_recharge_causal_aquifer_resources_v1",
+      "groundwater_flow_model": "descending_head_recharge_conserving_groundwater_flow_v1",
+      "river_channel_morphology_model": "causal_flow_sediment_wetland_baseflow_channel_morphology_v1",
+      "river_hydraulics_model": "manning_blended_diagnostic_river_hydraulics_v1",
+      "navigability_model": "causal_channel_hydraulic_coastal_navigability_v1",
+      "port_site_model": "causal_navigability_coastal_port_site_selection_v1",
+      "route_corridor_model": "causal_feature_weighted_dijkstra_route_corridors_v1"
+    }
+  },
+  "replay_128": {
+    "fixture": "replay_128.json.gz",
+    "fixture_gzip_sha256": "cd7d055596caca46ddf66a25d43194c02c8b493f1f9d4af4065402b2cc7279b9",
+    "world_sha256": "6038731bf5628f3d4730d62fd85789faa11d07d17ca8c5870b99bef197db811c",
+    "source_archive": "runs/review-default-seasonal-sweep-04-remaining",
+    "source_entry": {
+      "utc": "2026-09-10T17:43:47.117537+00:00",
+      "trigger": "tests/test_sediment_validators.py::SedimentValidatorControlTests::test_untampered_world_passes_every_sediment_validator:call",
+      "module": "support.worlds",
+      "cache": "_cache",
+      "key": "replay_128",
+      "object_id": 137832279673792,
+      "world_file": "worlds/6038731bf5628f3d4730d62fd85789faa11d07d17ca8c5870b99bef197db811c.json.gz",
+      "uncompressed_sha256": "6038731bf5628f3d4730d62fd85789faa11d07d17ca8c5870b99bef197db811c",
+      "uncompressed_bytes": 13672763,
+      "config_file": "configs/0aa328a5141c03037fbc903357d5e26daa4b7b73eb5ab0cef93f0cc5a82deaa2.json",
+      "config_recipe": {
+        "function": "canonical_config",
+        "key": "replay_128"
+      },
+      "config_provenance": "reconstructed_at_archive_time_with_existing_fixture_builder",
+      "cache_module_source_sha256": "8ec3546e9d7f00c544c93933a1ef85bb2e592b451b56020362bb92ac2f92b74d"
+    },
+    "config": {
+      "run": {
+        "seed": 424242,
+        "name": "earthlike_mvp"
+      },
+      "planet": {
+        "radius_km": 6371.0,
+        "gravity_g": 1.0,
+        "day_length_hours": 24.0,
+        "axial_tilt_deg": 23.5,
+        "orbital_eccentricity": 0.016,
+        "stellar_luminosity": 1.0,
+        "atmosphere_pressure_bar": 1.0,
+        "greenhouse_factor": 1.0,
+        "ocean_fraction_target": 0.7,
+        "ocean_water_inventory_km3": 1338000000.0,
+        "internal_heat": 1.0,
+        "geological_age_ga": 4.5
+      },
+      "mesh": {
+        "backend": "fibonacci_sphere",
+        "cell_count": 128,
+        "neighbor_count": 7
+      },
+      "tectonics": {
+        "plate_count": 14,
+        "continental_plate_fraction": 0.38,
+        "continental_crust_fraction_target": 0.34,
+        "min_angular_speed": 0.03,
+        "max_angular_speed": 0.95,
+        "boundary_smoothing_steps": 5,
+        "plate_motion_scale_deg_per_step": 4.0,
+        "oceanic_crust_aging_ma_per_step": 5.0
+      },
+      "climate": {
+        "months": 12,
+        "reference_infrared_optical_depth": 1.0,
+        "precipitation_scale": 0.8,
+        "subtropical_drying_strength": 0.65
+      },
+      "hydrology": {
+        "river_percentile": 0.92,
+        "preserve_geologic_depressions": true
+      },
+      "erosion": {
+        "iterations": 6,
+        "maturation_timestep_ma": 5.0,
+        "stream_power_coefficient": 7.5,
+        "drainage_exponent": 0.5,
+        "slope_exponent": 1.0,
+        "hillslope_diffusion": 0.055,
+        "tectonic_uplift_scale": 0.85
+      },
+      "compute": {
+        "backend": "auto",
+        "threads": 0,
+        "opencl_prefer_gpu": true
+      },
+      "output": {
+        "include_cells": true,
+        "float_precision": 4
+      },
+      "config_version": 2
+    },
+    "cell_count": 128,
+    "water_models": {
+      "aquifer_resource_model": "finite_recharge_causal_aquifer_resources_v1",
+      "groundwater_flow_model": "descending_head_recharge_conserving_groundwater_flow_v1",
+      "river_channel_morphology_model": "causal_flow_sediment_wetland_baseflow_channel_morphology_v1",
+      "river_hydraulics_model": "manning_blended_diagnostic_river_hydraulics_v1",
+      "navigability_model": "causal_channel_hydraulic_coastal_navigability_v1",
+      "port_site_model": "causal_navigability_coastal_port_site_selection_v1",
+      "route_corridor_model": "causal_feature_weighted_dijkstra_route_corridors_v1"
+    }
+  },
+  "routed_512": {
+    "fixture": "routed_512.json.gz",
+    "fixture_gzip_sha256": "b177c37c218faa9bfddcf9315d26fd40b6f5972880222b4206dcc4f1ca506dad",
+    "world_sha256": "acfc7b22c7d8a8b17d379c5a8b680ea5f1eee0ff583cb7bfad5d68bef18023f0",
+    "source_archive": "runs/review-default-seasonal-sweep-04-remaining",
+    "source_entry": {
+      "utc": "2026-09-10T19:14:37.474146+00:00",
+      "trigger": "tests/test_smoke_sediment.py::SmokeSedimentTests::test_fluvial_sediment_routing_provenance:call",
+      "module": "support.worlds",
+      "cache": "_cache",
+      "key": "routed_512",
+      "object_id": 137831276209280,
+      "world_file": "worlds/acfc7b22c7d8a8b17d379c5a8b680ea5f1eee0ff583cb7bfad5d68bef18023f0.json.gz",
+      "uncompressed_sha256": "acfc7b22c7d8a8b17d379c5a8b680ea5f1eee0ff583cb7bfad5d68bef18023f0",
+      "uncompressed_bytes": 39421019,
+      "config_file": "configs/00ed6e80c8cc47f9805eceba6d0c3488268a67f9d77953444df810e537cbf7a9.json",
+      "config_recipe": {
+        "function": "canonical_config",
+        "key": "routed_512"
+      },
+      "config_provenance": "reconstructed_at_archive_time_with_existing_fixture_builder",
+      "cache_module_source_sha256": "8ec3546e9d7f00c544c93933a1ef85bb2e592b451b56020362bb92ac2f92b74d"
+    },
+    "config": {
+      "run": {
+        "seed": 424242,
+        "name": "earthlike_mvp"
+      },
+      "planet": {
+        "radius_km": 6371.0,
+        "gravity_g": 1.0,
+        "day_length_hours": 24.0,
+        "axial_tilt_deg": 23.5,
+        "orbital_eccentricity": 0.016,
+        "stellar_luminosity": 1.0,
+        "atmosphere_pressure_bar": 1.0,
+        "greenhouse_factor": 1.0,
+        "ocean_fraction_target": 0.7,
+        "ocean_water_inventory_km3": 1338000000.0,
+        "internal_heat": 1.0,
+        "geological_age_ga": 4.5
+      },
+      "mesh": {
+        "backend": "fibonacci_sphere",
+        "cell_count": 512,
+        "neighbor_count": 7
+      },
+      "tectonics": {
+        "plate_count": 14,
+        "continental_plate_fraction": 0.38,
+        "continental_crust_fraction_target": 0.34,
+        "min_angular_speed": 0.03,
+        "max_angular_speed": 0.95,
+        "boundary_smoothing_steps": 5,
+        "plate_motion_scale_deg_per_step": 4.0,
+        "oceanic_crust_aging_ma_per_step": 5.0
+      },
+      "climate": {
+        "months": 12,
+        "reference_infrared_optical_depth": 1.0,
+        "precipitation_scale": 0.8,
+        "subtropical_drying_strength": 0.65
+      },
+      "hydrology": {
+        "river_percentile": 0.92,
+        "preserve_geologic_depressions": true
+      },
+      "erosion": {
+        "iterations": 6,
+        "maturation_timestep_ma": 5.0,
+        "stream_power_coefficient": 7.5,
+        "drainage_exponent": 0.5,
+        "slope_exponent": 1.0,
+        "hillslope_diffusion": 0.055,
+        "tectonic_uplift_scale": 0.85
+      },
+      "compute": {
+        "backend": "auto",
+        "threads": 0,
+        "opencl_prefer_gpu": true
+      },
+      "output": {
+        "include_cells": true,
+        "float_precision": 4
+      },
+      "config_version": 2
+    },
+    "cell_count": 512,
+    "water_models": {
+      "aquifer_resource_model": "finite_recharge_causal_aquifer_resources_v1",
+      "groundwater_flow_model": "descending_head_recharge_conserving_groundwater_flow_v1",
+      "river_channel_morphology_model": "causal_flow_sediment_wetland_baseflow_channel_morphology_v1",
+      "river_hydraulics_model": "manning_blended_diagnostic_river_hydraulics_v1",
+      "navigability_model": "causal_channel_hydraulic_coastal_navigability_v1",
+      "port_site_model": "causal_navigability_coastal_port_site_selection_v1",
+      "route_corridor_model": "causal_feature_weighted_dijkstra_route_corridors_v1"
+    }
+  },
+  "frontier_default_128": {
+    "fixture": "frontier_default_128.json.gz",
+    "fixture_gzip_sha256": "50954abc84a1f2459575c7e2a5aa79c5e4867dc6eab1d3095552286420591159",
+    "world_sha256": "e29db58d3a636e87f27fe1ecb4a9b564afc82ae547fee8f099b01b45fe96aac8",
+    "source_archive": "runs/review-default-seasonal-sweep-03",
+    "source_entry": {
+      "utc": "2026-09-10T06:13:09.369890+00:00",
+      "trigger": "tests/test_human_validators.py::ControlWorldTests::test_current_frontier_control_has_the_reclassification_prerequisites:call",
+      "module": "support.worlds",
+      "cache": "_cache",
+      "key": "frontier_default_128",
+      "object_id": 130296098691136,
+      "world_file": "worlds/e29db58d3a636e87f27fe1ecb4a9b564afc82ae547fee8f099b01b45fe96aac8.json.gz",
+      "uncompressed_sha256": "e29db58d3a636e87f27fe1ecb4a9b564afc82ae547fee8f099b01b45fe96aac8",
+      "uncompressed_bytes": 6442817,
+      "config_file": "configs/2b4bed66472d48a1f5b836d27a247798d109500afbeb426ac748e6a5e8ba88a6.json",
+      "config_recipe": {
+        "function": "canonical_config",
+        "key": "frontier_default_128"
+      },
+      "config_provenance": "reconstructed_at_archive_time_with_existing_fixture_builder",
+      "cache_module_source_sha256": "8ec3546e9d7f00c544c93933a1ef85bb2e592b451b56020362bb92ac2f92b74d"
+    },
+    "config": {
+      "run": {
+        "seed": 424242,
+        "name": "earthlike_mvp"
+      },
+      "planet": {
+        "radius_km": 6371.0,
+        "gravity_g": 1.0,
+        "day_length_hours": 24.0,
+        "axial_tilt_deg": 23.5,
+        "orbital_eccentricity": 0.016,
+        "stellar_luminosity": 1.0,
+        "atmosphere_pressure_bar": 1.0,
+        "greenhouse_factor": 1.0,
+        "ocean_fraction_target": 0.7,
+        "ocean_water_inventory_km3": 1338000000.0,
+        "internal_heat": 1.0,
+        "geological_age_ga": 4.5
+      },
+      "mesh": {
+        "backend": "fibonacci_sphere",
+        "cell_count": 128,
+        "neighbor_count": 7
+      },
+      "tectonics": {
+        "plate_count": 14,
+        "continental_plate_fraction": 0.38,
+        "continental_crust_fraction_target": 0.34,
+        "min_angular_speed": 0.03,
+        "max_angular_speed": 0.95,
+        "boundary_smoothing_steps": 5,
+        "plate_motion_scale_deg_per_step": 2.0,
+        "oceanic_crust_aging_ma_per_step": 5.0
+      },
+      "climate": {
+        "months": 12,
+        "reference_infrared_optical_depth": 1.0,
+        "precipitation_scale": 1.0,
+        "subtropical_drying_strength": 0.65
+      },
+      "hydrology": {
+        "river_percentile": 0.92,
+        "preserve_geologic_depressions": true
+      },
+      "erosion": {
+        "iterations": 1,
+        "maturation_timestep_ma": 5.0,
+        "stream_power_coefficient": 7.5,
+        "drainage_exponent": 0.5,
+        "slope_exponent": 1.0,
+        "hillslope_diffusion": 0.055,
+        "tectonic_uplift_scale": 0.85
+      },
+      "compute": {
+        "backend": "cpu",
+        "threads": 1,
+        "opencl_prefer_gpu": true
+      },
+      "output": {
+        "include_cells": true,
+        "float_precision": 4
+      },
+      "config_version": 2
+    },
+    "cell_count": 128,
+    "water_models": {
+      "aquifer_resource_model": "finite_recharge_causal_aquifer_resources_v1",
+      "groundwater_flow_model": "descending_head_recharge_conserving_groundwater_flow_v1",
+      "river_channel_morphology_model": "causal_flow_sediment_wetland_baseflow_channel_morphology_v1",
+      "river_hydraulics_model": "manning_blended_diagnostic_river_hydraulics_v1",
+      "navigability_model": "causal_channel_hydraulic_coastal_navigability_v1",
+      "port_site_model": "causal_navigability_coastal_port_site_selection_v1",
+      "route_corridor_model": "causal_feature_weighted_dijkstra_route_corridors_v1"
+    }
+  }
+}

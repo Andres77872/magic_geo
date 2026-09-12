@@ -14,11 +14,11 @@ a private deep copy of a canonical world, tampers with exactly one field (or a
 batch of mutually independent fields), writes it to a temporary file and runs
 ``validate`` over it through :class:`typer.testing.CliRunner`.
 
-``validate`` accumulates into a single ``failures`` list that is flushed at one
-gate near the end of the command, so independent summary counters can be
-tampered together and asserted in one invocation; checks that share a
-``for ... else break`` reporting loop are always split across invocations so no
-tamper can mask another.
+Current parent-model preflights can reject before the historical reporting gate.
+Affected numerical-message cases therefore also use complete, hash-checked
+historical land-use worlds; the same tamper is checked independently against
+the current model with its precise early diagnostic. Unrelated current summary
+counters remain batched, while early-rejection cases run individually.
 
 Exit code alone never decides a case.  ``CliRunner`` reports ``exit_code == 1``
 for an uncaught exception just as it does for ``typer.Exit(1)``, so every
@@ -61,6 +61,7 @@ from magic_geo.cli import app
 from magic_geo.io import write_json
 
 from support import worlds
+from support.legacy_land_use_worlds import legacy_land_use_world
 
 from support.cli import assert_no_cli_crash
 import pytest
@@ -77,15 +78,29 @@ Tamper = Callable[[World], None]
 #: case with an empty tamper, so every case in a table owns a real mutation.
 Case = tuple[str, Tamper, "str | tuple[str, ...]"]
 
-#: 256 cells.  The smallest canonical world that carries natural frontiers,
-#: borders and conflicts; the 128-cell world leaves those families empty.
+#: Preserve the compact geological/resource control for its passing cases.
 BASE_WORLD = "small_smoke"
+
+#: Multiple populated political regions and real frontier borders after lake
+#: cells are excluded from settlement candidates.
+SOCIETY_WORLD = "mid_512"
+
+#: Two seasonal-model languages that each own sound-change rules. Mid_512's
+#: current one-language control cannot reach cross-language membership guards.
+LANGUAGE_WORLD = "language_contact_256"
 
 #: 128 cells, where ``natural_frontiers`` is empty -- the only way to reach the
 #: "no frontier borders" arm of the barrier-score check.
 EMPTY_FRONTIER_WORLD = "replay_128"
 
 _CONTROL: dict[str, tuple[Any, bytes]] = {}
+
+
+def _world(key: str) -> World:
+    """Current by default; historical selectors load complete original bytes."""
+    if key.startswith("historical_land_use:"):
+        return legacy_land_use_world(key.split(":", 1)[1])
+    return worlds.cached_world(key)
 
 
 def _run_world(world: World) -> tuple[Any, bytes]:
@@ -107,7 +122,7 @@ def _control(key: str) -> tuple[Any, bytes]:
     """The untampered ``validate`` run for ``key``, computed once per process."""
 
     if key not in _CONTROL:
-        _CONTROL[key] = _run_world(worlds.cached_world(key))
+        _CONTROL[key] = _run_world(_world(key))
     return _CONTROL[key]
 
 
@@ -218,7 +233,7 @@ class ValidateTamperCase(TestCase):
         """
 
         key = world_key or self.world_key
-        world = worlds.cached_world(key)
+        world = _world(key)
         for tamper in tampers:
             tamper(world)
         result, serialized = _run_world(world)
@@ -255,6 +270,61 @@ class ValidateTamperCase(TestCase):
         for name, tamper, message in cases:
             with self.subTest(name):
                 self.assert_reports([tamper], *_messages(message), world_key=key)
+
+    def assert_migrated_reports(
+        self, tampers: Iterable[Tamper], *historical_messages: str,
+        current_messages: str | tuple[str, ...], world_key: str | None = None,
+    ) -> None:
+        """Keep historical numeric wiring and the same current input rejection.
+
+        Neither run changes declarations or bypasses a validator. Each scope
+        has its own clean control and serialized-change/noncrash assertions.
+        """
+        key = world_key or self.world_key
+        tampers = tuple(tampers)
+        with self.subTest(scope="historical_land_use_v1_numeric"):
+            self.assert_reports(tampers, *historical_messages,
+                                world_key="historical_land_use:" + key)
+        with self.subTest(scope="current_parent_preflight"):
+            self.assert_reports(tampers, *_messages(current_messages), world_key=key)
+
+    def assert_migrated_each(
+        self, cases: list[Case], *, current_messages: dict[str, str | tuple[str, ...]],
+        world_key: str | None = None,
+    ) -> None:
+        """Only named earlier-guard cases also retain an explicit old control."""
+        self.assertLessEqual(set(current_messages), {name for name, _, _ in cases})
+        for name, tamper, message in cases:
+            with self.subTest(name):
+                if name in current_messages:
+                    self.assert_migrated_reports(
+                        [tamper], *_messages(message),
+                        current_messages=current_messages[name], world_key=world_key,
+                    )
+                else:
+                    self.assert_reports([tamper], *_messages(message), world_key=world_key)
+
+    def assert_migrated_batch(
+        self, cases: list[Case], *, current_messages: dict[str, str | tuple[str, ...]],
+        world_key: str | None = None,
+    ) -> None:
+        """Split unrelated current checks from guards that reject early.
+
+        Historical numeric checks can still aggregate; current preflight cases
+        are deliberately individual so each field remains load-bearing.
+        """
+        key = world_key or self.world_key
+        self.assertLessEqual(set(current_messages), {name for name, _, _ in cases})
+        unaffected = [case for case in cases if case[0] not in current_messages]
+        historical = [case for case in cases if case[0] in current_messages]
+        if unaffected:
+            self.assert_batch(unaffected, world_key=key)
+        if historical:
+            with self.subTest(scope="historical_land_use_v1_numeric"):
+                self.assert_batch(historical, world_key="historical_land_use:" + key)
+        for name, tamper, _ in historical:
+            with self.subTest(name, scope="current_parent_preflight"):
+                self.assert_reports([tamper], *_messages(current_messages[name]), world_key=key)
 
 
 class GeologySummaryCase(ValidateTamperCase):
@@ -320,7 +390,7 @@ class GeologySummaryCase(ValidateTamperCase):
         )
 
     def test_petroleum_and_commodity_summary_mismatches(self) -> None:
-        self.assert_batch(
+        self.assert_migrated_batch(
             [
                 (
                     "migration_system_count",
@@ -386,25 +456,36 @@ class GeologySummaryCase(ValidateTamperCase):
                     "mean_commodity_occurrence_confidence_index does not match "
                     "commodity occurrences",
                 ),
-            ]
+            ],
+            current_messages={'commodity_count': 'biological resource summary: commodity_occurrence_count mismatch',
+             'commodity_type_counts': 'commodity type count mismatch',
+             'commodity_group_counts': 'commodity group counts mismatch',
+             'commodity_area': 'commodity total area: numerical replay mismatch',
+             'gemstone_commodity_count': 'biological resource summary: '
+                                         'gemstone_commodity_occurrence_count mismatch',
+             'commodity_confidence_mean': 'mean_commodity_occurrence_confidence_index: numerical replay '
+                                          'mismatch'},
         )
 
     def test_commodity_records_do_not_match_resource_deposits(self) -> None:
         def drop_last_occurrence(world: World) -> None:
             world["commodity_occurrences"].pop()
 
-        self.assert_reports(
+        self.assert_migrated_reports(
             [drop_last_occurrence],
             "commodity occurrence records do not match resource deposits",
             "commodity_occurrence_count does not match records",
+            current_messages='commodity coverage: missing supported occurrence or unexpected record',
         )
 
 
 class LandUseFrontierSummaryCase(ValidateTamperCase):
     """Summary counters over land-use zones, frontiers and realism checks."""
 
+    world_key = SOCIETY_WORLD
+
     def test_land_use_and_frontier_summary_mismatches(self) -> None:
-        self.assert_batch(
+        self.assert_migrated_batch(
             [
                 (
                     "agricultural_zone_count",
@@ -502,7 +583,19 @@ class LandUseFrontierSummaryCase(ValidateTamperCase):
                     offset_summary("mean_natural_frontier_barrier_score"),
                     "mean_natural_frontier_barrier_score does not match borders",
                 ),
-            ]
+            ],
+            current_messages={'agricultural_zone_count': 'land use availability: summary agricultural_zone_count mismatch',
+             'mining_zone_count': 'land use availability: summary mining_zone_count mismatch',
+             'agricultural_zone_cell_count': 'land use availability: summary agricultural_zone_cell_count '
+                                             'mismatch',
+             'mining_zone_cell_count': 'land use availability: summary mining_zone_cell_count mismatch',
+             'mean_agricultural_potential': 'land use availability: summary '
+                                            'mean_agricultural_potential_index mismatch',
+             'mean_mining_potential': 'land use availability: summary mean_mining_potential_index '
+                                      'mismatch',
+             'agricultural_area': 'land use availability: summary agricultural_zone_total_area_km2 '
+                                  'mismatch',
+             'mining_area': 'land use availability: summary mining_zone_total_area_km2 mismatch'},
         )
 
     def test_barrier_score_must_be_zero_without_frontier_borders(self) -> None:
@@ -514,7 +607,7 @@ class LandUseFrontierSummaryCase(ValidateTamperCase):
         )
 
     def test_realism_and_route_summary_mismatches(self) -> None:
-        self.assert_batch(
+        self.assert_migrated_batch(
             [
                 (
                     "realism_check_count",
@@ -597,7 +690,21 @@ class LandUseFrontierSummaryCase(ValidateTamperCase):
                     "coastal_route_corridor_count does not match route corridor type "
                     "counts",
                 ),
-            ]
+            ],
+            current_messages={'corridor_count': 'human water transport: corridors: route corridor model or causal replay '
+                               'invalid',
+             'corridor_cell_count': 'human water transport: corridors: route corridor model or causal '
+                                    'replay invalid',
+             'corridor_path_length': 'human water transport: corridors: route corridor model or causal '
+                                     'replay invalid',
+             'corridor_cell_mean': 'human water transport: corridors: route corridor model or causal '
+                                   'replay invalid',
+             'corridor_feature_coverage': 'human water transport: corridors: route corridor model or '
+                                          'causal replay invalid',
+             'corridor_type_counts': 'human water transport: corridors: route corridor model or causal '
+                                     'replay invalid',
+             'coastal_corridor_count': 'human water transport: corridors: route corridor model or causal '
+                                       'replay invalid'},
         )
 
 
@@ -833,7 +940,7 @@ class MissingSummaryMetricCase(ValidateTamperCase):
     """The ``... summary metrics missing`` guards, one deleted key each."""
 
     def test_summary_metric_groups_report_when_incomplete(self) -> None:
-        self.assert_each(
+        self.assert_migrated_each(
             [
                 (
                     "sedimentary",
@@ -880,7 +987,9 @@ class MissingSummaryMetricCase(ValidateTamperCase):
                     drop_summary("estimated_world_population"),
                     "population summary metrics missing",
                 ),
-            ]
+            ],
+            current_messages={'commodity': 'mean_commodity_occurrence_confidence_index: numerical replay mismatch',
+             'land_use': 'land use availability: summary mining_zone_cell_count mismatch'},
         )
 
 
@@ -888,7 +997,7 @@ class MissingRecordFieldCase(ValidateTamperCase):
     """The ``... fields missing`` guards, one deleted record key each."""
 
     def test_record_field_groups_report_when_incomplete(self) -> None:
-        self.assert_each(
+        self.assert_migrated_each(
             [
                 (
                     "sedimentary_resource",
@@ -911,11 +1020,6 @@ class MissingRecordFieldCase(ValidateTamperCase):
                     "agricultural_zone",
                     drop_record_field("agricultural_zones", "mean_fertility_index"),
                     "agricultural zone fields missing",
-                ),
-                (
-                    "natural_frontier",
-                    drop_record_field("natural_frontiers", "mean_barrier_score"),
-                    "natural frontier fields missing",
                 ),
                 (
                     "worldbuilding_realism",
@@ -981,11 +1085,21 @@ class MissingRecordFieldCase(ValidateTamperCase):
                     drop_record_field("population_regions", "carrying_capacity"),
                     "population region fields missing",
                 ),
-            ]
+            ],
+            current_messages={'commodity': 'commodity occurrence 0: market_value_index must be a finite unit index',
+             'agricultural_zone': 'land use availability: agricultural zone records or links mismatch',
+             'route_corridor': 'human water transport: route_corridors record fields mismatch'},
+        )
+
+    def test_natural_frontier_fields_report_when_incomplete(self) -> None:
+        self.assert_reports(
+            [drop_record_field("natural_frontiers", "mean_barrier_score")],
+            "natural frontier fields missing",
+            world_key=SOCIETY_WORLD,
         )
 
     def test_cell_field_groups_report_when_incomplete(self) -> None:
-        self.assert_each(
+        self.assert_migrated_each(
             [
                 (
                     "petroleum",
@@ -1002,7 +1116,8 @@ class MissingRecordFieldCase(ValidateTamperCase):
                     drop_cell_field("natural_frontier_id"),
                     "natural frontier cell fields missing",
                 ),
-            ]
+            ],
+            current_messages={'land_use': 'land use availability: cell 0: mining potential mismatch'},
         )
 
 
@@ -1010,7 +1125,7 @@ class MissingCollectionCase(ValidateTamperCase):
     """Whole record collections replaced by a non-list."""
 
     def test_non_list_collections_are_reported(self) -> None:
-        self.assert_each(
+        self.assert_migrated_each(
             [
                 (
                     "sedimentary_resource_systems",
@@ -1047,7 +1162,11 @@ class MissingCollectionCase(ValidateTamperCase):
                     lambda world: world.update({"route_corridors": None}),
                     "route_corridors missing or invalid",
                 ),
-            ]
+            ],
+            current_messages={'commodity_occurrences': 'biological resources require a commodity_occurrences list',
+             'agricultural_zones': 'land use availability: agricultural zone records or links mismatch',
+             'mining_zones': 'land use availability: mining zone records or links mismatch',
+             'route_corridors': 'human water transport: route_corridors must be a list'},
         )
 
 
@@ -1375,7 +1494,7 @@ class CommodityOccurrenceRecordCase(ValidateTamperCase):
             ]
             occurrences[1]["commodity"] = occurrences[0]["commodity"]
 
-        self.assert_each(
+        self.assert_migrated_each(
             [
                 (
                     "potential_out_of_range",
@@ -1392,7 +1511,11 @@ class CommodityOccurrenceRecordCase(ValidateTamperCase):
                     duplicate_pair,
                     "commodity occurrence deposit/commodity pairs are not unique",
                 ),
-            ]
+            ],
+            current_messages={'potential_out_of_range': 'commodity occurrence 0: occurrence_potential_index must be a '
+                                       'finite unit index',
+             'duplicate_id': 'commodity occurrence 1: IDs must be dense',
+             'duplicate_deposit_commodity_pair': 'commodity occurrence 1: commodity linkage mismatch'},
         )
 
 
@@ -1400,13 +1523,14 @@ class LandUseZoneRecordCase(ValidateTamperCase):
     """Record audits for agricultural and mining zones."""
 
     def test_land_use_cell_violations(self) -> None:
-        self.assert_reports(
+        self.assert_migrated_reports(
             [set_cell("mining_potential_index", 5.0)],
             "land use zone cell fields invalid",
+            current_messages='land use availability: cell 0: mining potential mismatch',
         )
 
     def test_land_use_zone_record_violations(self) -> None:
-        self.assert_each(
+        self.assert_migrated_each(
             [
                 (
                     "settlement_ids_not_a_list",
@@ -1438,12 +1562,23 @@ class LandUseZoneRecordCase(ValidateTamperCase):
                     set_record("mining_zones", "id", 0, index=1),
                     "mining zone ids are not unique",
                 ),
-            ]
+            ],
+            current_messages={'settlement_ids_not_a_list': 'land use availability: agricultural zone records or links '
+                                          'mismatch',
+             'cell_ids_unknown': 'land use availability: agricultural zone records or links mismatch',
+             'agricultural_cell_count_mismatch': 'land use availability: agricultural zone records or '
+                                                 'links mismatch',
+             'mining_cell_count_mismatch': 'land use availability: mining zone records or links mismatch',
+             'duplicate_agricultural_zone_id': 'land use availability: agricultural zone records or links '
+                                               'mismatch',
+             'duplicate_mining_zone_id': 'land use availability: mining zone records or links mismatch'},
         )
 
 
 class NaturalFrontierRecordCase(ValidateTamperCase):
     """Record audits for natural frontiers."""
+
+    world_key = SOCIETY_WORLD
 
     def test_frontier_cell_violations(self) -> None:
         self.assert_reports(
@@ -1490,9 +1625,10 @@ class RouteCorridorRecordCase(ValidateTamperCase):
         # As above, the ``except (TypeError, ValueError)`` arm is unreachable
         # through the CLI: a non-numeric corridor index dies in an earlier
         # bare ``float()`` before this guard is consulted.
-        self.assert_reports(
+        self.assert_migrated_reports(
             [set_cell("mountain_pass_route_index", 5.0)],
             "route corridor cell fields invalid",
+            current_messages='human water transport: corridors: route corridor model or causal replay invalid',
         )
 
     def test_route_corridor_record_violations(self) -> None:
@@ -1516,7 +1652,7 @@ class RouteCorridorRecordCase(ValidateTamperCase):
 
             return tamper
 
-        self.assert_each(
+        self.assert_migrated_each(
             [
                 (
                     "route_id_not_numeric",
@@ -1543,7 +1679,16 @@ class RouteCorridorRecordCase(ValidateTamperCase):
                     retype_route("coastal_sea"),
                     "route corridor records invalid",
                 ),
-            ]
+            ],
+            current_messages={'route_id_not_numeric': 'human water transport: route_id must be an exact integer',
+             'cell_count_mismatch': 'human water transport: corridors: route corridor model or causal '
+                                    'replay invalid',
+             'detour_ratio_mismatch': 'human water transport: corridors: route corridor model or causal '
+                                      'replay invalid',
+             'river_corridor_route_type': 'human water transport: corridors: route corridor model or '
+                                          'causal replay invalid',
+             'fallback_route_type': 'human water transport: corridors: route corridor model or causal '
+                                    'replay invalid'},
         )
 
     def test_route_corridor_path_must_be_adjacent(self) -> None:
@@ -1570,16 +1715,18 @@ class RouteCorridorRecordCase(ValidateTamperCase):
                     return
             raise AssertionError("route corridor does not reference an exported route")
 
-        self.assert_reports(
+        self.assert_migrated_reports(
             [divert_path],
             "route corridor records invalid",
             "route corridor cell id references invalid",
+            current_messages='human water transport: corridors: route corridor model or causal replay invalid',
         )
 
 
 class PhonologyRecordCase(ValidateTamperCase):
     """Every ``phonology_invalid`` arm reachable through the CLI."""
 
+    world_key = LANGUAGE_WORLD
     message = "phonological history records invalid"
 
     def _foreign_rule_id(self, world: World) -> int:
@@ -1707,6 +1854,10 @@ class PhonologyRecordCase(ValidateTamperCase):
                 "contact_pressure_index"
             ] = 0.9
 
+        def invert_high_contact_flag(world: World) -> None:
+            history = world["speaker_population_histories"][0]
+            history["high_contact_speaker_history"] = not history["high_contact_speaker_history"]
+
         self.assert_each(
             [
                 (
@@ -1724,11 +1875,7 @@ class PhonologyRecordCase(ValidateTamperCase):
                 ("step_high_contact", raise_step_contact, self.message),
                 (
                     "high_contact_flag",
-                    set_record(
-                        "speaker_population_histories",
-                        "high_contact_speaker_history",
-                        True,
-                    ),
+                    invert_high_contact_flag,
                     self.message,
                 ),
                 (

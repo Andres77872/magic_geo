@@ -1,0 +1,20 @@
+{
+  "full_world": {
+    "file": "full_world.json.gz",
+    "source": "/tmp/natural-groundwater-public-integration/public-natural-full-integration/full_world.json",
+    "source_sha256": "c95380b91b6f834537599d93662159181362f59eacb296f932e5a588440848da",
+    "gzip_sha256": "f8312aabbc1d6fc95d3aa5839dbc135e36328fc9fa2261baca3b76369ce719bc",
+    "cell_count": 128,
+    "scope": "full_world",
+    "land_use_model": "causal_soil_climate_resource_connected_land_use_zones_v1"
+  },
+  "geo_only": {
+    "file": "geo_only.json.gz",
+    "source": "/tmp/natural-groundwater-public-integration/public-natural-geo-integration/geo_only.json",
+    "source_sha256": "66c79e495fb205e1d33c4ad3810551ecea21cbe725a1ba0e5d11023d211b1139",
+    "gzip_sha256": "92dc2cf80c9db7694fbb5374be6d48eb58376284fcb653ea6e1cdca0bf776078",
+    "cell_count": 128,
+    "scope": "geo_only",
+    "land_use_model": null
+  }
+}

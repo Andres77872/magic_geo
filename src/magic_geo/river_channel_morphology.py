@@ -141,9 +141,9 @@ def _system_length(
     return total
 
 
-def enrich_world_with_river_channel_morphology(world: dict[str, Any]) -> dict[str, Any]:
+def _build_channel(world: dict[str, Any], *, natural: bool = False) -> dict[str, Any]:
     cells = world.get("cells", [])
-    if not isinstance(cells, list) or not cells:
+    if not isinstance(cells, list) or (not cells and not natural):
         return world
 
     radius_km = planet_radius_km(world)
@@ -340,4 +340,57 @@ def enrich_world_with_river_channel_morphology(world: dict[str, Any]) -> dict[st
     summary["mean_channel_slope_index"] = round(slope_sum / divisor, 6) if river_count else 0.0
     summary["channel_morphology_class_counts"] = dict(sorted(class_counts.items()))
     world["river_channel_systems"] = systems
+    return world
+
+
+NATURAL_MODEL = {'model_type': 'causal_flow_sediment_wetland_baseflow_channel_morphology_v2',
+ 'domain': 'is_river_and_not_is_water_cells',
+ 'flow_normalization_model': 'global_max_flow_accumulation_v1',
+ 'runoff_normalization_mm_y': 2200.0,
+ 'slope_model': 'downstream_conditioned_surface_drop_over_great_circle_distance_v1',
+ 'slope_normalization': 0.028,
+ 'sediment_model': 'routed_outgoing_deposition_and_mobile_thickness_v1',
+ 'floodplain_model': 'lowland_slope_sediment_wetland_baseflow_index_v1',
+ 'geometry_model': 'flow_runoff_floodplain_sediment_slope_baseflow_aridity_ice_v1',
+ 'stream_power_model': 'discharge_slope_runoff_sediment_flow_index_v1',
+ 'classification_model': 'ice_aridity_sediment_slope_depth_width_threshold_tree_v1',
+ 'system_grouping_model': 'undirected_mesh_connected_channel_components_v1',
+ 'system_length_model': 'internal_flow_to_great_circle_edges_v1',
+ 'deterministic': True,
+ 'model_limitation': 'empirical_diagnostic_channel_geometry_without_subcell_cross_sections_calibrated_bankfull_frequency_or_transient_morphodynamics',
+ 'source_groundwater_flow_model': 'descending_head_natural_recharge_partition_v2'}
+
+
+def enrich_world_with_river_channel_morphology(world: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild only owned diagnostics after exact independently audited ancestry.
+
+    Explicit historical parents/own declarations keep the original output.
+    Natural v2 stages all output and replays it before touching the caller.
+    """
+    from .natural_channel_validation import validate_natural_downstream_inputs
+    from .natural_channel_validation import validate_natural_channel_morphology
+
+    version = validate_natural_downstream_inputs(world, 'channel')
+    if version == 1:
+        return _build_channel(world)
+    staged = dict(world)
+    staged['cells'] = [dict(cell) for cell in world['cells']]
+    staged['summary'] = dict(world.get('summary', {}))
+    try:
+        _build_channel(staged, natural=True)
+        staged['river_channel_morphology_model'].update(NATURAL_MODEL)
+        staged['summary']['river_channel_morphology_model'] = NATURAL_MODEL['model_type']
+        errors = validate_natural_channel_morphology(staged)
+        if errors:
+            raise ValueError(errors[0])
+    except (TypeError, KeyError, OverflowError, ArithmeticError) as exc:
+        raise ValueError('natural channel: unrepresentable or malformed computed output') from exc
+    for cell, result in zip(world['cells'], staged['cells']):
+        for key in ('bankfull_discharge_m3_s', 'channel_morphology_class', 'channel_slope_index', 'floodplain_connectivity_index', 'river_channel_depth_m', 'river_channel_system_id', 'river_channel_width_m', 'stream_power_index'):
+            cell[key] = result[key]
+    for key in ('river_channel_morphology_model', 'river_channel_systems'):
+        world[key] = staged[key]
+    summary = world.setdefault('summary', {})
+    for key in ('channel_morphology_class_counts', 'floodplain_connected_channel_cell_count', 'high_stream_power_channel_cell_count', 'mean_bankfull_discharge_m3_s', 'mean_channel_slope_index', 'mean_river_channel_depth_m', 'mean_river_channel_width_m', 'mean_stream_power_index', 'navigable_channel_depth_cell_count', 'river_channel_cell_count', 'river_channel_morphology_model', 'river_channel_system_count', 'total_river_channel_length_km'):
+        summary[key] = staged['summary'][key]
     return world

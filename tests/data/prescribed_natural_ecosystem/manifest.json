@@ -1,0 +1,16 @@
+{
+  "full": {
+    "file": "full.json.gz",
+    "source": "runs/natural-water-full-public-acceptance/full_world.json.gz",
+    "compressed_sha256": "1325046020699c2f3f39806b06866ec918639848bc2c65996d2823c7e5cbc7b7",
+    "raw_sha256": "c95380b91b6f834537599d93662159181362f59eacb296f932e5a588440848da",
+    "cell_count": 128
+  },
+  "geo": {
+    "file": "geo.json.gz",
+    "source": "runs/natural-water-geo-public-acceptance/geo_only.json.gz",
+    "compressed_sha256": "92dc2cf80c9db7694fbb5374be6d48eb58376284fcb653ea6e1cdca0bf776078",
+    "raw_sha256": "66c79e495fb205e1d33c4ad3810551ecea21cbe725a1ba0e5d11023d211b1139",
+    "cell_count": 128
+  }
+}

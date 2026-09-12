@@ -1,0 +1,21 @@
+# Explicit prescribed seasonal model. This is a small integration case, not an
+# Earth calibration. Generated temperature is an output of the energy budget.
+config_version: 2
+run:
+  seed: 424242
+  name: seasonal_smoke
+mesh:
+  backend: fibonacci_sphere
+  cell_count: 128
+tectonics:
+  plate_count: 8
+climate:
+  reference_infrared_optical_depth: 1.0
+erosion:
+  iterations: 0
+compute:
+  backend: cpu
+  threads: 1
+output:
+  include_cells: true
+  float_precision: 8

@@ -1,3 +1,5 @@
+config_version: 2
+
 # Original warm, wet hothouse world. Strong greenhouse forcing, a dense
 # atmosphere, abundant ocean water, and weak subtropical drying encourage broad
 # humid biomes, wetlands, large rivers, and vigorous erosion.
@@ -36,8 +38,7 @@ tectonics:
 
 climate:
   months: 12
-  lapse_rate_c_per_km: 5.5
-  base_temperature_c: 30.0
+  reference_infrared_optical_depth: 1.0
   precipitation_scale: 1.80
   subtropical_drying_strength: 0.30
 

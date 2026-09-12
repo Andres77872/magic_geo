@@ -2,6 +2,13 @@
 
 [Wiki home](../README.md) > Features
 
+Fresh generation uses ecosystem v5, species v4 and climate-matched fire v6/v7.
+Their [prescribed natural activity contract](../../prescribed_natural_activity_migration.md)
+requires complete physical sources and propagates availability while excluding
+settlement suitability from disturbance and ignition. Detailed source-line
+references and field inventories below retain historical locations; the linked
+contract describes current version dispatch and complete availability fields.
+
 The living layer of a magic-geo world is produced in two distinct places with two distinct authority levels. A single native C++ stage, `derive_soils_biomes_resources` (`cpp/src/engine/environment.cpp:301`), writes the authoritative per-cell `biome` enum from a deterministic threshold cascade over climate, elevation, ice, water-body state and river state; `derive_landforms` (`cpp/src/engine/environment.cpp:417`) may then overwrite that enum on floodplains and deltas. Everything else on this page — biome diagnostics, ecotones, ecosystem productivity, species ranges, wildfire disturbance and the biome realism checks — is *post-hoc Python enrichment* over the serialized world, classified by `geo_layer_contracts.py` as `posthoc_diagnostic_trajectories` with `evidence_class = rule_replay_without_population_evolution`. None of it feeds back into the native simulation, none of it is time-calibrated, and no population, dispersal or evolutionary process is modelled anywhere.
 
 ## On this page
@@ -33,15 +40,15 @@ The living layer of a magic-geo world is produced in two distinct places with tw
 
 ### Native stage placement
 
-`derive_soils_biomes_resources` is called from `simulate_world_impl` at `cpp/src/engine/pipeline.cpp:187`, immediately after `summarize_plates` (`pipeline.cpp:186`) and immediately before `derive_landforms` (`pipeline.cpp:188`). The engine does not number its stages, so no ordinal is claimed here — only the neighbours in the call sequence, which are exact. Everything the stage reads has already reached its terminal value:
+In `cpp/src/engine/pipeline.cpp`, `simulate_world_impl` calls `derive_soils_biomes_resources` immediately after `summarize_plates` and before `derive_landforms`. The named functions define the dependency order:
 
-| Native stage | Pipeline line | What it fixes that biome assignment reads |
+| Native stage | Authority | What it fixes that biome assignment reads |
 |---|---|---|
-| `stabilize_numeric_depressions(..., "cryosphere_coupling", ...)` | `pipeline.cpp:157-166` | `elevation_m`, `is_water`, `water_body`, `water_depth_m`, `temperature_c`, `precipitation_mm_y`, `temperature_monthly_c`, `precipitation_monthly_mm`, `runoff_mm_y`, `flow_to`, `is_river`, `is_lake`, `is_closed_basin` |
-| `derive_cryosphere_state` (second call) | `pipeline.cpp:167` | `ice_thickness_m`, `glacial_erosion_m` |
-| `summarize_plates` | `pipeline.cpp:186` | plate aggregates (not read by the classifier) |
-| **`derive_soils_biomes_resources`** | **`pipeline.cpp:187`** | writes `soil_type`, `soil_depth_m`, `fertility`, `biome`, `resource`, `settlement_score`; may rewrite `water_body` for lakes |
-| `derive_landforms` | `pipeline.cpp:188` | writes `landform`; **may overwrite `biome`, `soil_type`, `fertility`, `resource`, `settlement_score`** |
+| `stabilize_numeric_depressions(..., "cryosphere_coupling", ...)` | `simulate_world_impl` | `elevation_m`, `is_water`, `water_body`, `water_depth_m`, `temperature_c`, `precipitation_mm_y`, `temperature_monthly_c`, `precipitation_monthly_mm`, `runoff_mm_y`, `flow_to`, `is_river`, `is_lake`, `is_closed_basin` |
+| terminal `derive_cryosphere_state` | `simulate_world_impl` | `ice_thickness_m`, `glacial_erosion_m` |
+| `summarize_plates` | `simulate_world_impl` | plate aggregates (not read by the classifier) |
+| **`derive_soils_biomes_resources`** | **`environment.cpp`** | writes `soil_type`, `soil_depth_m`, `fertility`, `biome`, `resource`, `settlement_score`; preserves hydrology's lake `water_body` |
+| `derive_landforms` | `environment.cpp` | writes `landform`; **may overwrite terrestrial `biome`, `soil_type`, `fertility`, `resource`, `settlement_score`** |
 
 Crust and boundary state (`crust_type`, `lithology`, `boundary_convergent`, `boundary_divergent`, `boundary_transform`, `crust_age_ma`, `sediment_thickness_m`) is read for the soil/resource/settlement half of the same stage. The biome branch itself reads only climate, elevation, ice, water and river state.
 
@@ -51,18 +58,18 @@ The stage runs under `#pragma omp parallel for schedule(static)` (`environment.c
 
 ### Python enricher placement
 
-Six enrichers own the diagnostic living layer. They run in a fixed order inside `magic_geo.api`:
+Six enrichers own the diagnostic living layer. Both entry points use the same named orchestration helpers in `magic_geo.api`:
 
-| Enricher | Module | `generate_world` line | `generate_geo_world` line |
-|---|---|---|---|
-| `enrich_world_with_biome_diagnostics` | `src/magic_geo/biome_dynamics.py:89` | `src/magic_geo/api.py:224` | `src/magic_geo/api.py:344` |
-| `enrich_world_with_biome_ecotones` | `src/magic_geo/biome_ecotones.py:205` | `api.py:227` | `api.py:345` |
-| `enrich_world_with_biome_realism` | `src/magic_geo/biome_realism.py:90` | `api.py:228` | `api.py:346` |
-| `enrich_world_with_ecosystem_dynamics` | `src/magic_geo/ecosystem_dynamics.py:133` | `api.py:245` | `api.py:359` |
-| `enrich_world_with_species_ranges` | `src/magic_geo/species_ranges.py:297` | `api.py:247` | `api.py:361` |
-| `enrich_world_with_wildfire_disturbance` | `src/magic_geo/wildfire_disturbance.py:270` | `api.py:248` | `api.py:362` |
+| Enricher | Module | Shared orchestration |
+|---|---|---|
+| `enrich_world_with_biome_diagnostics` | `biome_dynamics.py` | `_enrich_physical_foundation`, before permafrost |
+| `enrich_world_with_biome_ecotones` | `biome_ecotones.py` | `_enrich_physical_foundation`, after glacial landforms |
+| `enrich_world_with_biome_realism` | `biome_realism.py` | `_enrich_physical_foundation`, after ecotones |
+| `enrich_world_with_ecosystem_dynamics` | `ecosystem_dynamics.py` | `_enrich_ecosystems_and_resources`, before reefs |
+| `enrich_world_with_species_ranges` | `species_ranges.py` | `_enrich_ecosystems_and_resources`, after reefs |
+| `enrich_world_with_wildfire_disturbance` | `wildfire_disturbance.py` | `_enrich_ecosystems_and_resources`, after species |
 
-All six have the signature `(world: dict[str, Any]) -> dict[str, Any]`, take no tuning parameters, and every one returns `world` unchanged if `world["cells"]` is absent, not a list, or empty.
+All six have the signature `(world: dict[str, Any]) -> dict[str, Any]` and take no tuning parameters. Fresh ecosystem/species/fire stages validate their exact declarations and input shape before publication; missing or malformed cells are errors. Their valid explicit empty inputs produce complete empty diagnostics. Historical models retain their own documented empty-input behavior.
 
 They belong to layer contract `biomes_ecosystems`, phase 11 (`src/magic_geo/geo_layer_contracts.py:237-258`), whose declared dependencies are `soils_pedogenesis`, `climate_atmosphere` and `hydrology`, whose `temporal_class` is `posthoc_diagnostic_trajectories` and whose `evidence_class` is `rule_replay_without_population_evolution`.
 
@@ -93,7 +100,7 @@ warm_seasonal_climate = (dry_season_months >= 2) and (wet_season_months >= 3)
 
 `climate.months` is a `Literal[12]` in `src/magic_geo/config.py:324`, so both arrays always have exactly 12 entries in a configured world.
 
-The `coast` flag is `has_ocean_neighbor(cells, i)` (`environment.cpp:5-12`), true when any neighbour has `is_water == true`. Because `is_water` is set only by the marine flood-fill in `cpp/src/engine/ocean.cpp:250`, **lakes are not `is_water`**: a lake cell has `is_lake == true` and `is_water == false`, and is classified through the *land* branch.
+The `coast` flag is `has_ocean_neighbor(cells, i)`, true when any neighbour has `is_water == true`. The marine mask and standing-lake flag are distinct: native lakes can have `is_lake == true` and `is_water == false`. `derive_soils_biomes_resources` handles standing lakes in a dedicated early-return branch before terrestrial soil, biome and resource rules.
 
 ### Water-body enum recap
 
@@ -105,22 +112,22 @@ The `coast` flag is `has_ocean_neighbor(cells, i)` (`environment.cpp:5-12`), tru
 | 1 | `ocean` | `label_marine_water_bodies`: largest marine component, `water_depth_m >= 220.0` (`ocean.cpp:316`) |
 | 2 | `continental_shelf` | largest marine component, `water_depth_m < 220.0` (`ocean.cpp:316`) |
 | 3 | `inland_sea` | any marine component that is not the largest (`ocean.cpp:318`) |
-| 4 | `fresh_lake` | `hydrology.cpp:633` when `aridity >= 0.5`, or unconditionally when the lake overflows (`hydrology.cpp:642`, `:647`); re-asserted at `environment.cpp:342` |
-| 5 | `saline_basin` | `hydrology.cpp:633` when `aridity < 0.5`, and `hydrology.cpp:655` for dry geologic depressions with `aridity < 0.55`; re-asserted at `environment.cpp:342` |
+| 4 | `fresh_lake` | Hydrology's basin water budget/overflow classification; preserved by `derive_soils_biomes_resources` |
+| 5 | `saline_basin` | Hydrology's closed saline-water or dry geologic-depression classification; `is_lake` distinguishes standing water from a dry basin |
 
 ---
 
 ## Full biome class table and envelopes
 
-`BIOME_NAMES` has 16 entries (`cpp/src/engine/schema_names.hpp:21-26`). The classifier is a strictly ordered if/else cascade — **the first matching row wins** — split into a water branch (`environment.cpp:327-334`) and a land branch (`environment.cpp:341-381`). `T` = `temperature_c`, `P` = `precipitation_mm_y`, `E` = `elevation_m`, `H` = `ice_thickness_m`, `aridity` = `P / max(1, (T+8)*31)`.
+`BIOME_NAMES` has 16 entries in `schema_names.hpp`. In `derive_soils_biomes_resources`, marine and standing-lake branches return before the strictly ordered terrestrial cascade: **the first matching row wins**. `T` = `temperature_c`, `P` = `precipitation_mm_y`, `E` = `elevation_m`, `H` = `ice_thickness_m`, `aridity` = `P / max(1, (T+8)*31)`.
 
 | # | Enum index | `biome` name | Branch order | Exact envelope that produces it | Co-assigned `soil_type` | Source |
 |---|---|---|---|---|---|---|
 | W1 | 1 | `continental_shelf` | water, 1st | `is_water` and `water_body == 2` | `0` (`none`) | `environment.cpp:331` |
 | W2 | 2 | `lake` | water, 2nd | `is_water` and `water_body == 3` (**inland sea**) | `0` (`none`) | `environment.cpp:331` |
 | W3 | 0 | `ocean` | water, else | `is_water` and `water_body` not in `{2,3}` | `0` (`none`) | `environment.cpp:331` |
-| L1a | 10 | `hot_desert` | land, 1st | `is_lake` and `aridity < 0.5` (also forces `water_body = 5`) | `10` (`saline`) | `environment.cpp:341-344` |
-| L1b | 2 | `lake` | land, 1st | `is_lake` and `aridity >= 0.5` (also forces `water_body = 4`) | `9` (`wetland`) | `environment.cpp:341-344` |
+| K1a | 2 | `lake` | standing water, before land | `is_lake` and `water_body == 5`; preserves the hydrology classification | `10` (`saline`) | `derive_soils_biomes_resources` |
+| K1b | 2 | `lake` | standing water, before land | `is_lake` and other lake water-body class; preserves the hydrology classification | `9` (`wetland`) | `derive_soils_biomes_resources` |
 | L2 | 3 | `ice_cap` | land, 2nd | `H > 180.0` **or** (`T < -8.0` and (`abs(lat)*DEG > 55.0` or `E > 1600.0`)) | `8` (`tundra`) | `environment.cpp:345-348` |
 | L3 | 14 | `alpine` | land, 3rd | `E > 2800.0` and `T < 6.0` | `1` (`thin_mountain`) | `environment.cpp:349-351` |
 | L4 | 4 | `tundra` | land, 4th | `T < -2.0` | `8` (`tundra`) | `environment.cpp:352-354` |
@@ -142,7 +149,7 @@ The `coast` flag is `has_ocean_neighbor(cells, i)` (`environment.cpp:5-12`), tru
 Notes that follow directly from the table:
 
 - **`mediterranean_scrub` is an unreachable enum value.** It exists in `BIOME_NAMES` and it is referenced by several Python enrichers as a grassland/fuel category, but no native branch produces it, so `summary.biome_counts` can never contain it.
-- **Arid closed-basin lakes are labelled `hot_desert`.** Row L1a fires for any `is_lake` cell with `aridity < 0.5` regardless of temperature, and simultaneously stamps `water_body = saline_basin` and `soil_type = saline`. A high-latitude playa is therefore a `hot_desert` biome cell.
+- **Standing saline lakes remain `lake` biome.** The dedicated lake branch preserves hydrology's freshwater/saline decision and sets soil depth, fertility and settlement score to zero. A dry saline depression without `is_lake` still enters terrestrial rules.
 - **Non-largest marine components are labelled `lake`.** Row W2 maps `water_body == inland_sea` onto biome `lake`, so a large enclosed sea shares a biome label with a freshwater lake.
 - **`ice_cap` gets `tundra` soil.** Row L2 sets `soil_type = 8` (`tundra`), not a distinct ice class.
 - **Row L12c can label a 10 °C cell `hot_desert`.** The final else-branch splits on `T < 8.0`, with no precipitation guard beyond the failed earlier rows.
@@ -152,11 +159,11 @@ Notes that follow directly from the table:
 
 ## Post-classification overrides
 
-Two override blocks can rewrite the biome after the cascade.
+Two override blocks can rewrite terrestrial biomes after the cascade. Standing lakes return before Override A and receive lake-basin or glacial-lake landforms before the terrestrial floodplain/delta choices in Override B.
 
 ### Override A — riverine wetland, inside `derive_soils_biomes_resources`
 
-`environment.cpp:382-389`:
+The terrestrial tail of `environment.cpp::derive_soils_biomes_resources` applies:
 
 | Condition | Effect |
 |---|---|
@@ -165,7 +172,7 @@ Two override blocks can rewrite the biome after the cascade.
 
 ### Override B — floodplain/delta wetland, inside `derive_landforms`
 
-`derive_landforms` runs one stage later and classifies `landform` first (`environment.cpp:430-474`), then applies landform-conditioned edits (`environment.cpp:476-503`):
+`derive_landforms` runs one stage later and classifies `landform` first, then applies landform-conditioned edits:
 
 | Landform | Index | Edits applied |
 |---|---|---|
@@ -380,44 +387,52 @@ Regions are then built by iterating `sorted(candidate_ids_by_type.items())` and,
 
 `src/magic_geo/ecosystem_dynamics.py` derives net primary productivity, standing biomass, species richness, disturbance pressure, a four-phase succession trajectory, and renewable-resource records.
 
+The fresh `ecosystem_dynamics_model.model` is `heuristic_ecosystem_climate_support_v5`; exact historical v2-v4 declarations retain their established replay paths. `_is_aquatic_cell` defines aquatic cells as `is_water OR is_lake OR water_body_type in {ocean, continental_shelf, fresh_lake, inland_sea}`. Standing saline lakes qualify through `is_lake`; a dry `saline_basin` alone does not. This same selector controls productivity branch selection and terrestrial exclusions.
+
+The existing annual **surface-air climate proxies** apply only within their declared positive support: aquatic primary productivity needs finite non-boolean numeric `-16 < temperature_c < 52`; the fishery's own curve needs `-20 < temperature_c < 44` and an eligible water type. A derived fishery estimate additionally requires supported primary input. Exported booleans distinguish applicability, primary support, own fishery-climate support and composed fishery-productivity support. Unsupported estimates are numeric zero with false support flags and cannot create fishery records. Missing/malformed annual temperatures are unsupported; monthly temperatures are not used for this annual proxy. These are empirical applicability limits, not water-temperature measurements or universal survival limits. Named authorities are `_aquatic_climate_support`, `_primary_productivity` and `_fishery_productivity`.
+
+Aquatic JSON cell flags include `aquatic_climate_proxy_applicable`, `aquatic_primary_climate_supported`, `fishery_climate_supported` and `fishery_productivity_supported`. Versions v4/v5 also propagate explicit primary, biomass, richness, wildfire-risk, disturbance, forest, succession and recovery support. The shared aquatic-exclusion policy introduced in v3 remains; these are proxy support declarations, not physically solved ecological populations.
+
 ### Biome group constants
 
 | Constant | Members | Source |
 |---|---|---|
-| `FOREST_BIOMES` | `tropical_rainforest`, `tropical_seasonal_forest`, `temperate_forest`, `boreal_forest` | `ecosystem_dynamics.py:7` |
-| `GRASSLAND_BIOMES` | `savanna`, `temperate_grassland`, `mediterranean_scrub` | `ecosystem_dynamics.py:8` |
-| `BARREN_BIOMES` | `ice_cap`, `tundra`, `alpine`, `hot_desert`, `cold_desert` | `ecosystem_dynamics.py:9` |
-| `FISHERY_WATER_TYPES` | `ocean`, `continental_shelf`, `fresh_lake`, `inland_sea` (**not** `saline_basin`) | `ecosystem_dynamics.py:10` |
+| `FOREST_BIOMES` | `tropical_rainforest`, `tropical_seasonal_forest`, `temperate_forest`, `boreal_forest` | `ecosystem_dynamics.FOREST_BIOMES` |
+| `GRASSLAND_BIOMES` | `savanna`, `temperate_grassland`, `mediterranean_scrub` | `ecosystem_dynamics.GRASSLAND_BIOMES` |
+| `BARREN_BIOMES` | `ice_cap`, `tundra`, `alpine`, `hot_desert`, `cold_desert` | `ecosystem_dynamics.BARREN_BIOMES` |
+| `FISHERY_WATER_TYPES` | `ocean`, `continental_shelf`, `fresh_lake`, `inland_sea` (**not** `saline_basin`) | `ecosystem_dynamics.FISHERY_WATER_TYPES` |
 
 ### State variables
 
 | Variable | Branch | Formula | Source |
 |---|---|---|---|
-| `primary_productivity_index` | marine (`is_water`) | `clamp(0.12 + shelf_bonus + temp_suitability*0.24 + nutrient*0.22 + current*0.12)` where `shelf_bonus` = `0.20` (continental_shelf) / `0.12` (fresh_lake, inland_sea) / `0.04` (else), `nutrient = clamp(runoff_mm_y/900)`, `current = clamp(abs(ocean_current_temperature_c)/4.5)` | `ecosystem_dynamics.py:31-35` |
-| `primary_productivity_index` | land (incl. lakes) | `clamp(temp_suitability*0.26 + water_balance*0.22 + soil_moisture*0.18 + fertility*0.18 + growing*0.18 - seasonal_aridity*0.14 - ice*0.18)` where `water_balance = clamp(P/PET)`, `growing = clamp(growing_season_months/12)`, `ice = clamp(ice_thickness_m/1200)` | `ecosystem_dynamics.py:36-38` |
-| `temp_suitability` | all | `clamp(1 - abs(T - 18.0)/34.0)` | `ecosystem_dynamics.py:17-18` |
-| `vegetation_biomass_index` | marine | `0.0` | `ecosystem_dynamics.py:42-43` |
-| `vegetation_biomass_index` | land | `clamp(NPP*0.52 + organic*0.18 + soil_moisture*0.14 + biome_bonus - ice*0.22)`, `biome_bonus` = `+0.28` forest / `+0.13` grassland / `-0.16` barren / `+0.02` otherwise | `ecosystem_dynamics.py:44-49` |
-| `wildfire_spread_risk_index` | marine | `0.0` | `ecosystem_dynamics.py:59` |
-| `wildfire_spread_risk_index` | land | `clamp(fire_frequency_index*0.38 + biomass*0.22 + seasonal_aridity*0.22 + wind*0.10)`, `wind = clamp(hypot(wind_east, wind_north))` | `ecosystem_dynamics.py:53-59` |
-| `ecosystem_disturbance_pressure_index` | all | `clamp(wildfire_spread*0.42 + ecotone_index*0.16 + erosion*0.14 + settlement_score*0.16 + seasonal_aridity*0.12)`, `erosion = clamp(abs(erosion_rate)/0.08)` | `ecosystem_dynamics.py:52-61` |
-| `species_richness_index` | all | `clamp(NPP*0.34 + biomass*0.22 + ecotone_index*0.18 + temp_suitability*0.16 + soil_moisture*0.10)` | `ecosystem_dynamics.py:158` |
-| `forest_growth_index` | forest biomes or `"forest" in biome` | `clamp(NPP*0.44 + biomass*0.28 + soil_moisture*0.14 + fertility*0.12 - disturbance*0.16)` | `ecosystem_dynamics.py:91-97` |
-| `forest_growth_index` | grassland biomes | `clamp(NPP*0.20 + biomass*0.12)` | `ecosystem_dynamics.py:94` |
-| `forest_growth_index` | anything else | `0.0` | `ecosystem_dynamics.py:94` |
-| `fishery_productivity_index` | `water_body_type ∈ FISHERY_WATER_TYPES` | `clamp(shelf + NPP*0.34 + runoff_nutrient*0.20 + current_mixing*0.14 + temperature*0.12)`, `shelf` = `0.30`/`0.18`/`0.08`, `temperature = clamp(1 - abs(T-12)/32)` | `ecosystem_dynamics.py:80-88` |
-| `fishery_productivity_index` | else | `0.0` | `ecosystem_dynamics.py:82-83` |
-| `vegetation_recovery_years` | all | `int(round(4 + (1-NPP)*46 + disturbance*34 + (1-biomass)*18))` — range `[4, 102]` | `ecosystem_dynamics.py:161` |
+| `primary_productivity_index` | supported aquatic | `clamp(0.12 + shelf_bonus + temp_suitability*0.24 + nutrient*0.22 + current*0.12)` where `shelf_bonus` = `0.20` (continental_shelf) / `0.12` (fresh_lake, inland_sea) / `0.04` (else), `nutrient = clamp(runoff_mm_y/900)`, `current = clamp(abs(ocean_current_temperature_c)/4.5)` | `_primary_productivity` |
+| `primary_productivity_index` | terrestrial, including dry saline basins | `clamp(temp_suitability*0.26 + water_balance*0.22 + soil_moisture*0.18 + fertility*0.18 + growing*0.18 - seasonal_aridity*0.14 - ice*0.18)` where `water_balance = clamp(P/PET)`, `growing = clamp(growing_season_months/12)`, `ice = clamp(ice_thickness_m/1200)` | `_primary_productivity` |
+| `primary_productivity_index` | unsupported aquatic | `0.0` with false primary support flag | `_primary_productivity` |
+| `temp_suitability` | finite numeric T | `clamp(1 - abs(T - 18.0)/34.0)`; invalid T returns zero | `_temperature_suitability` |
+| `vegetation_biomass_index` | aquatic | `0.0` | `_vegetation_biomass` |
+| `vegetation_biomass_index` | terrestrial | `clamp(NPP*0.52 + organic*0.18 + soil_moisture*0.14 + biome_bonus - ice*0.22)`, `biome_bonus` = `+0.28` forest / `+0.13` grassland / `-0.16` barren / `+0.02` otherwise | `_vegetation_biomass` |
+| `wildfire_spread_risk_index` | aquatic | `0.0` | `_disturbance_pressure` |
+| `wildfire_spread_risk_index` | terrestrial | `clamp(fire_frequency_index*0.38 + biomass*0.22 + seasonal_aridity*0.22 + wind*0.10)`, `wind = clamp(hypot(wind_east, wind_north))` | `_disturbance_pressure` |
+| `ecosystem_disturbance_pressure_index` | supported v5 | `clamp(wildfire_spread*0.42 + ecotone_index*0.16 + erosion*0.14 + seasonal_aridity*0.12)`, `erosion = clamp(abs(erosion_rate)/0.08)` | `_disturbance_pressure` |
+| `species_richness_index` | all | `clamp(NPP*0.34 + biomass*0.22 + ecotone_index*0.18 + temp_suitability*0.16 + soil_moisture*0.10)` | `enrich_world_with_ecosystem_dynamics` |
+| `forest_growth_index` | aquatic, including stale forest biome | `0.0` | `_forest_growth` |
+| `forest_growth_index` | terrestrial forest biomes or `"forest" in biome` | `clamp(NPP*0.44 + biomass*0.28 + soil_moisture*0.14 + fertility*0.12 - disturbance*0.16)` | `_forest_growth` |
+| `forest_growth_index` | terrestrial grassland biomes | `clamp(NPP*0.20 + biomass*0.12)` | `_forest_growth` |
+| `forest_growth_index` | anything else | `0.0` | `_forest_growth` |
+| `fishery_productivity_index` | supported primary and own fishery climate, eligible water type | `clamp(shelf + NPP*0.34 + runoff_nutrient*0.20 + current_mixing*0.14 + temperature*0.12)`, `shelf` = `0.30`/`0.18`/`0.08`, `temperature = clamp(1 - abs(T-12)/32)` | `_fishery_productivity` |
+| `fishery_productivity_index` | else | `0.0` with false composed support flag | `_fishery_productivity` |
+| `vegetation_recovery_years` | all | `int(round(4 + (1-NPP)*46 + disturbance*34 + (1-biomass)*18))` — range `[4, 102]` | `enrich_world_with_ecosystem_dynamics` |
 
-`settlement_score` is read with a `0.0` default. In geo-only mode it is stripped from every cell by `_strip_native_civilization_outputs`, so the disturbance term contributed by human presence is exactly zero.
+Ecosystem v5 does not read `settlement_score`. Historical v4 includes its original `0.16 * settlement_score` term, with zero as the historical absent-score default. The score is prospective suitability, so that historical term must not be interpreted as observed human presence. The remaining v5 weights are unchanged and unrenormalized.
 
 ### Succession stage
 
-`_succession_stage` (`ecosystem_dynamics.py:64-77`), first match wins:
+`ecosystem_dynamics._succession_stage`, first match wins:
 
 | Order | Predicate | `vegetation_succession_stage` |
 |---|---|---|
-| 1 | `is_water` | `aquatic_primary_productivity` |
+| 1 | shared aquatic selector | `aquatic_primary_productivity` |
 | 2 | `biome == "ice_cap"` or `ice_thickness_m > 120.0` | `barren_ice` |
 | 3 | `biomass < 0.08` or `productivity < 0.12` | `pioneer_sparse_cover` |
 | 4 | `disturbance >= 0.58` | `disturbance_mosaic` |
@@ -427,7 +442,7 @@ Regions are then built by iterating `sorted(candidate_ids_by_type.items())` and,
 
 ### Succession trajectory
 
-A history is emitted only when the cell is **not** `is_water`, its stage is **not** in `{barren_ice, pioneer_sparse_cover}`, and `biomass > 0.06` (`ecosystem_dynamics.py:185`). The trajectory is a fixed four-phase sequence (`ecosystem_dynamics.py:108`):
+A history is emitted only for a **terrestrial** cell under the shared aquatic selector, with stage **not** in `{barren_ice, pioneer_sparse_cover}` and `biomass > 0.06`. `enrich_world_with_ecosystem_dynamics` applies that gate before `_history_steps` builds the fixed four-phase sequence:
 
 | index | `phase` | `years_since_start` |
 |---|---|---|
@@ -436,7 +451,7 @@ A history is emitted only when the cell is **not** `is_water`, its stage is **no
 | 2 | `mature_state` | 60 |
 | 3 | `disturbance_recovery` | 90 |
 
-With `progress = index / 3` and `start_biomass = clamp(biomass * (0.38 + (1-disturbance)*0.26))` (`ecosystem_dynamics.py:109`):
+In `_history_steps`, with `progress = index / 3` and `start_biomass = clamp(biomass * (0.38 + (1-disturbance)*0.26))`:
 
 ```
 step_biomass      = clamp(start_biomass + (biomass - start_biomass)*progress
@@ -452,50 +467,58 @@ The `years_since_start` values are **nominal integers with no calibrated relatio
 
 ### Renewable resource records
 
-`ecosystem_dynamics.py:204-241`:
+`enrich_world_with_ecosystem_dynamics` selects renewable records:
 
 | Condition | `resource_type` | `productivity_index` |
 |---|---|---|
-| `forest_growth >= 0.25` | `forest_growth` | `forest_growth` |
+| terrestrial and `forest_growth >= 0.25` | `forest_growth` | `forest_growth` |
 | `fishery >= 0.35` **and** `fishery >= productivity` (evaluated second, overrides) | `fishery_productivity` | `fishery` |
 | neither | no record emitted | — |
 
-`sustainable_yield_index = clamp(productivity*0.56 + NPP*0.20 + biomass*0.14 - disturbance*0.18)`; `regeneration_years = max(1, round(recovery_years * 0.35))` for fisheries and `max(1, round(recovery_years))` for forests. The `forest_record_count -= 1` compensation at `ecosystem_dynamics.py:215` handles the case where both conditions fire for one cell. That path is defensive rather than reachable in a standard world: every `water_body_type` in `FISHERY_WATER_TYPES` implies a biome of `ocean`, `continental_shelf`, `lake` or (for a river-crossed lake cell) `wetland`, none of which is in `FOREST_BIOMES` or `GRASSLAND_BIOMES` and none of which contains the substring `forest`, so `_forest_growth` returns `0.0` on exactly the cells that can produce a fishery record.
+`sustainable_yield_index = clamp(productivity*0.56 + NPP*0.20 + biomass*0.14 - disturbance*0.18)`; `regeneration_years = max(1, round(recovery_years * 0.35))` for fisheries and `max(1, round(recovery_years))` for forests. Explicit aquatic exclusion makes the forest and fishery branches mutually exclusive even with a stale forest biome. Unsupported fishery estimates remain zero and cannot meet the record threshold. Re-enrichment replaces stale records after inundation or loss of climate support.
 
 ---
 
 ## Species range modelling
 
+Fresh `heuristic_species_parent_support_v4` consumes exact ecosystem v5 and
+independently audited natural habitat inputs. Its ten guild scores retain their
+existing coefficients and own thermal terms, with separate habitat and parent
+support flags. Confidence, endemism and common record descriptors have their own
+availability requirements. Exact historical species v3 retains the E4 parent.
+
 `src/magic_geo/species_ranges.py` scores a fixed set of ten guilds per cell, flood-fills contiguous above-threshold cells into range records, and back-annotates the cells.
+
+`species_ranges_model.model="heuristic_species_habitat_support_v2"` now excludes standing water from the five terrestrial guilds, distinguishes marine from freshwater fish habitat, and requires supported primary/fishery inputs for standing-water fish scores. Rivers retain a separate channel score that omits the inapplicable fishery-resource term. See the [implemented contract, reproduced counterexamples and remaining guild limitations](../../seasonal_climate_ecology_migration.md#8-species-habitat-and-input-support-gates--implemented-v2).
 
 | Constant | Value | Source |
 |---|---|---|
-| `SPECIES_RANGE_THRESHOLD` | `0.46` | `species_ranges.py:14` |
-| dominant-guild floor | `0.25` (below it, `dominant_species_guild = "none"`) | `species_ranges.py:315-316` |
-| `FOREST_BIOMES` / `GRASSLAND_BIOMES` / `DESERT_BIOMES` / `ALPINE_BIOMES` | see below | `species_ranges.py:8-11` |
-| `FRESHWATER_TYPES` | `fresh_lake`, `inland_sea` | `species_ranges.py:12` |
-| `MARINE_TYPES` | `ocean`, `continental_shelf` | `species_ranges.py:13` |
+| `SPECIES_RANGE_THRESHOLD` | `0.46` | `species_ranges.py` |
+| dominant-guild floor | `0.25` (below it, `dominant_species_guild = "none"`) | `species_ranges.py` |
+| `FOREST_BIOMES` / `GRASSLAND_BIOMES` / `DESERT_BIOMES` / `ALPINE_BIOMES` | see below | `species_ranges.py` |
+| `FRESHWATER_TYPES` | `fresh_lake` | `species_ranges.py` |
+| `MARINE_TYPES` | `ocean`, `continental_shelf`, `inland_sea` | `species_ranges.py` |
 
 `ALPINE_BIOMES` is `{tundra, alpine, ice_cap}`; `DESERT_BIOMES` is `{hot_desert, cold_desert}`.
 
 ### Guild table
 
-`GUILD_METADATA` (`species_ranges.py:16-27`) fixes the habitat class and trophic role. `non_water_gate` is `0.0` when `is_water` and `1.0` otherwise, applied as a multiplier.
+`GUILD_METADATA` (`species_ranges.py`) fixes the habitat class and trophic role. `non_water_gate` is `0.0` for the shared aquatic selector and `1.0` otherwise. It applies to the five terrestrial guilds. Freshwater/marine fish use their respective habitat and input-support gates. The three remaining guilds retain their explicitly declared legacy scores; a lack of a whole-cell water gate does not certify their habitat realism.
 
 | Guild | `habitat_class` | `trophic_role` | Water gate | Scoring terms | Source |
 |---|---|---|---|---|---|
-| `canopy_tree` | `terrestrial` | `primary_producer` | yes | `forest_bonus(0.24)` + `NPP*0.24` + `biomass*0.28` + `forest_growth*0.20` + `moisture*0.12` + `temp_temperate*0.10` − `disturbance*0.14` − `aridity*0.08` − `ice*0.26` | `species_ranges.py:142-153` |
-| `grassland_grazer` | `terrestrial` | `herbivore` | yes | `grass_bonus(0.24)` + `NPP*0.24` + `richness*0.16` + `clamp(1-abs(aridity-0.45)/0.45)*0.18` + `temp_temperate*0.12` + `clamp(1-biomass)*0.08` − `disturbance*0.10` − `ice*0.22` | `species_ranges.py:154-164` |
-| `desert_specialist` | `arid` | `specialist_consumer` | yes | `desert_bonus(0.30)` + `aridity*0.28` + `clamp(1-moisture)*0.16` + `clamp(1-P/420)*0.14` + `richness*0.10` − `ice*0.22` − `wetland*0.24` | `species_ranges.py:165-174` |
-| `alpine_tundra_specialist` | `alpine` | `specialist_consumer` | yes | `alpine_bonus(0.28)` + `temp_cold*0.22` + `clamp((E-1200)/2600)*0.18` + `permafrost*0.18` + `richness*0.12` − `ice*0.18` | `species_ranges.py:175-183` |
-| `wetland_amphibian` | `wetland` | `secondary_consumer` | no | `wetland*0.34` + `wetland_hydrology*0.18` + `moisture*0.12` + `richness*0.14` + `temp_warm*0.10` + `freshwater_bonus*0.18` − `aridity*0.10` | `species_ranges.py:184-192` |
-| `large_predator` | `terrestrial` | `apex_predator` | yes | `richness*0.28` + `biomass*0.24` + `NPP*0.18` + `clamp(1-disturbance)*0.18` + `forest_bonus*0.10` + `grass_bonus*0.10` − `ice*0.26` | `species_ranges.py:193-202` |
-| `freshwater_fish` | `freshwater` | `aquatic_consumer` | no | `freshwater_bonus` + `fishery*0.30` + `NPP*0.12` + `river_channel*0.14` + `river_depth*0.12` + `temp_window(T,14,24)*0.10` − `ice*0.22` | `species_ranges.py:203-211` |
-| `marine_fish` | `marine` | `aquatic_consumer` | no | `marine_bonus(0.30)` + `fishery*0.42` + `NPP*0.14` + `temp_window(T,13,24)*0.10` + `0.08` if `continental_shelf` − `ice*0.18` | `species_ranges.py:212-219` |
-| `reef_builder` | `reef` | `foundation_species` | no | `reef_bonus(0.34)` + `reef_growth*0.54` + `fishery*0.10` + `temp_warm*0.08` − `ice*0.22` | `species_ranges.py:220` |
-| `mangrove_coastal_bird` | `wetland` | `mobile_consumer` | no | `mangrove_bonus(0.34)` + `wetland*0.22` + `coastal*0.14` + `richness*0.12` + `temp_warm*0.12` + `clamp(P/1600)*0.10` − `disturbance*0.08` | `species_ranges.py:221-229` |
+| `canopy_tree` | `terrestrial` | `primary_producer` | yes | `forest_bonus(0.24)` + `NPP*0.24` + `biomass*0.28` + `forest_growth*0.20` + `moisture*0.12` + `temp_temperate*0.10` − `disturbance*0.14` − `aridity*0.08` − `ice*0.26` | `species_ranges.py` |
+| `grassland_grazer` | `terrestrial` | `herbivore` | yes | `grass_bonus(0.24)` + `NPP*0.24` + `richness*0.16` + `clamp(1-abs(aridity-0.45)/0.45)*0.18` + `temp_temperate*0.12` + `clamp(1-biomass)*0.08` − `disturbance*0.10` − `ice*0.22` | `species_ranges.py` |
+| `desert_specialist` | `arid` | `specialist_consumer` | yes | `desert_bonus(0.30)` + `aridity*0.28` + `clamp(1-moisture)*0.16` + `clamp(1-P/420)*0.14` + `richness*0.10` − `ice*0.22` − `wetland*0.24` | `species_ranges.py` |
+| `alpine_tundra_specialist` | `alpine` | `specialist_consumer` | yes | `alpine_bonus(0.28)` + `temp_cold*0.22` + `clamp((E-1200)/2600)*0.18` + `permafrost*0.18` + `richness*0.12` − `ice*0.18` | `species_ranges.py` |
+| `wetland_amphibian` | `wetland` | `secondary_consumer` | no | `wetland*0.34` + `wetland_hydrology*0.18` + `moisture*0.12` + `richness*0.14` + `temp_warm*0.10` + `legacy_amphibian_freshwater_bonus*0.18` − `aridity*0.10` | `species_ranges.py` |
+| `large_predator` | `terrestrial` | `apex_predator` | yes | `richness*0.28` + `biomass*0.24` + `NPP*0.18` + `clamp(1-disturbance)*0.18` + `forest_bonus*0.10` + `grass_bonus*0.10` − `ice*0.26` | `species_ranges.py` |
+| `freshwater_fish` | `freshwater` | `aquatic_consumer` | fresh lake or nonaquatic nonsaline river, with supported inputs | `freshwater_bonus` + `fishery*0.30` (standing water only; omitted for rivers) + `NPP*0.12` + `river_channel*0.14` + `river_depth*0.12` + `temp_window(T,14,24)*0.10` − `ice*0.22` | `species_ranges.py` |
+| `marine_fish` | `marine` | `aquatic_consumer` | known marine type with supported inputs | `marine_bonus(0.30)` + `fishery*0.42` + `NPP*0.14` + `temp_window(T,13,24)*0.10` + `0.08` if `continental_shelf` − `ice*0.18` | `species_ranges.py` |
+| `reef_builder` | `reef` | `foundation_species` | no | `reef_bonus(0.34)` + `reef_growth*0.54` + `fishery*0.10` + `temp_warm*0.08` − `ice*0.22` | `species_ranges.py` |
+| `mangrove_coastal_bird` | `wetland` | `mobile_consumer` | no | `mangrove_bonus(0.34)` + `wetland*0.22` + `coastal*0.14` + `richness*0.12` + `temp_warm*0.12` + `clamp(P/1600)*0.10` − `disturbance*0.08` | `species_ranges.py` |
 
-Bonus and window definitions (`species_ranges.py:126-138`):
+Bonus and window definitions (`species_ranges.py`):
 
 | Symbol | Definition |
 |---|---|
@@ -505,13 +528,19 @@ Bonus and window definitions (`species_ranges.py:126-138`):
 | `coastal` | `clamp(1 - distance_to_marine_water_km / 80.0)` (default distance `9999.0`) |
 | `ice` | `clamp(ice_thickness_m / 800.0)` |
 | `river_channel` / `river_depth` | `clamp(river_channel_width_m / 180.0)` / `clamp(river_channel_depth_m / 9.0)` |
-| `freshwater_bonus` | `0.30` if `water_body_type ∈ FRESHWATER_TYPES` else `0.22` if `is_river` else `0.0` |
+| `freshwater_bonus` | `0.30` for a fresh lake; `0.22` for a nonaquatic, nonsaline river; `0.0` otherwise |
 | `reef_bonus` | `0.34` if `reef_type != "none"` |
 | `mangrove_bonus` | `0.34` if `biome_ecotone_type == "mangrove"` or `wetland_system_type == "mangrove"` |
 
+The amphibian bonus intentionally retains the legacy `fresh_lake`/`inland_sea` or `is_river` rule, separately from resident-fish classification. Its habitat policy remains pending. Standing-water fish scores require exact-true upstream primary and composed fishery support, finite indices in `[0,1]`, and annual climate inside their composed `(-16,44) C` support. The fish guild's own existing temperature window must also have positive support: freshwater (including rivers) needs open `(-10,38) C`; marine needs open `(-11,37) C`. A valid zero is usable; an unavailable estimate is not. These are annual air-climate proxy limits, not biological survival or habitat-depth temperature limits.
+
+The cell exports three habitat booleans (`species_terrestrial_habitat_eligible`, `species_freshwater_habitat_eligible`, `species_marine_habitat_eligible`), two fish-score support booleans (`species_freshwater_fish_score_supported`, `species_marine_fish_score_supported`) and `species_freshwater_fishery_input_mode`. The latter distinguishes `standing_water_required`, `river_inapplicable_omitted` and `not_applicable`. They are appended to the CSV and available as debug layers. The independent subsystem/CLI helper checks their prerequisites, dominant guilds, every range member and the shared-aquatic `habitat_evidence.water_cell_fraction`. Missing model metadata retains legacy structural validation; malformed or unknown present metadata fails.
+
+Every range still exports a climate envelope, so the producer rejects invalid annual temperature before mutation. Present primary/fishery indices must also be finite numeric and non-boolean before mutation. Absent indices retain the old diagnostic zero default but cannot support fish scores; finite out-of-range indices remain unsupported. `habitat_evidence.mean_fishery_productivity_index` remains an upstream numeric diagnostic even in river ranges; it is not evidence of a consumed river-resource estimate.
+
 ### Endemism and confidence
 
-`_cell_endemism` (`species_ranges.py:234-259`):
+`_cell_endemism` (`species_ranges.py`):
 
 ```
 same_biome_fraction = |neighbours with same biome| / |neighbours|   (0.0 if no neighbours)
@@ -528,18 +557,18 @@ species_endemism_index = clamp(island_score
 
 `sea_level_diagnostics._landmass_class` (`src/magic_geo/sea_level_diagnostics.py:85-92`) can only produce `continent`, `large_island`, `island` or `islet` (plus `water` / `unassigned` sentinels at `:309`), so the `continental_island` entry and the `"mainland"` default key in the endemism map are **dead** — `continent` cells receive `island_score = 0.0`.
 
-`_cell_confidence` (`species_ranges.py:262-268`):
+`_cell_confidence` (`species_ranges.py`):
 `clamp(biome_confidence_index*0.30 + richness*0.22 + NPP*0.20 + max(wetland_extent, reef_growth)*0.12 + (1-disturbance)*0.16)`.
 
 ### Range assembly
 
-For each guild in `sorted(GUILD_METADATA)`, cells scoring `>= 0.46` are flood-filled into connected components over the raw neighbour graph (`species_ranges.py:44-63`); because `remaining` only ever contains that guild's candidates, the BFS is implicitly guild-restricted. Records are appended in `(guild, component)` order so ids are deterministic.
+For each guild in `sorted(GUILD_METADATA)`, cells scoring `>= 0.46` are flood-filled into connected components over the raw neighbour graph (`species_ranges.py`); because `remaining` only ever contains that guild's candidates, the BFS is implicitly guild-restricted. Records are appended in `(guild, component)` order so ids are deterministic.
 
-Cells accumulate **all** the range ids they belong to (`species_range_record_ids`), so ranges legitimately overlap: a cell can be in a `canopy_tree` range and a `large_predator` range simultaneously. After all records exist, each member cell's `species_range_fragmentation_index` is set to the **maximum** fragmentation over the ranges it belongs to (`species_ranges.py:416-425`).
+Cells accumulate **all** the range ids they belong to (`species_range_record_ids`), so ranges legitimately overlap: a cell can be in a `canopy_tree` range and a `large_predator` range simultaneously. After all records exist, each member cell's `species_range_fragmentation_index` is set to the **maximum** fragmentation over the ranges it belongs to (`species_ranges.py`).
 
-`_range_fragmentation` (`species_ranges.py:90-101`): `clamp(external_edge_fraction*0.72 + (1/max(1,|component|))*0.28)` where `external_edge_fraction = |edges leaving the component| / |all incident edges|`.
+`_range_fragmentation` (`species_ranges.py`): `clamp(external_edge_fraction*0.72 + (1/max(1,|component|))*0.28)` where `external_edge_fraction = |edges leaving the component| / |all incident edges|`.
 
-Record-level endemism and stress (`species_ranges.py:356-358`):
+Record-level endemism and stress (`species_ranges.py`):
 
 ```
 small_range_bonus = clamp((800000.0 - area_km2) / 800000.0) * 0.18
@@ -556,22 +585,24 @@ conservation_stress_index = clamp(mean_disturbance*0.38 + fragmentation*0.22
 
 `src/magic_geo/wildfire_disturbance.py` scores burnability per cell, then propagates a bounded number of wind-aligned spread events.
 
+Fresh `enrich_world_with_wildfire_disturbance` declares `heuristic_wildfire_native_seasonal_prescribed_natural_parent_availability_v7` for native seasonal climate or `heuristic_wildfire_prescribed_natural_parent_availability_v6` for the legacy climate branch. Both require exact ecosystem v5. Historical v2-v5 retain their established replay paths. The shared aquatic selector includes standing fresh/saline lakes while retaining dry saline basins as land. Water has zero fuel and ignition, firebreak one, regime `non_burnable_water`, and no history membership. Unknown terrestrial fuel inputs carry false support and explicitly unmodelled fronts; they do not establish a physical firebreak. The model does not simulate embers spotting across lakes or aquatic vegetation combustion.
+
 | Constant | Value | Role | Source |
 |---|---|---|---|
-| `IGNITION_THRESHOLD` | `0.28` | Ignition-candidate cut and `seasonal_surface_fire` regime cut | `wildfire_disturbance.py:8` |
-| `SPREAD_THRESHOLD` | `0.30` | Minimum edge probability for a neighbour to burn | `wildfire_disturbance.py:9` |
-| `HIGH_FUEL_THRESHOLD` | `0.35` | Crown-fire regime cut and `high_wildfire_fuel_continuity_cell_count` | `wildfire_disturbance.py:10` |
-| `HIGH_FIREBREAK_THRESHOLD` | `0.55` | `fragmented_firebreak_mosaic` cut and `high_wildfire_firebreak_cell_count` | `wildfire_disturbance.py:11` |
-| `MAX_EVENT_COUNT` | `96` | Maximum spread histories per world | `wildfire_disturbance.py:12` |
-| `MAX_SPREAD_STEPS` | `6` | Maximum steps per history (step 0 is the ignition cell) | `wildfire_disturbance.py:13` |
-| `MAX_EVENT_CELLS` | `96` | Maximum burned cells per history | `wildfire_disturbance.py:14` |
+| `IGNITION_THRESHOLD` | `0.28` | Ignition-candidate cut and `seasonal_surface_fire` regime cut | `wildfire_disturbance.IGNITION_THRESHOLD` |
+| `SPREAD_THRESHOLD` | `0.30` | Minimum edge probability for a neighbour to burn | `wildfire_disturbance.SPREAD_THRESHOLD` |
+| `HIGH_FUEL_THRESHOLD` | `0.35` | Crown-fire regime cut and `high_wildfire_fuel_continuity_cell_count` | `wildfire_disturbance.HIGH_FUEL_THRESHOLD` |
+| `HIGH_FIREBREAK_THRESHOLD` | `0.55` | `fragmented_firebreak_mosaic` cut and `high_wildfire_firebreak_cell_count` | `wildfire_disturbance.HIGH_FIREBREAK_THRESHOLD` |
+| `MAX_EVENT_COUNT` | `96` | Maximum spread histories per world | `wildfire_disturbance.MAX_EVENT_COUNT` |
+| `MAX_SPREAD_STEPS` | `6` | Maximum steps per history (step 0 is the ignition cell) | `wildfire_disturbance.MAX_SPREAD_STEPS` |
+| `MAX_EVENT_CELLS` | `96` | Maximum burned cells per history | `wildfire_disturbance.MAX_EVENT_CELLS` |
 
 ### Fuel continuity
 
-`_fuel_continuity` (`wildfire_disturbance.py:57-83`) returns `0.0` for `is_water`; otherwise:
+`wildfire_disturbance._fuel_continuity` returns `0.0` for the shared aquatic selector; otherwise:
 
 ```
-neighbor_fuel = |neighbours with vegetation_biomass_index >= 0.20| / |neighbours|
+neighbor_fuel = |terrestrial neighbours with vegetation_biomass_index >= 0.20| / |neighbours|
 fuel = clamp(biomass*0.32 + NPP*0.16 + wildfire_spread_risk*0.20 + seasonal_aridity*0.14
            + neighbor_fuel*0.12
            + 0.10 if "forest" in biome else 0
@@ -582,10 +613,10 @@ fuel = clamp(biomass*0.32 + NPP*0.16 + wildfire_spread_risk*0.20 + seasonal_arid
 
 ### Firebreak
 
-`_firebreak` (`wildfire_disturbance.py:86-95`) returns exactly `1.0` for `is_water`; otherwise:
+`wildfire_disturbance._firebreak` returns exactly `1.0` for the shared aquatic selector; otherwise:
 
 ```
-water_neighbor_fraction = |water neighbours| / |neighbours|
+water_neighbor_fraction = |aquatic neighbours under the shared selector| / |neighbours|
 firebreak = clamp(water_neighbor_fraction*0.34
                 + wetland_extent_index*0.24
                 + 0.18 if is_river else 0
@@ -596,11 +627,11 @@ firebreak = clamp(water_neighbor_fraction*0.34
 
 ### Wind alignment
 
-`_wind_alignment(cell, neighbor)` (`wildfire_disturbance.py:31-54`) builds a unit local tangent direction from the great-circle offset (`east = dlon * cos(mean_lat)` with `dlon` wrapped to `(-π, π]`, `north = dlat`), then returns `clamp((cos θ + 1)/2) * clamp(hypot(wind_east, wind_north))` where `θ` is the angle between the surface wind and that direction. It is `0.0` when the two cells coincide or the wind is zero. The per-cell `wildfire_wind_alignment_index` is the **maximum over all neighbours** (`wildfire_disturbance.py:289`).
+`wildfire_disturbance._wind_alignment(cell, neighbor)` builds a unit local tangent direction from the local angular offset (`east = dlon * cos(mean_lat)` with `dlon` wrapped to `(-π, π]`, `north = dlat`), then returns `clamp((cos θ + 1)/2) * clamp(hypot(wind_east, wind_north))` where `θ` is the angle between the surface wind and that direction. It is `0.0` when the two cells coincide or the wind is zero. The per-cell `wildfire_wind_alignment_index` is the **maximum over all neighbours**, including aquatic cells; nonburnability does not imply zero wind.
 
 ### Ignition potential
 
-`_ignition_potential` (`wildfire_disturbance.py:98-117`), `0.0` for `is_water`:
+`wildfire_disturbance._ignition_potential`, `0.0` for the shared aquatic selector:
 
 ```
 ignition = clamp(wildfire_spread_risk_index*0.34
@@ -608,21 +639,20 @@ ignition = clamp(wildfire_spread_risk_index*0.34
                + seasonal_aridity_index*0.16
                + ecosystem_disturbance_pressure_index*0.10
                + wind_alignment*0.08
-               + settlement_score*0.08
-               + clamp(climate_energy_stress_index)*0.06     # lightning proxy
+               + clamp(climate_energy_stress_index)*0.06     # v6 only; absent in native v7
                - firebreak*0.18
                - clamp(ice_thickness_m/500)*0.18)
 ```
 
-`settlement_score` is absent (default `0.0`) in geo-only worlds, so the anthropogenic ignition term vanishes there and the lightning proxy plus fuel/dryness carry the whole signal.
+Fire v6/v7 do not read `settlement_score`. Historical parent-support fire v4/v5 retain the additional `0.08 * settlement_score` term. Native v7, like historical native v5, omits legacy energy stress; legacy v6 retains it as an uncalibrated diagnostic, not a lightning estimate. None of these indices specifies an ignition frequency per unit time.
 
 ### Disturbance regime
 
-`_regime` (`wildfire_disturbance.py:120-133`), first match wins:
+`wildfire_disturbance._regime`, first match wins:
 
 | Order | Predicate | `wildfire_disturbance_regime` |
 |---|---|---|
-| 1 | `is_water` | `non_burnable_water` |
+| 1 | shared aquatic selector | `non_burnable_water` |
 | 2 | `biome == "ice_cap"` or `ice_thickness_m > 120.0` | `ice_or_barren_firebreak` |
 | 3 | `fuel < 0.12` | `sparse_fuel` |
 | 4 | `firebreak >= 0.55` | `fragmented_firebreak_mosaic` |
@@ -632,9 +662,9 @@ ignition = clamp(wildfire_spread_risk_index*0.34
 
 ### Event selection and spread
 
-Candidates (`wildfire_disturbance.py:311-320`) are cells with `wildfire_ignition_potential_index >= 0.28` **and** `wildfire_fuel_continuity_index >= 0.18` **and** regime not in `{non_burnable_water, ice_or_barren_firebreak}`, sorted by `(-ignition, id)`. Events are built greedily until `MAX_EVENT_COUNT` histories exist; a candidate already claimed by an earlier event is skipped, so **histories are pairwise disjoint in their cell sets**.
+`enrich_world_with_wildfire_disturbance` selects cells with `wildfire_ignition_potential_index >= 0.28` **and** `wildfire_fuel_continuity_index >= 0.18` **and** regime not in `{non_burnable_water, ice_or_barren_firebreak}`, sorted by `(-ignition, id)`. Events are built greedily until `MAX_EVENT_COUNT` histories exist; a candidate already claimed by an earlier event is skipped, so **histories are pairwise disjoint in their cell sets**.
 
-`_spread_probability(source, target)` (`wildfire_disturbance.py:136-151`) is `0.0` when the target is water or has regime `ice_or_barren_firebreak`; otherwise:
+`wildfire_disturbance._spread_probability(source, target)` is `0.0` when **either endpoint** is aquatic under the shared selector, or the target has regime `ice_or_barren_firebreak`; otherwise:
 
 ```
 p = clamp(target.wildfire_ignition_potential_index * 0.26
@@ -648,14 +678,14 @@ p = clamp(target.wildfire_ignition_potential_index * 0.26
 
 Maximum attainable value is `0.92`.
 
-The propagation loop (`wildfire_disturbance.py:194-236`):
+The propagation loop in `wildfire_disturbance._build_history`:
 
 1. Step 0 burns only the ignition cell; `active_ids = {ignition_id}`.
 2. Each later step collects every unburned, unclaimed neighbour of the active front, keeps the maximum probability per candidate, discards anything below `0.30`, sorts by `(-probability, id)`, and truncates to `MAX_EVENT_CELLS - |burned|` remaining slots.
 3. If nothing qualifies, the loop breaks — so `spread_step_count ∈ [1, 6]`.
 4. The new set becomes the active front (the fire advances as a front, it does not re-radiate from the whole burn scar).
 
-Per-step `containment_index = clamp(mean_firebreak_over_newly_burned + (1 - mean_probability)*0.28)`; the history-level `containment_index = clamp(mean_firebreak_over_all_burned*0.62 + (1 - max_probability)*0.20)` (`wildfire_disturbance.py:234`, `:245`).
+`_build_history` computes per-step `containment_index = clamp(mean_firebreak_over_newly_burned + (1 - mean_probability)*0.28)` and history-level `containment_index = clamp(mean_firebreak_over_all_burned*0.62 + (1 - max_probability)*0.20)`.
 
 ---
 
@@ -785,7 +815,7 @@ All Python-emitted floats on this page are `round(value, 6)` — six decimal pla
 | `sustainable_yield_index` | double `[0,1]` | Yield blend | `:227` |
 | `regeneration_years` | int `>= 1` | `recovery_years × 0.35` for fisheries, `×1.0` for forests | `:228` |
 | `climate_dependency_index` | double `[0,1]` | `clamp(1 - temp_suitability + seasonal_aridity*0.35)` | `:229` |
-| `water_dependency_index` | double `[0,1]` | `clamp(soil_moisture*0.45 + groundwater_recharge_mm_y/450*0.35 + 0.30 if is_water)` | `:230` |
+| `water_dependency_index` | double `[0,1]` | `clamp(soil_moisture*0.45 + groundwater_recharge_mm_y/450*0.35 + (0.30 if shared aquatic selector else 0))` | `enrich_world_with_ecosystem_dynamics` |
 | `disturbance_risk_index` | double `[0,1]` | `ecosystem_disturbance_pressure_index` | `:231` |
 | `formation_evidence` | object | 6 keys: `primary_productivity_index`, `vegetation_biomass_index`, `forest_growth_index`, `fishery_productivity_index`, `runoff_mm_y`, `soil_moisture_index` | `:232-239` |
 
@@ -863,7 +893,7 @@ All Python-emitted floats on this page are `round(value, 6)` — six decimal pla
 | `resource` | enum string, `RESOURCE_NAMES` (9) | string | `environment.cpp:332`, `:390`–`:403`, `:483`, `:489`, `:494` |
 | `settlement_score` | double `[0,1]` | `max(8, float_precision)` | `environment.cpp:333`, `:410`–`:412`, `:485`–`:502` |
 | `landform` | enum string, `LANDFORM_NAMES` (20) | string | `environment.cpp:430`–`:474` |
-| `water_body` | enum string, `WATER_BODY_NAMES` (6) | string | may be re-stamped for lakes at `environment.cpp:342` |
+| `water_body` | enum string, `WATER_BODY_NAMES` (6) | string | hydrology owns lake classification; `derive_soils_biomes_resources` preserves it |
 
 Serialization order and precision are set in `cells_json` (`cpp/src/engine/entity_serialization.cpp:110`); `biome` is emitted at `entity_serialization.cpp:342`.
 
@@ -975,7 +1005,7 @@ Smoke-test coverage is high but **not** total: `tests/test_smoke_biosphere.py` i
 
 ### Hard native ordering
 
-The native classifier is the **last** stage that can be affected by climate and hydrology and the **first** stage that other environment products depend on. Its inputs are finalized by `stabilize_numeric_depressions` and the terminal `derive_cryosphere_state` call (`pipeline.cpp:157-167`); its outputs feed `derive_landforms`, `generate_settlements`, `generate_political_regions`, `generate_cultural_layers` and `generate_historical_layers` (all downstream of `pipeline.cpp:188`). Reordering it breaks engine invariant 1 (*preserve pipeline order*, `cpp/src/engine/README.md`).
+`simulate_world_impl` finishes the final climate/hydrology refresh and `derive_cryosphere_state` before calling `derive_soils_biomes_resources`. Its outputs feed `derive_landforms` and then the optional civilization stages. `derive_soils_biomes_resources` preserves hydrology's standing-lake classification and returns before terrestrial soil/resource rules for both marine and lake water. These named pipeline functions, rather than fixed source line numbers, define the dependency order.
 
 ### Hard Python ordering
 
@@ -996,24 +1026,26 @@ The native classifier is the **last** stage that can be affected by climate and 
 | `species_ranges` | `biome_confidence_index`, `biome_ecotone_type` (biome enrichers) | Composition confidence and endemism |
 | `wildfire_disturbance` | `vegetation_biomass_index`, `primary_productivity_index`, `wildfire_spread_risk_index`, `ecosystem_disturbance_pressure_index` (`ecosystem_dynamics`) | Fuel and ignition |
 | `wildfire_disturbance` | `wetland_extent_index` (`wetland_diagnostics`), `floodplain_connectivity_index` (`river_channel_morphology`) | Firebreak |
-| `wildfire_disturbance` | `climate_energy_stress_index` (`climate_energy`) | Lightning proxy |
+| `wildfire_disturbance` | `climate_energy_stress_index` (`climate_energy`) | Legacy-climate uncalibrated ignition proxy only; native seasonal fire omits it |
 
-### Full-world versus geo-only ordering delta
+### Shared full-world and geo-only enrichment order
 
-Both entry points run the six enrichers in the same relative order among themselves. The only delta that touches this page is that in `generate_geo_world` the permafrost and glacial-landform enrichers run **before** `biome_diagnostics` (`api.py:342-344`) whereas in `generate_world` they run **after** (`api.py:224-226`). `biome_diagnostics` reads nothing they produce, so its own output is order-invariant; but `permafrost_diagnostics` reads `frost_months` and, in the geo-only order, that key is not yet present. Its per-cell path has an explicit fallback that recomputes frost months from the monthly temperature array (`src/magic_geo/permafrost_diagnostics.py:50`); its region aggregate `mean_frost_months` uses a plain `0.0` default (`permafrost_diagnostics.py:167`) and is therefore reported as zero in geo-only worlds. That is a cryosphere-page concern, but it is caused by the biome-enricher ordering and is stated here for completeness.
+Both entry points call `_enrich_physical_foundation`: soil diagnostics precede biome diagnostics, which precede permafrost and glacial landforms. Permafrost therefore receives the produced frost-month and soil fields in both scopes. Both then use `_enrich_ecosystems_and_resources`, ordered ecosystem → reef → species → wildfire → resources. In a full world, settlement/route and port models run between these helpers so optional human inputs and reef port links exist before their consumers. Geo-only generation skips native civilization and removes its schema fields before the shared natural helpers.
+
+For `generate_world`, `output.include_cells=false` filters cells only after complete enrichment; linked records are still built from the complete internal state. `generate_geo_world` requires cells because natural-layer validation depends on them. Cell-free full-world exports are not standalone inputs for per-cell validation.
 
 ### Geo-only stripping effects on this layer
 
-`_strip_native_civilization_outputs` (`src/magic_geo/api.py:269-284`, called at `:304`) pops `settlement_score` — one of the four members of `NATIVE_CIVILIZATION_CELL_FIELDS` (`api.py:106-113`) — from every cell before enrichment. Exactly two formulas on this page read it, both with a `0.0` default, and therefore take their no-human branch in geo-only mode:
+`api._strip_native_civilization_outputs` removes `settlement_score`, a member of `NATIVE_CIVILIZATION_CELL_FIELDS`, before geo-only enrichment. Fresh ecosystem v5 and fire v6/v7 omit it in both scopes. The historical contracts retain these terms:
 
 | Formula | Term | Source | Effect when stripped |
 |---|---|---|---|
-| `_disturbance_pressure` | `settlement*0.16` | `ecosystem_dynamics.py:57`, `:60` | Disturbance drops by up to `0.16` |
-| `_ignition_potential` | `settlement*0.08` | `wildfire_disturbance.py:104`, `:113` | Ignition drops by up to `0.08` |
+| `_disturbance_pressure` | `settlement*0.16` | `ecosystem_dynamics._disturbance_pressure` | Direct disturbance contribution drops by up to `0.16` |
+| `_ignition_potential` | `settlement*0.08` | `wildfire_disturbance._ignition_potential` | Direct ignition contribution drops by up to `0.08`, with an additional upstream disturbance effect |
 
-The native `biome` enum itself is unaffected by stripping; only the Python diagnostic indices change.
+The native `biome` enum itself is unaffected by stripping.
 
-Consequently `ecosystem_disturbance_pressure_index`, `wildfire_ignition_potential_index`, and everything downstream of them (succession stage, recovery years, species conservation stress, wildfire regimes and events) legitimately differ between a full world and a geo-only world generated from the same seed. This is intentional, not drift.
+Historical full/geo ecology can differ through those score terms. Fresh ecosystem, species and fire owned outputs agree for the verified same-input full/geo pair. Resource access, port links and other human diagnostics retain separate inputs and are outside that invariance claim.
 
 ---
 
@@ -1029,8 +1061,12 @@ Consequently `ecosystem_disturbance_pressure_index`, `wildfire_ignition_potentia
 | `wildfire_inverse_links_and_steps` | `src/magic_geo/geo_validation_subsystems.py:2217-2275` | `validate-geo`, domain `ecosystems_reefs_species_wildfire` | Sequential ids; `ignition_cell_id ∈ cell_ids`; `cell_count`/`area_km2` match; exact inverse with `cell.wildfire_spread_history_ids`; `spread_step_count == len(steps)`; every step's `active_front_cell_ids` and `newly_burned_cell_ids` are subsets of the history's cells; **`cumulative_burned_cell_count` monotonic non-decreasing and bounded by `len(cell_ids)`**; bounded per-step probability and containment; non-negative burned area; 8 bounded history indices; four summary mirrors |
 | Layer contract `biomes_ecosystems` | `src/magic_geo/geo_layer_contracts.py:237-258` | `validate-geo` layer audit | Requires `biome_diagnostics` (**nonempty**), `biome_ecotone_regions`, `biome_realism_checks`, `vegetation_succession_histories`, `species_range_records`, `wetland_systems`, `reef_systems`, `wildfire_spread_histories`; dependencies `soils_pedogenesis` + `climate_atmosphere` + `hydrology` |
 | Smoke assertions | `tests/test_smoke_biosphere.py` | `pytest` | Independent re-derivation of every summary aggregate on this page from the record arrays, including the ecotone type-count sum equalling `cell_count` and the ecotone cell-id set equalling the union of region membership |
+| `validate_aquatic_climate_support` | `aquatic_climate_validation.py` | Both subsystem and public CLI ecosystem checks | Exact known v2/v3 metadata, independent annual proxy support and primary→fishery dependency; v3 additionally excludes aquatic terrestrial biomass/forest/fire, succession histories and forest records |
+| `validate_wildfire_aquatic_exclusion` | `wildfire_aquatic_validation.py` | Both subsystem and public CLI wildfire checks | Exact known wildfire v2 metadata, independent aquatic classification, zero fuel/ignition, unit firebreak, nonburnable regime, empty inverse IDs, and nonaquatic ignition/affected/newly-burned/active-front references |
 
-Note what the validators deliberately do **not** do: only `biome_diagnostics` has a full producer replay. Ecotones, ecosystem dynamics, species ranges and wildfire disturbance are validated structurally (membership, inverse links, bounds, monotonicity, summary mirrors) but their scoring formulas are not re-executed, so a change to a weight in those four modules will pass `validate-geo` as long as the resulting values stay in `[0,1]` and the membership bookkeeping stays consistent.
+Independent ecosystem, species, fire and biological-resource helpers run in public CLI and subsystem checks. Fresh versions require matched parents, explicit consumed sources, replayed owned outputs and complete inverse links. Exact historical metadata keeps its established validation behavior. Deleting new declarations or availability fields cannot silently downgrade a complete new chain to a legacy structural check. See the [version and dependency contract](../../prescribed_natural_activity_migration.md).
+
+The original v2 guards primarily checked habitat and input support. Current new ecosystem, species and fire branches also independently replay their owned numerical outputs and reject stale or missing source evidence. Biome diagnostic replay and other layer checks remain separate. Numerical agreement with a declared equation does not calibrate its empirical weights; the [current migration contract](../../prescribed_natural_activity_migration.md) describes that distinction and the validation evidence.
 
 ---
 
@@ -1044,7 +1080,7 @@ magic-geo validate --world runs/world.json
 magic-geo validate-geo --world runs/world.json --profile earthlike --output runs/geo_validation.json
 ```
 
-Generate a geo-only world (no `settlement_score`, so the no-human ecology branches are taken) and export the cell table:
+Generate a geo-only world with the same prescribed natural ecology scenario as full generation and export the cell table:
 
 ```bash
 magic-geo generate --config configs/earthlike_seed.yaml --geo-only \
@@ -1159,7 +1195,7 @@ print(ignition["wildfire_ignition_potential_index"],
 
 **Shadow classifier blind spots.** `_expected_biome` can never return `wetland` or `mediterranean_scrub`, so every native `wetland` cell is permanently scored as a mismatch with a `0.30` confidence base and `biome_transition_zone == True`. It also reads the native `biome` directly for its `ice_cap` rule (`biome_dynamics.py:42`), so it is not fully independent there.
 
-**Lakes are classified as land.** Because `is_water` is marine-only (`cpp/src/engine/ocean.cpp:250`), lake cells take the land branch everywhere: in the native cascade (rows L1a/L1b), in `_expected_biome`, and in `_primary_productivity` / `_vegetation_biomass`. A `fresh_lake` cell therefore receives a terrestrial NPP and a non-zero terrestrial biomass while simultaneously qualifying for `fishery_productivity_index` through `FISHERY_WATER_TYPES`. Arid closed-basin lakes are labelled `hot_desert` regardless of temperature.
+**Lake habitat corrections are versioned and incomplete across modules.** Native `derive_soils_biomes_resources` has a dedicated standing-lake branch preserving hydrology's class. Ecosystem v3 and wildfire v2 share an aquatic selector, so lakes receive aquatic productivity and cannot acquire terrestrial biomass, forest resources or wildfire histories. Species v2 now excludes standing water from its five terrestrial guilds and requires appropriate habitat and usable inputs for fish scores. `biome_dynamics._expected_biome`, the three remaining species guilds and general endemism/confidence proxies retain independent limitations; those diagnostics must not be confused with the corrected producer behavior.
 
 **Enum overloading.** Marine `inland_sea` cells are labelled biome `lake` (`environment.cpp:331`); `ice_cap` cells are given `tundra` soil; the final else-branch can label a 10 °C cell `hot_desert`. These are properties of the classifier as written, not modelling claims.
 
@@ -1171,9 +1207,9 @@ print(ignition["wildfire_ignition_potential_index"],
 
 **Ecotone confidence for non-ecotone cells.** `biome_ecotone_confidence` retains the sub-threshold best score for cells whose type is `"none"`, and `mean_biome_ecotone_confidence` averages over **all** cells including those. It is not the mean confidence of the detected ecotones.
 
-**Validation asymmetry.** Only the biome diagnostics have a full producer replay in `validate-geo`. Ecotones, ecosystem dynamics, species ranges and wildfire disturbance are checked for structure, membership, inverse links, bounds and summary mirrors — not for formula fidelity.
+**Validation scope.** Independent ecosystem, species and fire checks enforce their versioned support, source, habitat, numerical replay and record-link contracts. They do not calibrate the guild habitat rules, empirical scoring coefficients or ecological realism.
 
-**Geo-only divergence is expected.** With `settlement_score` stripped, `ecosystem_disturbance_pressure_index` and `wildfire_ignition_potential_index` and everything downstream of them differ from a full world at the same seed. Comparing the two directly is not a drift test.
+**Natural activity is scoped explicitly.** Fresh ecosystem/species/fire outputs agree across the verified same-input full/geo pair. Historical versions retain their score-driven differences. Neither result establishes full/geo equality of economic access or realized human activity.
 
 ---
 

@@ -856,7 +856,7 @@ def _contains_expected(actual: Any, expected: Any) -> bool:
     return actual == expected
 
 
-def validate_market_clearing_replay(payload: dict[str, Any]) -> list[str]:
+def _validate_market_clearing_legacy(payload: dict[str, Any]) -> list[str]:
     try:
         summary = payload.get("summary", {})
         required_lists = (
@@ -923,3 +923,14 @@ def validate_market_clearing_replay(payload: dict[str, Any]) -> list[str]:
     ):
         valid = False
     return [] if valid else ["market clearing model or causal replay invalid"]
+
+
+
+def validate_market_clearing_replay(payload: dict[str, Any]) -> list[str]:
+    from .market_availability_validation import market_version,validate_market_availability
+    try:
+        if market_version(payload)==1:
+            return _validate_market_clearing_legacy(payload)
+        return validate_market_availability(payload)
+    except (ValueError,TypeError,KeyError,IndexError,OverflowError,AttributeError):
+        return ["market clearing model or causal replay invalid"]

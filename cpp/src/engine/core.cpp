@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include <locale>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -172,6 +173,7 @@ std::string num(double value, int precision) {
         );
     }
     std::ostringstream out;
+    out.imbue(std::locale::classic());
     out << std::fixed << std::setprecision(precision) << value;
     return out.str();
 }
@@ -270,8 +272,20 @@ void validate_params(const Params& params) {
         params.oceanic_crust_aging_ma_per_step
     );
     require_finite("maturation_timestep_ma", params.maturation_timestep_ma);
-    require_finite("lapse_rate_c_per_km", params.lapse_rate_c_per_km);
-    require_finite("base_temperature_c", params.base_temperature_c);
+    switch (params.temperature_model) {
+    case ClimateTemperatureModel::legacy_empirical:
+        require_finite("lapse_rate_c_per_km", params.lapse_rate_c_per_km);
+        require_finite("base_temperature_c", params.base_temperature_c);
+        break;
+    case ClimateTemperatureModel::prescribed_seasonal:
+        require_finite("reference_infrared_optical_depth", params.reference_infrared_optical_depth);
+        if (params.reference_infrared_optical_depth < 0.0) {
+            throw std::runtime_error("reference_infrared_optical_depth must be nonnegative");
+        }
+        break;
+    default:
+        throw std::runtime_error("temperature_model must be legacy_empirical or prescribed_seasonal");
+    }
     require_finite("precipitation_scale", params.precipitation_scale);
     require_finite(
         "subtropical_drying_strength",
@@ -391,11 +405,13 @@ void validate_params(const Params& params) {
     if (params.subtropical_drying_strength < 0.0 || params.subtropical_drying_strength > 0.9) {
         throw std::runtime_error("subtropical_drying_strength must be between 0 and 0.9");
     }
-    if (params.lapse_rate_c_per_km < 0.0 || params.lapse_rate_c_per_km > 15.0) {
-        throw std::runtime_error("lapse_rate_c_per_km must be between 0 and 15");
-    }
-    if (params.base_temperature_c < -100.0 || params.base_temperature_c > 100.0) {
-        throw std::runtime_error("base_temperature_c must be between -100 and 100");
+    if (params.temperature_model == ClimateTemperatureModel::legacy_empirical) {
+        if (params.lapse_rate_c_per_km < 0.0 || params.lapse_rate_c_per_km > 15.0) {
+            throw std::runtime_error("lapse_rate_c_per_km must be between 0 and 15");
+        }
+        if (params.base_temperature_c < -100.0 || params.base_temperature_c > 100.0) {
+            throw std::runtime_error("base_temperature_c must be between -100 and 100");
+        }
     }
     if (params.precipitation_scale < 0.0 || params.precipitation_scale > 10.0) {
         throw std::runtime_error("precipitation_scale must be between 0 and 10");

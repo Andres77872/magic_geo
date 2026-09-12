@@ -46,8 +46,10 @@ from typing import Any
 from unittest import TestCase
 
 from support import worlds
+from support.legacy_land_use_worlds import legacy_land_use_world
 
 from magic_geo.human_geography_validation import validate_human_geography_replay
+from magic_geo.land_use_availability_validation import validate_land_use_availability
 from magic_geo.natural_frontiers import enrich_world_with_natural_frontiers
 
 LAND_USE_FAILURE = "land use zone model or causal replay invalid"
@@ -66,6 +68,15 @@ NATURAL_FRONTIER_THRESHOLD = 0.45
 
 
 class HumanGeographyReplayValidationTests(TestCase):
+    def _legacy_world(self) -> dict[str, Any]:
+        """An intact historical v1 world, independently validated by its loader."""
+        world = legacy_land_use_world()
+        self.assertEqual(
+            world["worldbuilding_realism_model"]["model_type"],
+            "causal_upstream_evidence_worldbuilding_realism_checks_v1",
+        )
+        return world
+
     def _tampered_world(self) -> dict[str, Any]:
         """A private copy of the canonical world, proven clean before tampering."""
         world = worlds.cached_world("replay_128")
@@ -139,9 +150,9 @@ class HumanGeographyReplayValidationTests(TestCase):
         summary = world["summary"]
 
         self.assertEqual(len(world["cells"]), 128)
-        self.assertEqual(len(world["agricultural_zones"]), 6)
-        self.assertEqual(len(world["mining_zones"]), 2)
-        self.assertEqual(len(world["resource_deposits"]), 118)
+        self.assertEqual(len(world["agricultural_zones"]), 9)
+        self.assertEqual(len(world["mining_zones"]), 5)
+        self.assertEqual(len(world["resource_deposits"]), 120)
         self.assertEqual(len(world["worldbuilding_realism_checks"]), 5)
         self.assertEqual(len(world["settlements"]), 3)
         self.assertEqual(len(world["routes"]), 3)
@@ -220,7 +231,7 @@ class HumanGeographyReplayValidationTests(TestCase):
 
                 self.assertEqual(validate_human_geography_replay(world), expected)
 
-    def test_upstream_evidence_tampers_report_exactly_one_message(self) -> None:
+    def test_legacy_upstream_evidence_tampers_report_exactly_one_message(self) -> None:
         # These rewrite model *inputs*, not published outputs, so they only fail if
         # the family recomputes its model from the raw payload. Fertility feeds the
         # agricultural index and deposit viability feeds the mining index (land
@@ -235,9 +246,33 @@ class HumanGeographyReplayValidationTests(TestCase):
         }
         for name, (tamper, expected) in cases.items():
             with self.subTest(tamper=name):
-                world = self._tampered_world()
+                world = self._legacy_world()
                 tamper(world)
 
+                self.assertEqual(validate_human_geography_replay(world), expected)
+
+    def test_current_upstream_evidence_reports_every_affected_family(self) -> None:
+        # Current worldbuilding v3 verifies the resource parents used by its fishery
+        # context. Changing fertility or viability invalidates that evidence as
+        # well as the independently replayed land-use potential.
+        cases = {
+            "best_farmland_fertility": (
+                self._zero_the_fertility_of_the_best_farmland,
+                [LAND_USE_FAILURE, WORLDBUILDING_FAILURE],
+            ),
+            "deposit_economic_viability": (
+                self._zero_the_viability_of_the_first_deposit,
+                [LAND_USE_FAILURE, WORLDBUILDING_FAILURE],
+            ),
+            "settlement_score": (self._zero_the_first_settlement_score, [WORLDBUILDING_FAILURE]),
+            "route_cost": (self._double_the_first_route_cost, [WORLDBUILDING_FAILURE]),
+        }
+        for name, (tamper, expected) in cases.items():
+            with self.subTest(tamper=name):
+                world = self._tampered_world()
+                self.assertEqual(world["worldbuilding_realism_model"]["model_type"],
+                                 "causal_upstream_evidence_worldbuilding_realism_checks_v3")
+                tamper(world)
                 self.assertEqual(validate_human_geography_replay(world), expected)
 
     def test_extra_natural_frontier_record_reports_only_the_frontier_message(self) -> None:
@@ -288,7 +323,7 @@ class HumanGeographyReplayValidationTests(TestCase):
         # ``resource_deposits`` feeds the mining-potential replay and the
         # resource/geology realism check, but nothing in the frontier family.
         world = self._tampered_world()
-        self.assertEqual(len(world["resource_deposits"]), 118)
+        self.assertEqual(len(world["resource_deposits"]), 120)
         world["resource_deposits"] = []
 
         self.assertEqual(
@@ -353,11 +388,11 @@ class HumanGeographyReplayValidationTests(TestCase):
                 self.assertEqual(validate_human_geography_replay(world), expected)
 
     def test_cells_whose_neighbour_list_is_unusable_form_single_cell_zones(self) -> None:
-        # Zones are mesh components, so a cell whose neighbour list is not a list
+        # Historical v1 zones are mesh components, so a cell whose neighbour list is not a list
         # cannot be walked from; the model treats it as isolated. Doing that to
         # every member of the agricultural zones splits them into one zone per
         # cell, which the stored zone ids contradict.
-        world = self._tampered_world()
+        world = self._legacy_world()
         members = [
             cell for cell in world["cells"] if int(cell.get("agricultural_zone_id", -1)) >= 0
         ]
@@ -368,16 +403,33 @@ class HumanGeographyReplayValidationTests(TestCase):
         self.assertEqual(validate_human_geography_replay(world), [LAND_USE_FAILURE])
 
     def test_a_route_with_an_unknown_endpoint_is_dropped_from_the_link_maps(self) -> None:
-        # Both the land use and the frontier family index routes by the
+        # Historical v1 land use and the frontier family index routes by the
         # settlements they join, and skip a route whose endpoint is not a known
         # settlement. The land use family notices, because the zone records
         # publish the routes that touch them.
-        world = self._tampered_world()
+        world = self._legacy_world()
         route = world["routes"][0]
         self.assertNotEqual(int(route["from"]), 10**9)
         route["from"] = 10**9
 
         self.assertEqual(validate_human_geography_replay(world), [LAND_USE_FAILURE])
+
+    def test_current_land_use_rejects_unusable_graph_inputs(self) -> None:
+        cases = {
+            "unusable_neighbours": lambda world: world["cells"][0].__setitem__("neighbors", None),
+            "unknown_route_endpoint": lambda world: world["routes"][0].__setitem__("from", 10**9),
+        }
+        for name, tamper in cases.items():
+            with self.subTest(tamper=name):
+                world = self._tampered_world()
+                self.assertEqual(validate_land_use_availability(world), [])
+                tamper(world)
+                errors = validate_land_use_availability(world)
+                self.assertTrue(errors, "current inputs must be rejected before numerical replay")
+                # Current worldbuilding also requires complete reciprocal cell
+                # neighbors and known route endpoints before evaluating checks.
+                self.assertEqual(validate_human_geography_replay(world),
+                                 [LAND_USE_FAILURE, WORLDBUILDING_FAILURE])
 
     def test_records_the_frontier_family_skips_leave_it_silent(self) -> None:
         # Two skip branches whose whole point is that nothing downstream moves.
@@ -435,12 +487,12 @@ class HumanGeographyReplayValidationTests(TestCase):
             self.assertEqual(validate_human_geography_replay(world), [WORLDBUILDING_FAILURE])
 
     def test_deposit_geology_evidence_falls_back_to_the_cell_it_sits_on(self) -> None:
-        # The resource realism check reads each deposit's formation evidence and
+        # The historical v1 resource realism check reads each deposit's formation evidence and
         # falls back to the host cell when it is not a mapping, so a corrupted
         # evidence block is tolerated; an unmodelled resource is not, because it
         # drops to the generic confidence rule and loses its support.
         with self.subTest(deposit="evidence_not_a_mapping"):
-            world = self._tampered_world()
+            world = self._legacy_world()
             for deposit in world["resource_deposits"]:
                 self.assertIsInstance(deposit["formation_evidence"], dict)
                 deposit["formation_evidence"] = "not-a-mapping"
@@ -458,7 +510,7 @@ class HumanGeographyReplayValidationTests(TestCase):
             #     the cell answered in its place.
             # Both legs also move the land use replay, so that message is the
             # constant here and the worldbuilding message is the discriminator.
-            world = self._tampered_world()
+            world = self._legacy_world()
             for cell in world["cells"]:
                 self.assertLess(float(cell["soil_salinity_index"]), 0.9)
                 cell["soil_salinity_index"] = 0.9
@@ -476,12 +528,32 @@ class HumanGeographyReplayValidationTests(TestCase):
             )
 
         with self.subTest(deposit="unmodelled_resource"):
-            world = self._tampered_world()
+            world = self._legacy_world()
             deposit = world["resource_deposits"][0]
             self.assertNotEqual(str(deposit["resource"]), "unobtainium")
             deposit["resource"] = "unobtainium"
 
             self.assertEqual(validate_human_geography_replay(world), [WORLDBUILDING_FAILURE])
+
+    def test_current_worldbuilding_rejects_corrupted_resource_parent_evidence(self) -> None:
+        # The current v3 fishery context audits the actual resource chain before the
+        # historical material-geology fallback could hide stale parent evidence.
+        for field in ("formation_evidence", "soil_salinity_index"):
+            with self.subTest(field=field):
+                world = self._tampered_world()
+                self.assertEqual(world["worldbuilding_realism_model"]["model_type"],
+                                 "causal_upstream_evidence_worldbuilding_realism_checks_v3")
+                if field == "formation_evidence":
+                    for deposit in world["resource_deposits"]:
+                        self.assertIsInstance(deposit[field], dict)
+                        deposit[field] = "not-a-mapping"
+                    expected = [WORLDBUILDING_FAILURE]
+                else:
+                    for cell in world["cells"]:
+                        self.assertLess(float(cell[field]), 0.9)
+                        cell[field] = 0.9
+                    expected = [LAND_USE_FAILURE, WORLDBUILDING_FAILURE]
+                self.assertEqual(validate_human_geography_replay(world), expected)
 
     def test_region_capital_and_settlement_membership_drive_connectivity(self) -> None:
         # The connectivity check walks the route graph from each region's
@@ -541,23 +613,18 @@ class HumanGeographyReplayValidationTests(TestCase):
         return first, second
 
     def test_the_cell_terrain_names_the_frontier_a_border_runs_along(self) -> None:
-        # An accepted ``open_lowland`` border takes its name from the terrain of
-        # its two endpoint cells, so this walks that ladder rung by rung.
-        #
-        # The validator answers with one fixed string per family, so a bare
-        # "this payload fails" assertion could not tell one rung from another:
-        # every case below would pass with any terrain at all. Each case
-        # therefore names the rung it expects and proves it twice.
-        #   1. With the border injected and the payload still stale, all three
-        #      families report -- the endpoint rewrite moves their land use
-        #      potential and the border evidence of the realism checks too.
-        #   2. The *producer* (``magic_geo.natural_frontiers``, a separate
-        #      implementation from the validator) is then run over the same
-        #      payload: it must name both endpoints with the expected rung, and
-        #      the frontier message must disappear while the other two stay.
-        # A rung the validator computes differently from the producer therefore
-        # keeps the frontier message and fails here, and a case whose terrain
-        # selects the wrong rung fails on the name.
+        self._assert_terrain_frontier_replay(legacy=False)
+
+    def test_legacy_cell_terrain_names_the_frontier_a_border_runs_along(self) -> None:
+        self._assert_terrain_frontier_replay(legacy=True)
+
+    def _assert_terrain_frontier_replay(self, *, legacy: bool) -> None:
+        # The same eight terrain witnesses retain the historical equations and
+        # test current availability. These current endpoints are cold exposed
+        # land: unsupported agriculture stays zero when their terrain changes.
+        # Coastal water also invalidates their published mining applicability.
+        # Running the separate frontier producer must name the expected rung
+        # and remove exactly the frontier replay failure in both versions.
         cases: dict[str, tuple[str, dict[str, Any]]] = {
             "river": ("river", {"is_river": True}),
             "coastal": ("coastal", {"is_river": False, "water_body_type": "ocean"}),
@@ -618,11 +685,22 @@ class HumanGeographyReplayValidationTests(TestCase):
         )
         for name, (expected_type, terrain) in cases.items():
             with self.subTest(frontier_terrain=name):
-                world = self._tampered_world()
+                world = self._legacy_world() if legacy else self._tampered_world()
+                if not legacy:
+                    for cell in world["cells"][:2]:
+                        self.assertTrue(cell["agricultural_habitat_applicable"])
+                        self.assertFalse(cell["agricultural_climate_supported"])
+                        self.assertFalse(cell["agricultural_potential_supported"])
+                        self.assertEqual(cell["agricultural_potential_index"], 0.0)
+                        self.assertTrue(cell["mining_surface_applicable"])
+                land_errors = [LAND_USE_FAILURE] if legacy or name == "coastal" else []
                 first, second = self._inject_open_border_between_rewritten_cells(world, **terrain)
                 self.assertEqual(str(first["natural_frontier_type"]), "none")
 
-                self.assertEqual(validate_human_geography_replay(world), ALL_FAILURES)
+                self.assertEqual(
+                    validate_human_geography_replay(world),
+                    land_errors + [FRONTIER_FAILURE, WORLDBUILDING_FAILURE],
+                )
 
                 enrich_world_with_natural_frontiers(world)
 
@@ -630,16 +708,16 @@ class HumanGeographyReplayValidationTests(TestCase):
                 self.assertEqual(str(second["natural_frontier_type"]), expected_type)
                 self.assertEqual(
                     validate_human_geography_replay(world),
-                    [LAND_USE_FAILURE, WORLDBUILDING_FAILURE],
+                    land_errors + [WORLDBUILDING_FAILURE],
                     f"the validator must replay the {expected_type!r} rung the producer wrote",
                 )
 
     def test_natural_frontier_records_are_rebuilt_from_the_border_components(self) -> None:
         # The canonical 128-cell world draws no borders, so its frontier record
-        # list is empty and the record builder never runs. The smallest canonical
-        # world that does draw borders carries three frontier records, each
-        # linking the routes, settlements and waterways that touch it, and every
-        # published field of those records is recomputed here.
+        # list is empty and the record builder never runs. The existing 512-cell
+        # control carries four frontier records. Waterways
+        # and settlements touch different components in the current seasonal
+        # world, so each membership tamper selects an actual linked record.
         world = worlds.cached_world(BORDERED_WORLD)
         self.assertEqual(
             validate_human_geography_replay(world),
@@ -647,13 +725,14 @@ class HumanGeographyReplayValidationTests(TestCase):
             "the untampered bordered world must replay clean",
         )
         records = world["natural_frontiers"]
-        self.assertEqual(len(records), 3)
-        self.assertEqual(world["summary"]["natural_frontier_count"], 3)
+        self.assertEqual(len(records), 4)
+        self.assertEqual(world["summary"]["natural_frontier_count"], 4)
         record = records[0]
         self.assertEqual(record["region_ids"], [0, 1])
         self.assertTrue(record["route_ids"], "the first frontier must link routes")
-        self.assertTrue(record["settlement_ids"], "the first frontier must link a settlement")
         self.assertTrue(record["navigable_waterway_ids"], "the first frontier must link a waterway")
+        settlement_records = [item for item in records if item["settlement_ids"]]
+        self.assertTrue(settlement_records, "a frontier must link a real settlement")
 
         cases: dict[str, Any] = {
             "frontier_type": "river",
@@ -674,6 +753,7 @@ class HumanGeographyReplayValidationTests(TestCase):
         }
         for field, value in cases.items():
             with self.subTest(frontier_field=field):
+                record = settlement_records[0] if field == "settlement_ids" else records[0]
                 original = record[field]
                 self.assertNotEqual(original, value, f"{field} already holds {value!r}")
                 record[field] = value

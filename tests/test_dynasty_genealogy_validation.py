@@ -35,9 +35,9 @@ class DynastyGenealogyReplayValidationTests(TestCase):
     """Causal replay of :func:`validate_dynasty_genealogy_replay`.
 
     The validator recomputes the whole deterministic genealogy from the
-    dynasties, economy histories and conflicts in the payload, so a passing
-    payload can only come from a generated world. Failure cases therefore
-    start from a private deep copy of that world and apply exactly one
+    dynasties, economy histories and conflicts in the payload. The control is
+    an actual generated current-model world. Failure cases start from a private
+    deep copy of that world and apply exactly one
     tamper, and every tamper is checked against the untampered copy so that
     a silently ignored mutation cannot masquerade as a passing test.
     """
@@ -59,122 +59,95 @@ class DynastyGenealogyReplayValidationTests(TestCase):
 
     def test_canonical_world_replays_and_exposes_named_ruler_genealogy(self) -> None:
         self.assertEqual(validate_dynasty_genealogy_replay(self.world), [])
-
         self.assertEqual(self.world["ruler_genealogy_model"], EXPECTED_MODEL)
+        self.assertEqual(self.world["climate_model"]["model_type"], "prescribed_seasonal_surface_energy_v1")
+
+        # Preserve the intended one-dynasty, five-reign, no-conflict branch.
+        # Its physical/economic inputs now come from the current seasonal world;
+        # old climate-derived duration and treasury snapshots are not constants
+        # of the genealogy model. Recompute every expectation from those inputs
+        # and the declared genealogy equations, without producer/replay helpers.
+        self.assertEqual(len(self.world["dynasties"]), 1)
+        dynasty = self.world["dynasties"][0]
+        self.assertEqual(dynasty["id"], 0)
+        self.assertEqual(dynasty["region_id"], 0)
+        self.assertEqual(dynasty["lineage_depth"], 0)
+        duration = float(dynasty["duration_years"])
+        pressure = float(dynasty["succession_pressure"])
+        continuity = float(dynasty["dynastic_continuity_index"])
+        self.assertGreaterEqual(duration, 1260.0)
+        self.assertLess(duration, 1680.0)
+        self.assertGreaterEqual(pressure, 0.0)
+        self.assertLess(pressure, 0.55)
+        self.assertEqual(dynasty["start_year_bp"], duration)
+        self.assertEqual(dynasty["end_year_bp"], 0.0)
+        self.assertEqual(int(duration // 420) + 2, 5)
+
+        economies = self.world["economy_histories"]
+        self.assertEqual(len(economies), 1)
+        economy = economies[0]
+        self.assertEqual(economy["region_id"], 0)
+        self.assertEqual(self.world["conflicts"], [])
+        self.assertGreater(economy["peak_gross_output_index"], 0.0)
+        self.assertLess(economy["peak_gross_output_index"], 1200.0)
+        self.assertGreater(economy["peak_treasury_index"], 0.0)
+        self.assertLess(economy["peak_treasury_index"], 250.0)
+        self.assertGreater(economy["max_army_capacity_population"], 0.0)
+        self.assertLess(economy["max_army_capacity_population"], 60_000_000.0)
+        economic_strength = economy["peak_gross_output_index"] / 1200.0
+        treasury_strength = economy["peak_treasury_index"] / 250.0
+        legitimacy = (0.45 * dynasty["legitimacy_index"] + 0.24 * continuity
+                      + 0.12 * economic_strength + 0.07 * treasury_strength
+                      + 0.12 * (1.0 - pressure))
+        claim = round(0.72 * legitimacy + 0.28 * continuity, 6)
+        prestige = 0.32 * economy["max_army_capacity_population"] / 60_000_000.0 + 0.20 * pressure
+        patronage = 0.50 * economic_strength + 0.30 * treasury_strength + 0.20 * continuity
+        succession_risks = [0.42 * pressure + 0.24 * (1.0 - legitimacy) + 0.10 * i / 4 for i in range(5)]
 
         rulers = self.world["rulers"]
-        dynasty = self.world["dynasties"][0]
-        branches = self.world["cadet_branches"]
-
-        # The 128-cell world holds a single dynasty. Pin the causal inputs the
-        # rest of this test derives its expectations from, so a drift in the
-        # upstream generator is reported here rather than silently changing
-        # what "the replayed value" means.
-        self.assertEqual(len(self.world["dynasties"]), 1)
-        self.assertEqual(dynasty["region_id"], 0)
-        self.assertEqual(dynasty["duration_years"], 1304.8103)
-        self.assertEqual(dynasty["start_year_bp"], 1304.8103)
-        self.assertEqual(dynasty["end_year_bp"], 0.0)
-        self.assertEqual(dynasty["succession_pressure"], 0.242)
-        self.assertEqual(dynasty["dynastic_continuity_index"], 0.8076)
-        self.assertEqual(dynasty["legitimacy_index"], 0.5621)
-        self.assertEqual(dynasty["lineage_depth"], 0)
-
-        economy = self.world["economy_histories"]
-        self.assertEqual(len(economy), 1)
-        self.assertEqual(economy[0]["region_id"], 0)
-        self.assertEqual(economy[0]["peak_gross_output_index"], 564.55029)
-        self.assertEqual(economy[0]["peak_treasury_index"], 63.970702)
-        self.assertEqual(self.world["conflicts"], [])
-
-        # ``dynasty_duration_pressure_bounded_two_to_six_rulers_v1``:
-        # ``int(1304.8103 // 420) + 2`` is five, and the 0.242 pressure stays
-        # under the 0.55 threshold that would add a sixth ruler.
         self.assertEqual(len(rulers), 5)
         self.assertEqual(self.world["marriage_alliances"], [])
-
-        # ``deterministic_root_and_regnal_number_v1``: root index advances by
-        # three per reign for dynasty 0 at lineage depth 0, regnal number is
-        # the reign index plus one rendered as a Roman numeral.
-        self.assertEqual(
-            [ruler["name"] for ruler in rulers],
-            ["Aren I", "Daren II", "Galen III", "Joren IV", "Maren V"],
-        )
+        self.assertEqual([ruler["name"] for ruler in rulers],
+                         ["Aren I", "Daren II", "Galen III", "Joren IV", "Maren V"])
         self.assertEqual([ruler["regnal_number"] for ruler in rulers], [1, 2, 3, 4, 5])
+        self.assertEqual([ruler["predecessor_ruler_id"] for ruler in rulers], [-1, 0, 1, 2, 3])
+        self.assertEqual([ruler["successor_ruler_id"] for ruler in rulers], [1, 2, 3, 4, -1])
+        self.assertEqual([ruler["parent_ruler_id"] for ruler in rulers], [-1, 0, 0, 1, 2])
+        self.assertEqual([ruler["ruler_lineage_depth"] for ruler in rulers], [0, 1, 2, 3, 4])
 
-        # ``ordered_predecessor_successor_and_parent_links_v1``.
-        self.assertEqual(
-            [ruler["predecessor_ruler_id"] for ruler in rulers], [-1, 0, 1, 2, 3]
-        )
-        self.assertEqual(
-            [ruler["successor_ruler_id"] for ruler in rulers], [1, 2, 3, 4, -1]
-        )
-        self.assertEqual(
-            [ruler["parent_ruler_id"] for ruler in rulers], [-1, 0, 0, 1, 2]
-        )
-        self.assertEqual(
-            [ruler["ruler_lineage_depth"] for ruler in rulers], [0, 1, 2, 3, 4]
-        )
+        # Five equal reigns; derive the date values from duration, never from
+        # another exported ruler record. The final endpoint is exactly present.
+        span = duration / 5
+        expected_starts = [round(duration - i * span, 6) for i in range(5)]
+        expected_ends = [round(duration - (i + 1) * span, 6) for i in range(4)] + [0.0]
+        self.assertEqual([ruler["reign_start_year_bp"] for ruler in rulers], expected_starts)
+        self.assertEqual([ruler["reign_end_year_bp"] for ruler in rulers], expected_ends)
+        self.assertEqual([ruler["reign_length_years"] for ruler in rulers], [round(span, 6)] * 5)
+        self.assertEqual(rulers[0]["birth_year_bp"], round(duration + 24.0 + 18.0 * pressure, 6))
+        for key, expected in (
+            ("legitimacy_index", round(legitimacy, 6)),
+            ("succession_claim_strength", claim),
+            ("military_prestige_index", round(prestige, 6)),
+            ("economic_patronage_index", round(patronage, 6)),
+        ):
+            with self.subTest(field=key):
+                self.assertEqual([ruler[key] for ruler in rulers], [expected] * 5)
+        self.assertEqual([ruler["succession_crisis_risk"] for ruler in rulers],
+                         [round(value, 6) for value in succession_risks])
 
-        # ``equal_dynasty_duration_partition_v1``: 1304.8103 / 5 == 260.96206
-        # per reign, counting down from ``start_year_bp`` to ``end_year_bp``.
-        self.assertEqual(
-            [ruler["reign_start_year_bp"] for ruler in rulers],
-            [1304.8103, 1043.84824, 782.88618, 521.92412, 260.96206],
-        )
-        self.assertEqual(
-            [ruler["reign_end_year_bp"] for ruler in rulers],
-            [1043.84824, 782.88618, 521.92412, 260.96206, 0.0],
-        )
-        self.assertEqual(
-            [ruler["reign_length_years"] for ruler in rulers], [260.96206] * 5
-        )
-        # ``birth_year_bp`` leads the reign by ``24 + succession_pressure * 18``.
-        self.assertEqual(rulers[0]["birth_year_bp"], 1333.1663)
-
-        # ``dynasty_continuity_pressure_economy_treasury_conflict_v1``: the
-        # attribute weights do not depend on the reign index, so every ruler
-        # shares one legitimacy, prestige and patronage value. Only the
-        # succession risk moves, by 0.10 * index / (count - 1).
-        self.assertEqual(
-            [ruler["legitimacy_index"] for ruler in rulers], [0.612096] * 5
-        )
-        self.assertEqual(
-            [ruler["succession_claim_strength"] for ruler in rulers], [0.666837] * 5
-        )
-        self.assertEqual(
-            [ruler["military_prestige_index"] for ruler in rulers], [0.113819] * 5
-        )
-        self.assertEqual(
-            [ruler["economic_patronage_index"] for ruler in rulers], [0.473514] * 5
-        )
-        self.assertEqual(
-            [ruler["succession_crisis_risk"] for ruler in rulers],
-            [0.194737, 0.219737, 0.244737, 0.269737, 0.294737],
-        )
-
-        # ``second_ruler_founder_with_next_three_heirs_v1``. The year bounds are
-        # pinned as literals rather than compared back to the ruler records:
-        # the last reign ends at 0.0, so a ``branch_end_year_bp`` cross-check
-        # against ``rulers[4]`` would hold for any rule that also yields zero.
+        # The cadet stage consumes the already published six-decimal ruler
+        # attributes. Keep that quantization visible in its independent replay.
+        cadet_claim = round(0.72 * claim + 0.28 * pressure, 6)
+        cadet_legitimacy = round(0.80 * round(legitimacy, 6) + 0.20 * continuity, 6)
+        branches = self.world["cadet_branches"]
         self.assertEqual(len(branches), 1)
         self.assertEqual(branches[0]["founder_ruler_id"], 1)
         self.assertEqual(branches[0]["heir_ruler_ids"], [2, 3, 4])
-        self.assertEqual(branches[0]["branch_start_year_bp"], 1043.84824)
-        self.assertEqual(
-            branches[0]["branch_start_year_bp"], rulers[1]["reign_start_year_bp"]
-        )
+        self.assertEqual(branches[0]["branch_start_year_bp"], expected_starts[1])
         self.assertEqual(branches[0]["branch_end_year_bp"], 0.0)
-        self.assertEqual(
-            branches[0]["branch_end_year_bp"], rulers[4]["reign_end_year_bp"]
-        )
-        self.assertEqual(branches[0]["claim_strength"], 0.547883)
-        self.assertEqual(branches[0]["cadet_legitimacy_index"], 0.651197)
-        self.assertEqual(
-            [ruler["cadet_branch_id"] for ruler in rulers], [-1, 0, 0, 0, 0]
-        )
-
-        # Dynasty annotations mirror the replayed genealogy.
+        self.assertEqual(branches[0]["claim_strength"], cadet_claim)
+        self.assertEqual(branches[0]["cadet_legitimacy_index"], cadet_legitimacy)
+        self.assertEqual([ruler["cadet_branch_id"] for ruler in rulers], [-1, 0, 0, 0, 0])
         self.assertEqual(dynasty["founder_ruler_id"], 0)
         self.assertEqual(dynasty["ruler_count"], 5)
         self.assertEqual(dynasty["cadet_branch_count"], 1)
@@ -188,10 +161,10 @@ class DynastyGenealogyReplayValidationTests(TestCase):
         self.assertEqual(summary["cadet_branch_count"], 1)
         self.assertEqual(summary["married_ruler_count"], 0)
         self.assertEqual(summary["max_ruler_lineage_depth"], 4)
-        self.assertEqual(summary["mean_ruler_legitimacy_index"], 0.612096)
-        self.assertEqual(summary["mean_succession_crisis_risk"], 0.244737)
+        self.assertEqual(summary["mean_ruler_legitimacy_index"], round(legitimacy, 6))
+        self.assertEqual(summary["mean_succession_crisis_risk"], round(sum(succession_risks) / 5, 6))
         self.assertEqual(summary["mean_marriage_alliance_strength"], 0.0)
-        self.assertEqual(summary["mean_cadet_branch_claim_strength"], 0.547883)
+        self.assertEqual(summary["mean_cadet_branch_claim_strength"], cadet_claim)
 
     def test_malformed_payloads_return_the_failure_without_raising(self) -> None:
         without_summary = {

@@ -1,0 +1,9 @@
+{
+  "fixture": "mixed-p4-prefix.json.gz",
+  "gzip_sha256": "5a7da21de49d2fad0de102aa33c55861875a63bd180ff5cca216e5fc578ef8af",
+  "sha256": "244dc1f52ae188d1b35be6cb9f163a42ca9fa340fae84e45856211224b485e92",
+  "source_config": "source.config.json",
+  "source_config_sha256": "76e3ca3b863ea96b7eed475fca1fe23022cbc146d6ff132587628c4144382748",
+  "source_native_library_sha256": "a8f2a6eabc0fe8e8d36f88f9a405f1fcff4ac24e42109fa6a857f0d10470979a",
+  "scope": "actual seasonal native128 full API prefix stopped before cultural metadata on original area precision audit; not a completed public world"
+}

@@ -3,6 +3,16 @@ from __future__ import annotations
 from collections import Counter, defaultdict, deque
 from typing import Any
 
+from .land_use_availability_validation import (
+    land_use_model_version,
+    validate_land_use_availability,
+)
+from .worldbuilding_fishery_validation import (
+    WorldbuildingFisheryValidationError,
+    audit_worldbuilding_fishery_inputs,
+    validate_worldbuilding_fishery_context,
+)
+
 
 LAND_USE_ZONE_MODEL = "causal_soil_climate_resource_connected_land_use_zones_v1"
 NATURAL_FRONTIER_MODEL = "causal_border_terrain_connected_natural_frontiers_v1"
@@ -756,6 +766,21 @@ def _resource_supported(deposit: dict[str, Any], cell: dict[str, Any]) -> bool:
     return float(deposit.get("geologic_confidence_index", 0.0)) >= 0.25
 
 
+def _exact_worldbuilding_value(actual: Any, expected: Any) -> bool:
+    """Exact typed replay for the new record contract, including boolean evidence."""
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return actual.keys() == expected.keys() and all(
+            _exact_worldbuilding_value(actual[key], value) for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _exact_worldbuilding_value(a, e) for a, e in zip(actual, expected)
+        )
+    return actual == expected
+
+
 def _worldbuilding_replay_valid(payload: dict[str, Any]) -> bool:
     cells = payload.get("cells", [])
     settlements = payload.get("settlements", [])
@@ -766,8 +791,28 @@ def _worldbuilding_replay_valid(payload: dict[str, Any]) -> bool:
     summary = payload.get("summary", {})
     if not all(isinstance(value, list) for value in (cells, settlements, routes, regions, borders, deposits)) or not isinstance(summary, dict):
         return False
-    if not cells or payload.get("worldbuilding_realism_model") != _worldbuilding_model() or summary.get("worldbuilding_realism_model") != WORLDBUILDING_REALISM_MODEL:
+    if not cells:
         return False
+    model = payload.get("worldbuilding_realism_model")
+    fishery_context = (isinstance(model, dict) and model.get("model_type") in (
+        "causal_upstream_evidence_worldbuilding_realism_checks_v2",
+        "causal_upstream_evidence_worldbuilding_realism_checks_v3",
+        "causal_upstream_evidence_worldbuilding_realism_checks_v4",
+    ))
+    if fishery_context:
+        # One independent source audit owns material/fishery context, the fifth
+        # record and totals. The four human checks below still replay their own
+        # source graphs and fields; accepting this helper alone is insufficient.
+        if validate_worldbuilding_fishery_context(payload):
+            return False
+    else:
+        if model != _worldbuilding_model() or summary.get("worldbuilding_realism_model") != WORLDBUILDING_REALISM_MODEL:
+            return False
+        try:
+            if audit_worldbuilding_fishery_inputs(payload) is not None:
+                return False
+        except WorldbuildingFisheryValidationError:
+            return False
     cells_by_id = {int(cell.get("id", -1)): cell for cell in cells if isinstance(cell, dict)}
     if len(cells_by_id) != len(cells):
         return False
@@ -907,6 +952,18 @@ def _worldbuilding_replay_valid(payload: dict[str, Any]) -> bool:
         },
     )
 
+    if fishery_context:
+        observed_checks = payload["worldbuilding_realism_checks"]
+        if not _exact_worldbuilding_value(observed_checks[:4], checks):
+            return False
+        human_summary = {
+            "large_settlement_water_access_index": round(settlement_water_index, 6),
+            "route_barrier_avoidance_index": round(route_avoidance_index, 6),
+            "political_region_connectivity_index": round(political_connectivity_index, 6),
+            "natural_border_alignment_index": round(natural_border_index, 6),
+        }
+        return all(_exact_worldbuilding_value(summary.get(key), value) for key, value in human_summary.items())
+
     resource_counts: Counter[str] = Counter()
     supported_resource_counts: Counter[str] = Counter()
     supported_deposits = 0
@@ -953,12 +1010,24 @@ def _worldbuilding_replay_valid(payload: dict[str, Any]) -> bool:
     return all(summary.get(key) == value for key, value in expected_summary.items())
 
 
+def _versioned_land_use_replay_valid(payload: dict[str, Any]) -> bool:
+    """Retain the historical family; independently replay the declared v2 model."""
+    if land_use_model_version(payload) == 1:
+        return _land_use_replay_valid(payload)
+    return not validate_land_use_availability(payload)
+
+
 def validate_human_geography_replay(payload: dict[str, Any]) -> list[str]:
     failures: list[str] = []
-    if not _land_use_replay_valid(payload):
-        failures.append("land use zone model or causal replay invalid")
-    if not _natural_frontier_replay_valid(payload):
-        failures.append("natural frontier model or causal replay invalid")
-    if not _worldbuilding_replay_valid(payload):
-        failures.append("worldbuilding realism model or causal replay invalid")
+    for replay, message in (
+        (_versioned_land_use_replay_valid, "land use zone model or causal replay invalid"),
+        (_natural_frontier_replay_valid, "natural frontier model or causal replay invalid"),
+        (_worldbuilding_replay_valid, "worldbuilding realism model or causal replay invalid"),
+    ):
+        try:
+            valid = replay(payload)
+        except (TypeError, ValueError, KeyError, OverflowError, ArithmeticError, AttributeError):
+            valid = False
+        if not valid:
+            failures.append(message)
     return failures

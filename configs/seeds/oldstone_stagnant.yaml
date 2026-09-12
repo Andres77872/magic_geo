@@ -1,3 +1,5 @@
+config_version: 2
+
 # Original ancient, tectonically stagnant world. Zero procedural plate motion,
 # weak internal heat, broad continental crust, and a longer refined erosion run
 # favor worn relief, old interiors, closed basins, and sparse young mountains.
@@ -37,8 +39,7 @@ tectonics:
 
 climate:
   months: 12
-  lapse_rate_c_per_km: 6.5
-  base_temperature_c: 8.0
+  reference_infrared_optical_depth: 1.0
   precipitation_scale: 0.65
   subtropical_drying_strength: 0.72
 

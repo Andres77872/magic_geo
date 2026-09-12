@@ -186,8 +186,9 @@ class GeoPhysicsReplayValidationTests(TestCase):
         self.assertIn("multi-source Dijkstra path witness", check["message"])
         self.assertTrue(check["evidence"]["violations"])
 
-    def test_colluding_negative_energy_mirrors_fail_equation_replay(self) -> None:
-        altered = deepcopy(self.world)
+    def test_colluding_negative_legacy_energy_mirrors_fail_equation_replay(self) -> None:
+        # These fields belong to the preserved posthoc graybody model.
+        altered = worlds.cached_legacy_world("energy_128")
         record = altered["climate_energy_balance_records"][0]
         cell_id = record["cell_id"]
         cell = next(cell for cell in altered["cells"] if cell["id"] == cell_id)
@@ -388,15 +389,19 @@ class GeoPhysicsReplayViolationTests(TestCase):
         self.assertIn(key, container, f"{key} is not a pre-existing field")
         del container[key]
 
-    def assert_tampers_fail(self, target, cases) -> None:
+    def assert_tampers_fail(self, target, cases, *, legacy_energy=False) -> None:
         domain, name = target
-        control = _check(self.control, domain, name)
+        source = (
+            lambda: worlds.cached_legacy_world("energy_128")
+        ) if legacy_energy else lambda: worlds.cached_world(WORLD_KEY)
+        controls = validate_physics_replays(source()) if legacy_energy else self.control
+        control = _check(controls, domain, name)
         self.assertTrue(control["passed"], control["evidence"])
         self.assertFalse(control["evidence"]["violations"])
 
         for label, mutate, fragments in cases:
             with self.subTest(label):
-                world = worlds.cached_world(WORLD_KEY)
+                world = source()
                 mutate(world)
                 check = _check(validate_physics_replays(world), domain, name)
                 self.assertFalse(check["passed"], label)
@@ -417,14 +422,14 @@ class GeoPhysicsReplayViolationTests(TestCase):
         )
 
     @classmethod
-    def _ocean_record_index(cls) -> tuple[int, int]:
+    def _legacy_ocean_record_index(cls) -> tuple[int, int]:
         """``(cell id, energy-record index)`` of the first open-ocean cell.
 
         Read from the shared world so the tamper table can name the exact
-        record the violation must carry; ``replay_128`` is deterministic, and
+        record the violation must carry; ``energy_128`` is deterministic, and
         the tamper itself still runs against a private deep copy.
         """
-        shared = worlds.cached_world_readonly(WORLD_KEY)
+        shared = worlds.cached_legacy_world_readonly("energy_128")
         cell_id = cls._ocean_cell(shared)["id"]
         index = next(
             index
@@ -616,7 +621,7 @@ class GeoPhysicsReplayViolationTests(TestCase):
         )
 
     # ------------------------------------------------------- climate energy
-    def test_cell_tampers_fail_climate_energy_replay(self) -> None:
+    def test_cell_tampers_fail_legacy_climate_energy_replay(self) -> None:
         def duplicate_cell_id(world: dict) -> None:
             self.set_field(world["cells"][1], "id", world["cells"][0]["id"])
 
@@ -629,7 +634,7 @@ class GeoPhysicsReplayViolationTests(TestCase):
         def lake_water_body(world: dict) -> None:
             self.set_field(self._ocean_cell(world), "water_body_type", "fresh_lake")
 
-        ocean_cell_id, ocean_record_index = self._ocean_record_index()
+        ocean_cell_id, ocean_record_index = self._legacy_ocean_record_index()
 
         self.assert_tampers_fail(
             CLIMATE_ENERGY,
@@ -669,9 +674,10 @@ class GeoPhysicsReplayViolationTests(TestCase):
                     ),
                 ),
             ],
+            legacy_energy=True,
         )
 
-    def test_record_tampers_fail_climate_energy_replay(self) -> None:
+    def test_record_tampers_fail_legacy_climate_energy_replay(self) -> None:
         def non_object_record(world: dict) -> None:
             records = world["climate_energy_balance_records"]
             self.assertIsInstance(records[0], dict)
@@ -693,7 +699,9 @@ class GeoPhysicsReplayViolationTests(TestCase):
             monthly = world["climate_energy_balance_records"][0][
                 "monthly_top_of_atmosphere_insolation_w_m2"
             ]
-            self.assertGreater(monthly[0], 0.0)
+            # Polar night is physically zero; a negative flux is invalid in
+            # either daylight or darkness.
+            self.assertGreaterEqual(monthly[0], 0.0)
             monthly[0] = -1.0
 
         def dropped_record(world: dict) -> None:
@@ -773,6 +781,46 @@ class GeoPhysicsReplayViolationTests(TestCase):
                     ),
                 ),
             ],
+            legacy_energy=True,
+        )
+
+    def test_current_cell_tampers_fail_native_energy_replay(self) -> None:
+        self.assert_tampers_fail(
+            CLIMATE_ENERGY,
+            [
+                (
+                    "duplicate native cell ID",
+                    lambda world: self.set_field(world["cells"][1], "id", world["cells"][0]["id"]),
+                    ("cells: noncanonical ID coverage",),
+                ),
+                (
+                    "incomplete native monthly temperature mirror",
+                    lambda world: self.set_field(world["cells"][0], "temperature_monthly_c", []),
+                    ("cell[0].temperature_monthly_c: expected 12 values",),
+                ),
+                (
+                    "nonfinite native latitude source",
+                    lambda world: self.set_field(world["cells"][0], "lat_deg", float("nan")),
+                    ("cell[0].lat_deg: nonfinite number",),
+                ),
+            ],
+        )
+
+    def test_current_monthly_energy_cannot_be_replaced_by_colluding_negative_mirrors(self) -> None:
+        def colluding_negative_flux(world: dict) -> None:
+            record = world["climate_energy_balance_records"][0]
+            record["monthly_absorbed_shortwave_w_m2"] = [-100.0] * 12
+            cell = next(c for c in world["cells"] if c["id"] == record["cell_id"])
+            self.set_field(cell, "annual_absorbed_shortwave_w_m2", -100.0)
+            values = [c["annual_absorbed_shortwave_w_m2"] for c in world["cells"]]
+            world["summary"]["cell_count_mean_annual_absorbed_shortwave_w_m2"] = sum(values) / len(values)
+            areas = [r["area_m2"] for r in world["climate_energy_balance_records"]]
+            world["summary"]["area_weighted_mean_annual_absorbed_shortwave_w_m2"] = sum(a*v for a,v in zip(areas, values)) / sum(areas)
+
+        self.assert_tampers_fail(
+            CLIMATE_ENERGY,
+            [("native source defeats colluding record/cell/summary flux", colluding_negative_flux,
+              ("monthly_absorbed_shortwave_w_m2",))],
         )
 
     # --------------------------------------------------- simulation clock

@@ -1,12 +1,48 @@
 from __future__ import annotations
 
 from collections import Counter
+from copy import deepcopy
 from typing import Any
+
+from . import resource_access_validation as _access
+
+from .biological_resource_validation import (
+    BiologicalResourceValidationError,
+    biological_resource_parent_support,
+    biological_resource_contract,
+    RESOURCE_SUMMARY_FIELDS,
+    resource_deposit_expected_model,
+    resource_access_v5,
+    validate_biological_resources,
+)
 
 
 METAL_RESOURCES = {"volcanic_arc_metals", "craton_iron_gold", "placer_metals"}
 ENERGY_RESOURCES = {"sedimentary_fuels", "geothermal"}
 AGRICULTURAL_RESOURCES = {"fertile_alluvium", "coastal_fisheries"}
+
+RESOURCE_BIOLOGICAL_MODEL = {
+    "model_type": "causal_geologic_resource_deposit_diagnostics_v3",
+    "biological_resource_types": ["coastal_fisheries"],
+    "source_ecosystem_model": "heuristic_ecosystem_climate_support_v4",
+    "biological_parent_policy": "native_fishery_resource_requires_supported_primary_and_derived_fishery",
+    "fishery_water_body_types": ["continental_shelf", "fresh_lake", "inland_sea", "ocean"],
+    "unsupported_biological_record_policy": "retain_native_resource_label_emit_no_deposit",
+    "material_resource_policy": "preserve_nonfishery_diagnostics_independent_of_current_ecosystem_productivity",
+    "renewability_scope": "static_resource_category_prior_not_observed_replenishment",
+    "summary_support_scope": "emitted_record_means_with_unsupported_fishery_source_counts",
+}
+
+
+RESOURCE_PRESCRIBED_NATURAL_MODEL = {
+    **RESOURCE_BIOLOGICAL_MODEL,
+    "model_type": "causal_geologic_resource_deposit_diagnostics_v4",
+    "source_ecosystem_model": "heuristic_ecosystem_climate_support_v5",
+}
+_RESOURCE_MODELS = {
+    "heuristic_ecosystem_climate_support_v4": RESOURCE_BIOLOGICAL_MODEL,
+    "heuristic_ecosystem_climate_support_v5": RESOURCE_PRESCRIBED_NATURAL_MODEL,
+}
 
 
 def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
@@ -145,9 +181,12 @@ def _formation_evidence(cell: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def enrich_world_with_resource_deposits(world: dict[str, Any]) -> dict[str, Any]:
+def _build_resource_deposits(
+    world: dict[str, Any], *, fishery_support: dict[int, tuple[bool, bool]] | None = None,
+    economic_sites: Any = False,
+) -> dict[str, Any]:
     cells = world.get("cells", [])
-    if not isinstance(cells, list) or not cells:
+    if not isinstance(cells, list) or (not cells and fishery_support is None):
         return world
 
     deposits: list[dict[str, Any]] = []
@@ -159,12 +198,21 @@ def enrich_world_with_resource_deposits(world: dict[str, Any]) -> dict[str, Any]
     high_viability = 0
     flow_accumulation_scale = _flow_accumulation_scale(cells)
 
+    available_count = 0
+    geographic_viability_sum = 0.0
     for cell in cells:
         resource = str(cell.get("resource", "none"))
         if resource == "none":
             continue
+        if fishery_support is not None and resource == "coastal_fisheries" and not fishery_support[cell["id"]][1]:
+            continue
         reserve = _reserve_potential(resource, cell, flow_accumulation_scale)
         accessibility = _accessibility(cell)
+        availability = True
+        geographic_access = _accessibility({**cell, "settlement_score": 0.0})
+        if economic_sites is not False:
+            availability = economic_sites is not None and economic_sites[cell["id"]].available
+            accessibility = _accessibility({**cell, "settlement_score": economic_sites[cell["id"]].value}) if availability else geographic_access
         hazard = _extraction_hazard(cell)
         confidence = _confidence(
             resource, cell, reserve, flow_accumulation_scale
@@ -174,10 +222,13 @@ def enrich_world_with_resource_deposits(world: dict[str, Any]) -> dict[str, Any]
         deposit_class = _resource_class(resource)
         class_counts[deposit_class] += 1
         reserve_sum += reserve
-        viability_sum += viability
+        viability_sum += viability if availability else 0.0
+        available_count += availability
+        geographic_viability = _clamp(reserve * 0.46 + geographic_access * 0.30 + confidence * 0.20 - hazard * 0.18 + renewability * 0.10)
+        geographic_viability_sum += geographic_viability
         confidence_sum += confidence
         total_area += max(0.0, float(cell.get("area_km2", 0.0)))
-        if viability >= 0.65:
+        if availability and viability >= 0.65:
             high_viability += 1
         deposits.append(
             {
@@ -205,6 +256,13 @@ def enrich_world_with_resource_deposits(world: dict[str, Any]) -> dict[str, Any]
             }
         )
 
+        if economic_sites is not False:
+            deposits[-1].update({"accessibility_index": round(accessibility, 6) if availability else None,
+                "economic_viability_index": round(viability, 6) if availability else None,
+                "accessibility_supported": availability, "economic_viability_supported": availability,
+                "geographic_accessibility_baseline_index": round(geographic_access, 6),
+                "geographic_economic_viability_baseline_index": round(geographic_viability, 6)})
+
     world["resource_deposits"] = deposits
     world["resource_deposit_model"] = {
         "model_type": "causal_geologic_resource_deposit_diagnostics_v2",
@@ -226,4 +284,49 @@ def enrich_world_with_resource_deposits(world: dict[str, Any]) -> dict[str, Any]
     summary["mean_resource_economic_viability_index"] = round(viability_sum / divisor, 6) if deposits else 0.0
     summary["mean_resource_geologic_confidence_index"] = round(confidence_sum / divisor, 6) if deposits else 0.0
     summary["resource_deposit_class_counts"] = dict(sorted(class_counts.items()))
+    if economic_sites is not False:
+        complete = available_count == len(deposits)
+        summary.update({"resource_accessibility_supported_deposit_count": available_count,
+            "unsupported_resource_accessibility_deposit_count": len(deposits)-available_count,
+            "resource_economic_viability_supported_deposit_count": available_count,
+            "unsupported_resource_economic_viability_deposit_count": len(deposits)-available_count,
+            "mean_resource_economic_viability_supported": complete,
+            "high_viability_resource_deposit_count_complete": complete,
+            "mean_resource_economic_viability_index": summary["mean_resource_economic_viability_index"] if complete else None,
+            "mean_geographic_resource_viability_baseline_index": round(geographic_viability_sum / divisor, 6) if deposits else 0.0})
+    return world
+
+
+def _enrich_world_with_resource_deposits_legacy(world: dict[str, Any]) -> dict[str, Any]:
+    """Historical v2 mapping, all-cell normalization and equations unchanged."""
+    return _build_resource_deposits(world)
+
+
+def enrich_world_with_resource_deposits(world: dict[str, Any]) -> dict[str, Any]:
+    chain = biological_resource_contract(world)
+    if chain is None:
+        return _enrich_world_with_resource_deposits_legacy(world)
+    # All computation and validation precede the commit. Shallow staging keeps
+    # physical/native objects untouched and does not copy or replace certificates.
+    support = biological_resource_parent_support(world)
+    staged = {**world, "cells": [dict(cell) for cell in world["cells"]], "summary": dict(world["summary"])}
+    economic_sites = _access.source_inputs(world) if resource_access_v5(world) and chain == "heuristic_ecosystem_climate_support_v5" else False
+    _build_resource_deposits(staged, fishery_support=support, economic_sites=economic_sites)
+    staged["resource_deposit_model"].update(deepcopy(resource_deposit_expected_model(world, chain)))
+    for cell in staged["cells"]:
+        cell["fishery_resource_proxy_applicable"], cell["fishery_resource_proxy_supported"] = support[cell["id"]]
+    staged["summary"].update({
+        "fishery_resource_proxy_applicable_cell_count": sum(a for a, _ in support.values()),
+        "fishery_resource_proxy_supported_cell_count": sum(s for _, s in support.values()),
+        "unsupported_fishery_resource_proxy_cell_count": sum(a and not s for a, s in support.values()),
+    })
+    errors = validate_biological_resources(staged, include_commodities=False)
+    if errors:
+        raise BiologicalResourceValidationError(errors[0])
+    for cell, patch in zip(world["cells"], staged["cells"]):
+        for key in ("fishery_resource_proxy_applicable", "fishery_resource_proxy_supported"):
+            cell[key] = patch[key]
+    world["resource_deposits"] = staged["resource_deposits"]
+    world["resource_deposit_model"] = staged["resource_deposit_model"]
+    world["summary"].update({key: staged["summary"][key] for key in (*RESOURCE_SUMMARY_FIELDS, *(_access.ACCESS_SUMMARY_FIELDS if economic_sites is not False else ()))})
     return world

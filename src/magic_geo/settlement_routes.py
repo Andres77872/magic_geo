@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from .settlement_climate_support import (
+    SEASONAL_SETTLEMENT_SELECTION_MODEL, SETTLEMENT_CLIMATE_SUPPORT_MODEL, seasonal_settlement_inputs,
+)
+
 
 SETTLEMENT_SELECTION_MODEL = (
-    "causal_native_score_local_max_separated_settlement_selection_v1"
+    "causal_native_score_local_max_separated_settlement_selection_v2"
 )
 ROUTE_NETWORK_MODEL = "causal_endpoint_barrier_ranked_route_network_v1"
 SETTLEMENT_SCORE_THRESHOLD = 0.48
@@ -15,7 +19,7 @@ SETTLEMENT_MINIMUM_SEPARATION_FACTOR = 2.4
 ROUTE_LINKS_PER_SETTLEMENT = 2
 
 
-def _candidate_count(cells: list[dict[str, Any]]) -> int:
+def _candidate_count(cells: list[dict[str, Any]], temperatures: dict[int, float] | None = None) -> int:
     cells_by_id = {
         int(cell.get("id", -1)): cell
         for cell in cells
@@ -26,10 +30,17 @@ def _candidate_count(cells: list[dict[str, Any]]) -> int:
         if not isinstance(cell, dict):
             continue
         score = float(cell.get("settlement_score", 0.0))
-        if bool(cell.get("is_water", False)) or score < SETTLEMENT_SCORE_THRESHOLD:
+        if (
+            bool(cell.get("is_water", False))
+            or bool(cell.get("is_lake", False))
+            or (temperatures is not None and not -14.0 < temperatures[cell['id']] < 48.0)
+            or score < SETTLEMENT_SCORE_THRESHOLD
+        ):
             continue
         if all(
             bool(neighbor.get("is_water", False))
+            or bool(neighbor.get("is_lake", False))
+            or (temperatures is not None and not -14.0 < temperatures[neighbor["id"]] < 48.0)
             or float(neighbor.get("settlement_score", 0.0)) <= score
             for raw_neighbor_id in cell.get("neighbors", [])
             if (neighbor := cells_by_id.get(int(raw_neighbor_id))) is not None
@@ -41,6 +52,9 @@ def _candidate_count(cells: list[dict[str, Any]]) -> int:
 def enrich_world_with_settlement_route_models(
     world: dict[str, Any],
 ) -> dict[str, Any]:
+    temperatures = seasonal_settlement_inputs(world)
+    seasonal = temperatures is not None
+    selection_model = SEASONAL_SETTLEMENT_SELECTION_MODEL if seasonal else SETTLEMENT_SELECTION_MODEL
     cells = world.get("cells", [])
     if not isinstance(cells, list) or not cells:
         return world
@@ -60,9 +74,9 @@ def enrich_world_with_settlement_route_models(
     )
     output_precision = int(world.get("summary", {}).get("output_float_precision", 4))
     world["settlement_selection_model"] = {
-        "model_type": SETTLEMENT_SELECTION_MODEL,
-        "score_model": "native_soil_biome_resource_water_climate_hazard_landform_score_v1",
-        "candidate_model": "nonwater_raw_score_threshold_neighbor_local_max_v1",
+        "model_type": selection_model,
+        "score_model": ("native_soil_biome_resource_water_climate_hazard_landform_score_with_annual_proxy_support_v3" if seasonal else "native_soil_biome_resource_water_climate_hazard_landform_score_v2"),
+        "candidate_model": ("nonmarine_nonlake_annual_proxy_supported_raw_score_threshold_neighbor_local_max_v3" if seasonal else "nonmarine_nonlake_raw_score_threshold_neighbor_local_max_v2"),
         "rank_model": "descending_raw_score_then_cell_id_v1",
         "selection_model": "greedy_spherical_minimum_separation_until_target_v1",
         "target_model": "clamp_floor_cell_count_divisor_minimum_maximum_v1",
@@ -99,14 +113,16 @@ def enrich_world_with_settlement_route_models(
         "formula_replay_tolerance_model": "max_16_selection_units_one_output_unit",
         "record_order": "selection_order_with_sequential_ids",
         "deterministic": True,
-        "candidate_cell_count": _candidate_count(cells),
+        "candidate_cell_count": _candidate_count(cells, temperatures),
         "target_count": target_count,
         "settlement_count": len(settlements),
         "model_limitation": "static_suitability_selection_without_population_growth_land_market_or_infrastructure_feedback",
     }
+    if seasonal:
+        world["settlement_selection_model"]["annual_climate_applicability"] = dict(SETTLEMENT_CLIMATE_SUPPORT_MODEL)
     world["route_network_model"] = {
         "model_type": ROUTE_NETWORK_MODEL,
-        "source_settlement_model": SETTLEMENT_SELECTION_MODEL,
+        "source_settlement_model": selection_model,
         "ranking_model": "endpoint_great_circle_distance_times_barrier_with_port_or_river_discount_v1",
         "barrier_model": "endpoint_mountain_tectonic_hazard_and_desert_multiplier_v1",
         "selection_model": "two_lowest_ranked_neighbors_per_settlement_then_unique_unordered_pair_v1",
@@ -132,6 +148,6 @@ def enrich_world_with_settlement_route_models(
         "model_limitation": "endpoint_only_network_selection_before_downstream_cell_path_routing_capacity_congestion_and_equilibrium",
     }
     summary = world.setdefault("summary", {})
-    summary["settlement_selection_model"] = SETTLEMENT_SELECTION_MODEL
+    summary["settlement_selection_model"] = selection_model
     summary["route_network_model"] = ROUTE_NETWORK_MODEL
     return world

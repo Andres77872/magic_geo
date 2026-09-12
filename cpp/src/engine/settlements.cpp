@@ -1,6 +1,18 @@
 #include "internal.hpp"
+#include "settlement_climate_support.hpp"
 
 namespace magic_geo::detail {
+
+void finalize_settlement_climate_applicability(const Params& params, std::vector<Cell>& cells) {
+    if (params.temperature_model == ClimateTemperatureModel::legacy_empirical) return;
+    if (params.temperature_model != ClimateTemperatureModel::prescribed_seasonal) {
+        throw std::invalid_argument("unsupported settlement climate model");
+    }
+    for (Cell& cell : cells) {
+        cell.settlement_climate_supported = settlement_annual_climate_supported(cell.temperature_c);
+        if (!cell.settlement_climate_supported) cell.settlement_score = 0.0;
+    }
+}
 
 int settlement_type_for_cell(const std::vector<Cell>& cells, const Cell& cell) {
     const bool coast = has_ocean_neighbor(cells, cell.id);
@@ -23,16 +35,21 @@ int settlement_type_for_cell(const std::vector<Cell>& cells, const Cell& cell) {
 }
 
 std::vector<Settlement> generate_settlements(const Params& params, const std::vector<Cell>& cells) {
-    (void)params;
+    const bool seasonal = params.temperature_model == ClimateTemperatureModel::prescribed_seasonal;
+    const auto eligible = [seasonal](const Cell& cell) {
+        return !cell.is_water && !cell.is_lake &&
+            (!seasonal || settlement_annual_climate_supported(cell.temperature_c));
+    };
     std::vector<int> candidates;
     candidates.reserve(cells.size() / 8);
     for (const Cell& cell : cells) {
-        if (cell.is_water || cell.settlement_score < 0.48) {
+        if (!eligible(cell) || cell.settlement_score < 0.48) {
             continue;
         }
         bool local_max = true;
         for (int neighbor : cell.neighbors) {
-            if (!cells[neighbor].is_water && cells[neighbor].settlement_score > cell.settlement_score) {
+            if (eligible(cells[neighbor]) &&
+                cells[neighbor].settlement_score > cell.settlement_score) {
                 local_max = false;
                 break;
             }

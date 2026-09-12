@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -12,6 +13,8 @@ namespace magic_geo {
 
 Params params_from_c_config(const CConfig& cfg) {
     Params params;
+    // Frozen C ABIs have no seasonal model selector and retain their contract.
+    params.temperature_model = ClimateTemperatureModel::legacy_empirical;
     params.seed = cfg.seed;
     params.name = cfg.name == nullptr ? "world" : cfg.name;
     params.radius_km = cfg.radius_km;
@@ -66,6 +69,69 @@ ComputeOptions compute_options_from_c_config(const CConfigV2& cfg) {
     ComputeOptions options;
     options.compute_backend = cfg.compute_backend;
     options.opencl_prefer_gpu = cfg.opencl_prefer_gpu != 0;
+    return options;
+}
+
+namespace {
+bool v4_flag(std::int32_t value, const char* name) {
+    if (value != 0 && value != 1) {
+        throw std::invalid_argument(std::string(name) + " must be exactly 0 or 1 in CConfigV4");
+    }
+    return value == 1;
+}
+}  // namespace
+
+Params params_from_c_config(const CConfigV4& cfg) {
+    Params params;
+    params.temperature_model = ClimateTemperatureModel::prescribed_seasonal;
+    params.seed = cfg.seed;
+    params.name = cfg.name == nullptr ? "world" : cfg.name;
+    params.radius_km = cfg.radius_km;
+    params.gravity_g = cfg.gravity_g;
+    params.day_length_hours = cfg.day_length_hours;
+    params.axial_tilt_deg = cfg.axial_tilt_deg;
+    params.orbital_eccentricity = cfg.orbital_eccentricity;
+    params.stellar_luminosity = cfg.stellar_luminosity;
+    params.atmosphere_pressure_bar = cfg.atmosphere_pressure_bar;
+    params.greenhouse_factor = cfg.greenhouse_factor;
+    params.ocean_fraction_target = cfg.ocean_fraction_target;
+    params.ocean_water_inventory_km3 = cfg.ocean_water_inventory_km3;
+    params.internal_heat = cfg.internal_heat;
+    params.geological_age_ga = cfg.geological_age_ga;
+    params.cell_count = cfg.cell_count;
+    params.mesh_backend = cfg.mesh_backend;
+    params.neighbor_count = cfg.neighbor_count;
+    params.plate_count = cfg.plate_count;
+    params.continental_plate_fraction = cfg.continental_plate_fraction;
+    params.continental_crust_fraction_target = cfg.continental_crust_fraction_target;
+    params.min_angular_speed = cfg.min_angular_speed;
+    params.max_angular_speed = cfg.max_angular_speed;
+    params.boundary_smoothing_steps = cfg.boundary_smoothing_steps;
+    params.plate_motion_scale_deg_per_step = cfg.plate_motion_scale_deg_per_step;
+    params.oceanic_crust_aging_ma_per_step = cfg.oceanic_crust_aging_ma_per_step;
+    params.months = cfg.months;
+    params.reference_infrared_optical_depth = cfg.reference_infrared_optical_depth;
+    params.precipitation_scale = cfg.precipitation_scale;
+    params.subtropical_drying_strength = cfg.subtropical_drying_strength;
+    params.preserve_geologic_depressions = v4_flag(cfg.preserve_geologic_depressions, "preserve_geologic_depressions");
+    params.river_percentile = cfg.river_percentile;
+    params.erosion_iterations = cfg.erosion_iterations;
+    params.stream_power_coefficient = cfg.stream_power_coefficient;
+    params.drainage_exponent = cfg.drainage_exponent;
+    params.slope_exponent = cfg.slope_exponent;
+    params.hillslope_diffusion = cfg.hillslope_diffusion;
+    params.tectonic_uplift_scale = cfg.tectonic_uplift_scale;
+    params.threads = cfg.threads;
+    params.include_cells = v4_flag(cfg.include_cells, "include_cells");
+    params.float_precision = cfg.float_precision;
+    params.maturation_timestep_ma = cfg.maturation_timestep_ma;
+    return params;
+}
+
+ComputeOptions compute_options_from_c_config(const CConfigV4& cfg) {
+    ComputeOptions options;
+    options.compute_backend = cfg.compute_backend;
+    options.opencl_prefer_gpu = v4_flag(cfg.opencl_prefer_gpu, "opencl_prefer_gpu");
     return options;
 }
 
@@ -132,6 +198,14 @@ std::string error_json(std::string_view message) {
 
 std::vector<std::uint8_t> error_msgpack(std::string_view message) {
     return magic_geo::detail::json_to_messagepack(error_json(message));
+}
+
+const char* copy_error_json_noexcept(std::string_view message) noexcept {
+    try {
+        return copy_string(error_json(message));
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 const std::uint8_t* copy_error_msgpack_noexcept(
@@ -287,6 +361,76 @@ extern "C" const std::uint8_t* magic_geo_generate_geo_msgpack_v3(
             "unknown geo generation failure",
             size
         );
+    }
+}
+
+extern "C" const char* magic_geo_generate_json_v4(
+    const magic_geo::CConfigV4* cfg
+) noexcept {
+    try {
+        if (cfg == nullptr) return copy_error_json_noexcept("null config pointer");
+        return copy_string(magic_geo::generate_world_json(
+            magic_geo::params_from_c_config(*cfg),
+            magic_geo::compute_options_from_c_config(*cfg)
+        ));
+    } catch (const std::exception& exc) {
+        return copy_error_json_noexcept(exc.what());
+    } catch (...) {
+        return copy_error_json_noexcept("unknown generation failure");
+    }
+}
+
+extern "C" const char* magic_geo_generate_geo_json_v4(
+    const magic_geo::CConfigV4* cfg
+) noexcept {
+    try {
+        if (cfg == nullptr) return copy_error_json_noexcept("null config pointer");
+        return copy_string(magic_geo::generate_geo_world_json(
+            magic_geo::params_from_c_config(*cfg),
+            magic_geo::compute_options_from_c_config(*cfg)
+        ));
+    } catch (const std::exception& exc) {
+        return copy_error_json_noexcept(exc.what());
+    } catch (...) {
+        return copy_error_json_noexcept("unknown geo generation failure");
+    }
+}
+
+extern "C" const std::uint8_t* magic_geo_generate_msgpack_v4(
+    const magic_geo::CConfigV4* cfg,
+    std::size_t* size
+) noexcept {
+    if (size == nullptr) return nullptr;
+    *size = 0;
+    try {
+        if (cfg == nullptr) return copy_error_msgpack_noexcept("null config pointer", size);
+        return copy_buffer(magic_geo::generate_world_msgpack(
+            magic_geo::params_from_c_config(*cfg),
+            magic_geo::compute_options_from_c_config(*cfg)
+        ), size);
+    } catch (const std::exception& exc) {
+        return copy_error_msgpack_noexcept(exc.what(), size);
+    } catch (...) {
+        return copy_error_msgpack_noexcept("unknown generation failure", size);
+    }
+}
+
+extern "C" const std::uint8_t* magic_geo_generate_geo_msgpack_v4(
+    const magic_geo::CConfigV4* cfg,
+    std::size_t* size
+) noexcept {
+    if (size == nullptr) return nullptr;
+    *size = 0;
+    try {
+        if (cfg == nullptr) return copy_error_msgpack_noexcept("null config pointer", size);
+        return copy_buffer(magic_geo::generate_geo_world_msgpack(
+            magic_geo::params_from_c_config(*cfg),
+            magic_geo::compute_options_from_c_config(*cfg)
+        ), size);
+    } catch (const std::exception& exc) {
+        return copy_error_msgpack_noexcept(exc.what(), size);
+    } catch (...) {
+        return copy_error_msgpack_noexcept("unknown geo generation failure", size);
     }
 }
 
