@@ -1,4 +1,5 @@
 #include "adaptive_energy_balance.hpp"
+#include "generation_progress.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -126,6 +127,12 @@ AdaptivePeriodicSurfaceEnergyYear solve_adaptive_periodic_surface_energy_balance
     // when all stages are positive; BE alone is infinity-nonexpansive here.
     const long double first_half_amplification = second_order ? 1.0L + 2.0L * std::sqrt(2.0L) : 1.0L;
     for (;;) {
+        if (generation_progress_enabled()) {
+            emit_generation_progress("climate", "Refining seasonal climate accuracy",
+                "Time-step refinements: " + std::to_string(result.partition_refinements) +
+                "; solver precision adjustments: " + std::to_string(result.solver_tightenings) +
+                ". Checking a repeated seasonal cycle; the required number of cycles is not known in advance.");
+        }
         check_partition_budget(partition, options, result);
         if (result.total_step_attempts >= options.maximum_total_step_attempts) {
             throw failure("adaptive energy total work budget exhausted", result);
@@ -165,11 +172,18 @@ AdaptivePeriodicSurfaceEnergyYear solve_adaptive_periodic_surface_energy_balance
                 step_options.duration_seconds = duration;
                 return integrate_surface_energy_step(system, start, interval.absorbed_shortwave_w_m2, step_options, periodic.time_method);
             };
+            GenerationProgressCadence progress;
             for (std::size_t index = 0; index < intervals.size(); ++index) {
                 const auto& interval = intervals[index];
                 const std::size_t pairs = partition[index] / 2;
                 const double duration = interval.duration_seconds / static_cast<double>(pairs);
                 for (std::size_t pair = 0; pair < pairs; ++pair) {
+                    if (pair % 64 == 0 && progress.ready()) {
+                        emit_generation_progress("climate", "Checking seasonal climate accuracy",
+                            "Comparing thermal time steps for month " + std::to_string(interval.month_index + 1) +
+                            " of 12. Further refinement runs if the accuracy checks require it.",
+                            interval.month_index + 1, 12);
+                    }
                     ++result.estimator_trials;
                     // These are exactly the accepted shooting map's two steps.
                     // Their trajectory continues even if the diagnostic full

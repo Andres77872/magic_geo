@@ -6,7 +6,7 @@ map/data endpoints become available as soon as a cache is selected or created.
 
 Debug-cache reads are confined to the selected directory.  Browser-triggered
 jobs accept only the fixed schemas in :mod:`magic_geo.web_jobs`, read inputs
-from the current project, and write artifacts below the configured workspace.
+from the project and configured storage roots, and write to configured output roots.
 """
 
 from __future__ import annotations
@@ -37,9 +37,11 @@ from .config import (
     create_config,
     dump_config_yaml,
     parse_config_yaml,
-    write_config,
+    write_config_text,
 )
 from .debug_export import FORMAT_NAME, FORMAT_VERSION
+from .paths import RuntimePaths, walk_files
+from .config_store import ConfigStore
 from .web_jobs import JobInputError, JobManager, WebJob, operation_catalog
 
 _NAN = float("nan")
@@ -577,14 +579,10 @@ class _DebugCache:
 class _CacheManager:
     """Reloadable cache selection used by cacheless startup and completed jobs."""
 
-    def __init__(self, project_root: Path, workspace: Path, selected: Path | None) -> None:
-        self.project_root = Path(project_root).resolve()
-        workspace_path = Path(workspace)
-        if not workspace_path.is_absolute():
-            workspace_path = self.project_root / workspace_path
-        self.workspace = workspace_path.resolve()
-        if not _is_relative_to(self.workspace, self.project_root):
-            raise ValueError("web workspace must be inside the project directory")
+    def __init__(self, project_root: Path, workspace: Path, selected: Path | None, *, paths: RuntimePaths | None = None) -> None:
+        self.paths = paths or RuntimePaths.resolve(project_root, workspace)
+        self.project_root = self.paths.project
+        self.workspace = self.paths.workspace
         self.workspace.mkdir(parents=True, exist_ok=True)
         self._selected = self._resolve_selected(selected) if selected is not None else None
         self._cache: _DebugCache | None = None
@@ -605,22 +603,31 @@ class _CacheManager:
     def _discover_default(self) -> None:
         if self._selected is not None:
             return
-        direct = self.workspace / "debug" / "manifest.json"
-        if direct.is_file() and _is_relative_to(direct.parent.resolve(), self.workspace):
-            self._selected = direct.parent.resolve()
-            return
-        candidates: list[tuple[int, str, Path]] = []
-        for path in self.workspace.glob("**/debug/manifest.json"):
+        direct = self.paths.debug_dir
+        if (direct / "manifest.json").is_file() and self.paths.allows_output(direct.resolve()):
             try:
-                resolved_parent = path.parent.resolve()
-                if not _is_relative_to(resolved_parent, self.workspace):
-                    continue
-                candidates.append((path.stat().st_mtime_ns, path.as_posix(), resolved_parent))
-            except OSError:
-                continue
-        candidates.sort(reverse=True)
-        if candidates:
-            self._selected = candidates[0][2]
+                candidate = _DebugCache(direct)
+                candidate.close()
+                self._selected = direct.resolve()
+                return
+            except (ValueError, OSError) as exc:
+                self._error = str(exc)
+        # Try the conventional cache first, then every published cache, newest
+        # first. A corrupt candidate must not hide a healthy sibling.
+        candidates = self.available()
+        candidates.sort(key=lambda item: (
+            item["cache_dir"] != self.paths.display(self.paths.debug_dir),
+            -item["modified_ns"], item["cache_dir"],
+        ))
+        for item in candidates:
+            try:
+                path = self.project_root / item["cache_dir"]
+                candidate = _DebugCache(path)
+                candidate.close()
+                self._selected = path.resolve()
+                return
+            except (ValueError, OSError) as exc:
+                self._error = str(exc)
 
     def close(self) -> None:
         with self._lock:
@@ -680,9 +687,7 @@ class _CacheManager:
 
         staging = Path(staging).resolve()
         destination = Path(destination).resolve()
-        if not _is_relative_to(staging, self.workspace) or not _is_relative_to(
-            destination, self.workspace
-        ):
+        if not self.paths.allows_output(destination) or staging.parent != destination.parent:
             raise ValueError("published cache must stay inside the web workspace")
         if destination.exists() and not destination.is_dir():
             raise ValueError(f"cache destination is not a directory: {destination}")
@@ -827,18 +832,18 @@ class _CacheManager:
 
     def available(self) -> list[dict[str, Any]]:
         manifests: set[Path] = set()
-        direct = self.workspace / "manifest.json"
-        if direct.is_file():
-            manifests.add(direct)
-        manifests.update(self.workspace.glob("**/manifest.json"))
+        for directory in dict.fromkeys((self.workspace, self.paths.output_dir, self.paths.debug_dir)):
+            manifests.update(walk_files(directory, name="manifest.json", excluded=(self.paths.state_dir,)))
+        if self._selected is not None:
+            manifests.add(self._selected / "manifest.json")
         worlds: list[dict[str, Any]] = []
         for manifest in sorted(manifests):
             try:
                 resolved_manifest = manifest.resolve()
-                if not _is_relative_to(resolved_manifest, self.workspace):
+                if manifest.is_symlink():
                     continue
                 resolved_parent = resolved_manifest.parent
-                if not _is_relative_to(resolved_parent, self.workspace):
+                if not self.paths.allows_output(resolved_parent) and resolved_parent != self._selected:
                     continue
                 payload = json.loads(resolved_manifest.read_text(encoding="utf-8"))
                 if not isinstance(payload, dict):
@@ -853,16 +858,17 @@ class _CacheManager:
                 world = payload.get("world", {})
                 if not isinstance(world, dict):
                     continue
-                relative_workspace = resolved_parent.relative_to(self.workspace)
+                relative_workspace = resolved_parent
                 if ".magic-geo-web" in relative_workspace.parts or any(
                     part.startswith(".")
                     and (part.endswith(".staging") or part.endswith(".backup"))
                     for part in relative_workspace.parts
                 ):
                     continue
-                relative = resolved_parent.relative_to(self.project_root).as_posix()
+                relative = self.paths.display(resolved_parent)
                 worlds.append(
                     {
+                        "modified_ns": resolved_manifest.stat().st_mtime_ns,
                         "id": relative,
                         "cache_dir": relative,
                         "name": world.get("name"),
@@ -932,6 +938,8 @@ class ConfigRenderRequest(_StrictRequest):
 class ConfigSaveRequest(ConfigTextRequest):
     name: str = Field(default="web-config.yaml", min_length=1, max_length=128)
     force: bool = False
+    path: str | None = None
+    revision: str | None = None
 
 
 class JobRequest(_StrictRequest):
@@ -966,13 +974,16 @@ def _check_web_yaml_size(text: str) -> None:
 def create_app(
     debug_dir: Path | None = None,
     *,
-    workspace: Path = Path("runs"),
+    workspace: Path | None = None,
     project_root: Path | None = None,
 ) -> FastAPI:
     """Create the web workbench, with or without an existing debug cache."""
 
-    root = Path.cwd().resolve() if project_root is None else Path(project_root).resolve()
-    caches = _CacheManager(root, workspace, debug_dir)
+    paths = RuntimePaths.resolve(project_root, workspace)
+    root = paths.project
+    configs = ConfigStore(paths)
+    config_write_lock = threading.RLock()
+    caches = _CacheManager(root, paths.workspace, debug_dir, paths=paths)
 
     def on_job_complete(job: WebJob) -> None:
         if job.status == "succeeded" and job.cache_dir:
@@ -984,7 +995,8 @@ def create_app(
 
     jobs = JobManager(
         root,
-        workspace,
+        paths.workspace,
+        paths=paths,
         on_complete=on_job_complete,
         publish_cache=caches.publish,
     )
@@ -1020,7 +1032,8 @@ def create_app(
 
         return {
             **caches.status(),
-            "workspace": jobs.workspace.relative_to(root).as_posix(),
+            "workspace": paths.display(paths.workspace),
+            "paths": paths.describe(),
             "project": root.name,
             "version": __version__,
             "api_docs": "/api/docs",
@@ -1028,7 +1041,7 @@ def create_app(
 
     @app.get("/api/operations", tags=["operations"])
     def operations() -> dict[str, Any]:
-        return operation_catalog(root, jobs.workspace)
+        return operation_catalog(root, jobs.workspace, paths=paths)
 
     @app.get("/api/backend", tags=["operations"])
     def backend() -> dict[str, Any]:
@@ -1038,6 +1051,19 @@ def create_app(
             return backend_info()
         except Exception as exc:
             raise HTTPException(status_code=503, detail=f"backend probe failed: {exc}") from exc
+
+    @app.get("/api/config/files", tags=["configuration"])
+    def config_files() -> dict[str, Any]:
+        return configs.catalog()
+
+    @app.get("/api/config/file", tags=["configuration"])
+    def config_file(path: str = Query(min_length=1)) -> dict[str, Any]:
+        try:
+            return configs.read(path)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Configuration file no longer exists; refresh the list.") from exc
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/api/config/schema", tags=["configuration"])
     def get_config_schema() -> dict[str, Any]:
@@ -1106,41 +1132,41 @@ def create_app(
             config = parse_config_yaml(request.yaml, source=f"<web:{name}>")
         except ConfigError as exc:
             raise _config_error(exc) from exc
-        target_dir = jobs.workspace / "configs"
-        if target_dir.is_symlink():
-            raise HTTPException(
-                status_code=422,
-                detail="workspace config directory must not be a symbolic link",
-            )
-        target_dir.mkdir(parents=True, exist_ok=True)
-        resolved_target_dir = target_dir.resolve()
-        if not _is_relative_to(resolved_target_dir, jobs.workspace.resolve()):
-            raise HTTPException(status_code=422, detail="config directory escapes workspace")
-        requested_target = target_dir / name
-        if requested_target.is_symlink():
-            raise HTTPException(
-                status_code=422,
-                detail="configuration target must not be a symbolic link",
-            )
-        target = requested_target.resolve()
-        if not _is_relative_to(target, resolved_target_dir):
-            raise HTTPException(status_code=422, detail="invalid configuration name")
-        if target.exists() and not request.force:
-            raise HTTPException(
-                status_code=409,
-                detail=f"configuration already exists: {name}; confirm overwrite to replace it",
-            )
-        try:
-            write_config(target, config, force=request.force)
-        except FileExistsError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except OSError as exc:
-            raise HTTPException(status_code=500, detail=f"unable to save configuration: {exc}") from exc
-        return {
-            "saved": True,
-            "path": target.relative_to(root).as_posix(),
-            "yaml": dump_config_yaml(config),
-        }
+        with config_write_lock:
+            if request.path:
+                try:
+                    existing = configs.read(request.path)
+                except (OSError, UnicodeError, ValueError) as exc:
+                    raise HTTPException(status_code=409, detail="Source file is no longer readable. Reload it or save a copy under a new name.") from exc
+                if request.revision != existing["revision"]:
+                    raise HTTPException(status_code=409, detail={"code": "config_changed", "message": "This file changed on disk. Reload it before saving, or change the name to save a copy."})
+                if name != existing["name"]:
+                    raise HTTPException(status_code=422, detail="Source name does not match the save target.")
+                target = root / existing["path"]
+                force = True
+            else:
+                target_dir = paths.saved_config_dir
+                if target_dir.is_symlink():
+                    raise HTTPException(status_code=422, detail="workspace config directory must not be a symbolic link")
+                target_dir.mkdir(parents=True, exist_ok=True)
+                if target_dir.resolve() != paths.saved_config_dir:
+                    raise HTTPException(status_code=422, detail="config directory escapes workspace")
+                target = target_dir / name
+                if target.is_symlink():
+                    raise HTTPException(status_code=422, detail="configuration target must not be a symbolic link")
+                target = target.resolve()
+                if not target.is_relative_to(target_dir):
+                    raise HTTPException(status_code=422, detail="invalid configuration name")
+                force = request.force
+            if target.exists() and not force:
+                raise HTTPException(status_code=409, detail=f"configuration already exists: {name}; confirm overwrite to replace it")
+            try:
+                write_config_text(target, request.yaml, force=force)
+            except FileExistsError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except OSError as exc:
+                raise HTTPException(status_code=500, detail=f"unable to save configuration: {exc}") from exc
+            return {"saved": True, **configs.read(target)}
 
     @app.get("/api/jobs", tags=["jobs"])
     def list_jobs() -> dict[str, Any]:
@@ -1190,7 +1216,7 @@ def create_app(
             resolved = path.resolve()
         except (OSError, RuntimeError) as exc:
             raise HTTPException(status_code=422, detail=f"unable to resolve cache path: {exc}") from exc
-        if not _is_relative_to(resolved, jobs.workspace):
+        if not paths.allows_output(resolved):
             raise HTTPException(status_code=422, detail="cache must be inside the web workspace")
         try:
             caches.select(resolved)

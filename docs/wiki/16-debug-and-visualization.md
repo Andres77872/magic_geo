@@ -302,7 +302,7 @@ The family the rest of the system depends on by name is **`cell_adjacency_edges`
 | Ring 3D positions | `_xyz_from_lat_lon(lat, lon)` on the **raw** ring longitude | `:636`, `:573` |
 | Center 2D positions | equirect `(lon/180, lat/90)`; mollweide from the center lat/lon | `:630`–`:631` |
 | Ring 2D positions | Longitude first wrapped to the branch nearest the cell center via `_wrap_lon_near` (`anchor + ((lon - anchor + 180) mod 360) - 180`), then projected | `:635`, `:638`–`:639`, `:595` |
-| Mollweide solve | 8 Newton iterations on `2θ + sin 2θ = π sin φ`, with the pole short-circuited when `abs(abs(lat) - π/2) < 1e-9`, and a bail-out if the denominator falls below `1e-12` | `:580`–`:592` |
+| Mollweide solve | `_mollweide_theta`: Newton on `2θ + sin 2θ = π sin φ` to convergence (step < 1e-14, at most 50), starting near the poles (`|φ| > 1.4`) from the asymptotic solution `π/2 − θ ≈ (3πδ²/8)^(1/3)`, δ = π/2 − |φ|; exact at the poles. The earlier fixed 8-step solve stalled next to the poles (0.1° wrong at 89.9°); the latitude round trip is now within 2·10⁻¹¹° everywhere | `debug_export.py` `_mollweide_theta` |
 
 ### Binary buffer layout
 
@@ -371,11 +371,11 @@ A **layer** is one scalar value per cell that a viewer can color the globe by (`
 
 | `kind` | Address (`id`) | Time axis | Value domain | Color treatment |
 | --- | --- | --- | --- | --- |
-| `numeric` | `cells/<column>` | none | float | viridis over `p2..p98` |
-| `categorical` | `cells/<column>` | none | category index | one hue per class |
-| `numeric_monthly` | `monthly/<column>` | month `0`–`11` | float | viridis, scale fixed across all 12 months |
-| `numeric_stage` | `<history key>/<field>` | stage `0`–`stage_count-1` | float | viridis, scale fixed across all stages |
-| `categorical_stage` | `<history key>/<field>` | stage | category index | one hue per class |
+| `numeric` | `cells/<column>` | none | float | `numericScale()`: Viridis, Cool–warm (signed), Terrain (elevation crossing 0 m) or identifier colours, over `p2..p98` |
+| `categorical` | `cells/<column>` | none | category index | one guide colour per class (semantic where recognized, e.g. ocean blue; see `palettes.js`) |
+| `numeric_monthly` | `monthly/<column>` | month `0`–`11` | float | as `numeric`, scale fixed across all 12 months |
+| `numeric_stage` | `<history key>/<field>` | stage `0`–`stage_count-1` | float | as `numeric`, scale fixed across all stages |
+| `categorical_stage` | `<history key>/<field>` | stage | category index | one guide colour per class (semantic where recognized) |
 
 Because a history key becomes the `source` verbatim, ids can contain `/` inside the history name; the HTTP route therefore declares `{layer_id:path}` (`src/magic_geo/debug_server.py:1137`) and the browser URL-encodes the id (`src/magic_geo/debug_ui/app.js:331`).
 
@@ -457,7 +457,7 @@ The rename happens in `scripts/gen_layers_reference.mjs:175` (`STATUS_LABEL`).
 | `UI_GUIDE` | The seven-section help overlay text | `:498` |
 | `KEY_REFERENCE` | The seven keyboard bindings | `:560` |
 
-`SOURCE_DOCS` (`:313`) supplies a title and paragraph for exactly four sources: `cells`, `cells_monthly`, `hydrologic_water_budget_history`, `numeric_depression_correction_history`. `ROLE_BADGES` (`:333`) supplies a short pill label and hint per role. `describeLayer` also attaches contextual notes: a stage-count note for `*_stage` layers, a month-count note for `numeric_monthly`, and "Values are labels, not magnitudes — expect a noisy gradient." for `identifier` (`:423`–`:432`).
+`SOURCE_DOCS` (`:313`) supplies a title and paragraph for exactly four sources: `cells`, `cells_monthly`, `hydrologic_water_budget_history`, `numeric_depression_correction_history`. `ROLE_BADGES` (`:333`) supplies a short pill label and hint per role. `describeLayer` also attaches contextual notes: a stage-count note for `*_stage` layers, a month-count note for `numeric_monthly`, and "Values are labels, not magnitudes. Colours repeat every 18 ids; −1 means none and is drawn in the no-data grey." for `identifier` (`:423`–`:432`).
 
 ### Cross-module reuse by the CLI
 
@@ -549,7 +549,7 @@ magic-geo export-debug-map \
 | `--camera-up` | `"x,y,z"` | `None` → `0,1,0` | Camera up vector; requires `--camera-position` | `:80` |
 | `--vertical-fov` | float, 1–179 | `50.0` | Perspective vertical field of view in degrees | `:87` |
 | `--cache-identity` | string | `None` → derived | Browser cache-identity override for byte-exact fingerprint/name parity | `:91` |
-| `--wireframe` / `--no-wireframe` | bool | `False` | Diagnostic cell/triangle edges | `:98` |
+| `--wireframe` / `--no-wireframe` | bool | `False` | Diagnostic cell outlines (the boundary edge of each fan triangle only) | `:98` |
 | `--plates` / `--no-plates` | bool | `False` | Diagnostic plate-boundary guides | `:103` |
 | `--graticule` / `--no-graticule` | bool | `False` | Diagnostic lat/lon guides | `:106` |
 | `--image` / `--no-image` | bool | `True` | Write the PNG | `:110` |
@@ -616,11 +616,11 @@ Both files are written to `.<name>.<uuid4hex>.tmp` beside the destination and mo
 | --- | --- | --- |
 | Background | `(16, 20, 26)` = `#10141a` | `:34`–`:35` |
 | Missing / no-data | `(41, 46, 54)` = `#292e36` | `:36`–`:37` |
-| Numeric ramp | 256-entry viridis LUT built from a 7-term polynomial, sampled at `min(255, floor(t * 256))` | `:350`–`:390` |
+| Numeric ramp | `_numeric_scale()` picks Viridis, Cool–warm, Terrain (two slopes about 0 m), identifier colours or a single constant colour, mirroring `numericScale()` in `colormaps.js`; the 256-entry tables are read from `debug_ui/colormaps.js` (`_load_colormap_luts`) and sampled at `min(255, floor(t * 256))` | `_numeric_scale`, `_colormap_lut_rgb` |
 | Numeric normalization | `t = clamp((value − low) / max(high − low, 1e-12))` where `(low, high)` is `p2..p98`, falling back to `min..max`, then to `min..min+1` | `:401`–`:421` |
 | Categorical hue | `hue = (index * 0.61803398875) % 1`, HLS `(hue, 0.55, 0.55)` | `:369`–`:372` |
 | "Missing" predicate | `not math.isfinite(v) or v >= 1.0e37`, plus `v < -0.5` for categorical | `:397`, `:413`–`:416` |
-| Wireframe | white `(255,255,255)`, α `0.10`, radius 0 | `:1166` |
+| Cell outlines | black, α `0.5525` (the browser scales the fill by 0.4475), radius 0, only the ring edge `(i+1, i+2)` of each fan triangle | `render` in `debug_map_export.py` |
 | Plate boundaries | `(255, 107, 81)`, α `0.90`, radius `1` when `min(width, height) ≥ 600` else `0` | `:1167`–`:1178` |
 | Graticule | `(114, 140, 178)`, α `0.28`, radius 0; parallels every 30° from −60 to 60 spanning the full −180…180 longitude range, meridians every 30° from −180 to 150 spanning only −85…85 latitude, both emitted as 5° segments | `:1012`–`:1018`, `:1179` |
 
@@ -671,7 +671,7 @@ Shared between the CLI exporter and the browser — identical in source except w
 | Aspect | CLI | Browser | Verified at |
 | --- | --- | --- | --- |
 | Layer values | `_DebugCache.layer_values` | `GET /api/layer` → same function | `debug_map_export.py:27`, `debug_server.py:1145` |
-| Viridis LUT | 256 entries from the 7-term polynomial, nearest-sampled | 256×1 RGBA `DataTexture` built from the same polynomial | `debug_map_export.py:379`, `app.js:404` |
+| Numeric LUTs | 256-entry tables parsed from `colormaps.js`, nearest-sampled | 256×1 RGBA `DataTexture` from the same tables, read with `texelFetch` | `debug_map_export.py` `_COLORMAP_LUTS`, `app.js` `applyLayerColors` |
 | Categorical hue | `(i * 0.61803398875) % 1`, HLS lightness/saturation `0.55` | Same constants in JS and in the fragment shader | `debug_map_export.py:369`, `app.js:60`, `app.js:145` |
 | Background / missing colors | `#10141a` / `#292e36` | `#10141a` / `#292e36` | `debug_map_export.py:34`, `app.js:16` |
 | Missing threshold | `v < 1.0e37` | `Number.isFinite(v) && v < 1.0e37` | `debug_map_export.py:397`, `app.js:813` |
@@ -707,7 +707,7 @@ The **Mapped field** section reports the layer id, the resolved curated meaning,
 | --- | --- | --- |
 | Categorical | One row per code in the union of `range(len(categories))` and the observed codes, sorted: guide color, code, category meaning (or `unlisted category code <n>`), cell count, share; then no-data and background rows | `:472`–`:499` |
 | Numeric, `role == "identifier"`, ≤ 64 distinct finite values | Exact value → color table | `:507`–`:517` |
-| Numeric, otherwise | 9 viridis stops (`NUMERIC_CODEX_STOPS = 9`) evenly spaced over the display range, with `(and below)` / `(and above)` clamp notes on the endpoints and a scale-position percentage | `:519`–`:524` |
+| Numeric, otherwise | the scale's name and shape (split at 0 m for Terrain, centred on 0 for Cool–warm), then 9 stops (`NUMERIC_CODEX_STOPS = 9`) evenly spaced in scale position — so a terrain codex lists 0 m exactly at 50 % — with `(and below)` / `(and above)` clamp notes and a scale-position percentage. Identifiers list exact id colours (or state the `id mod 18` rule above 64 ids); a constant layer lists its one colour | `build_color_codex` |
 
 Numeric codices additionally report the finite range of the current slice, the complete layer/time-axis raw range from `stats.min`/`stats.max`, and the robust 2nd–98th percentile display range (`:533`–`:540`). Both variants close with an explicit statement that every label and value in the table is reference data, never an instruction (`:496`, `:672`), and the Output section states the result "is an artistic interpretation of the supplied data, not a replacement for the underlying scientific/debug values" (`:678`).
 
@@ -810,7 +810,7 @@ Documentation-tier coverage over those 439 layers: curated 174 (39.6%), conventi
 - Boundary rings are approximate and do **not** tessellate — `docs/gui_debug_visualization_research.md:158` records that the README explicitly defers exact native edge polygons. Visible gaps between cells in the flat projections are the documented ring mismatch, diagnosable through `mean_neighbor_boundary_segment_mismatch_km`, not a rendering bug (`layer_docs.js:555`).
 - Monthly detection is a pure shape heuristic (any field whose non-null values are all 12-element numeric lists, `debug_export.py:205`). No field-name check is applied.
 - `"endianness": "little"` in `manifest.mesh` is a hardcoded literal while the writer emits host-order bytes (`debug_export.py:654`, `:661`). Big-endian write behavior is not verified in source.
-- `p2`/`p98` are nearest-rank picks over finite values only (`:115`). `docs/layers_reference.md:784` records that 62 layers in the reference world have `p2 == p98`, in which case the color scale silently falls back to `min..max` and then to `min..min+1` (`debug_map_export.py:401`).
+- `p2`/`p98` are nearest-rank picks over finite values only (`:115`). `docs/layers_reference.md:784` records that 62 layers in the reference world have `p2 == p98`, in which case the color scale falls back to `min..max`; a layer whose `min == max` is drawn in one colour and described as constant rather than given an invented `min..min+1` range.
 - Identifier layers (`*_id`, `*_to`) are rendered as continuous ramps. Both the UI and the generated reference flag this with the `identifier` role, but the ramp itself remains meaningless — "same colour ≈ same group", and percentile statistics on ids are not meaningful (`layer_docs.js:68`).
 - Per-stage `lithology` ships as numeric codes 0–6 while `cells/lithology` uses alphabetical names, and **no code→name table is emitted**; the code order here is alphabetical and may not match the engine enum (`layer_docs.js:144`, `docs/layers_reference.md:781`).
 - High-cardinality string fields (for example `healpix_like_pixel_code`, `s2_like_token`) produce no layer. They are not dropped: the column stays in `cells.parquet` and the reason is recorded in `cells.skipped_layers` (`docs/layers_reference.md:780`).

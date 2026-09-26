@@ -1,5 +1,8 @@
 # Web/API/configuration deep review and refactor record
 
+Storage and configuration workflow updated September 12, 2026: see [runtime storage and discovery](runtime_storage.md) and [the current UX review](workbench_ux_review.md). External roots are now supported; the earlier workspace-containment and template-only descriptions below describe the prior behavior.
+
+
 Date: 2026-07-11
 
 This review records the repository evidence that drove the workbench refactor,

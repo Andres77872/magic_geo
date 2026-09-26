@@ -9,7 +9,6 @@ with an adaptive color codex.  It never calls an image-generation service.
 from __future__ import annotations
 
 import ast
-import colorsys
 import json
 import math
 import os
@@ -381,10 +380,125 @@ def _viridis(t: float) -> tuple[float, float, float]:
     return channels[0], channels[1], channels[2]
 
 
-def _category_rgb(index: int) -> tuple[int, int, int]:
-    hue = (index * 0.61803398875) % 1.0
-    rgb = colorsys.hls_to_rgb(hue, 0.55, 0.55)
-    return tuple(max(0, min(255, math.floor(channel * 255))) for channel in rgb)
+# Categorical guide colors. This table mirrors debug_ui/palettes.js exactly so a
+# CLI export and the browser draw each class in the same color; the parity
+# test in tests/test_debug_map_export_parity.py keeps the two in step.
+_CATEGORY_COLORS: dict[str, str] = {
+    "ocean": "#2c5d8f",
+    "open_ocean": "#2c5d8f",
+    "marine": "#2c5d8f",
+    "water": "#2c5d8f",
+    "continental_shelf": "#5b9bd0",
+    "trench": "#1a3558",
+    "lake": "#7cc4e8",
+    "fresh_lake": "#7cc4e8",
+    "lacustrine_basin": "#8fcbe0",
+    "saline_basin": "#c9c19a",
+    "salt_flat": "#e6dcc0",
+    "alpine": "#d9dfe7",
+    "tundra": "#a7b8a0",
+    "hot_desert": "#e3c58f",
+    "desert": "#e3c58f",
+    "arid": "#e3c58f",
+    "savanna": "#cfc36a",
+    "temperate_grassland": "#b8cf7e",
+    "tropical_rainforest": "#1e7b3c",
+    "tropical_seasonal_forest": "#5a9e3e",
+    "temperate_forest": "#3f915e",
+    "boreal_forest": "#2c6a5c",
+    "taiga": "#2c6a5c",
+    "wetland": "#3fa59b",
+    "mangrove": "#2e8b6e",
+    "swamp": "#3b8f7a",
+    "land": "#b09a6e",
+    "continental": "#b09a6e",
+    "oceanic": "#2c5d8f",
+    "mountain_belt": "#8c6d58",
+    "volcanic_arc": "#b24a3c",
+    "rift_valley": "#b87952",
+    "river_valley": "#78b56e",
+    "floodplain": "#93c47d",
+    "delta": "#a8d08d",
+    "coastal_plain": "#d4c68c",
+    "stable_lowland": "#a3bf7e",
+    "none": "#7b8494",
+    "False": "#7b8494",
+    "True": "#f5b454",
+    "Af": "#0000ff",
+    "Am": "#0078ff",
+    "Aw": "#46aafa",
+    "BWh": "#ff0000",
+    "BWk": "#ff9696",
+    "BSh": "#f5a500",
+    "BSk": "#ffdc64",
+    "Csa": "#ffff00",
+    "Csb": "#c8c800",
+    "Csc": "#969600",
+    "Cwa": "#96ff96",
+    "Cwb": "#64c864",
+    "Cwc": "#329632",
+    "Cfa": "#c8ff50",
+    "Cfb": "#64ff50",
+    "Cfc": "#32c800",
+    "Dsa": "#ff00ff",
+    "Dsb": "#c800c8",
+    "Dsc": "#963296",
+    "Dsd": "#966496",
+    "Dwa": "#aaafff",
+    "Dwb": "#5a78dc",
+    "Dwc": "#4b50b4",
+    "Dwd": "#320087",
+    "Dfa": "#00ffff",
+    "Dfb": "#37c8ff",
+    "Dfc": "#007d7d",
+    "Dfd": "#00465f",
+    "ET": "#b2b2b2",
+    "EF": "#666666",
+}
+_QUALITATIVE_PALETTE: tuple[str, ...] = (
+    "#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f", "#edc948",
+    "#b07aa1", "#ff9da7", "#9c755f", "#bab0ac", "#86bcb6", "#d37295",
+    "#a0cbe8", "#ffbe7d", "#8cd17d", "#f1ce63", "#d4a6c8", "#fabfd2",
+)
+
+
+def _category_palette(categories: Sequence[Any]) -> list[str]:
+    """Guide colors for declared categories: semantic when known, else qualitative.
+
+    No two classes of one layer share a color, matching ``categoryPalette`` in
+    the browser.
+    """
+
+    used: set[str] = set()
+    cursor = 0
+    colors: list[str] = []
+    size = len(_QUALITATIVE_PALETTE)
+    for category in categories:
+        semantic = _CATEGORY_COLORS.get(str(category))
+        if semantic is not None and semantic not in used:
+            color = semantic
+        else:
+            color = _QUALITATIVE_PALETTE[cursor]
+            for step in range(size):
+                candidate = _QUALITATIVE_PALETTE[(cursor + step) % size]
+                if candidate not in used:
+                    color = candidate
+                    cursor = (cursor + step + 1) % size
+                    break
+            else:
+                cursor = (cursor + 1) % size
+        used.add(color)
+        colors.append(color)
+    return colors
+
+
+def _category_rgb(index: int, categories: Sequence[Any] = ()) -> tuple[int, int, int]:
+    palette = _category_palette(categories)
+    if 0 <= index < len(palette):
+        color = palette[index]
+    else:
+        color = _QUALITATIVE_PALETTE[max(index, 0) % len(_QUALITATIVE_PALETTE)]
+    return tuple(int(color[offset:offset + 2], 16) for offset in (1, 3, 5))
 
 
 def _float_rgb_bytes(rgb: tuple[float, float, float]) -> tuple[int, int, int]:
@@ -396,13 +510,49 @@ _VIRIDIS_LUT: tuple[tuple[int, int, int], ...] = tuple(
     for index in range(VIRIDIS_LUT_SIZE)
 )
 
+# Colour names and kinds as the web legend shows them (debug_ui/colormaps.js).
+_COLORMAP_LABELS = {"viridis": "Viridis", "coolwarm": "Cool–warm", "terrain": "Terrain"}
+
+
+def _load_colormap_luts() -> dict[str, tuple[tuple[int, int, int], ...]]:
+    """Read the lookup tables the browser uses from ``debug_ui/colormaps.js``.
+
+    ``scripts/generate_colormaps.py`` writes those tables and is the single
+    source for both renderers, so a value gets the same colour in the web map,
+    its PNG export and this CLI export.  Viridis falls back to the polynomial
+    table if the file cannot be read.
+    """
+
+    luts: dict[str, tuple[tuple[int, int, int], ...]] = {"viridis": _VIRIDIS_LUT}
+    path = Path(__file__).with_name("debug_ui") / "colormaps.js"
+    try:
+        source = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return luts
+    for name, data in re.findall(r"^\s*([a-z]+): '([0-9a-f]{1536})',\s*$", source, flags=re.M):
+        luts[name] = tuple(
+            (int(data[i:i + 2], 16), int(data[i + 2:i + 4], 16), int(data[i + 4:i + 6], 16))
+            for i in range(0, len(data), 6)
+        )
+    return luts
+
+
+_COLORMAP_LUTS = _load_colormap_luts()
+
+
+def _colormap_lut_rgb(name: str | None, t: float) -> tuple[int, int, int]:
+    """Sample a 256-entry nearest-filtered colour texture exactly as the shader does."""
+
+    lut = _COLORMAP_LUTS.get(name or "viridis") or _VIRIDIS_LUT
+    normalized = max(0.0, min(1.0, t)) if math.isfinite(t) else 0.0
+    index = min(VIRIDIS_LUT_SIZE - 1, math.floor(normalized * VIRIDIS_LUT_SIZE))
+    return lut[index]
+
 
 def _viridis_lut_rgb(t: float) -> tuple[int, int, int]:
     """Sample the browser's 256-byte nearest-filtered Viridis texture exactly."""
 
-    normalized = max(0.0, min(1.0, t))
-    index = min(VIRIDIS_LUT_SIZE - 1, math.floor(normalized * VIRIDIS_LUT_SIZE))
-    return _VIRIDIS_LUT[index]
+    return _colormap_lut_rgb("viridis", t)
 
 
 def _rgb_hex(rgb: tuple[int, int, int]) -> str:
@@ -425,15 +575,112 @@ def _layer_range(layer: dict[str, Any]) -> tuple[float, float]:
     return low, high
 
 
-def _value_rgb(layer: dict[str, Any], value: float) -> tuple[int, int, int]:
+# Numeric scale choice, mirroring numericScale() in debug_ui/colormaps.js:
+# identifiers get categorical colours, elevations that cross sea level a
+# terrain ramp split at 0 m, signed fields a diverging map centred on 0, and
+# everything else sequential Viridis over the 2nd-98th percentile.
+_IDENTIFIER_POINTERS = frozenset({"id", "flow_to", "spill_to", "glacier_flow_to"})
+_ELEVATION_NAME = re.compile(r"(^|_)elevation(_|$)")
+_CHANGE_NAME = re.compile(r"(^|_)(change|delta|difference|anomaly|tendency|residual|error)(_|$)")
+
+
+@dataclass(frozen=True)
+class _NumericScale:
+    mode: str  # "linear", "two-slope", "constant" or "identifier"
+    colormap: str | None
+    low: float
+    high: float
+    pivot: float = 0.0
+    value: float | None = None
+    clip_low: bool = False
+    clip_high: bool = False
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def _is_identifier_layer(layer: dict[str, Any]) -> bool:
+    name = str(layer.get("name", ""))
+    return str(layer.get("kind", "")).startswith("numeric") and (name in _IDENTIFIER_POINTERS or name.endswith("_id"))
+
+
+def _auto_colormap(layer: dict[str, Any]) -> str:
+    stats = layer.get("stats") if isinstance(layer.get("stats"), dict) else {}
+    name = str(layer.get("name", ""))
+    low, high = _layer_range(layer)
+    if _ELEVATION_NAME.search(name) and not _CHANGE_NAME.search(name) and low < 0 < high:
+        return "terrain"
+    p2, p98 = stats.get("p2"), stats.get("p98")
+    if (
+        _is_number(p2) and _is_number(p98) and float(p2) < 0 < float(p98)
+        and not (stats.get("min") == -1 and p2 == -1)
+    ):
+        return "coolwarm"
+    return "viridis"
+
+
+def _numeric_scale(layer: dict[str, Any]) -> _NumericScale:
+    stats = layer.get("stats") if isinstance(layer.get("stats"), dict) else {}
+    if _is_identifier_layer(layer):
+        return _NumericScale(
+            "identifier", None,
+            float(stats["min"]) if _is_number(stats.get("min")) else 0.0,
+            float(stats["max"]) if _is_number(stats.get("max")) else 0.0,
+        )
+    colormap = _auto_colormap(layer)
+    if _is_number(stats.get("min")) and stats.get("min") == stats.get("max"):
+        value = float(stats["min"])
+        return _NumericScale("constant", colormap, value - 1.0, value + 1.0, value=value)
+    low, high = _layer_range(layer)
+    if colormap == "coolwarm":
+        magnitude = max(abs(low), abs(high)) or 1.0
+        low, high = -magnitude, magnitude
+    return _NumericScale(
+        "two-slope" if colormap == "terrain" else "linear", colormap, low, high,
+        clip_low=_is_number(stats.get("min")) and float(stats["min"]) < low - abs(low) * 1e-6,
+        clip_high=_is_number(stats.get("max")) and float(stats["max"]) > high + abs(high) * 1e-6,
+    )
+
+
+def _scale_position(scale: _NumericScale, value: float) -> float:
+    if scale.mode == "constant":
+        return 0.5
+    if scale.mode == "two-slope":
+        if value <= scale.pivot:
+            t = 0.5 * (value - scale.low) / (scale.pivot - scale.low) if scale.pivot > scale.low else 0.5
+        else:
+            t = 0.5 + 0.5 * (value - scale.pivot) / (scale.high - scale.pivot) if scale.high > scale.pivot else 0.5
+    else:
+        t = (value - scale.low) / max(scale.high - scale.low, 1.0e-12)
+    return max(0.0, min(1.0, t))
+
+
+def _scale_value_at(scale: _NumericScale, t: float) -> float:
+    if scale.mode == "constant" and scale.value is not None:
+        return scale.value
+    if scale.mode == "two-slope":
+        if t < 0.5:
+            return scale.low + (scale.pivot - scale.low) * (t / 0.5) if scale.pivot > scale.low else scale.pivot
+        return scale.pivot + (scale.high - scale.pivot) * ((t - 0.5) / 0.5) if scale.high > scale.pivot else scale.pivot
+    return scale.low + (scale.high - scale.low) * t
+
+
+def _identifier_rgb(value: float) -> tuple[int, int, int]:
+    color = _QUALITATIVE_PALETTE[math.floor(value + 0.5) % len(_QUALITATIVE_PALETTE)]
+    return tuple(int(color[offset:offset + 2], 16) for offset in (1, 3, 5))  # type: ignore[return-value]
+
+
+def _value_rgb(layer: dict[str, Any], value: float, scale: _NumericScale | None = None) -> tuple[int, int, int]:
     categorical = str(layer.get("kind", "")).startswith("categorical")
     if not _finite_value(value) or (categorical and value < -0.5):
         return MISSING_COLOR
     if categorical:
-        return _category_rgb(round(value))
-    low, high = _layer_range(layer)
-    t = max(0.0, min(1.0, (value - low) / max(high - low, 1.0e-12)))
-    return _viridis_lut_rgb(t)
+        return _category_rgb(round(value), layer.get("categories") or ())
+    scale = scale or _numeric_scale(layer)
+    if scale.mode == "identifier":
+        return MISSING_COLOR if value < -0.5 else _identifier_rgb(value)
+    return _colormap_lut_rgb(scale.colormap, _scale_position(scale, value))
 
 
 def _format_value(value: float | None) -> str:
@@ -478,6 +725,25 @@ def _markdown_inline(value: Any) -> str:
     return " ".join(str(value).replace("|", "\\|").replace("`", "\\`").split())
 
 
+def _numeric_scale_intro(scale: _NumericScale, unit: str | None) -> str:
+    if scale.mode == "identifier":
+        return "The diagnostic image draws identifiers with 18 repeating categorical colors (id modulo 18). Colors label groups and carry no magnitude; −1 (none) uses the missing-data color."
+    if scale.mode == "constant" and scale.value is not None:
+        return f"Every finite cell in this layer has the value {_value_with_unit(scale.value, unit)}, drawn in a single color."
+    pivot = _value_with_unit(scale.pivot, unit)
+    if scale.colormap == "coolwarm":
+        shape = f" It is a diverging scale centred on {pivot}: blue below, light grey at {pivot}, red above."
+    elif scale.mode == "two-slope":
+        shape = f" It is split at {pivot}: values below use the blue lower half and values from {pivot} up use the green-to-white upper half, so the sharp color change marks {pivot}."
+    else:
+        shape = ""
+    label = _COLORMAP_LABELS.get(scale.colormap or "viridis", "Viridis")
+    return (
+        f"The diagnostic image uses {label} normalized over {_value_with_unit(scale.low, unit)} to {_value_with_unit(scale.high, unit)}.{shape}"
+        " Values outside that display range are clamped to its endpoint colors. Interpolate continuously between listed anchors."
+    )
+
+
 def build_color_codex(layer: dict[str, Any], values: Sequence[float]) -> str:
     """Build the adaptive categorical or numeric color key used in the prompt."""
 
@@ -502,7 +768,7 @@ def build_color_codex(layer: dict[str, Any], values: Sequence[float]) -> str:
             label = categories[code] if 0 <= code < len(categories) else f"unlisted category code {code}"
             count = counts.get(code, 0)
             escaped_label = _markdown_inline(label)
-            rows.append(f"| {_rgb_hex(_category_rgb(code))} | {code} | {escaped_label} | {count} | {_share(count, summary['total'])} |")
+            rows.append(f"| {_rgb_hex(_category_rgb(code, categories))} | {code} | {escaped_label} | {count} | {_share(count, summary['total'])} |")
         rows.extend(
             [
                 f"| {MISSING_COLOR_HEX} | no-data | Missing or unavailable cell; do not invent content | {summary['missing_count']} | {_share(summary['missing_count'], summary['total'])} |",
@@ -527,13 +793,10 @@ def build_color_codex(layer: dict[str, Any], values: Sequence[float]) -> str:
             "Current slice: 0 finite cells; no available-value range.",
         ])
 
-    low, high = _layer_range(layer)
-    rows = [
-        f"The diagnostic image uses Viridis normalized over {_value_with_unit(low, doc.unit)} to {_value_with_unit(high, doc.unit)}. Values outside that display range are clamped to its endpoint colors. Interpolate continuously between listed anchors.",
-        "",
-    ]
+    scale = _numeric_scale(layer)
+    rows = [_numeric_scale_intro(scale, doc.unit), ""]
     unique = sorted({value for value in values if _finite_value(value)})
-    if doc.role == "identifier" and 0 < len(unique) <= 64:
+    if (doc.role == "identifier" or scale.mode == "identifier") and 0 < len(unique) <= 64:
         rows.extend(
             [
                 "This identifier slice has at most 64 distinct values, so the exact rendered value-to-color mapping is listed. Values are labels, not magnitudes.",
@@ -543,14 +806,22 @@ def build_color_codex(layer: dict[str, Any], values: Sequence[float]) -> str:
             ]
         )
         for value in unique:
-            rows.append(f"| {_rgb_hex(_value_rgb(layer, value))} | {_value_with_unit(value, doc.unit)} |")
+            rows.append(f"| {_rgb_hex(_value_rgb(layer, value, scale))} | {_value_with_unit(value, doc.unit)} |")
+    elif scale.mode == "identifier":
+        rows.append("This identifier slice has more than 64 distinct values; each id uses the palette color at position (id mod 18).")
+    elif scale.mode == "constant" and scale.value is not None:
+        rows.extend([
+            "| Guide color | Encoded value |",
+            "|---|---:|",
+            f"| {_rgb_hex(_value_rgb(layer, scale.value, scale))} | {_value_with_unit(scale.value, doc.unit)} |",
+        ])
     else:
         rows.extend(["| Guide color | Encoded value | Scale position |", "|---|---:|---:|"])
         for index in range(NUMERIC_CODEX_STOPS):
             t = index / (NUMERIC_CODEX_STOPS - 1)
-            value = low + (high - low) * t
+            value = _scale_value_at(scale, t)
             boundary = " (and below)" if index == 0 else " (and above)" if index == NUMERIC_CODEX_STOPS - 1 else ""
-            rows.append(f"| {_rgb_hex(_viridis_lut_rgb(t))} | {_value_with_unit(value, doc.unit)}{boundary} | {t * 100.0:.1f}% |")
+            rows.append(f"| {_rgb_hex(_colormap_lut_rgb(scale.colormap, t))} | {_value_with_unit(value, doc.unit)}{boundary} | {t * 100.0:.1f}% |")
     rows.extend(
         [
             "",
@@ -586,7 +857,7 @@ def _format_camera_vector(vector: Sequence[float]) -> str:
 def _overlay_prompt(*, wireframe: bool, plates: bool, graticule: bool) -> str:
     lines: list[str] = []
     if wireframe:
-        lines.append("- White cell/triangle wireframe lines are diagnostic geometry: remove them completely in the final image.")
+        lines.append("- Dark cell outlines are diagnostic geometry: remove them completely in the final image.")
     if plates:
         lines.append("- Coral plate-boundary lines are structural guides: they may inform terrain transitions, but remove the literal lines in the final image.")
     if graticule:
@@ -721,19 +992,35 @@ def _read_array(path: Path, typecode: str) -> array:
     return values
 
 
+def _mollweide_theta(latitude: float) -> float:
+    """Solve 2θ + sin 2θ = π sin φ for the Mollweide auxiliary angle θ.
+
+    Newton's derivative vanishes at the poles, so iteration starts there from
+    the asymptotic solution π/2 − θ ≈ (3πδ²/8)^(1/3), δ = π/2 − |φ|, and runs to
+    convergence (a fixed 8 steps from θ = φ was 0.1° wrong at 89.9°).  Mirrors
+    ``mollweideTheta`` in ``debug_ui/map-navigation.js``.
+    """
+
+    half = math.pi / 2.0
+    if abs(latitude) >= half - 1.0e-12:
+        return math.copysign(half, latitude)
+    target = math.pi * math.sin(latitude)
+    delta = half - abs(latitude)
+    theta = math.copysign(half - (3.0 * math.pi * delta * delta / 8.0) ** (1.0 / 3.0), latitude) if abs(latitude) > 1.4 else latitude
+    for _ in range(50):
+        derivative = 2.0 + 2.0 * math.cos(2.0 * theta)
+        if derivative < 1.0e-15:
+            break
+        step = (2.0 * theta + math.sin(2.0 * theta) - target) / derivative
+        theta = max(-half, min(half, theta - step))
+        if abs(step) < 1.0e-14:
+            break
+    return theta
+
+
 def _mollweide_normalized(lat_deg: float, lon_deg: float) -> tuple[float, float]:
-    latitude = math.radians(lat_deg)
-    longitude = math.radians(lon_deg)
-    if abs(abs(latitude) - math.pi / 2.0) < 1.0e-9:
-        theta = math.copysign(math.pi / 2.0, latitude)
-    else:
-        theta = latitude
-        for _ in range(8):
-            denominator = 2.0 + 2.0 * math.cos(2.0 * theta)
-            if abs(denominator) < 1.0e-12:
-                break
-            theta -= (2.0 * theta + math.sin(2.0 * theta) - math.pi * math.sin(latitude)) / denominator
-    return longitude / math.pi * math.cos(theta), math.sin(theta)
+    theta = _mollweide_theta(math.radians(lat_deg))
+    return math.radians(lon_deg) / math.pi * math.cos(theta), math.sin(theta)
 
 
 def _xyz(lat_deg: float, lon_deg: float) -> tuple[float, float, float]:
@@ -1184,16 +1471,18 @@ def render_debug_map_png(
     pixels = bytearray(MAP_BACKGROUND)
     pixels *= width * height
     depths = array("f", [float("inf")]) * (width * height)
-    colors = [_value_rgb(layer, value) for value in values]
+    scale = None if str(layer.get("kind", "")).startswith("categorical") else _numeric_scale(layer)
+    colors = [_value_rgb(layer, value, scale) for value in values]
     _rasterize_triangles(pixels, depths, width, height, projected, indices, cell_ids, colors)
 
     if wireframe:
+        # Cell outlines: each fan triangle is (centre, ring i, ring i+1), so
+        # only its last edge lies on the cell boundary. Black at 55% matches
+        # the browser's outline, which scales the fill colour by 0.4475.
         for offset in range(0, len(indices), 3):
-            triangle = (indices[offset], indices[offset + 1], indices[offset + 2])
-            for a, b in ((0, 1), (1, 2), (2, 0)):
-                start, end = projected[triangle[a]], projected[triangle[b]]
-                if start is not None and end is not None:
-                    _draw_line(pixels, depths, width, height, start, end, (255, 255, 255), 0.10)
+            start, end = projected[indices[offset + 1]], projected[indices[offset + 2]]
+            if start is not None and end is not None:
+                _draw_line(pixels, depths, width, height, start, end, (0, 0, 0), 0.5525)
     if plates:
         _draw_geo_segments(
             pixels,
@@ -1460,7 +1749,8 @@ def export_map_reference(
             month=month,
             view_fingerprint=view_fingerprint,
         )
-        base = _output_base(output) if output is not None else Path("runs") / base_name
+        from .paths import RuntimePaths
+        base = _output_base(output) if output is not None else RuntimePaths.resolve().exports_dir / base_name
         image_path = base.with_name(base.name + ".png") if write_image else None
         prompt_path = base.with_name(base.name + ".gpt-image-prompt.md") if write_prompt else None
         image_filename = base.with_name(base.name + ".png").name

@@ -1,0 +1,65 @@
+{
+  "description": "Numeric colour-scale cases shared by tests/test_debug_ui.mjs (debug_ui/colormaps.js) and tests/test_debug_map_export_parity.py (debug_map_export.py). Both renderers must resolve every case to the same scale and draw every sample in the same colour.",
+  "cases": [
+    {
+      "why": "Elevations that cross sea level use the terrain ramp split at 0 m over p2..p98",
+      "layer": {"name": "elevation_m", "kind": "numeric", "stats": {"min": -10151.0, "max": 7334.0, "p2": -6359.5, "p98": 3067.4}},
+      "scale": {"mode": "two-slope", "colormap": "terrain", "lo": -6359.5, "hi": 3067.4},
+      "samples": [[-20000.0, "#0a1a3c"], [-6359.5, "#0a1a3c"], [-1.0, "#a9d6f2"], [0.0, "#2c6a3a"], [3067.4, "#f8f6f2"], [9000.0, "#f8f6f2"]]
+    },
+    {
+      "why": "An elevation field that never goes below 0 m has no sea level to split at",
+      "layer": {"name": "filled_elevation_m", "kind": "numeric", "stats": {"min": 0.0, "max": 7334.0, "p2": 0.0, "p98": 3067.4}},
+      "scale": {"mode": "linear", "colormap": "viridis", "lo": 0.0, "hi": 3067.4},
+      "samples": [[0.0, "#460155"], [3067.4, "#fbe721"]]
+    },
+    {
+      "why": "An elevation change is signed, so it is diverging about 0, not terrain",
+      "layer": {"name": "cumulative_tectonic_elevation_change_m", "kind": "numeric", "stats": {"min": -7058.0, "max": 7288.0, "p2": -3965.7, "p98": 6283.9}},
+      "scale": {"mode": "linear", "colormap": "coolwarm", "lo": -6283.9, "hi": 6283.9},
+      "samples": [[-6283.9, "#3b4cc0"], [0.0, "#dddcdc"], [6283.9, "#b40426"]]
+    },
+    {
+      "why": "A signed quantity is symmetric about 0 so equal magnitudes get equal intensity",
+      "layer": {"name": "temperature_c", "kind": "numeric", "stats": {"min": -30.0, "max": 31.0, "p2": -25.0, "p98": 29.0}},
+      "scale": {"mode": "linear", "colormap": "coolwarm", "lo": -29.0, "hi": 29.0},
+      "samples": [[-29.0, "#3b4cc0"], [0.0, "#dddcdc"], [29.0, "#b40426"], [40.0, "#b40426"]]
+    },
+    {
+      "why": "A lone -1 'none' sentinel does not make a counter signed",
+      "layer": {"name": "last_plate_assignment_change_iteration", "kind": "numeric", "stats": {"min": -1.0, "max": 6.0, "p2": -1.0, "p98": 6.0}},
+      "scale": {"mode": "linear", "colormap": "viridis", "lo": -1.0, "hi": 6.0},
+      "samples": [[-1.0, "#460155"], [6.0, "#fbe721"]]
+    },
+    {
+      "why": "Identifiers are labels drawn with categorical colours (id mod 18); -1 is none",
+      "layer": {"name": "plate_id", "kind": "numeric", "stats": {"min": 0.0, "max": 13.0, "p2": 0.0, "p98": 13.0}},
+      "scale": {"mode": "identifier", "colormap": null, "lo": 0.0, "hi": 13.0},
+      "samples": [[0.0, "#4e79a7"], [3.0, "#76b7b2"], [7.0, "#ff9da7"], [21.0, "#76b7b2"], [-1.0, "#292e36"]]
+    },
+    {
+      "why": "Graph pointers are identifiers too",
+      "layer": {"name": "flow_to", "kind": "numeric", "stats": {"min": -1.0, "max": 4036.0, "p2": -1.0, "p98": 3761.0}},
+      "scale": {"mode": "identifier", "colormap": null, "lo": -1.0, "hi": 4036.0},
+      "samples": [[-1.0, "#292e36"], [18.0, "#4e79a7"]]
+    },
+    {
+      "why": "A constant field is one colour at the ramp centre, not the minimum of an invented range",
+      "layer": {"name": "active_layer_depth_m", "kind": "numeric", "stats": {"min": 0.0, "max": 0.0, "p2": 0.0, "p98": 0.0}},
+      "scale": {"mode": "constant", "colormap": "viridis", "lo": -1.0, "hi": 1.0},
+      "samples": [[0.0, "#1f908b"]]
+    },
+    {
+      "why": "When the percentiles coincide the range falls back to the true min..max",
+      "layer": {"name": "sparse_depth_m", "kind": "numeric", "stats": {"min": 10.0, "max": 30.0, "p2": 10.0, "p98": 10.0}},
+      "scale": {"mode": "linear", "colormap": "viridis", "lo": 10.0, "hi": 30.0},
+      "samples": [[10.0, "#460155"], [30.0, "#fbe721"]]
+    },
+    {
+      "why": "Per-stage elevations follow the same sea-level rule",
+      "layer": {"name": "elevation_m", "kind": "numeric_stage", "stats": {"min": -10889.9, "max": 8946.8, "p2": -6284.5, "p98": 3925.2}},
+      "scale": {"mode": "two-slope", "colormap": "terrain", "lo": -6284.5, "hi": 3925.2},
+      "samples": [[0.0, "#2c6a3a"]]
+    }
+  ]
+}

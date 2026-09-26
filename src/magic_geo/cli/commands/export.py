@@ -8,6 +8,7 @@ from typing import Annotated
 import typer
 
 from .._app import _load_world_for_cli, app
+from .._paths import runtime_path
 
 
 @app.command("export-debug-map")
@@ -17,9 +18,10 @@ def export_debug_map(
         typer.Option(
             "--debug-dir",
             "-d",
-            exists=True,
+            exists=False,
             file_okay=False,
             help="Debug cache directory produced by export-debug.",
+            callback=runtime_path,
         ),
     ] = Path("runs/debug"),
     layer: Annotated[
@@ -36,6 +38,7 @@ def export_debug_map(
             "--output",
             "-o",
             help="Output basename; .png and .gpt-image-prompt.md are appended (default: runs/<generated name>).",
+            callback=runtime_path,
         ),
     ] = None,
     projection: Annotated[
@@ -166,7 +169,7 @@ def export_debug(
     world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated .json or .mgeo world.")],
     output: Annotated[
         Path | None,
-        typer.Option("--output", "-o", help="Debug cache directory (default: <world dir>/debug)."),
+        typer.Option("--output", "-o", help="Debug cache directory (default: <world dir>/debug).", callback=runtime_path),
     ] = None,
     vtu: Annotated[
         bool,
@@ -210,7 +213,7 @@ def export_rerun(
     world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated .json or .mgeo world.")],
     output: Annotated[
         Path | None,
-        typer.Option("--output", "-o", help="Rerun recording path (default: <world dir>/world.rrd)."),
+        typer.Option("--output", "-o", help="Rerun recording path (default: <world dir>/world.rrd).", callback=runtime_path),
     ] = None,
 ) -> None:
     """Export a Rerun (.rrd) recording with stage-scrubbable mesh and feedback ledgers."""

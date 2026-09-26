@@ -2,9 +2,8 @@
 
 The workbench exposes the existing CLI workflows without accepting arbitrary
 shell commands.  Each operation has a fixed command, a typed argument schema,
-and explicit input/output path policy.  Inputs are confined to the project
-directory and outputs are confined to the configured workspace (``runs/`` by
-default).
+and explicit input/output path policy. Inputs and outputs are confined to the
+configured runtime roots, which may live outside the source checkout.
 
 This module deliberately has no FastAPI dependency.  The HTTP layer and the
 browser consume the same operation catalog, while tests can exercise command
@@ -35,6 +34,9 @@ from typing import Any, Callable, Literal
 import yaml
 from yaml.events import AliasEvent, CollectionEndEvent, CollectionStartEvent
 
+from .paths import RuntimePaths
+from .config_store import ConfigStore
+
 
 JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 FileFingerprint = tuple[int, int, int, int]
@@ -49,6 +51,7 @@ _MAX_WEB_MANIFEST_BYTES = 8 * 1024 * 1024
 _MAX_WEB_MANIFEST_EVENTS = 20_000
 _MAX_WEB_MANIFEST_DEPTH = 64
 _MAX_WEB_MANIFEST_ALIASES = 64
+_PROGRESS_PREFIX = "MAGIC_GEO_PROGRESS "
 
 
 def _field(
@@ -98,7 +101,7 @@ _WORLD_INPUT = lambda: _field(
     "path",
     flag="--world",
     required=True,
-    help="Generated .json or .mgeo world to process.",
+    help="A saved world (.json or .mgeo) produced by Generate world.",
     path_role="input",
 )
 
@@ -110,41 +113,41 @@ _WORLD_INPUT = lambda: _field(
 _OPERATIONS: dict[str, dict[str, Any]] = {
     "generate": {
         "title": "Generate world",
-        "description": "Generate a full or natural-geography-only planet from YAML.",
+        "description": "Simulate a planet from a YAML configuration and save it as JSON or MessagePack. With Prepare browser map on, its layers and mesh are exported so the Map and Data views open it automatically. Progress is reported stage by stage.",
         "command": "generate",
         "fields": [
-            _field("config", "YAML config", "path", flag="--config", default="runs/configs/world.yaml", path_role="input", workspace_relative=True, help="Validated generation configuration; this matches the Config view's default saved path."),
-            _field("output", "World file", "path", flag="--output", default="runs/world.json", path_role="output", help="Destination for the generated JSON or MessagePack world."),
-            _field("summary", "Markdown summary", "path", flag="--summary", path_role="output", help="Optional human-readable summary."),
-            _field("cells_csv", "Cells CSV", "path", flag="--cells-csv", path_role="output", help="Optional flat per-cell table."),
-            _field("cells", "Cell count override", "integer", flag="--cells", minimum=128, help="Optional smoke-run mesh override."),
-            _field("geo_only", "Natural geography only", "boolean", flag="--geo-only", default=False, help="Skip civilization, settlement, and history layers."),
-            _field("world_format", "World serialization", "choice", flag="--format", default="auto", choices=["auto", "json", "mgeo"], help="Select automatically from the output suffix or force JSON/MessagePack."),
-            _field("open_in_web", "Prepare browser cache", "boolean", default=True, cli=False, help="Run export-debug after generation and select the cache in this workbench."),
-            _field("debug_output", "Browser cache directory", "path", default="runs/debug", path_role="output", cli=False, help="Destination used when preparing the browser cache."),
-            _field("debug_vtu", "Include ParaView VTU", "boolean", default=False, cli=False, help="Also create the larger VTU stage export."),
+            _field("config", "YAML config", "path", flag="--config", default="runs/configs/world.yaml", path_role="input", workspace_relative=True, help="World definition to simulate. Use Configure to create or edit one."),
+            _field("output", "World file", "path", flag="--output", default="runs/world.json", path_role="output", help="Where to save the generated world (.json, or .mgeo for compact MessagePack)."),
+            _field("summary", "Markdown summary", "path", flag="--summary", path_role="output", help="Optional Markdown report of the world's key statistics."),
+            _field("cells_csv", "Cells CSV", "path", flag="--cells-csv", path_role="output", help="Optional flat table with one row per cell, for spreadsheets."),
+            _field("cells", "Cell count override", "integer", flag="--cells", minimum=128, help="Overrides mesh.cell_count for a quick, coarse run (minimum 128). Leave blank to use the configuration."),
+            _field("geo_only", "Natural geography only", "boolean", flag="--geo-only", default=False, help="Stop after natural geography: skip settlements, routes, borders, cultures and history."),
+            _field("world_format", "World serialization", "choice", flag="--format", default="auto", choices=["auto", "json", "mgeo"], help="Auto picks from the file extension; choose json or mgeo to force a format."),
+            _field("open_in_web", "Prepare browser map", "boolean", default=True, cli=False, help="Export layers and mesh after generation and open the new world in this workbench."),
+            _field("debug_output", "Browser map folder", "path", default="runs/debug", path_role="output", cli=False, help="Folder for the browser map (the debug cache read by Map and Data)."),
+            _field("debug_vtu", "Include ParaView VTU", "boolean", default=False, cli=False, help="Also write ParaView VTU stage files (larger and slower)."),
         ],
     },
     "validate": {
         "title": "Validate world",
-        "description": "Run the complete structural and replay validation command.",
+        "description": "Run every structural, conservation and replay check on a saved world. The job fails if any contract is broken.",
         "command": "validate",
         "fields": [_WORLD_INPUT()],
     },
     "validate-geo": {
         "title": "Validate natural geography",
-        "description": "Validate natural-system contracts and realism gates.",
+        "description": "Check natural-system contracts and realism gates for terrain, climate, water, ice, soils and ecology.",
         "command": "validate-geo",
         "fields": [
             _WORLD_INPUT(),
-            _field("profile", "Profile", "choice", flag="--profile", default="generic", choices=["generic", "earthlike"], help="Validation policy."),
-            _field("output", "Report JSON", "path", flag="--output", path_role="output", help="Optional machine-readable report."),
-            _field("fail_on_warnings", "Fail on warnings", "boolean", flag="--fail-on-warnings", default=False, help="Promote evidence-backed warning failures."),
+            _field("profile", "Profile", "choice", flag="--profile", default="generic", choices=["generic", "earthlike"], help="generic applies universal physical checks; earthlike also compares against Earth reference ranges."),
+            _field("output", "Report JSON", "path", flag="--output", path_role="output", help="Optional JSON report for scripts and CI."),
+            _field("fail_on_warnings", "Fail on warnings", "boolean", flag="--fail-on-warnings", default=False, help="Treat evidence-backed warnings as failures."),
         ],
     },
     "validate-geo-suite": {
         "title": "Run geo validation suite",
-        "description": "Generate the configured scenario matrix and paired response gates.",
+        "description": "Generate every scenario in a matrix from one base configuration and check their paired responses.",
         "command": "validate-geo-suite",
         "fields": [
             _field("config", "Base YAML config", "path", flag="--config", default="runs/configs/world.yaml", path_role="input", workspace_relative=True),
@@ -155,7 +158,7 @@ _OPERATIONS: dict[str, dict[str, Any]] = {
     },
     "calibrate": {
         "title": "Calibrate world",
-        "description": "Compare one generated world with external-data target ranges.",
+        "description": "Compare one saved world with target ranges derived from external data and report which metrics fall inside.",
         "command": "calibrate",
         "fields": [
             _WORLD_INPUT(),
@@ -168,7 +171,7 @@ _OPERATIONS: dict[str, dict[str, Any]] = {
     },
     "calibrate-ensemble": {
         "title": "Calibrate ensemble",
-        "description": "Generate and evaluate an explicit seed/resolution ensemble.",
+        "description": "Generate an explicit set of seeds and resolutions, then evaluate the whole ensemble against target bundles.",
         "command": "calibrate-ensemble",
         "fields": [
             _field("config", "Base YAML config", "path", flag="--config", required=True, path_role="input"),
@@ -182,7 +185,7 @@ _OPERATIONS: dict[str, dict[str, Any]] = {
     },
     "derive-targets": {
         "title": "Derive calibration targets",
-        "description": "Derive target ranges from a local source manifest.",
+        "description": "Build calibration target ranges from a local manifest of source datasets.",
         "command": "derive-targets",
         "fields": [
             _field("sources", "Source manifest", "path", flag="--sources", required=True, path_role="input"),
@@ -192,7 +195,7 @@ _OPERATIONS: dict[str, dict[str, Any]] = {
     },
     "render": {
         "title": "Render SVG map",
-        "description": "Create a downloadable layer-driven vector map.",
+        "description": "Draw a downloadable vector map with terrain, water, borders, and optional labels and contours.",
         "command": "render",
         "fields": [
             _WORLD_INPUT(),
@@ -208,7 +211,7 @@ _OPERATIONS: dict[str, dict[str, Any]] = {
     },
     "render-raster": {
         "title": "Render raster map",
-        "description": "Create a dependency-free downloadable PPM map.",
+        "description": "Draw a shaded raster map (PPM) without extra dependencies.",
         "command": "render-raster",
         "fields": [
             _WORLD_INPUT(),
@@ -221,8 +224,8 @@ _OPERATIONS: dict[str, dict[str, Any]] = {
         ],
     },
     "export-debug": {
-        "title": "Export browser/ParaView cache",
-        "description": "Create columnar tables, mesh assets, and optional VTU stages.",
+        "title": "Prepare browser map",
+        "description": "Export a saved world's layers, tables and mesh so Map and Data can open it, with optional ParaView VTU stages. Use this to reopen a world generated without its browser map.",
         "command": "export-debug",
         "fields": [
             _WORLD_INPUT(),
@@ -233,7 +236,7 @@ _OPERATIONS: dict[str, dict[str, Any]] = {
     },
     "export-rerun": {
         "title": "Export Rerun recording",
-        "description": "Create a stage-scrubbable .rrd companion recording.",
+        "description": "Write a Rerun (.rrd) recording you can scrub stage by stage in the Rerun viewer.",
         "command": "export-rerun",
         "optional_dependency": "rerun",
         "fields": [
@@ -248,7 +251,7 @@ _EQUIVALENT_OPERATIONS: list[dict[str, Any]] = [
     {
         "id": "init-config",
         "title": "Create YAML config",
-        "description": "Provided by the Config view and /api/config endpoints.",
+        "description": "Provided by the Configure view, the New world dialog and /api/config endpoints.",
         "equivalent_view": "config",
         "available": True,
     },
@@ -262,7 +265,7 @@ _EQUIVALENT_OPERATIONS: list[dict[str, Any]] = [
     {
         "id": "export-debug-map",
         "title": "Export debug map reference",
-        "description": "Provided directly by the Map view's Export PNG and Prompt .md controls.",
+        "description": "Provided directly by the Map view's PNG and Prompt export buttons.",
         "equivalent_view": "map",
         "available": True,
     },
@@ -276,32 +279,25 @@ _EQUIVALENT_OPERATIONS: list[dict[str, Any]] = [
 ]
 
 
-def _workspace_default(
-    value: Any,
-    field_spec: dict[str, Any],
-    project_root: Path | None,
-    workspace: Path | None,
-) -> Any:
-    if (
-        value in (None, "")
-        or project_root is None
-        or workspace is None
-    ):
-        return value
-    if field_spec.get("path_role") != "output" and not field_spec.get(
-        "workspace_relative", False
-    ):
-        return value
-    raw = Path(str(value))
-    if raw.is_absolute() or not raw.parts or raw.parts[0] != "runs":
-        return value
-    target = Path(workspace) / Path(*raw.parts[1:])
-    return target.resolve().relative_to(Path(project_root).resolve()).as_posix()
+def _operation_default(paths: RuntimePaths, operation: str, spec: dict[str, Any]) -> Any:
+    value = spec.get("default")
+    if spec["name"] == "config" and value:
+        selected = ConfigStore(paths).default()
+        return paths.display(selected) if selected else (
+            paths.display(paths.saved_config_dir / "world.yaml") if value else value
+        )
+    if spec.get("path_role") == "output" and value:
+        category = "report" if operation in _REPORTING_OPERATIONS or operation == "derive-targets" else (
+            "export" if operation.startswith("render") or operation == "export-rerun" else "output"
+        )
+        return paths.display(paths.rebase_default(value, category=category))
+    return value
 
 
 def operation_catalog(
     project_root: Path | None = None,
     workspace: Path | None = None,
+    *, paths: RuntimePaths | None = None,
 ) -> dict[str, Any]:
     """Return browser-safe metadata for every CLI feature.
 
@@ -309,6 +305,8 @@ def operation_catalog(
     defaults are rebased below it so the displayed form and server policy agree.
     """
 
+    if paths is None and project_root is not None and workspace is not None:
+        paths = RuntimePaths.resolve(project_root, workspace)
     operations: list[dict[str, Any]] = []
     for operation_id, spec in _OPERATIONS.items():
         item = copy.deepcopy(spec)
@@ -318,12 +316,15 @@ def operation_catalog(
         if dependency is not None:
             item["dependency"] = dependency
         for field_spec in item["fields"]:
-            field_spec["default"] = _workspace_default(
-                field_spec.get("default"),
-                field_spec,
-                project_root,
-                workspace,
-            )
+            if paths is not None:
+                field_spec["default"] = _operation_default(paths, operation_id, field_spec)
+            # UI grouping is part of the shared catalog, not a second schema.
+            name = field_spec["name"]
+            field_spec["group"] = "essentials" if name in {
+                "config", "world", "output", "matrix", "targets", "sources", "cells", "geo_only", "open_in_web"
+            } else "advanced"
+            if operation_id == "generate" and name in {"debug_output", "debug_vtu"}:
+                field_spec["depends_on"] = "open_in_web"
         operations.append(item)
     return {
         "operations": operations,
@@ -362,6 +363,19 @@ class WebJob:
     log: str = ""
     artifacts: list[dict[str, Any]] = field(default_factory=list)
     cache_dir: str | None = None
+    map_superseded: bool = False
+    progress: dict[str, Any] = field(default_factory=lambda: {
+        "phase": "queued", "label": "Waiting in queue",
+        "detail": "Starts when the current operation finishes.",
+        "current": None, "total": None,
+    })
+    last_activity_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    error: str | None = None
+    _started_monotonic: float | None = field(default=None, repr=False)
+    _finished_monotonic: float | None = field(default=None, repr=False)
+    _phase_started_monotonic: float = field(default_factory=time.monotonic, repr=False)
+    _activity_monotonic: float = field(default_factory=time.monotonic, repr=False)
+    _last_output: str = field(default="", repr=False)
     _process: subprocess.Popen[str] | None = field(default=None, repr=False)
     _stopping_process: subprocess.Popen[str] | None = field(default=None, repr=False)
     _process_active: bool = field(default=False, repr=False)
@@ -376,9 +390,36 @@ class WebJob:
     _artifact_fingerprints: dict[int, FileFingerprint] = field(
         default_factory=dict, repr=False
     )
+    _artifact_sources: dict[int, FileFingerprint] = field(default_factory=dict, repr=False)
+
+    def telemetry(self) -> dict[str, Any]:
+        """Report measured durations; silence is never invented progress."""
+        now = self._finished_monotonic if self._finished_monotonic is not None else time.monotonic()
+        progress = copy.deepcopy(self.progress)
+        progress.setdefault("updated_at", self.created_at)
+        world_index = next((
+            index for index, artifact in enumerate(self.artifacts)
+            if self.operation == "generate" and artifact.get("name") == "output" and artifact.get("available")
+        ), None)
+        world_path = self._artifact_paths.get(world_index) if world_index is not None else None
+        return {
+            "progress": progress,
+            "elapsed_seconds": round(max(0.0, now - self._started_monotonic), 1) if self._started_monotonic is not None else 0.0,
+            "phase_elapsed_seconds": round(max(0.0, now - self._phase_started_monotonic), 1),
+            "last_activity_at": self.last_activity_at,
+            "seconds_since_activity": round(max(0.0, now - self._activity_monotonic), 1),
+            "queue_position": None,
+            "cancellable": self.status in {"queued", "running"} and not (self._cancel_requested or self._publishing or self._finalizing),
+            "cancel_requested": self._cancel_requested,
+            "error": self.error,
+            "world_available": world_index is not None,
+            "world_path": str(world_path) if world_path is not None else None,
+            "map_superseded": self.map_superseded,
+        }
 
     def public(self) -> dict[str, Any]:
         return {
+            **self.telemetry(),
             "id": self.id,
             "operation": self.operation,
             "arguments": copy.deepcopy(self.arguments),
@@ -397,6 +438,7 @@ class WebJob:
         """Lightweight list representation; logs/arguments stay on detail GET."""
 
         return {
+            **self.telemetry(),
             "id": self.id,
             "operation": self.operation,
             "status": self.status,
@@ -417,26 +459,20 @@ class JobManager:
         project_root: Path,
         workspace: Path,
         *,
+        paths: RuntimePaths | None = None,
         on_complete: Callable[[WebJob], None] | None = None,
         publish_cache: CachePublisher | None = None,
         max_log_bytes: int = 2_000_000,
         max_jobs: int = 100,
     ) -> None:
-        self.project_root = Path(project_root).resolve()
-        raw_workspace = Path(workspace)
-        if not raw_workspace.is_absolute():
-            raw_workspace = self.project_root / raw_workspace
-        self.workspace = raw_workspace.resolve()
-        if not _is_relative_to(self.workspace, self.project_root):
-            raise ValueError("web workspace must be inside the project directory")
+        self.paths = paths or RuntimePaths.resolve(project_root, workspace)
+        self.project_root = self.paths.project
+        self.workspace = self.paths.workspace
         self.workspace.mkdir(parents=True, exist_ok=True)
-        self._internal_root = self.workspace / ".magic-geo-web"
+        self._internal_root = self.paths.state_dir
         if self._internal_root.is_symlink():
             raise ValueError("web internal directory must not be a symbolic link")
         self._internal_root.mkdir(parents=True, exist_ok=True)
-        self._internal_root = self._internal_root.resolve()
-        if not _is_relative_to(self._internal_root, self.workspace):
-            raise ValueError("web internal directory must stay inside the workspace")
         self._artifact_root = self._internal_root / "artifacts"
         if self._artifact_root.is_symlink():
             raise ValueError("web artifact directory must not be a symbolic link")
@@ -464,6 +500,8 @@ class JobManager:
                 job._cancel_requested = True
                 job.status = "cancelled"
                 job.finished_at = now
+                self._set_progress(job, "cancelled", "Cancelled", "Removed from the queue before starting.")
+                job._finished_monotonic = time.monotonic()
             running = [job for job in self._jobs.values() if job.status == "running"]
         for job in running:
             self.cancel(job.id)
@@ -474,14 +512,21 @@ class JobManager:
     def list(self) -> list[dict[str, Any]]:
         with self._lock:
             jobs = sorted(self._jobs.values(), key=lambda job: job.created_at, reverse=True)
-            return [job.summary() for job in jobs]
+            return [self._public(job, summary=True) for job in jobs]
+
+    def _public(self, job: WebJob, *, summary: bool = False) -> dict[str, Any]:
+        result = job.summary() if summary else job.public()
+        if job.status == "queued":
+            queued = [candidate.id for candidate in self._jobs.values() if candidate.status == "queued"]
+            result["queue_position"] = queued.index(job.id) + 1
+        return result
 
     def get(self, job_id: str) -> dict[str, Any]:
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
                 raise KeyError(job_id)
-            return job.public()
+            return self._public(job)
 
     def submit(self, operation: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         with self._lock:
@@ -507,7 +552,7 @@ class JobManager:
             ]
             for candidate in active:
                 if candidate.operation == operation and candidate.arguments == normalized:
-                    return candidate.public()
+                    return self._public(candidate)
                 conflicts = {
                     new_artifact["path"]
                     for new_artifact in artifacts
@@ -520,10 +565,25 @@ class JobManager:
                         + ", ".join(sorted(conflicts))
                     )
             if len(self._jobs) >= self._max_jobs:
+                # Recovery/validation jobs can read immutable world snapshots.
+                # Keep their source job alive until these readers finish.
+                retained_sources: set[str] = set()
+                for reader in [*active, job]:
+                    for value in reader.arguments.values():
+                        values = value if isinstance(value, list) else [value]
+                        for item in values:
+                            if not isinstance(item, str):
+                                continue
+                            path = Path(item)
+                            if _is_relative_to(path, self._artifact_root):
+                                parts = path.relative_to(self._artifact_root).parts
+                                if parts:
+                                    retained_sources.add(parts[0])
                 terminal = [
                     candidate
                     for candidate in self._jobs.values()
                     if candidate.status in {"succeeded", "failed", "cancelled"}
+                    and candidate.id not in retained_sources
                 ]
                 terminal.sort(key=lambda candidate: candidate.created_at)
                 while len(self._jobs) >= self._max_jobs and terminal:
@@ -542,7 +602,7 @@ class JobManager:
             except RuntimeError as exc:
                 self._jobs.pop(job.id, None)
                 raise JobInputError("web job executor is unavailable") from exc
-        return job.public()
+            return self._public(job)
 
     def cancel(self, job_id: str) -> dict[str, Any]:
         with self._lock:
@@ -550,17 +610,21 @@ class JobManager:
             if job is None:
                 raise KeyError(job_id)
             if job.status in {"succeeded", "failed", "cancelled"}:
-                return job.public()
+                return self._public(job)
             # Cache publication and terminal artifact snapshotting are commit
             # phases. Once either begins, cancellation cannot be made truthful
             # without rolling back a completed publication/snapshot.
             if job._publishing or job._finalizing:
-                return job.public()
+                return self._public(job)
             job._cancel_requested = True
             process = job._process
             if job.status == "queued":
                 job.status = "cancelled"
                 job.finished_at = datetime.now(timezone.utc).isoformat()
+                self._set_progress(job, "cancelled", "Cancelled", "Removed from the queue before starting.")
+                job._finished_monotonic = time.monotonic()
+            else:
+                self._set_progress(job, "cancelling", "Stopping operation", "Waiting for the process and its child processes to stop.")
         if process is not None:
             self._request_process_stop(job, process)
         return self.get(job_id)
@@ -598,13 +662,15 @@ class JobManager:
         except (OSError, RuntimeError) as exc:
             raise JobInputError(f"unable to resolve {role} path {value!r}: {exc}") from exc
         root = self.project_root if role == "input" else self.workspace
-        if not _is_relative_to(path, root):
+        if role == "output" and _is_relative_to(path, self._internal_root):
+            raise JobInputError("output path uses the reserved web-internal directory")
+        if not (self.paths.allows_input(path) if role == "input" else self.paths.allows_output(path)):
             noun = "input" if role == "input" else "output"
             raise JobInputError(f"{noun} path must stay inside {root}: {value}")
         if role == "input" and not path.is_file():
             raise JobInputError(f"input path must name an existing regular file: {value}")
         if role == "output":
-            if path == self.workspace:
+            if path in self.paths.output_roots and path != self.paths.debug_dir:
                 raise JobInputError("output path must not replace the web workspace")
             if _is_relative_to(path, self._internal_root):
                 raise JobInputError("output path uses the reserved web-internal directory")
@@ -625,7 +691,7 @@ class JobManager:
             path = (raw if raw.is_absolute() else base / raw).resolve()
         except (OSError, RuntimeError) as exc:
             raise JobInputError(f"unable to resolve {context} {value!r}: {exc}") from exc
-        if not _is_relative_to(path, self.project_root):
+        if not self.paths.allows_input(path):
             raise JobInputError(
                 f"indirect input path must stay inside {self.project_root}: "
                 f"{context}={value}"
@@ -879,12 +945,7 @@ class JobManager:
         input_paths: list[Path] = []
         for field_spec in spec["fields"]:
             name = field_spec["name"]
-            default = _workspace_default(
-                field_spec.get("default"),
-                field_spec,
-                self.project_root,
-                self.workspace,
-            )
+            default = _operation_default(self.paths, operation, field_spec)
             value = supplied.get(name, default)
             missing = value is None or value == "" or value == []
             if missing:
@@ -900,7 +961,7 @@ class JobManager:
                 if role == "input":
                     input_paths.append(path)
                 if role == "output":
-                    relative = path.relative_to(self.project_root).as_posix()
+                    relative = self.paths.display(path)
                     is_cache = operation == "export-debug" or (
                         operation == "generate"
                         and name == "debug_output"
@@ -976,7 +1037,7 @@ class JobManager:
                         raise JobInputError(
                             "cache output must not replace or contain an input: "
                             f"{artifact['path']} contains "
-                            f"{input_path.relative_to(self.project_root).as_posix()}"
+                            f"{self.paths.display(input_path)}"
                         )
 
         return normalized, command, artifacts
@@ -1033,10 +1094,10 @@ class JobManager:
             if artifact.get("kind") != "file":
                 continue
             source = (self.project_root / str(artifact["path"])).resolve()
-            if not _is_relative_to(source, self.workspace):
+            if not self.paths.allows_output(source):
                 continue
             after = self._file_fingerprint(source)
-            if after is None or after == job._artifact_before.get(index):
+            if after is None or after == job._artifact_before.get(index) or after == job._artifact_sources.get(index):
                 continue
             destination_dir = self._artifact_root / job.id / str(index)
             try:
@@ -1066,6 +1127,7 @@ class JobManager:
             with self._lock:
                 job._artifact_paths[index] = destination
                 job._artifact_fingerprints[index] = snapshot_fingerprint
+                job._artifact_sources[index] = after
                 artifact["available"] = True
                 artifact["bytes"] = snapshot_fingerprint[2]
 
@@ -1124,6 +1186,7 @@ class JobManager:
     ) -> int:
         """Export to a private sibling and publish only a complete cache."""
 
+        self._set_progress(job, "export_cache", "Preparing browser map", "Building map geometry, layers and tables from the saved world.")
         destination.parent.mkdir(parents=True, exist_ok=True)
         staging = Path(
             tempfile.mkdtemp(
@@ -1141,6 +1204,8 @@ class JobManager:
             raise RuntimeError("export-debug command has no output argument") from exc
 
         try:
+            with self._lock:
+                job._last_output = ""
             code = self._spawn(job, staged_command)
             with self._lock:
                 cancelled = job._cancel_requested
@@ -1152,6 +1217,7 @@ class JobManager:
                 if job._cancel_requested:
                     return code
                 job._publishing = True
+                self._set_progress(job, "publishing", "Opening the generated map", "Publishing the complete browser cache. This final step cannot be cancelled.")
             publication_completed = False
             try:
                 published = publisher(staging, destination)
@@ -1164,25 +1230,91 @@ class JobManager:
                         # from the cancellation API's point of view.
                         job._finalizing = True
             published = Path(published).resolve()
-            if not _is_relative_to(published, self.workspace):
+            if not self.paths.allows_output(published):
                 raise RuntimeError("published debug cache escaped the web workspace")
             with self._lock:
-                job.cache_dir = published.relative_to(self.project_root).as_posix()
+                # A destination can be reused by a later generation/export.
+                # Every stored cache_dir is already a canonical display path
+                # from its resolved publication destination; older jobs must
+                # never advertise the replacement map as their own result.
+                cache_dir = self.paths.display(published)
+                for previous in self._jobs.values():
+                    if previous is not job and previous.cache_dir == cache_dir:
+                        previous.cache_dir = None
+                        previous.map_superseded = True
+                job.cache_dir = cache_dir
+                job.map_superseded = False
             return code
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
-    def _append_log(self, job: WebJob, text: str) -> None:
+    def _append_log(self, job: WebJob, text: str, *, diagnostic: bool = False) -> None:
         with self._lock:
+            job.last_activity_at = datetime.now(timezone.utc).isoformat()
+            job._activity_monotonic = time.monotonic()
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            if lines and not diagnostic and not text.startswith("$ "):
+                job._last_output = lines[-1][-1000:]
             job.log += text
             encoded = job.log.encode("utf-8", errors="replace")
             if len(encoded) > self._max_log_bytes:
                 tail = encoded[-self._max_log_bytes :].decode("utf-8", errors="replace")
                 job.log = "[earlier output truncated]\n" + tail
 
+    def _set_progress(
+        self, job: WebJob, phase: str, label: str, detail: str = "", *,
+        current: int | float | None = None, total: int | float | None = None,
+    ) -> None:
+        with self._lock:
+            if job._cancel_requested and phase not in {"cancelling", "cancelled"}:
+                return
+            now = time.monotonic()
+            timestamp = datetime.now(timezone.utc).isoformat()
+            if job.progress.get("phase") != phase:
+                job._phase_started_monotonic = now
+            job.progress = {
+                "phase": phase, "label": label, "detail": detail,
+                "current": current, "total": total, "updated_at": timestamp,
+            }
+            job.last_activity_at = timestamp
+            job._activity_monotonic = now
+
+    def _consume_output(self, job: WebJob, line: str) -> None:
+        """Consume opt-in stage events while preserving ordinary/error output."""
+        if line.startswith(_PROGRESS_PREFIX) and len(line) <= 16_384:
+            try:
+                event = json.loads(line[len(_PROGRESS_PREFIX):])
+                if not isinstance(event, dict):
+                    raise ValueError("progress event must be an object")
+                phase, label, detail = event.get("phase"), event.get("label"), event.get("detail", "")
+                if not isinstance(phase, str) or not phase.strip() or len(phase) > 80:
+                    raise ValueError("invalid phase")
+                if not isinstance(label, str) or not label.strip() or len(label) > 200:
+                    raise ValueError("invalid label")
+                if not isinstance(detail, str) or len(detail) > 4000:
+                    raise ValueError("invalid detail")
+                current, total = event.get("current"), event.get("total")
+                if not (
+                    type(current) in {int, float} and type(total) in {int, float}
+                    and math.isfinite(current) and math.isfinite(total)
+                    and 0 <= current <= total and total > 0
+                ):
+                    current = total = None
+            except (ValueError, TypeError, OverflowError, RecursionError):
+                pass  # A malformed diagnostic must never terminate the job.
+            else:
+                with self._lock:
+                    if not job._cancel_requested:
+                        self._set_progress(job, phase, label, detail, current=current, total=total)
+                counts = f" ({current}/{total})" if total is not None else ""
+                self._append_log(job, f"[{label}]{counts} {detail}\n", diagnostic=True)
+                return
+        self._append_log(job, line)
+
     def _spawn(self, job: WebJob, command: list[str]) -> int:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
+        env["MAGIC_GEO_PROGRESS"] = "1"
         process = subprocess.Popen(
             command,
             cwd=self.project_root,
@@ -1190,6 +1322,8 @@ class JobManager:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
             start_new_session=os.name == "posix",
         )
@@ -1203,7 +1337,7 @@ class JobManager:
                 self._request_process_stop(job, process)
             assert process.stdout is not None
             for line in process.stdout:
-                self._append_log(job, line)
+                self._consume_output(job, line)
             process.stdout.close()
 
             # Keep the leader unreaped while descendants can hold its output
@@ -1281,8 +1415,15 @@ class JobManager:
                 return
             job.status = "running"
             job.started_at = datetime.now(timezone.utc).isoformat()
+            job._started_monotonic = time.monotonic()
+            self._set_progress(
+                job, "generate" if job.operation == "generate" else "running",
+                "Starting world generation" if job.operation == "generate" else _OPERATIONS[job.operation]["title"],
+                "Starting the generator and loading the selected configuration." if job.operation == "generate" else "The operation is running; its output will appear below.",
+            )
         final_status: JobStatus = "failed"
         final_exit_code = -1
+        failure_label: str | None = None
         try:
             self._snapshot_artifact_inputs(job)
             self._append_log(job, "$ " + " ".join(job.command) + "\n")
@@ -1300,11 +1441,12 @@ class JobManager:
             # Generation can complete successfully even if its optional cache
             # export later fails. Preserve those complete primary artifacts now.
             if code == 0 and job.operation == "generate" and not cancelled:
+                self._set_progress(job, "saving_artifacts", "Preserving the generated world", "Preserving a downloadable copy of the completed world.")
                 self._capture_artifacts(job)
 
             if code == 0 and job.operation == "generate" and job.arguments.get("open_in_web", True) and not cancelled:
                 world = job.arguments["output"]
-                debug_dir = job.arguments.get("debug_output") or str(self.workspace / "debug")
+                debug_dir = job.arguments.get("debug_output") or str(self.paths.debug_dir)
                 export_command = [
                     sys.executable,
                     "-m",
@@ -1326,14 +1468,20 @@ class JobManager:
                 else:
                     final_status = "succeeded" if code == 0 else "failed"
                     job._finalizing = True
+                    if code != 0:
+                        job.error = job._last_output or f"Process exited with code {code}."
+                        failure_label = job.progress.get("label")
             if final_status == "succeeded" or (
                 final_status == "failed" and job.operation in _REPORTING_OPERATIONS
             ):
+                self._set_progress(job, "finalizing", "Finishing operation", "Preserving downloadable results. This final step cannot be cancelled.")
                 self._capture_artifacts(job)
         except Exception as exc:  # Keep worker failures visible in the browser.
             self._append_log(job, f"web job failed: {type(exc).__name__}: {exc}\n")
             with self._lock:
                 final_status = "cancelled" if job._cancel_requested else "failed"
+                job.error = f"{type(exc).__name__}: {exc}"[-1000:]
+                failure_label = job.progress.get("label")
             final_exit_code = -1
         finally:
             with self._lock:
@@ -1346,6 +1494,16 @@ class JobManager:
                 job.status = final_status
                 job.exit_code = final_exit_code
                 job.finished_at = datetime.now(timezone.utc).isoformat()
+                previous_label = failure_label or job.progress.get("label", "operation")
+                if final_status == "succeeded":
+                    detail = "The generated map is ready to explore." if job.cache_dir else "The operation finished. Available results can be downloaded below."
+                    self._set_progress(job, "succeeded", "Complete", detail)
+                elif final_status == "cancelled":
+                    job.error = None
+                    self._set_progress(job, "cancelled", "Cancelled", "The process has stopped. Any completed world download remains available.")
+                else:
+                    self._set_progress(job, "failed", "Operation failed", f"{previous_label}: {job.error or 'See the operation output for details.'}")
+                job._finished_monotonic = time.monotonic()
             if self._on_complete is not None:
                 try:
                     self._on_complete(job)

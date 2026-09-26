@@ -359,6 +359,7 @@ class DebugServerTests(TestCase):
         self.assertIn("debug_ui/*.css", package_data)
         self.assertIn("debug_ui/*.js", package_data)
         self.assertIn("debug_ui/vendor/*.js", package_data)
+        self.assertIn("debug_ui/assets/*.webp", package_data)
         self.assertIn("magic_geo_native.dll", package_data)
         self.assertIn("libmagic_geo_native.dylib", package_data)
         setup_text = Path("setup.py").read_text(encoding="utf-8")
@@ -377,6 +378,16 @@ class DebugServerTests(TestCase):
             "style.css",
             "app.js",
             "layer_docs.js",
+            "ui.js",
+            "palettes.js",
+            "colormaps.js",
+            "map-navigation.js",
+            "home-workbench.js",
+            "command-palette.js",
+            "new-world.js",
+            "landing.html",
+            "landing.css",
+            "assets/workbench-map.webp",
             "vendor/three.module.js",
         ):
             self.assertTrue(ui.joinpath(relative).is_file(), relative)
@@ -1132,7 +1143,7 @@ class DebugServerTests(TestCase):
                 )
                 self.assertEqual(
                     config_field["default"],
-                    "runs/custom-workspace/configs/world.yaml",
+                    "configs/config.yaml",
                 )
             finally:
                 custom_manager.close()
@@ -1562,7 +1573,7 @@ class DebugServerTests(TestCase):
                 job = manager.submit(
                     "generate",
                     {
-                        "config": "configs/earthlike_seed.yaml",
+                        "config": "configs/seasonal_smoke.yaml",
                         "output": str(workspace / "world.json"),
                         "cells": 128,
                         "geo_only": True,
@@ -1907,10 +1918,9 @@ class CacheManagerDegradationTests(_WorkbenchTestCase):
         root = self.temp_root()
         project = root / "project"
         project.mkdir()
-        with self.assertRaisesRegex(
-            ValueError, "web workspace must be inside the project directory"
-        ):
-            _CacheManager(project, root / "outside", None)
+        external = self.manager(project, root / "outside", None)
+        self.assertEqual(external.workspace, root / "outside")
+        self.assertFalse(external.status()["cache_available"])
 
         _make_cache(project)
         manager = self.manager(project, Path("runs"), Path("runs/debug"))
@@ -2858,7 +2868,7 @@ class DebugServerApiErrorTests(_WorkbenchTestCase):
         self.assertTrue(blocked.is_dir())
 
         with patch(
-            "magic_geo.debug_server.write_config",
+            "magic_geo.debug_server.write_config_text",
             side_effect=FileExistsError("configuration already exists: raced.yaml"),
         ):
             status, _headers, body = asgi_call(

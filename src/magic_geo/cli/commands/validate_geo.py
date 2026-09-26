@@ -9,6 +9,7 @@ import typer
 from pydantic import ValidationError
 
 from .._app import _load_world_for_cli, app
+from .._paths import runtime_path
 from ...config import load_config
 from ...geo_validation import validate_geo_world
 from ...geo_validation_suite import (
@@ -35,7 +36,7 @@ def validate_geo(
     ] = "generic",
     output: Annotated[
         Path | None,
-        typer.Option("--output", "-o", help="Optional machine-readable validation report."),
+        typer.Option("--output", "-o", help="Optional machine-readable validation report.", callback=runtime_path),
     ] = None,
     fail_on_warnings: Annotated[
         bool,
@@ -92,20 +93,21 @@ def validate_geo(
 def validate_geo_suite(
     config: Annotated[
         Path,
-        typer.Option("--config", "-c", exists=True, help="Base YAML config path."),
+        typer.Option("--config", "-c", exists=False, help="Base YAML config path.", callback=runtime_path),
     ] = Path("configs/earthlike_seed.yaml"),
     matrix: Annotated[
         Path,
         typer.Option(
             "--matrix",
             "-m",
-            exists=True,
+            exists=False,
             help="Geo scenario matrix with nested config overrides and paired gates.",
+            callback=runtime_path,
         ),
     ] = Path("configs/geo_validation_matrix.yaml"),
     output: Annotated[
         Path,
-        typer.Option("--output", "-o", help="Machine-readable suite report."),
+        typer.Option("--output", "-o", help="Machine-readable suite report.", callback=runtime_path),
     ] = Path("runs/geo_validation.json"),
     summary: Annotated[
         Path | None,

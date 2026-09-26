@@ -505,13 +505,19 @@ def config_schema() -> dict[str, Any]:
 def write_config(path: str | PathLike[str], config: WorldConfig, *, force: bool = False) -> None:
     """Atomically write validated YAML, creating parent directories as needed."""
 
+    write_config_text(path, dump_config_yaml(config), force=force)
+
+
+def write_config_text(path: str | PathLike[str], text: str, *, force: bool = False) -> None:
+    """Validate and atomically save editor text, retaining comments and exact integers."""
+
     target = Path(path)
     if target.exists() and not force:
         raise FileExistsError(f"{target} already exists; pass --force to overwrite")
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
     try:
-        temporary.write_text(dump_config_yaml(config), encoding="utf-8")
+        temporary.write_text(text, encoding="utf-8")
         # Validate exactly what will be committed before replacing the target.
         parse_config_yaml(temporary.read_text(encoding="utf-8"), source=str(temporary))
         if force:

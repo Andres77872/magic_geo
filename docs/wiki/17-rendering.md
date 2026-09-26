@@ -37,7 +37,7 @@ Two pipelines, three commands: the two world renderers share one duplicated code
 | Raster world map | `magic-geo render-raster` | a world `.json` / `.mgeo` | binary PPM (`P6`) | `src/magic_geo/io/raster_map.py:10` `write_raster_map` | none (stdlib `math`) |
 | Diagnostic layer image | `magic-geo export-debug-map` | a **debug cache** directory | 8-bit RGB PNG + Markdown prompt | `src/magic_geo/debug_map_export.py:1073` / `:1291` | `duckdb` (via `_DebugCache`) |
 
-The first two share ~330 lines of near-duplicate projection and palette code that has already drifted apart (see [How a cell gets its colour](#how-a-cell-gets-its-colour)); `docs/gui_debug_visualization_research.md:171-178` records this duplication and drift explicitly. The third does not share code with the first two at all — it uses a different projection vocabulary, a different palette (Viridis / golden-angle categorical), and a real z-buffered triangle rasterizer over the cached mesh.
+The first two share ~330 lines of near-duplicate projection and palette code that has already drifted apart (see [How a cell gets its colour](#how-a-cell-gets-its-colour)); `docs/gui_debug_visualization_research.md:171-178` records this duplication and drift explicitly. The third does not share code with the first two at all — it uses a different projection vocabulary, a different palette (Viridis / semantic-qualitative categorical), and a real z-buffered triangle rasterizer over the cached mesh.
 
 Both world renderers are registered on the Typer app in `src/magic_geo/cli/commands/render.py` and are also exposed as web-workbench background jobs (`src/magic_geo/web_jobs.py:192` for `render`, `:208` for `render-raster`) with the same field names, defaults, and numeric bounds. One field differs in kind: the CLI declares `--projection` as a free `str` and validates it inside the writer, while the web form declares it as a `choice` restricted up-front to `equirectangular` / `mollweide` / `orthographic` (`web_jobs.py:201`, `:217`), so the browser cannot reach the writer's `unknown projection` error path.
 
@@ -538,7 +538,7 @@ The repository does not ship a PPM converter or viewer. PPM is read natively by 
 | View centring | `--center-lat` (`−90..90`), `--center-lon` (`−360..360`, then folded by `(lon + 180) % 360 − 180` into `[−180, 180)`, so `+180` becomes `−180`) — the only renderer here that can recentre | `debug_map_export.py:1324-1328` |
 | Camera | canonical (`--camera-distance`, default `3.0` globe / `3.4` flat, range `1.01–100`) **or** an exact Three.js pose (`--camera-position` + optional `--camera-target`, `--camera-up`); the two are mutually exclusive | `:780-817` |
 | Geometry | true triangle rasterisation with a per-pixel z-buffer over the cached mesh (`mesh/indices.u32`, `mesh/cell_ids.u32` and one of `positions.f32` / `pos_equirect.f32` / `pos_mollweide.f32`) — **cell polygons, not discs** | `:961-1009`, `:1093-1152` |
-| Overlays | `--wireframe` (white, α 0.10), `--plates` (coral `(255,107,81)`, α 0.90, 1-px radius when `min(W,H) >= 600`), `--graticule` (`(114,140,178)`, α 0.28, 30° lines) | `:1160-1190`, `:1012-1018` |
+| Overlays | `--wireframe` (cell outlines: black, α 0.5525, boundary edges only), `--plates` (coral `(255,107,81)`, α 0.90, 1-px radius when `min(W,H) >= 600`), `--graticule` (`(114,140,178)`, α 0.28, 30° lines) | `:1160-1190`, `:1012-1018` |
 | Output | hand-rolled 8-bit RGB PNG (IHDR colour type 2, `zlib.compress(…, 6)`), written to `.<name>.<uuid>.tmp` then `os.replace`d | `:1048-1056`, `:1268-1270`, `:1485-1486` |
 | Hard limits | `MAX_DEBUG_CELLS = 200_000`, `MAX_MESH_VERTICES = 2_000_000`, `MAX_MESH_TRIANGLES = 2_000_000` | `:41-43` |
 | Fail-closed | refuses to render when `mesh.cells_without_ring > 0` or `triangle_count < 1`, because holes would be indistinguishable from background | `:1363-1369` |
@@ -562,8 +562,8 @@ Colours here are per-layer and are the same in the browser and on the CLI.
 
 | Layer kind | Value domain | Colour rule | Source |
 |---|---|---|---|
-| `numeric`, `numeric_stage`, `numeric_monthly` | continuous float | Viridis, normalised over the manifest's `p2 … p98` and clamped at both ends | `debug_map_export.py:413-421`, `:401-410` |
-| `categorical`, `categorical_stage` | integer **category index**, `-1` for an unlisted value | golden-angle hue `(index · 0.61803398875) mod 1`, HLS with `L = 0.55`, `S = 0.55` | `:369-372` |
+| `numeric`, `numeric_stage`, `numeric_monthly` | continuous float | chosen by `_numeric_scale()`: Viridis for amounts, Cool–warm (Moreland 2009) symmetric about 0 for signed fields, Terrain split at 0 m for elevations that cross sea level, categorical colours (`id mod 18`) for identifiers, one colour for constant fields; normalised over the manifest's `p2 … p98` and clamped at both ends | `_numeric_scale`, `_value_rgb` in `debug_map_export.py` |
+| `categorical`, `categorical_stage` | integer **category index**, `-1` for an unlisted value | semantic guide colour for the category label when one exists (`_CATEGORY_COLORS`: water, ice, deserts, grasslands, forests, wetlands, landforms, `none`/booleans, and Köppen–Geiger per Beck et al. 2018), otherwise the next unused colour of `_QUALITATIVE_PALETTE`; no two classes of a layer share a colour; codes beyond the declared list cycle the qualitative palette | `_category_palette()`, `_category_rgb()`; mirrors `debug_ui/palettes.js` (parity-tested) |
 | any | non-finite, `>= 1.0e37`, or a categorical value `< -0.5` | `MISSING_COLOR = (41, 46, 54)` / `#292e36` | `:36-37`, `:397-398`, `:415-416` |
 | — | canvas outside the mapped world | `MAP_BACKGROUND = (16, 20, 26)` / `#10141a` | `:34-35` |
 
@@ -575,7 +575,7 @@ Range selection for continuous layers, `_layer_range` (`:401-410`), with two fal
 
 `p2` / `p98` are **nearest-rank order statistics, not interpolated percentiles**: from the sorted finite values, `p2 = finite[int(0.02 * (n-1))]` and `p98 = finite[int(0.98 * (n-1))]` (`src/magic_geo/debug_export.py:115-127`). The range is computed once over the *whole* time axis of a stage or monthly layer, so scrubbing stages or months keeps magnitudes comparable rather than re-normalising each frame.
 
-Viridis sampling matches the browser's 256-entry nearest-filtered texture exactly: a 7-term polynomial evaluated at 256 points into `_VIRIDIS_LUT`, then indexed by `min(255, floor(t · 256))` (`debug_map_export.py:350-390`).
+Colour sampling matches the browser's 256-entry nearest-filtered texture exactly: both read the tables that `scripts/generate_colormaps.py` writes into `debug_ui/colormaps.js` (Viridis is the historical 7-term polynomial, byte-identical to `_VIRIDIS_LUT`; Cool–warm is Moreland's Msh interpolation; Terrain is two CIELAB ramps whose lightness rises away from deep water), indexed by `min(255, floor(t · 256))`. `tests/fixtures/colormap_scale_cases.json` is asserted against both implementations.
 
 Categorical enumeration is capped at export time: a column with more than `_CATEGORY_LIMIT = 64` distinct values is not published as a categorical layer at all — it stays in `cells.parquet` and is recorded in `skipped_layers` with the reason `"more than 64 distinct values (column kept in cells.parquet)"` (`src/magic_geo/debug_export.py:34`, `:230`).
 

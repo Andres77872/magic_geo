@@ -57,7 +57,7 @@ Four ordered sequences through the same 42 pages, one per audience. Each is mean
 10. [Political, Cultural and Linguistic Geography](./features/political-and-cultural-geography.md) — regions, borders, cultures, languages, sacred sites and ruins.
 11. [History, Demography, Economy and Markets](./features/history-demography-and-economy.md) — eras, events, dynasties, population and trade.
 12. [Rendering and Map Output](./17-rendering.md) — SVG and raster output, projections, palettes, and what these renderers deliberately are not.
-13. [Web Workbench](./15-web-workbench.md) — drive all of the above from a browser instead of a shell.
+13. [Web workbench guide](../debug_ui_guide.md) — drive all of the above from a browser instead of a shell: New world, Jobs, the map, the command palette and shortcuts. The [Web Workbench](./15-web-workbench.md) reference covers what happens underneath.
 
 ### Integrator — you want magic-geo inside your own system
 

@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "generation_progress.hpp"
 #include "seasonal_climate_serialization.hpp"
 #include "world.hpp"
 
@@ -118,6 +119,7 @@ std::string planet_parameters_json(const Params& params) {
 }
 
 std::string serialize_world(const Params& params, const GeneratedWorld& world) {
+    emit_generation_progress("native_output", "Assembling the simulated world", "Serializing terrain, climate, water and linked records for geographic enrichment.");
     const EarthSystemState& earth = world.earth;
     const NaturalArtifacts& natural = world.natural;
     const SocietyArtifacts& society = world.society;

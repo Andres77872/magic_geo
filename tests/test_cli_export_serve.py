@@ -597,29 +597,22 @@ class ExportDebugMapCommandTests(TestCase):
 class ServeCommandTests(TestCase):
     """``serve`` guards: workspace containment, cache selection and startup failures."""
 
-    def test_rejects_a_workspace_that_escapes_the_current_directory(self) -> None:
-        cases = (("relative", ".."), ("nested-relative", "../sibling/runs"))
-        for label, workspace in cases:
-            with self.subTest(case=label), TemporaryDirectory() as temp_dir, chdir(temp_dir):
-                project_root = Path.cwd().resolve()
-                result = CliRunner().invoke(app, ["serve", "--workspace", workspace])
+    def test_relative_external_workspace_is_forwarded_to_the_server(self) -> None:
+        with TemporaryDirectory() as temp_dir, chdir(temp_dir):
+            create_app = Mock(return_value=object())
+            with patch.dict(sys.modules, _fake_server_modules(create_app)):
+                result = CliRunner().invoke(app, ["serve", "--workspace", "../sibling/runs"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertEqual(create_app.call_args.kwargs["workspace"], (Path(temp_dir) / "../sibling/runs").resolve())
+            assert_no_cli_crash(self, result)
 
-                self.assertEqual(result.exit_code, 2, result.output)
-                self.assertIn(
-                    f"Web workspace must stay inside {project_root}: {workspace}",
-                    result.output,
-                )
-                assert_no_cli_crash(self, result)
-
-    def test_rejects_an_absolute_workspace_outside_the_current_directory(self) -> None:
+    def test_absolute_external_workspace_is_forwarded_to_the_server(self) -> None:
         with TemporaryDirectory() as outside, TemporaryDirectory() as temp_dir, chdir(temp_dir):
-            project_root = Path.cwd().resolve()
-            result = CliRunner().invoke(app, ["serve", "--workspace", outside])
-
-            self.assertEqual(result.exit_code, 2, result.output)
-            self.assertIn(
-                f"Web workspace must stay inside {project_root}: {outside}", result.output
-            )
+            create_app = Mock(return_value=object())
+            with patch.dict(sys.modules, _fake_server_modules(create_app)):
+                result = CliRunner().invoke(app, ["serve", "--workspace", outside])
+            self.assertEqual(result.exit_code, 0, result.output)
+            create_app.assert_called_once_with(None, workspace=Path(outside))
             assert_no_cli_crash(self, result)
 
     def test_rejects_a_debug_directory_that_does_not_exist(self) -> None:

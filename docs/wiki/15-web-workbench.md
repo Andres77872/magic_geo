@@ -1,5 +1,7 @@
 # Web Workbench
 
+Interface redesigned September 26, 2026: see the [workbench guide](../debug_ui_guide.md) for the user-facing tour and the [redesign record](../workbench_redesign.md) for research, decisions and verification. Storage and configuration discovery: [runtime storage](../runtime_storage.md). Server, job and REST contracts below are unchanged by the redesign; source references name functions because line numbers drift.
+
 [Wiki home](./README.md) > Web Workbench
 
 The web workbench is a local, single-user browser application served by `magic-geo serve`. It wraps the same configuration, generation, validation, calibration, rendering and export workflows the CLI exposes, adds a GPU layer explorer over an exported debug cache, and publishes a documented REST API at `/api/docs`. It is implemented by `src/magic_geo/debug_server.py` (FastAPI + DuckDB), `src/magic_geo/web_jobs.py` (typed background job queue) and `src/magic_geo/debug_ui/` (build-free ES-module frontend). It has **no authentication, no authorization, no per-user isolation and no TLS** — read [Security model](#security-model-trusted-local-single-user) before binding it anywhere but loopback.
@@ -10,12 +12,13 @@ The web workbench is a local, single-user browser application served by `magic-g
 - [Security model: trusted-local, single-user](#security-model-trusted-local-single-user)
 - [Starting the server: workspace, host and port resolution](#starting-the-server-workspace-host-and-port-resolution)
 - [Cache discovery and selection](#cache-discovery-and-selection)
-- [The browser shell: tabs, routing and keyboard model](#the-browser-shell-tabs-routing-and-keyboard-model)
-- [Config view](#config-view)
-- [Operations view](#operations-view)
+- [The browser shell: navigation, routing and keyboard model](#the-browser-shell-navigation-routing-and-keyboard-model)
+- [Home view](#home-view)
+- [Configure view](#configure-view)
+- [Jobs view](#jobs-view)
 - [Data view](#data-view)
 - [Map view](#map-view)
-- [Backend and API view](#backend-and-api-view)
+- [API and system view](#api-and-system-view)
 - [The job system](#the-job-system)
 - [Job lifecycle state machine](#job-lifecycle-state-machine)
 - [Cancellation and the commit boundary](#cancellation-and-the-commit-boundary)
@@ -41,7 +44,7 @@ The web workbench is a local, single-user browser application served by `magic-g
 |---|---|---|
 | Cache manager | `_CacheManager`, `src/magic_geo/debug_server.py:504` | Selects, validates, fingerprints, reloads and atomically republishes one exported debug-cache directory. |
 | Job manager | `JobManager`, `src/magic_geo/web_jobs.py:408` | Runs fixed CLI operations as isolated subprocesses, one at a time, with typed arguments and a strict path policy. |
-| Static UI | `src/magic_geo/debug_ui/` mounted at `/` | `index.html` + `app.js` (3,265 lines) + `layer_docs.js` + `style.css` + vendored three.js, mounted with `StaticFiles(directory=ui_dir, html=True)` **last** so `/api` and `/mesh` win (`src/magic_geo/debug_server.py:1205`). |
+| Static UI | `src/magic_geo/debug_ui/` mounted at `/` | Build-free ES modules: `index.html`, `style.css`, `app.js` (map, data, routing), `home-workbench.js`, `config-workbench.js`, `operations-workbench.js`, `new-world.js`, `command-palette.js`, `ui.js`, `palettes.js`, `layer_docs.js`, vendored three.js, and the product page `landing.html` + `landing.css` + `assets/*.webp`. Mounted by `_WorkbenchStaticFiles` (revalidating `Cache-Control: no-cache` + ETag) **last** in `create_app()` so `/api` and `/mesh` win. |
 
 The server starts **with or without** a debug cache. Without one, Config, Operations, Backend, jobs and the OpenAPI surface still work; every cache-backed data route answers `409` until a cache exists (`src/magic_geo/debug_server.py:684`). The module docstring states this contract directly (`src/magic_geo/debug_server.py:1-10`).
 
@@ -147,7 +150,7 @@ Note the asymmetry at `serve.py:64-69`: cache auto-discovery is tested against t
 
 ### Output-default rebasing
 
-`_workspace_default()` (`web_jobs.py:278`) rebases any catalog default that begins with `runs/` under a non-default workspace, but only for fields whose `path_role == "output"` or whose `workspace_relative` flag is set. This makes the displayed browser form and the server-side path policy agree: with `--workspace myruns`, **Prepare browser cache** and the browser `export-debug` operation both default to `myruns/debug`. CLI `export-debug` is different — omitting `--output` there derives `<world parent>/debug`.
+`_workspace_default()` (`web_jobs.py:278`) rebases any catalog default that begins with `runs/` under a non-default workspace, but only for fields whose `path_role == "output"` or whose `workspace_relative` flag is set. This makes the displayed browser form and the server-side path policy agree: with `--workspace myruns`, **Prepare browser map** and the browser `export-debug` operation both default to `myruns/debug`. CLI `export-debug` is different — omitting `--output` there derives `<world parent>/debug`.
 
 ### Startup failure modes
 
@@ -189,80 +192,103 @@ The cache format version is independent of the package version, the HTTP API ver
 
 ---
 
-## The browser shell: tabs, routing and keyboard model
+## The browser shell: navigation, routing and keyboard model
 
-Five semantic tabs are declared in `src/magic_geo/debug_ui/index.html:18-24` with `role="tablist"` / `role="tab"` / `aria-controls`.
+The shell (`index.html`) is a CSS grid: a navigation rail (`#app-rail`), a header (`#workbench-header`) and the view area (`#workbench`). Below 760 CSS pixels the rail becomes a bottom tab bar. Six views are declared as ARIA tabs in `#view-tabs` (`role="tablist"`, `aria-orientation="vertical"`), in workflow order:
 
 | Tab | Panel id | Hash | Needs a cache? |
 |---|---|---|---|
-| Map | `#view-map` | `#map` | Yes — otherwise `#map-empty` empty state with "Create configuration" / "Open operations" buttons |
-| Data | `#view-data` | `#data` | Yes — otherwise `#data-unavailable` notice |
-| Config | `#view-config` | `#config` | No |
-| Operations | `#view-operations` | `#operations` | No |
+| Home | `#view-home` | `#home` | No — shows workflow status, the world library and examples |
+| Configure | `#view-config` | `#config` | No |
+| Jobs | `#view-operations` | `#operations` | No |
+| Map | `#view-map` | `#map` (optionally `#map?layer=…&stage=…&month=…&proj=…`) | Yes — otherwise the `#map-empty` state offers **Create a world** / **Open jobs** |
+| Data | `#view-data` | `#data` | Yes — otherwise the `#data-unavailable` notice |
 | API | `#view-api` | `#api` | No |
 
-`setView()` (`app.js:1865`) hides every other panel, sets `aria-selected`/`tabIndex`, and pushes a history entry when the switch is user-initiated (`history.pushState(null, '', '#view')`), so browser Back/Forward moves between visited views. A `hashchange` listener re-syncs with `{ updateHash: false }`, so Back/Forward does not push again (`app.js:2968`). Entering a view triggers its refresh: Map resizes the renderer, Data reloads the current selection, Operations calls `refreshJobs()`, API calls `loadBackend()` (`app.js:1879-1882`).
+`setView()` in `app.js` parses the hash with `parseViewHash()`, hides every other panel, sets `aria-selected`/`tabIndex`, updates `#header-view-title`, remembers the view in `localStorage` (`magic-geo.lastView`) and pushes a history entry for user-initiated switches, so Back/Forward moves between views. A `hashchange` listener re-syncs with `{ updateHash: false }`. With no hash, `main()` opens the last-used view, else Home. Entering a view refreshes it: Home renders and refreshes jobs, Map resizes the renderer and applies pending URL state, Data reloads the selection, Jobs refreshes the queue, API loads the backend report and lazily sets the Swagger `iframe` `src`.
 
-Arrow-key tab navigation (`ArrowLeft`/`ArrowRight`/`Home`/`End`) is wired at `app.js:2953-2965`.
+**Map URL state.** `mapUrlHash()` serializes the committed layer, its stage (per-stage layers), its 1-based month (monthly layers) and a non-globe projection; `updateMapUrl()` writes it with `history.replaceState` after every committed layer, stage or projection change, so the address bar is always a shareable link without polluting history. On load, `state.pendingMapParams` is applied by `applyPendingMapParams()` once the manifest and scene are ready; unknown layers or projections are ignored.
 
-Two polling loops run from `main()` (`app.js:3239-3249`):
+**Keyboard.** Arrow keys (both axes), `Home` and `End` move between tabs. `Ctrl`/`⌘`+`K` toggles the command palette everywhere. Single-character shortcuts (`?`, `/`, `d`, `1`–`3`, `,` `.`, `space`, `w` `b` `g`) never fire inside inputs, textareas, selects or dialogs, and can be disabled in Help → Settings (`magic-geo.singleKeyShortcuts`, WCAG 2.1.4).
+
+**Header.** `#command-open` (palette), `#job-activity` (the running — or last — job's phase; a finished job drops the pulsing indicator and is tinted by outcome), the world picker `<select id="world-select">` (fed by `GET /api/worlds`, switched with `POST /api/worlds/select`), the `#cache-state` pill (`Connecting…` → `Map ready` / `No world` / `Switch failed` / `Status unavailable` / `Startup error`; the cache error is its tooltip), `#workspace-state`, the theme toggle and Help.
+
+**Polling** runs from `main()`:
 
 | Loop | Interval | Guard |
 |---|---|---|
-| `refreshJobs()` | 2500 ms | Skipped when `document.hidden`, and skipped when the active view is not `operations` **and** no job is active |
+| `refreshJobs()` | 2500 ms | Skipped when `document.hidden`, and when the view is not Jobs **and** no job is active or disconnected. Concurrent polls share one in-flight request. |
 | `loadServerStatus()` | 5000 ms | Skipped when `document.hidden` |
 
-The header (`index.html:25-32`) carries the cache `<select id="world-select">` (fed by `GET /api/worlds`, switched with `POST /api/worlds/select`), the `#cache-state` pill (`Connecting…` → `Cache ready` / `No cache` / `Switch failed` / `Startup error`), and `#workspace-state`, which renders `cache <dir> · workspace <ws> · error: … · v<version>` from `/api/status` (`app.js:1885-1901`).
+**Notifications.** After each job-list refresh, `onJobsChanged(previous, jobs)` compares statuses with the previous list. Only transitions observed during the session produce a toast (`toast()` in `ui.js`): success (with **Open map** when the job published a cache, else **View job**), failure (with the error and **View job**) or cancellation. The first list after page load never announces old results. The same hook toggles a dot on the Jobs tab and sets `document.title` to the active phase.
 
-The help overlay (`?`, the floating `?` button, or the docs-card `?`) is wired outside the map-only handlers so it works without a cache (`app.js:2975-2991`); it is assembled from `UI_GUIDE`, `KEY_REFERENCE` and `docsCoverage()` exported by `layer_docs.js`.
+**Theme.** `data-theme` on `<html>` selects the token set in `style.css`; an inline pre-paint script applies the stored choice (`magic-geo.theme`, JSON-encoded) or the system preference before first paint. The map viewport keeps a fixed dark palette (`--map-*`) so exported PNGs and their codex share one background.
+
+**Help** (`?`, the header button, or the layer card) is built from `UI_GUIDE`, `KEY_REFERENCE` and `docsCoverage()` in `layer_docs.js`, plus the single-key setting, and works without a cache.
+
+**Command palette** (`command-palette.js`) is a `<dialog>` holding an ARIA combobox (`#command-input`, `aria-activedescendant`) over a listbox. `commandItems()` in `app.js` supplies views, actions (new world, validate, save, theme, help, exports, projections, overlays), operations, every manifest layer, every discovered world, every discovered configuration and every session job. Matching scores prefix, word-start, substring and subsequence hits per query word; groups are capped (Layers 40, Worlds 12, Configurations 12, Jobs 8). An empty query lists suggested actions and pinned layers.
 
 ---
 
-## Config view
+## Home view
 
-Panels: a YAML editor on the left, a flattened schema reference on the right (`index.html:171-196`).
+Rendered by `createHomeWorkbench()` (`home-workbench.js`) from shared state only; actions are delegated to injected services. Markup is replaced only when it changes, so polling never steals focus.
+
+| Region | Source |
+|---|---|
+| Workflow cards (Configure / Generate / Explore) | `state.configFiles` + `state.savedConfig`; `state.jobs` (active phase or last generation outcome); `state.status` + `state.manifest` (world name, cells, layers) |
+| Worlds library | `state.worlds` from `GET /api/worlds`: selected world first, then newest `modified_ns`; filterable; **Open** calls `selectWorldByPath(cacheDir, { openMap: true })` |
+| Example seeds | Valid entries of `GET /api/config/files`, `configs/seeds/*` first; opens the file in Configure |
+| System | `/api/status` version and workspace; `/api/backend` active backend, OpenMP threads and CUDA/OpenCL device |
+
+---
+
+## Configure view
+
+### New world dialog
+
+`createNewWorldDialog()` (`new-world.js`) renders profile cards from the schema's `x-magic-geo.profiles` (or `GET /api/config/profiles`), a name, a seed (random safe integer; dice button), a resolution segmented control (Profile default, 512, 2,048, 4,096, 16,384 cells, filtered by `mesh.cell_count` bounds) and optional overrides for eight planet/tectonics/climate/erosion fields whose inputs carry the live schema bounds. Collected values become dotted overrides (`run.name`, `run.seed`, `mesh.cell_count`, …) for `POST /api/config/render`; the server validates them and returns YAML, so the client never writes YAML itself.
+
+- **Open in editor** loads the YAML as an unsaved file (`loadGeneratedConfig()` in the config controller; confirms before replacing unsaved edits).
+- **Create & generate** saves with `POST /api/config/save` under a unique slug (`<slug>.yaml`, `force: false`; a `409` asks for another name), adopts the saved file (`adoptSavedConfig()`), then `startGeneration()` prepares and submits a **Generate world** job whose `output` and `debug_output` are `<output_dir>/<slug>/world.json` and `<output_dir>/<slug>/debug`.
+
+### Editor and saving
 
 | Control | Element | Behaviour |
 |---|---|---|
-| Profile select | `#config-profile` | Populated from `GET /api/config/profiles`. Selecting a profile is **non-destructive** — it only prints `Selected <profile>. Choose Reset from profile to replace the editor.` (`app.js:3008-3016`). |
-| Reset from profile | `#config-reset` | Fetches `GET /api/config/template?profile=…` and replaces the editor. Confirms first if there are unsaved edits, and refuses to apply a late response if the editor changed while loading (`app.js:2471-2497`). |
-| YAML editor | `#config-yaml` | Raw textarea; `Tab` inserts two spaces (`app.js:3022-3029`). Every input bumps `state.configEditRevision`. |
-| Validate YAML | `#config-validate` | `POST /api/config/validate`. Renders `source:line:column` plus dotted field paths from `ConfigError.to_dict()` issues (`app.js:2499-2540`, error shape at `src/magic_geo/config.py:70-82`). |
-| Save as | `#config-name` | Default value `world`, `pattern="[A-Za-z0-9][A-Za-z0-9._-]*"`. Client adds `.yaml` when missing (`app.js:2542-2546`). |
-| Save configuration | `#config-save` | `POST /api/config/save`. On `409` it asks "A configuration with this name already exists. Replace it?" and retries with `force: true` (`app.js:2576-2586`). |
-| Download YAML | `#config-download` | Pure client-side `Blob` download; never touches the server filesystem (`app.js:2548-2550`). |
-| Schema filter | `#schema-search` | Filters the flattened schema cards on path, type and description (`app.js:2459-2469`). |
+| Existing configuration | `#config-file`, `#config-open`, `#config-files-refresh` | `GET /api/config/files` discovery; opening confirms before discarding unsaved edits and never lets an older response replace newer edits |
+| Profile / Reset | `#config-profile`, `#config-reset` | Selecting is non-destructive; Reset fetches `GET /api/config/template` and requires a version-2 template matching the loaded schema |
+| YAML editor | `#config-yaml` with `#config-gutter` + `#config-highlight` | The textarea is the source of truth; `syncEditorDecorations()` redraws line numbers and token colouring (`highlightYamlLine()`: keys, strings, numbers, booleans, comments, all HTML-escaped) and `syncEditorScroll()` keeps them aligned. Over 250,000 characters the overlay switches to plain text. |
+| Validate | `#config-validate`, `Ctrl/⌘+Enter` | `POST /api/config/validate`; renders `source:line:column` and dotted paths; results for superseded text are discarded |
+| File name | `#config-name` | `[A-Za-z0-9][A-Za-z0-9._-]*`; `.yaml` added when missing |
+| Save | `#config-save`, `Ctrl/⌘+S` | `POST /api/config/save` with the opened file's `path` + `revision` when the name is unchanged (a stale revision is a `409` requiring reload or a copy); otherwise a new file in the save directory, with an explicit overwrite confirmation on `409` |
+| Save & generate | `#config-save-generate` | Skips the write when the saved file already matches the editor, then `generateFromSavedConfig()` fills the Generate form and rewrites **untouched** default outputs to the per-world folder (`worldOutputDefaults()`); typed destinations are kept |
+| Download | `#config-download` | Client-side `Blob` only |
+| Stepper | `[data-config-step]` | `updateConfigStepper()` marks *Open or create*, *Edit & validate*, *Save* and *Generate* as done/current |
 
-The schema panel resolves `$ref` entries from `GET /api/config/schema` and flattens nested objects up to depth 12, including array item objects rendered as `path[]` (`app.js:2420-2457`). Each card shows dotted path, type, required flag, description, default and enum choices.
-
-The default save name `world` produces `<workspace>/configs/world.yaml`, which is exactly the default `config` value of the `generate` and `validate-geo-suite` operations (`web_jobs.py:115`, `:149`) — the two views are wired to agree.
+The schema panel flattens `GET /api/config/schema` (resolving `$ref`, depth ≤ 12, array items as `path[]`) into cards with path, type, required flag, description, default, choices and bounds; exact 64-bit integer text from `x-magic-geo-integer-display` is shown instead of rounded JSON numbers.
 
 ---
 
-## Operations view
+## Jobs view
 
-Three panels (`index.html:203-222`): the operation launcher, the jobs list, and the selected-job detail.
+Three panels: the selected job (`.job-detail-panel`, first in reading order so progress is reachable on small screens), the launcher and the session history.
 
-The form is **generated** from `GET /api/operations`, not hard-coded (`renderOperationForm`, `app.js:2671`). Field rendering:
+The launcher is **generated** from `GET /api/operations` by `renderOperationForm()` (`operations-workbench.js`). Quick-pick chips (`#operation-quick`) select Generate world, Validate natural geography, Render SVG map and Prepare browser map. Field rendering:
 
 | Catalog `kind` | Rendered control | Notes |
 |---|---|---|
-| `choice` (has `choices`) | `<select>`; a `—` blank option is prepended when not required | `app.js:2687-2691` |
-| `boolean` | `<select>` with `Default` / `Yes` / `No` | blank means "omit, use server default" |
-| `path_list` | `<textarea>` with placeholder `One path per line` | split on newlines client-side |
-| `integer`, `number` | `<input type="number">` with `step`, `min`, `max` from `minimum`/`maximum` | |
-| `path`, anything else | `<input type="text">` | |
+| `choice` | `<select>`; a `—` option is prepended when not required | |
+| `boolean` | `<select>` with `Default` / `Yes` / `No` | blank means "use the server default" |
+| `path_list` | `<textarea>`, one path per line | |
+| `integer`, `number` | `<input type="number">` with `step`, `min`, `max` | integers must be safe; numbers finite |
+| `path`, anything else | `<input type="text">` | the Generate `config` field offers discovered configurations |
 
-An operation whose catalog entry has `available: false` disables the submit button and appends `This operation is unavailable until <dependency> is installed.` to the description (`app.js:2673-2676`). Only `export-rerun` declares `optional_dependency: "rerun"` (`web_jobs.py:237`); availability is computed with `importlib.util.find_spec` at catalog build time (`web_jobs.py:316`).
+Fields in the catalog's `essentials` group render first; the rest sit in *Output options & advanced settings*. `depends_on` hides and disables dependent fields (for example the browser-map folder when **Prepare browser map** is off). Each operation keeps a draft for the page lifetime. An unavailable operation (only `export-rerun`, which needs `rerun`) disables submission and says why.
 
-Empty fields are dropped before submit (`collectOperationArguments`, `app.js:2726-2747`), so the server default applies.
-
-The jobs list rebuilds only when `selectedJobId | id:status | …` changes, so polling never steals keyboard focus or swaps a node under a click (`app.js:2792-2795`). The detail panel renders status pill, an **indeterminate** progress bar for active jobs (the server reports no progress field — `app.js:2838-2842`), meta table, normalized arguments, the bounded combined log, and artifact download links. Artifact hrefs are restricted client-side to same-origin paths or `http(s)` URLs so a `javascript:` scheme in server data cannot be rendered (`app.js:2820-2824`).
-
-**Cancel job** asks `window.confirm('Cancel this job?')` first (`app.js:2906-2917`).
+The detail panel (`renderJobDetail()`) shows the status pill, the plain-language phase from the server's `progress` (`label`, `detail`), a determinate `<progress>` only when `current`/`total` are reported, measured elapsed, phase and since-last-output times, the generation workflow steps, an error summary, outcome actions (`renderJobActions()`: Open map, Prepare browser map, Validate world, Render map, Reuse settings), artifacts, and two disclosures — *Submitted settings & timestamps* and *Technical log* — that are updated in place so they stay open and keep their scroll position during polling. Cancellation shows *Requesting stop…* / *Stopping…* and is disabled when the server reports `cancellable: false`. Artifact links are restricted to same-origin paths or `http(s)` URLs.
 
 ---
-
 ## Data view
 
 The Data tab is the generic escape hatch: every exporter/API resource is browsable even when it has no bespoke map overlay.
@@ -290,45 +316,83 @@ Layout is sidebar / viewport / inspector (`index.html:36-124`).
 
 ### Rendering model
 
-One merged indexed `THREE.BufferGeometry` with attributes `position`, `aPosEq`, `aPosMo`, `aCellId` (`app.js:378-385`), built from the five binary mesh buffers fetched in parallel from `/mesh/*` (`app.js:362-369`). Per-cell values live in an R32F `DataTexture` of size `ceil(sqrt(cellCount)) × ceil(cellCount / width)` indexed by cell id, initialized to the missing sentinel (`app.js:394-400`). Switching layer, stage or month uploads one `Float32Array`; **geometry is never rebuilt**.
+One merged indexed `THREE.BufferGeometry` with attributes `position`, `aPosEq`, `aPosMo`, `aCellId`, `aEdge` and `aRelief` (`buildScene()` in `app.js`), built from the five binary mesh buffers fetched in parallel from `/mesh/*`. Every triangle is *(cell centre, ring i, ring i+1)*, so `aEdge` (1 at a centre vertex, 0 on the ring) is derived from the index buffer; in the fragment shader `vEdge / |∇vEdge|` is the distance to the cell boundary in screen pixels, which draws anti-aliased one-pixel cell outlines and the hover (white) and selection (amber) rings without extra geometry (after Bærentzen et al. 2006). Per-cell values live in an R32F `DataTexture` of size `ceil(sqrt(cellCount)) × ceil(cellCount / width)` indexed by cell id, initialized to the missing sentinel, and read through `flat` varyings; a second texture holds the previous time slice for a 220 ms cross-fade. Switching layer, stage or month uploads one `Float32Array`; **geometry is never rebuilt**.
 
 `MISSING_SENTINEL = 3.0e38` (`app.js:14`) replaces `NaN` after every layer fetch because "NaN replacement survives every GPU driver". The hover readout treats any value `>= 1e37` as missing and prints `—` (`app.js:1789-1797`).
 
-Scene constants: background `0x10141a`, `PerspectiveCamera(50, 1, 0.01, 100)` at `z = 3.0`, `OrbitControls` with `enableDamping`, `dampingFactor 0.08`, `minDistance 1.05`, `maxDistance 12` (`app.js:371-377`). Switching to a flat projection resets the camera to `z = 3.4` and the target to the origin (`app.js:3064-3067`). Picking renders encoded cell ids into an offscreen target and reads one pixel (`app.js:617-654`).
+Frames are drawn **on demand** (three.js manual, *Rendering on demand*): the `requestAnimationFrame` loop only renders when `requestRender()` was called or the camera, projection morph or cross-fade moved, so an idle map draws nothing. The pixel ratio is capped at 2. A `ResizeObserver` on the canvas keeps the drawing buffer and camera aspect in step with layout changes that are not window resizes.
 
-### Layer selection
+The camera is driven by `createMapNavigator()` (`map-navigation.js`), not OrbitControls. It stores one geographic view — the latitude/longitude at the screen centre and `span`, the arc of surface (radians) visible across the viewport height — and derives the globe camera (north-up, looking at the centre from `span / (2·tan(fov/2))` radii) and the flat camera (straight down on the `z = 0` plane) from it, blending the two by the morph value so the centre stays fixed while the map unrolls. Behaviour follows MapLibre GL JS where it has a default:
 
-Layers are grouped by `layer.source` into collapsible groups; kind badges are `numeric_stage → "stages"`, `categorical_stage → "stage cat"`, `numeric_monthly → "monthly"`, `categorical → "cat"` (`app.js:1561-1565`). The initial layer is `cells/elevation_m`, else the first `kind == "numeric"` layer, else the first layer (`app.js:2184-2186`).
+- **Drag** grabs the surface: the latitude/longitude under the previous and current pointer (ray–sphere or ray–plane intersection) are differenced, falling back to `span / height` radians per pixel off the globe. Release inertia uses MapLibre's pan constants: speed = velocity × 0.3 (linearity) over the last 60 ms, capped at 1400 px/s, decelerating at 2500 × 0.3 px/s².
+- **Zoom** keeps the point under the pointer fixed (exact on flat maps; on the globe the anchor is re-grabbed after each step). Wheel steps are smoothed with a 90 ms time constant; double-click zooms one level around the point; pinch zooms around the finger midpoint. Limits: two cell spacings (`2·√(4π/N)`) up to 6 radii altitude, or 1.8 × the fitted flat map.
+- **Keyboard** (only while the canvas has focus): arrows pan 100 px (Shift 300), `+`/`-` zoom one level (Shift two), `0`/Home fits the world — each eased over 300 ms with `t(2 − t)`.
+- **Fly-to** follows van Wijk & Nuij (2003) with ρ = 1.42 and duration = 1000·S / 1.2 ms (MapLibre `flyTo` defaults), along the great circle on the globe.
+- **Projection switch** keeps centre and scale when zoomed in; from a whole-world view it eases to the new projection's fitted view.
+- `prefers-reduced-motion` makes every move instant.
 
-`fetchLayerValues()` (`app.js:318`) keys an LRU on `` `${cacheIdentity}|${layer.id}|${stageKey}|${monthKey}` `` where only the axis the layer actually varies along participates, capped at 48 buffers (`app.js:340-342`). Stages `±1` and `±2` are prefetched (`app.js:346-359`). Stale responses are dropped through `fetchSeq`, `cacheEpoch` and `cacheContextIsCurrent(context)`; a failed fetch rolls the UI back to the previous layer and prints `Layer load failed: …` (`app.js:1444-1465`).
+Picking renders encoded cell ids into an offscreen target once per camera change; hover reads one pixel back asynchronously with `readRenderTargetPixelsAsync` (three.js r165+), clicks synchronously.
+
+### Layer panel
+
+`buildLayerList()` renders groups from `layerGroups()`:
+
+1. **Pinned** — ids in `state.pinnedLayers` (persisted as `magic-geo.pinnedLayers`, at most 24; toggled by the ☆ button via `togglePinnedLayer()`);
+2. **Featured** — `FEATURED_LAYER_NAMES` in `layer_docs.js` (elevation, biome, climate class, temperature, precipitation, plates, landform, water, runoff, ice, soil, settlement, political regions);
+3. **Topic groups** — every `cells` layer classified by `layerTopic()` (ordered regex rules in `layer_docs.js`: terrain, climate, oceans, water, ice, sediment, soils, life, resources, people, mesh, other); `cells_monthly` joins Climate;
+4. **Source groups** — any other source, e.g. *Monthly climate*, *Water budget · per stage*, *Depression correction · per stage*.
+
+Rows show `layerLabel()` (sentence case without the unit suffix), `layerUnit()`, and a *classes* / *stages* / *monthly* badge; the raw id is in the tooltip, the layer card and the legend. Group expansion survives rebuilds, and the group holding the active layer opens by default. Clicks on items, pins and group titles are handled by one delegated listener. `filterLayerList()` combines the `/` search (id, label, topic, unit, role, description, categories) with the kind chips (`numeric`, `categorical`, `time`); while filtering, the duplicate Pinned/Featured groups are hidden so each match appears once. `#sidebar-toggle` collapses the panel; `#layer-collapse-all` folds or unfolds every group.
+
+The initial layer honours the URL's `layer`; otherwise `cells/elevation_m`, else the first numeric layer, else the first layer.
+
+`fetchLayerValues()` keys an LRU on `` `${cacheIdentity}|${layer.id}|${stageKey}|${monthKey}` `` where only the axis the layer varies along participates, capped at 48 buffers; stages `±1` and `±2` are prefetched. Stale responses are dropped through `fetchSeq`, `cacheEpoch` and `cacheContextIsCurrent(context)`; a failed fetch rolls the UI back to the last displayed slice and reports `Layer load failed: …`.
 
 ### Legend, colors and time
 
-Numeric layers use the manifest `p2..p98` range, fixed across the whole time axis so one color is comparable between stages/months; `≤`/`≥` markers mark clipped true extremes. Categorical layers use golden-angle hues (`index * 0.61803398875`, `app.js:61`) both in JS and in the fragment shader (`app.js:145`), with category chips in the legend.
+Numeric layers are coloured by `numericScale()` (`colormaps.js`), which picks the scale from what the field measures: identifiers (`*_id`, `flow_to`, `spill_to`, `glacier_flow_to`, the same rule as the *identifier* role) get categorical colours (`id mod 18`, −1 = none); elevations whose robust range crosses 0 m get the **Terrain** ramp split at sea level (two slopes, pivot 0); fields whose `p2 < 0 < p98` get Moreland's **Cool–warm** diverging map, symmetric about 0; constant fields get one colour; everything else gets **Viridis**. The range is the manifest `p2..p98` (or `min..max` from the legend's *Colour scale* menu), fixed across the whole time axis so one color is comparable between stages and months. The 256-entry tables come from `scripts/generate_colormaps.py`; the shader samples the texel `min(255, floor(t·256))` with `texelFetch`, exactly the index the legend, tooltip and both exporters use.
 
-The stage bar (`#stagebar`) exposes a slider, an exact-value number input, prev/next buttons and a contextual label. Slider scrubbing updates the label immediately but coalesces the layer fetch on a 120 ms timer, so dragging across N stages issues one request (`app.js:3136-3151`).
+`updateLegend()` draws the ramp, Heckbert "nice" ticks (always labelling the terrain pivot), an area-weighted histogram of the displayed slice (weights from `cells/area_km2`), the scale summary, and marks clipped true extremes with `≤`/`≥` labels, extend triangles in the ramp's end colours and tooltips. A caret marks the hovered value. For class layers each chip shows its share of the surface and is a toggle that spotlights the class (`uHighlightCode`).
+
+Categorical layers sample a 256-entry palette texture (`uCategoryPalette`) by category code in the fragment shader. `categoryPaletteData()` fills it from `categoryPalette()` in `palettes.js`: a semantic table (`CATEGORY_COLORS` — water, ice, deserts, grasslands, forests, wetlands, landforms, `none`/booleans, and the Köppen–Geiger scheme of Beck et al. 2018) with a Tableau-derived qualitative fallback, assigned so that no two classes of one layer share a color. The legend chips, the layer card, the GPT Image codex and the CLI exporter (`_category_palette()` in `debug_map_export.py`) use the same assignment; `tests/test_debug_map_export_parity.py` keeps the two tables identical and free of the reserved missing (`#292e36`) and background (`#10141a`) colors.
+
+The time bar (`#stagebar`) has play/pause (`setPlaying()`; one step per 650 ms, and only after the previous slice committed), previous/next, a slider, an exact-index input and a label (`month 7 · Jul`, `stage_idx 4 · stage 12 · iter 3`). Slider scrubbing updates the label immediately but coalesces the fetch on a 120 ms timer. Playback stops when leaving the map, hiding the page, or selecting a static layer.
+
+### Map chrome and overlays
+
+- **Tooltip** (`#map-tooltip`): value with unit or class name, layer label and time slice, latitude/longitude and cell id; it follows the pointer and flips at the edges. The status line carries the same text for assistive technology.
+- **Coordinates** (`#map-coords`): the latitude/longitude under the pointer from the navigator's inverse projection, or the view centre, with decimals matched to the mesh spacing (1 dp ≈ 11 km).
+- **Scale bar** (`#map-scale`): the great-circle distance between two screen points 80 px apart through the centre, times the planet radius from `/api/section/planet_parameters`, rounded down to 1/2/5 × 10ⁿ (MapLibre's method). Hidden when `span > 1.2` rad. The radius is cross-checked against `√(Σ cell area / 4π)`; the layer panel shows `R 6,371 km ✓` when they agree within 1 %.
+- **Relief** (`r`): per-vertex hillshade from present-day `cells/elevation_m` with ocean floors flattened to 0 m, corner heights averaged over the cells that meet there, smooth normals, light from 315° at 45°, vertical exaggeration chosen so the 90th-percentile land slope reads as 35°, and the shade divided by the flat-ground value so level ground keeps its exact colour. Off by default.
+- **Graticule** (`g`): 30° at whole-world views, 10°, 5° or 1° as the span shrinks.
+- **Places** (`p`): `settlements`, `port_sites`, `ruins`, `sacred_areas` and `landmasses` centroids from `/api/family/*?detail=scalars`, with capitals from `political_regions.capital_settlement_id`. HTML markers are positioned from the navigator each frame, hidden behind the globe's horizon, and labelled greedily by priority without overlaps. Rows without valid coordinates are skipped. The command palette lists every place, and parses typed coordinates and cell numbers.
+- **Atmosphere**: a back-facing shell whose brightness depends only on how close the view ray passes to the limb, so it never tints a data pixel; it fades out as the globe unrolls.
+- **URL**: `show=` lists overlays and `at=lat,lon,spanDeg` the camera, updated when a move ends.
 
 ### Cell inspector
 
-A click (movement under 4 px, `app.js:3177-3186`) picks a cell and opens `GET /api/cell/{id}`. The panel renders, in order: a field filter, **Ledger slices (per stage)** sparklines with a marker at the current stage when the active layer belongs to that history, **Monthly** sparklines, **Fields** (every scalar column plus merged detail-sidecar fields), and **Adjacency (N edges)** rows showing `plate_boundary` / `land_water_transition` / `biome_transition` flags, the great-circle distance in km, and a click-through link to the neighbouring cell (`app.js:1674-1770`).
+A click (movement under 4 px) picks a cell, outlines it in amber (`uSelectedCell`) and opens `GET /api/cell/{id}`. The header's target button (`c`) flies to the cell. The panel renders, in order: the active layer's value for the cell with its unit and time slice (`inspectorSummaryMarkup()`, refreshed on every committed slice), the cell centre and area, a field filter, species and land-use availability notes, **Ledger slices (per stage)** sparklines with a marker at the displayed stage, **Monthly** sparklines, **Fields** (every scalar column plus merged detail-sidecar fields, formatted by `formatInspectorValue()` so unavailable estimates read *Unavailable*), and **Adjacency** rows with `plate_boundary` / `land_water_transition` / `biome_transition` flags, great-circle distance and click-through to the neighbour.
 
 ### Map keyboard reference
 
-| Key | Action | Source |
-|---|---|---|
-| `1` / `2` / `3` | Globe / Equirectangular / Mollweide | `app.js:3218-3220` |
-| `w` / `b` / `g` | Wireframe / plate boundaries / graticule | `app.js:3221-3223` |
-| `,` / `.` | Previous / next stage or month | `app.js:3216-3217` |
-| `d` | Toggle the layer docs card | `app.js:3224` |
-| `/` | Focus the layer filter | `app.js:3225` |
-| `?` | Toggle help (works without a cache) | `app.js:2987-2990` |
-| `Esc` | Close the inspector, else blur the focused field; closes help first | `app.js:3206-3212`, `:2982-2985` |
+| Key | Action |
+|---|---|
+| `1` / `2` / `3` | Globe / Equirectangular / Mollweide (instant with reduced motion) |
+| `w` / `r` / `b` / `g` / `p` | Cell outlines / relief / plate boundaries / graticule / places |
+| `c` | Centre on the selected cell |
+| Arrows, `+` / `-`, `0` | Pan, zoom, fit the world — only while the map canvas has focus |
+| `,` / `.` | Previous / next stage or month |
+| `space` | Play / pause the time bar |
+| `d` | Toggle *About this layer* |
+| `/` | Focus the layer search |
+| `?` | Toggle help (works without a cache) |
+| `Esc` | Close the inspector, else blur the focused field; closes help first |
 
-Shortcuts are suppressed while the help overlay is open and while focus is inside an `input`, `textarea` or `select`.
+Map shortcuts are suppressed while help or a dialog is open, while focus is in a form control, with a modifier key held, or when single-key shortcuts are disabled.
 
-### Export PNG / Prompt .md
+### Export PNG / Prompt
 
-Two toolbar buttons (`index.html:82-85`) produce the browser side of the `export-debug-map` pair. Both are **entirely client-side**: no image-generation service is contacted.
+Two toolbar buttons (`#export-map-image`, `#export-image-prompt`) produce the browser side of the `export-debug-map` pair. Both are **entirely client-side**: no image-generation service is contacted.
 
 - **Export PNG** re-renders the scene synchronously at the final projection state (so an in-progress morph cannot leak into the image), copies the WebGL canvas into a 2-D canvas, and encodes `image/png` (`app.js:932-983`).
 - **Prompt .md** writes a `text/markdown` GPT Image prompt with a color codex; it reuses the exact view of the last PNG for this data slice when one exists, so the Markdown never invents a companion filename the user never downloaded (`app.js:894-906`, `:1268-1284`).
@@ -337,18 +401,18 @@ Both are disabled when the snapshot is not current or when `exportMeshIssue()` f
 
 ---
 
-## Backend and API view
-
-Two panels (`index.html:230-233`): **Backend information** renders `GET /api/backend` (which delegates to `magic_geo.api.backend_info()`) as formatted JSON, isolating a probe failure as a warning notice instead of breaking the workbench (`app.js:2940-2949`); the right panel embeds Swagger in an `<iframe src="/api/docs">`, with an **Open Swagger ↗** button to `/api/docs` in a new tab.
+## API and system view
 
 | Control | Element | Behaviour |
 |---|---|---|
-| Refresh backend | `#backend-refresh` | Calls `loadBackend()`; shows a `Loading…` pill, then the probe payload inside a `<pre>` (`app.js:2941-2945`). Entering the API view calls the same function (`app.js:1882`). |
-| Backend output | `#backend-output` | A failed probe — the route answers `503 backend probe failed: …` (`debug_server.py:944-951`) — is rendered as a warning notice in this panel only (`app.js:2946-2948`). |
-| Open Swagger ↗ | `<a href="/api/docs" target="_blank" rel="noopener">` | Opens the same Swagger UI in a new tab (`index.html:228`). |
-| Interactive documentation | `#api-docs-frame` | `<iframe src="/api/docs">` (`index.html:232`). |
+| Native engine | `#backend-output` | `loadBackend()` calls `GET /api/backend` (which delegates to `magic_geo.api.backend_info()`), renders a summary grid (`backendSummaryMarkup()`: active/requested backend and fallback, native core and OpenMP threads, CUDA and OpenCL availability and device) and the complete report in a *Full capability report* disclosure. A failed probe — `503 backend probe failed: …` — is a warning in this panel only. Newer requests always win over older replies. |
+| Refresh | `#backend-refresh` | Re-runs `loadBackend()`; entering the view does too. |
+| File locations | `#storage-paths` | The resolved `paths` from `GET /api/status`. |
+| Common endpoints | static list | A short route reference; the OpenAPI document is authoritative. |
+| Swagger UI / ReDoc | links | `/api/docs` and `/api/redoc` in a new tab. |
+| Interactive documentation | `#api-docs-frame` | `<iframe>` whose `src` is set to `/api/docs` the first time the view opens. |
 
-This view needs no cache: both `/api/backend` and `/api/docs` are always-available routes, so it works on a cacheless start. What `backend_info()` actually reports is documented in [Compute Backends](./09-compute-backends.md), not here.
+This view needs no cache. What `backend_info()` reports is documented in [Compute Backends](./09-compute-backends.md).
 
 ---
 
@@ -369,7 +433,7 @@ Eleven executable operations (`web_jobs.py:109-243`) plus four non-executable eq
 | `derive-targets` | `derive-targets` | Derive calibration targets |
 | `render` | `render` | Render SVG map |
 | `render-raster` | `render-raster` | Render raster map |
-| `export-debug` | `export-debug` | Export browser/ParaView cache |
+| `export-debug` | `export-debug` | Prepare browser map |
 | `export-rerun` | `export-rerun` | Export Rerun recording (requires `rerun`) |
 
 | Equivalent id | `equivalent_view` | Why it is not a job |

@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>magic-geo — procedural planets, simulated from plate to biome</title>
+<meta name="description" content="magic-geo is an open-source planet generator. A C++20 engine simulates tectonics, seasonal climate, water, ice, soils, ecology and civilizations on a spherical mesh — explore every layer in a local web workbench, or drive it from Python and the CLI.">
+<meta name="color-scheme" content="dark light">
+<meta property="og:title" content="magic-geo — procedural planets, simulated from plate to biome">
+<meta property="og:description" content="Causal planet generation with a C++20 engine, a Python API and CLI, and a local web workbench for exploring ~500 map layers.">
+<meta property="og:image" content="./assets/workbench-map.webp">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%235eead4'/%3E%3Cstop offset='1' stop-color='%233b82f6'/%3E%3C/linearGradient%3E%3C/defs%3E%3Ccircle cx='16' cy='16' r='12' fill='url(%23g)'/%3E%3Cpath d='M9 13c2-1.5 4-.5 5 1.5s3 2 4.5 1 3.5-1 4.5 1M10 20.5c2 1 3.5 0 5 1s2.5 1.5 4.5.5' stroke='%230b1220' stroke-opacity='.5' stroke-width='1.8' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+<script>
+  try {
+    const saved = JSON.parse(localStorage.getItem('magic-geo.theme') || 'null');
+    if (saved === 'light' || saved === 'dark') document.documentElement.dataset.theme = saved;
+  } catch (_) { /* follow the system theme */ }
+</script>
+<link rel="preload" as="image" href="./assets/workbench-map.webp" fetchpriority="high">
+<link rel="stylesheet" href="./landing.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="container nav">
+    <a class="logo" href="#top" aria-label="magic-geo home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><defs><linearGradient id="logo-g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5eead4"/><stop offset="1" stop-color="#3b82f6"/></linearGradient></defs><circle cx="16" cy="16" r="12" fill="url(#logo-g)"/><path d="M9 13c2-1.5 4-.5 5 1.5s3 2 4.5 1 3.5-1 4.5 1M10 20.5c2 1 3.5 0 5 1s2.5 1.5 4.5.5" stroke="#0b1220" stroke-opacity=".5" stroke-width="1.8" fill="none" stroke-linecap="round"/></svg>
+      <span>magic-geo</span>
+    </a>
+    <nav aria-label="Primary">
+      <ul class="nav-links">
+        <li><a href="#features">Features</a></li>
+        <li><a href="#how">How it works</a></li>
+        <li><a href="#quickstart">Quickstart</a></li>
+        <li><a href="#docs">Docs</a></li>
+        <li><a href="https://github.com/Andres77872/magic_geo" rel="noopener">GitHub</a></li>
+      </ul>
+    </nav>
+    <a class="btn btn-primary btn-small" href="./">Open workbench</a>
+  </div>
+</header>
+
+<main id="main">
+  <section class="hero" id="top">
+    <div class="container hero-grid">
+      <div class="hero-copy">
+        <p class="kicker">Open-source planet generator</p>
+        <h1>Procedural planets, simulated from plate to biome.</h1>
+        <p class="lede">magic-geo grows a world the way a planet grows: plates move, mountains rise, a seasonal climate sets rain and ice, rivers carve valleys, soils and ecosystems follow, and settlements find their place. One YAML file in, a fully explorable world out.</p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="./">Generate your first planet</a>
+          <a class="btn btn-ghost" href="#quickstart">Install in 3 commands</a>
+        </div>
+        <ul class="hero-facts" aria-label="At a glance">
+          <li><strong>~500</strong> map layers</li>
+          <li><strong>12</strong> months of seasonal climate</li>
+          <li><strong>3</strong> projections</li>
+          <li><strong>100%</strong> local, no uploads</li>
+        </ul>
+      </div>
+      <figure class="hero-shot">
+        <div class="window">
+          <div class="window-bar" aria-hidden="true"><span></span><span></span><span></span><em>magic-geo workbench</em></div>
+          <img src="./assets/workbench-map.webp" width="1440" height="900" alt="The magic-geo workbench showing a 4,096-cell planet on a 3D globe with a soft atmosphere, colored by biome with relief shading: blue oceans, green forests, tan deserts, place markers, the layer list on the left and a legend with each biome’s share of the surface on the right." fetchpriority="high">
+        </div>
+      </figure>
+    </div>
+  </section>
+
+  <section class="strip" aria-label="Capabilities">
+    <div class="container strip-grid">
+      <span>C++20 native core</span>
+      <span>OpenMP · CUDA · OpenCL</span>
+      <span>Python API &amp; 15-command CLI</span>
+      <span>REST API with OpenAPI</span>
+      <span>JSON or binary <code>.mgeo</code></span>
+      <span>Parquet · Arrow · ParaView · Rerun</span>
+    </div>
+  </section>
+
+  <section class="section" id="features">
+    <div class="container">
+      <p class="kicker">Why magic-geo</p>
+      <h2>Worlds that make sense — and tell you where they don’t.</h2>
+      <div class="feature-grid">
+        <article class="feature">
+          <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 20h18"/><path d="m5 20 5-9 3 5 2-3 4 7"/><path d="M8 7l2-3 2 3"/></svg></div>
+          <h3>Causal, not cosmetic</h3>
+          <p>Every field is computed from what came before it. Plate motion builds relief. Relief shapes the seasonal climate. Climate drives runoff, erosion and ice. Soils, biomes, resources and settlements follow. A coastline in the wrong place is a bug, not noise.</p>
+        </article>
+        <article class="feature">
+          <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18z"/></svg></div>
+          <h3>Explore every layer</h3>
+          <p>Grab the globe and fly anywhere, or unroll it into an equirectangular or Mollweide map without losing your place. Scrub through stages and months, turn on relief, cell outlines and places, and click any cell to see all of its fields. Around 500 layers are grouped by topic, searchable and documented in place.</p>
+        </article>
+        <article class="feature">
+          <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 4 7v6c0 4 3.5 7 8 8 4.5-1 8-4 8-8V7z"/><path d="m9 12 2 2 4-4"/></svg></div>
+          <h3>Honest about uncertainty</h3>
+          <p>Unavailable estimates are shown as unavailable, never as zero. Each field gets a colour scale that fits it — sea level on elevations, zero on signed values, labels for identifiers — and the browser and CLI draw the same colours. Budgets carry their residuals. Every output says what it is and what it is not.</p>
+        </article>
+        <article class="feature">
+          <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 14-5.3L20 9"/><path d="M20 4v5h-5"/><path d="M20 12a8 8 0 0 1-14 5.3L4 15"/><path d="M4 20v-5h5"/></svg></div>
+          <h3>Reproducible by design</h3>
+          <p>Running the same seed with the same configuration produces the same planet. Configurations are validated against a versioned schema, and saving is atomic and checks the file’s revision. A world can be regenerated, compared and shared.</p>
+        </article>
+        <article class="feature">
+          <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m8 8-4 4 4 4"/><path d="m16 8 4 4-4 4"/><path d="m13.5 5-3 14"/></svg></div>
+          <h3>Scriptable end to end</h3>
+          <p>The Python API, the CLI and the REST API all run the same pipeline. Generation, validation, rendering and export run as typed background jobs, which you can queue from the browser or from your own scripts.</p>
+        </article>
+        <article class="feature">
+          <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.8"/><path d="m21 16-5-5-9 9"/></svg></div>
+          <h3>Ready for art and games</h3>
+          <p>Export SVG and raster maps, columnar Parquet/Arrow caches, ParaView stages and Rerun recordings. You can also export a PNG reference with a matching GPT Image prompt that includes an exact colour key.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section alt" id="how">
+    <div class="container">
+      <p class="kicker">How it works</p>
+      <h2>Configure → generate → explore → export.</h2>
+      <ol class="steps">
+        <li>
+          <span class="step-n">1</span>
+          <h3>Configure</h3>
+          <p>Start from a profile such as <em>earthlike</em>, <em>smoke</em> or <em>default</em>. Name your world, then pick a seed and a resolution. Experts can edit the full YAML with live schema reference and validation.</p>
+        </li>
+        <li>
+          <span class="step-n">2</span>
+          <h3>Generate</h3>
+          <p>The generator builds the mesh, then runs tectonics, the seasonal energy balance, hydrology, erosion, cryosphere, soils, ecology and human geography. Each phase reports progress, and you’re notified when the map is ready.</p>
+        </li>
+        <li>
+          <span class="step-n">3</span>
+          <h3>Explore</h3>
+          <p>Open the world on the globe. Pin the layers you care about and play through months or stages. Inspect cells and their neighbours, and browse every record family as a table.</p>
+        </li>
+        <li>
+          <span class="step-n">4</span>
+          <h3>Export</h3>
+          <p>Validate the world against its physical checks, render maps, or feed the exported tables and images into your own tools.</p>
+        </li>
+      </ol>
+
+      <div class="gallery">
+        <figure>
+          <img src="./assets/workbench-home.webp" width="1440" height="900" loading="lazy" alt="The workbench home screen, showing the configure, generate and explore steps, the world library and example seeds.">
+          <figcaption><strong>Home.</strong> Shows your workflow at a glance, along with recent worlds and example seeds.</figcaption>
+        </figure>
+        <figure>
+          <img src="./assets/workbench-configure.webp" width="1440" height="900" loading="lazy" alt="The configuration editor with syntax-highlighted YAML, a step indicator and a searchable schema reference.">
+          <figcaption><strong>Configure.</strong> The YAML editor has a searchable schema reference.</figcaption>
+        </figure>
+        <figure>
+          <img src="./assets/workbench-climate.webp" width="1440" height="900" loading="lazy" alt="A Mollweide map of Köppen–Geiger climate classes drawn in their standard colours.">
+          <figcaption><strong>Classes.</strong> Köppen climates use their standard colours, and oceans read as water.</figcaption>
+        </figure>
+        <figure>
+          <img src="./assets/workbench-monthly.webp" width="1440" height="900" loading="lazy" alt="An equirectangular map of July temperature on a blue-to-red scale centred on 0 °C, with a latitude and longitude grid and the time bar set to month 7.">
+          <figcaption><strong>Time.</strong> Play through months and stages on a fixed colour scale.</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="pipeline" aria-labelledby="pipeline-title">
+    <div class="container">
+      <p class="kicker">Under the hood</p>
+      <h2 id="pipeline-title">One pipeline, from mantle to markets.</h2>
+      <ol class="pipeline">
+        <li>Spherical mesh</li><li>Plate tectonics</li><li>Relief &amp; isostasy</li><li>Seasonal energy balance</li>
+        <li>Hydrology &amp; lakes</li><li>Erosion &amp; sediment</li><li>Ice &amp; permafrost</li><li>Soils</li>
+        <li>Biomes &amp; ecology</li><li>Resources</li><li>Settlements &amp; routes</li><li>Borders, cultures &amp; history</li>
+      </ol>
+      <p class="muted center">A C++20 core does the heavy simulation and is loaded through a frozen C ABI. Python handles configuration, validation, enrichment and file output. Use <code>--geo-only</code> to stop at natural geography.</p>
+    </div>
+  </section>
+
+  <section class="section alt" id="quickstart">
+    <div class="container narrow">
+      <p class="kicker">Quickstart</p>
+      <h2>From clone to planet in minutes.</h2>
+      <p class="muted">You need Python 3.11+, CMake 3.20+ and a C++20 compiler. OpenMP is used when found, and a CUDA toolkit enables the GPU backend.</p>
+      <div class="tabs" data-tabs>
+        <div class="tab-list" role="tablist" aria-label="Ways to run magic-geo">
+          <button type="button" role="tab" id="tab-workbench" aria-controls="panel-workbench" aria-selected="true">Workbench</button>
+          <button type="button" role="tab" id="tab-cli" aria-controls="panel-cli" aria-selected="false" tabindex="-1">CLI</button>
+          <button type="button" role="tab" id="tab-python" aria-controls="panel-python" aria-selected="false" tabindex="-1">Python</button>
+          <button type="button" role="tab" id="tab-docker" aria-controls="panel-docker" aria-selected="false" tabindex="-1">Docker</button>
+        </div>
+        <div class="tab-panel" role="tabpanel" id="panel-workbench" aria-labelledby="tab-workbench" tabindex="0">
+          <pre><code>git clone https://github.com/Andres77872/magic_geo.git
+cd magic_geo
+./scripts/dev.sh          # builds the core and serves http://127.0.0.1:8642</code></pre>
+          <button type="button" class="copy" data-copy>Copy</button>
+          <p class="muted">Open the address, choose <strong>New world</strong>, pick a profile and select <strong>Create &amp; generate</strong>. The map opens when it’s ready.</p>
+        </div>
+        <div class="tab-panel" role="tabpanel" id="panel-cli" aria-labelledby="tab-cli" tabindex="0" hidden>
+          <pre><code>python -m pip install -e .
+cmake -S . -B build &amp;&amp; cmake --build build
+magic-geo generate --config configs/earthlike_seed.yaml \
+  --output runs/earthlike/world.json --summary runs/earthlike/summary.md
+magic-geo render --world runs/earthlike/world.json \
+  --output runs/earthlike/world.svg --projection mollweide --labels</code></pre>
+          <button type="button" class="copy" data-copy>Copy</button>
+          <p class="muted">Add <code>--cells 512</code> for a fast smoke run, or <code>--geo-only</code> to stop after natural geography.</p>
+        </div>
+        <div class="tab-panel" role="tabpanel" id="panel-python" aria-labelledby="tab-python" tabindex="0" hidden>
+          <pre><code>from magic_geo import create_config
+from magic_geo.api import generate_world
+
+config = create_config("earthlike", {"run.seed": 20240117, "mesh.cell_count": 2048})
+world = generate_world(config)
+print(len(world["cells"]), "cells generated")</code></pre>
+          <button type="button" class="copy" data-copy>Copy</button>
+          <p class="muted">Profiles, overrides and the JSON Schema are all available from Python. See the <a href="https://github.com/Andres77872/magic_geo/blob/master/docs/wiki/07-python-api.md" rel="noopener">Python API guide</a>.</p>
+        </div>
+        <div class="tab-panel" role="tabpanel" id="panel-docker" aria-labelledby="tab-docker" tabindex="0" hidden>
+          <pre><code>cp .env.example .env
+mkdir -p worlds
+docker compose up --build -d   # workbench on http://127.0.0.1:8642</code></pre>
+          <button type="button" class="copy" data-copy>Copy</button>
+          <p class="muted">Worlds persist in <code>./worlds</code>. Run any CLI command with <code>docker compose run --rm magic-geo …</code>.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="use-cases">
+    <div class="container">
+      <p class="kicker">Made for</p>
+      <h2>Worldbuilders, developers, teachers and researchers.</h2>
+      <div class="use-grid">
+        <div class="use"><h3>Worldbuilding</h3><p>Coherent continents, climates and cultures for fiction and tabletop campaigns, with a GPT Image prompt ready for each map.</p></div>
+        <div class="use"><h3>Games</h3><p>Deterministic, seedable worlds with per-cell tables for biomes, resources, routes and settlements.</p></div>
+        <div class="use"><h3>Teaching</h3><p>See how tilt, water and relief change climate, rivers and life by changing one value and generating again.</p></div>
+        <div class="use"><h3>Research sandbox</h3><p>Validation suites, calibration against external targets and explicit model limits make it a transparent testbed.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section alt" id="docs">
+    <div class="container">
+      <p class="kicker">Documentation</p>
+      <h2>Learn, do, look up, understand.</h2>
+      <div class="docs-grid">
+        <div class="doc-col">
+          <h3>Tutorials</h3>
+          <ul>
+            <li><a href="https://github.com/Andres77872/magic_geo/blob/master/docs/wiki/03-quickstart.md" rel="noopener">Your first planet</a></li>
+            <li><a href="https://github.com/Andres77872/magic_geo/blob/master/docs/debug_ui_guide.md" rel="noopener">A tour of the workbench</a></li>
+          </ul>
+        </div>
+        <div class="doc-col">
+          <h3>How-to guides</h3>
+          <ul>
+            <li><a href="https://github.com/Andres77872/magic_geo/blob/master/docs/wiki/02-installation-and-build.md" rel="noopener">Install and build</a></li>
+            <li><a href="https://github.com/Andres77872/magic_geo/blob/master/docs/docker_deployment.md" rel="noopener">Deploy with Docker</a></li>
+            <li><a href="https://github.com/Andres77872/magic_geo/blob/master/docs/runtime_storage.md" rel="noopener">Move storage outside the checkout</a></li>
+          </ul>
+        </div>
+        <div class="doc-col">
+          <h3>Reference</h3>
+          <ul>
+            <li><a href="https://github.com/Andres77872/magic_geo/blob/master/docs/wiki/05-configuration-reference.md" rel="noopener">Configuration</a></li>
+            <li><a href="https://github.com/Andres77872/magic_geo/blob/master/docs/wiki/06-cli-reference.md" rel="noopener">CLI</a></li>
+            <li><a href="https://github.com/Andres77872/magic_geo/blob/master/docs/wiki/10-world-schema.md" rel="noopener">World schema</a></li>
+            <li><a href="https://github.com/Andres77872/magic_geo/blob/master/docs/wiki/15-web-workbench.md" rel="noopener">Web workbench &amp; REST API</a></li>
+          </ul>
+        </div>
+        <div class="doc-col">
+          <h3>Explanation</h3>
+          <ul>
+            <li><a href="https://github.com/Andres77872/magic_geo/blob/master/docs/wiki/01-overview.md" rel="noopener">Project overview</a></li>
+            <li><a href="https://github.com/Andres77872/magic_geo/blob/master/docs/wiki/04-architecture.md" rel="noopener">Architecture</a></li>
+            <li><a href="https://github.com/Andres77872/magic_geo/blob/master/docs/wiki/21-glossary.md" rel="noopener">Glossary</a></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="final-cta">
+    <div class="container narrow center">
+      <h2>Your next planet is one seed away.</h2>
+      <p class="lede">Everything runs on your machine, and nothing is uploaded.</p>
+      <div class="cta-row center">
+        <a class="btn btn-primary" href="./">Open the workbench</a>
+        <a class="btn btn-ghost" href="https://github.com/Andres77872/magic_geo" rel="noopener">Star on GitHub</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-grid">
+    <div>
+      <a class="logo" href="#top"><svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="12" fill="url(#logo-g)"/></svg><span>magic-geo</span></a>
+      <p class="muted">Causal planet generation with a C++20 core, Python orchestration and a local web workbench.</p>
+    </div>
+    <nav aria-label="Footer">
+      <ul>
+        <li><a href="./">Workbench</a></li>
+        <li><a href="/api/docs">API docs</a></li>
+        <li><a href="https://github.com/Andres77872/magic_geo" rel="noopener">Source</a></li>
+        <li><a href="https://github.com/Andres77872/magic_geo/tree/master/docs/wiki" rel="noopener">Wiki</a></li>
+      </ul>
+    </nav>
+  </div>
+</footer>
+
+<script>
+  // Quickstart tabs (ARIA tabs pattern) and copy buttons. No dependencies.
+  document.querySelectorAll('[data-tabs]').forEach((root) => {
+    const tabs = [...root.querySelectorAll('[role="tab"]')];
+    const select = (tab) => {
+      tabs.forEach((item) => {
+        const active = item === tab;
+        item.setAttribute('aria-selected', String(active));
+        item.tabIndex = active ? 0 : -1;
+        document.getElementById(item.getAttribute('aria-controls')).hidden = !active;
+      });
+    };
+    tabs.forEach((tab, index) => {
+      tab.addEventListener('click', () => select(tab));
+      tab.addEventListener('keydown', (event) => {
+        const delta = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+        if (!delta) return;
+        event.preventDefault();
+        const next = tabs[(index + delta + tabs.length) % tabs.length];
+        next.focus();
+        select(next);
+      });
+    });
+  });
+  document.querySelectorAll('[data-copy]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const code = button.parentElement.querySelector('code').textContent;
+      try {
+        await navigator.clipboard.writeText(code);
+        button.textContent = 'Copied';
+      } catch (_) {
+        button.textContent = 'Select and copy';
+      }
+      setTimeout(() => { button.textContent = 'Copy'; }, 1600);
+    });
+  });
+</script>
+</body>
+</html>

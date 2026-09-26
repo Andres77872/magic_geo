@@ -17,7 +17,6 @@ planet:
   atmosphere_pressure_bar: 1.10
   greenhouse_factor: 1.0
   ocean_fraction_target: 0.66
-  # This volume closes exactly in the connected-ocean solve at 2,048 cells.
   ocean_water_inventory_km3: 1100000000.0
   internal_heat: 1.0
   geological_age_ga: 4.5

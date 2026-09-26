@@ -30,7 +30,6 @@ from magic_geo.web_jobs import (
     JobInputError,
     JobManager,
     WebJob,
-    _workspace_default,
     operation_catalog,
 )
 
@@ -204,38 +203,6 @@ class OperationCatalogTests(TestCase):
         self.assertEqual(second["equivalents"][0]["id"], "init-config")
         self.assertEqual(_EQUIVALENT_OPERATIONS[0]["id"], "init-config")
 
-    def test_workspace_defaults_rebase_only_runs_relative_managed_paths(self) -> None:
-        with TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir).resolve()
-            workspace = root / "runs" / "ws"
-            output = field_spec("generate", "output")
-            config = field_spec("generate", "config")
-            world = field_spec("validate", "world")
-            cases = [
-                ("rebased output", output, "runs/world.json", "runs/ws/world.json"),
-                ("nested output", output, "runs/a/b.json", "runs/ws/a/b.json"),
-                ("bare runs directory", output, "runs", "runs/ws"),
-                ("absolute output", output, "/etc/passwd", "/etc/passwd"),
-                ("foreign prefix", output, "outputs/x.json", "outputs/x.json"),
-                ("empty value", output, "", ""),
-                ("missing value", output, None, None),
-                ("workspace-relative input", config, "runs/configs/world.yaml", "runs/ws/configs/world.yaml"),
-                ("plain input", world, "runs/world.json", "runs/world.json"),
-            ]
-            for label, spec, value, expected in cases:
-                with self.subTest(case=label):
-                    self.assertEqual(
-                        _workspace_default(value, spec, root, workspace), expected
-                    )
-            self.assertEqual(
-                _workspace_default("runs/world.json", output, None, workspace),
-                "runs/world.json",
-            )
-            self.assertEqual(
-                _workspace_default("runs/world.json", output, root, None),
-                "runs/world.json",
-            )
-
     def test_catalog_defaults_follow_a_custom_workspace(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()
@@ -265,22 +232,17 @@ class OperationCatalogTests(TestCase):
 
 
 class WorkspaceSandboxTests(TestCase):
-    def test_workspace_must_stay_inside_the_project(self) -> None:
+    def test_explicit_external_workspaces_and_the_default_are_supported(self) -> None:
         with TemporaryDirectory() as temp_dir, TemporaryDirectory() as other_dir:
             root = Path(temp_dir).resolve()
             outside = Path(other_dir).resolve()
-            with self.assertRaisesRegex(
-                ValueError, r"^web workspace must be inside the project directory$"
-            ):
-                JobManager(root, outside)
-
-            # A symlinked workspace resolves before the containment check.
-            (root / "escape").symlink_to(outside, target_is_directory=True)
-            with self.assertRaisesRegex(
-                ValueError, r"^web workspace must be inside the project directory$"
-            ):
-                JobManager(root, Path("escape"))
-
+            for location in (outside,):
+                manager = JobManager(root, location)
+                try:
+                    self.assertEqual(manager.workspace, outside)
+                    self.assertEqual(manager._resolve_path(str(outside / "world.json"), "output"), outside / "world.json")
+                finally:
+                    manager.close()
             manager = JobManager(root, Path("runs"))
             try:
                 self.assertEqual(manager.workspace, root / "runs")
@@ -1191,10 +1153,17 @@ class JobLifecycleTests(TestCase):
                     "exit_code",
                     "artifacts",
                     "cache_dir",
+                    "progress", "elapsed_seconds", "phase_elapsed_seconds",
+                    "last_activity_at", "seconds_since_activity", "queue_position",
+                    "cancellable", "cancel_requested", "error", "world_available", "world_path", "map_superseded",
                 },
             )
             self.assertEqual(listing[1]["status"], "running")
             self.assertEqual(listing[0]["status"], "queued")
+            self.assertEqual(listing[0]["queue_position"], 1)
+            self.assertIsNone(listing[1]["queue_position"])
+            self.assertEqual(listing[0]["progress"]["phase"], "queued")
+            self.assertTrue(listing[0]["cancellable"])
             blocker.release.set()
             first_done = wait_for_job(manager, first["id"])
             second_done = wait_for_job(manager, second["id"])
@@ -1222,6 +1191,8 @@ class JobLifecycleTests(TestCase):
             finished = wait_for_job(manager, submitted["id"])
         self.assertEqual(finished["status"], "failed")
         self.assertEqual(finished["exit_code"], 3)
+        self.assertEqual(finished["error"], "boom")
+        self.assertFalse(finished["cancellable"])
         self.assertEqual(
             finished["log"],
             "$ "
@@ -1477,6 +1448,7 @@ class JobLifecycleTests(TestCase):
                             setattr(job, phase, True)
                         ignored = manager.cancel(submitted["id"])
                         self.assertEqual(ignored["status"], "running")
+                        self.assertFalse(ignored["cancellable"])
                         self.assertFalse(job._cancel_requested)
                         with manager._lock:
                             setattr(job, phase, False)
@@ -1592,6 +1564,9 @@ class JobLifecycleTests(TestCase):
                 manager.cancel(job.id)
                 self.assertEqual(len(timers), 1)
                 self.assertEqual(manager.get(job.id)["status"], "running")
+                self.assertEqual(manager.get(job.id)["progress"]["phase"], "cancelling")
+                self.assertFalse(manager.get(job.id)["cancellable"])
+                self.assertTrue(manager.get(job.id)["cancel_requested"])
                 self.assertIsNone(children[0].poll())
                 release_escalation.set()
                 finished = wait_for_job(manager, job.id, timeout=3.0)
@@ -1645,6 +1620,114 @@ class JobLifecycleTests(TestCase):
         )
         self.assertEqual(code, 0)
         self.assertEqual(job.log, f"{self.root}\n1\n")
+
+    def test_structured_activity_is_visible_before_a_real_process_finishes(self) -> None:
+        manager = self.manager()
+        real_popen = subprocess.Popen
+        gate = self.root / "release-child"
+        child = [sys.executable, "-c", (
+            "import json, os, pathlib, sys, time\n"
+            "assert os.environ['MAGIC_GEO_PROGRESS'] == '1'\n"
+            "print('MAGIC_GEO_PROGRESS ' + json.dumps({'phase': 'climate', 'label': 'Solving climate', 'detail': 'Computing seasonal temperatures.', 'current': 2, 'total': 12}), file=sys.stderr, flush=True)\n"
+            f"gate = pathlib.Path({str(gate)!r})\n"
+            "while not gate.exists(): time.sleep(.01)\n"
+            "sys.stdout.buffer.write(b'ordinary output\\xff\\n'); sys.stdout.flush()\n"
+        )]
+
+        def fake_popen(command, **kwargs):
+            return real_popen(child, **kwargs)
+
+        try:
+            with patch("magic_geo.web_jobs.subprocess.Popen", side_effect=fake_popen):
+                submitted = manager.submit("validate", {"world": str(self.world)})
+                self.assertTrue(wait_until(lambda: manager.get(submitted["id"])["progress"]["phase"] == "climate"))
+                active = manager.get(submitted["id"])
+                self.assertEqual(active["status"], "running")
+                self.assertEqual(active["progress"]["current"], 2)
+                self.assertEqual(active["progress"]["total"], 12)
+                self.assertEqual(active["progress"]["detail"], "Computing seasonal temperatures.")
+                self.assertNotIn("MAGIC_GEO_PROGRESS", active["log"])
+                self.assertIn("[Solving climate] (2/12)", active["log"])
+                self.assertTrue(active["cancellable"])
+                gate.touch()
+                finished = wait_for_job(manager, submitted["id"])
+        finally:
+            gate.touch()
+        self.assertEqual(finished["status"], "succeeded")
+        self.assertIn("ordinary output\ufffd", finished["log"])
+        self.assertEqual(finished["progress"]["phase"], "succeeded")
+        self.assertFalse(finished["cancellable"])
+
+    def test_malformed_progress_does_not_hide_output_or_fabricate_counts(self) -> None:
+        manager = self.manager()
+        job = WebJob(id="events", operation="generate", arguments={}, command=[])
+        for payload in ("not json", "[]", '{"phase": 3}', '{"phase":"mesh","label":"Mesh","detail":3}'):
+            line = "MAGIC_GEO_PROGRESS " + payload + "\n"
+            manager._consume_output(job, line)
+            self.assertIn(line, job.log)
+            self.assertEqual(job.progress["phase"], "queued")
+        for current, total in [(1, None), (-1, 4), (5, 4), (True, 4), (2, 0), (2, float("inf"))]:
+            with self.subTest(current=current, total=total):
+                manager._consume_output(job, "MAGIC_GEO_PROGRESS " + json.dumps({"phase": "mesh", "label": "Building mesh", "current": current, "total": total}) + "\n")
+                self.assertEqual(job.progress["phase"], "mesh")
+                self.assertIsNone(job.progress["current"])
+                self.assertIsNone(job.progress["total"])
+        job._cancel_requested = True
+        manager._set_progress(job, "cancelling", "Stopping")
+        manager._consume_output(job, 'MAGIC_GEO_PROGRESS {"phase":"mesh","label":"Building mesh"}\n')
+        self.assertEqual(job.progress["phase"], "cancelling")
+
+    def test_silent_stage_durations_use_server_time_without_advancing_progress(self) -> None:
+        manager = self.manager()
+        job = WebJob(id="timing", operation="generate", arguments={}, command=[], status="running")
+        job._started_monotonic = 10.0
+        with patch("magic_geo.web_jobs.time.monotonic", return_value=12.0):
+            manager._set_progress(job, "climate", "Solving climate", current=1, total=12)
+        with patch("magic_geo.web_jobs.time.monotonic", return_value=32.0):
+            active = job.public()
+        self.assertEqual(active["elapsed_seconds"], 22.0)
+        self.assertEqual(active["phase_elapsed_seconds"], 20.0)
+        self.assertEqual(active["seconds_since_activity"], 20.0)
+        self.assertEqual(active["progress"]["current"], 1)
+        job._finished_monotonic = 35.0
+        with patch("magic_geo.web_jobs.time.monotonic", return_value=99.0):
+            finished = job.public()
+        self.assertEqual(finished["elapsed_seconds"], 25.0)
+        self.assertEqual(finished["seconds_since_activity"], 23.0)
+        active["progress"]["label"] = "changed in caller"
+        self.assertEqual(job.progress["label"], "Solving climate")
+
+    def test_history_pruning_preserves_snapshots_read_by_active_jobs(self) -> None:
+        manager = self.manager(max_jobs=2)
+        with patch.object(manager, "_spawn", side_effect=WritingSpawn()):
+            producer = manager.submit("render", {"world": str(self.world), "output": "runs/map.svg"})
+            wait_for_job(manager, producer["id"])
+        snapshot = manager.artifact_path(producer["id"], 0)
+        with patch.object(manager, "_spawn", return_value=0):
+            expendable = manager.submit("validate", {"world": str(self.other_world)})
+            wait_for_job(manager, expendable["id"])
+        blocker = BlockingSpawn()
+        try:
+            with patch.object(manager, "_spawn", side_effect=blocker):
+                reader = manager.submit("validate", {"world": str(snapshot)})
+                self.assertTrue(blocker.entered.wait(5.0))
+                self.assertTrue(snapshot.is_file())
+                self.assertIn(producer["id"], {job["id"] for job in manager.list()})
+                with self.assertRaises(KeyError):
+                    manager.get(expendable["id"])
+                with self.assertRaisesRegex(JobInputError, "queue is full"):
+                    manager.submit("validate", {"world": str(self.world)})
+                self.assertTrue(snapshot.is_file())
+                blocker.release.set()
+                wait_for_job(manager, reader["id"])
+        finally:
+            blocker.release.set()
+        # Once the reader finishes, normal history retention can evict its
+        # source snapshot again.
+        with patch.object(manager, "_spawn", return_value=0):
+            next_job = manager.submit("validate", {"world": str(self.world)})
+            wait_for_job(manager, next_job["id"])
+        self.assertFalse(snapshot.exists())
 
     def test_log_growth_is_truncated_from_the_front(self) -> None:
         manager = self.manager(max_log_bytes=64)
@@ -2102,6 +2185,65 @@ class DebugCachePublicationTests(TestCase):
             [artifact["kind"] for artifact in finished["artifacts"]], ["cache"]
         )
 
+    def test_replacing_a_cache_supersedes_only_its_previous_job_map(self) -> None:
+        manager = self.manager()
+        config = self.root / "config.yaml"
+        config.write_text("config_version: 2\nmesh: {}\n", encoding="utf-8")
+
+        def stage(job: WebJob, command: list[str]) -> int:
+            target = Path(command[command.index("--output") + 1])
+            if command[3] == "generate":
+                target.write_text('{"world":"original"}', encoding="utf-8")
+            else:
+                (target / "manifest.json").write_text(job.id, encoding="utf-8")
+            return 0
+
+        with (
+            patch.object(manager, "_spawn", side_effect=stage),
+            patch.object(manager, "_validate_debug_cache", return_value=None),
+        ):
+            generated = manager.submit("generate", {
+                "config": str(config), "output": "runs/generated.json",
+                "debug_output": "runs/debug", "open_in_web": True,
+            })
+            original = wait_for_job(manager, generated["id"])
+            self.assertEqual(original["cache_dir"], "runs/debug")
+            self.assertFalse(original["map_superseded"])
+
+            with patch.object(manager, "_spawn", return_value=4):
+                failed = manager.submit("export-debug", {
+                    "world": str(self.world), "output": "runs/debug", "vtu": False,
+                })
+                self.assertEqual(wait_for_job(manager, failed["id"])["status"], "failed")
+            self.assertEqual(manager.get(original["id"])["cache_dir"], "runs/debug")
+            self.assertFalse(manager.get(original["id"])["map_superseded"])
+
+            unrelated = manager.submit("export-debug", {
+                "world": str(self.world), "output": "runs/another-map", "vtu": False,
+            })
+            wait_for_job(manager, unrelated["id"])
+            self.assertFalse(manager.get(original["id"])["map_superseded"])
+
+            replacement = manager.submit("export-debug", {
+                "world": str(self.world),
+                "output": str(self.root / "runs" / "debug"), "vtu": False,
+            })
+            replaced = wait_for_job(manager, replacement["id"])
+
+        previous = manager.get(original["id"])
+        self.assertEqual(previous["status"], "succeeded")
+        self.assertIsNone(previous["cache_dir"])
+        self.assertTrue(previous["map_superseded"])
+        self.assertTrue(previous["world_available"])
+        self.assertEqual(previous["world_path"], original["world_path"])
+        self.assertEqual(Path(previous["world_path"]).read_text(encoding="utf-8"), '{"world":"original"}')
+        self.assertEqual(replaced["cache_dir"], "runs/debug")
+        self.assertFalse(replaced["map_superseded"])
+        self.assertEqual(manager.get(unrelated["id"])["cache_dir"], "runs/another-map")
+        listed = next(job for job in manager.list() if job["id"] == original["id"])
+        self.assertIsNone(listed["cache_dir"])
+        self.assertTrue(listed["map_superseded"])
+
     def test_failed_export_never_publishes_and_cleans_up_staging(self) -> None:
         manager = self.manager()
         existing = self.root / "runs" / "debug"
@@ -2233,6 +2375,9 @@ class DebugCachePublicationTests(TestCase):
 
         self.assertEqual(finished["status"], "failed")
         self.assertEqual(finished["exit_code"], 7)
+        self.assertTrue(finished["world_available"])
+        self.assertEqual(finished["error"], "Process exited with code 7.")
+        self.assertIn("Preparing browser map", finished["progress"]["detail"])
         self.assertIsNone(finished["cache_dir"])
         self.assertFalse((self.root / "runs" / "debug").exists())
         # The completed world stays downloadable even though the optional
@@ -2251,6 +2396,15 @@ class DebugCachePublicationTests(TestCase):
             manager.artifact_path(submitted["id"], 0).read_text(encoding="utf-8"),
             '{"schema_version": 1}',
         )
+        # Recovery must use the per-job snapshot when a later generation has
+        # overwritten the configured output path.
+        (self.root / "runs" / "world-out.json").write_text('{"later_world": true}', encoding="utf-8")
+        self.assertEqual(Path(finished["world_path"]), manager.artifact_path(submitted["id"], 0))
+        _, recovery, _ = manager._build_command("export-debug", {
+            "world": finished["world_path"], "output": "runs/recovered-debug", "vtu": False,
+        })
+        recovered_source = Path(recovery[recovery.index("--world") + 1])
+        self.assertEqual(recovered_source.read_text(encoding="utf-8"), '{"schema_version": 1}')
 
     def test_generate_chains_a_browser_cache_export(self) -> None:
         manager = self.manager()

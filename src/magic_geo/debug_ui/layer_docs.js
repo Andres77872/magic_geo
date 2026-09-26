@@ -75,7 +75,7 @@ const PATTERN_RULES = [
   {
     test: (n) => n.endsWith('_id') || n === 'flow_to' || n === 'spill_to' || n === 'glacier_flow_to' || n.endsWith('_cell_id') || n.endsWith('_basin_id'),
     role: 'identifier',
-    doc: 'Identifier / graph reference — the integer labels a region, system, or points at another cell. Rendered as a numeric gradient, so neighbouring ids get neighbouring colours: read it as "same colour ≈ same group", not as a magnitude. Percentile stats on ids are not meaningful.',
+    doc: 'Identifier / graph reference — the integer labels a region, system, or points at another cell. Drawn with categorical colours (they repeat every 18 ids), so read it as "same colour ≈ same group", never as a magnitude; hover a cell for its exact id. Percentile stats on ids are not meaningful.',
   },
   {
     test: (n) => n.startsWith('initial_'),
@@ -514,7 +514,7 @@ export function describeLayer(layer) {
     notes.push(`Monthly layer · ${layer.month_count || 12} months · colour scale fixed across the year.`);
   }
   if (role === 'identifier') {
-    notes.push('Values are labels, not magnitudes — expect a noisy gradient.');
+    notes.push('Values are labels, not magnitudes. Colours repeat every 18 ids; −1 means none and is drawn in the no-data grey.');
   }
 
   return {
@@ -579,76 +579,165 @@ export function docsCoverage(layers) {
   return { counts, byRole };
 }
 
+// --- Topic grouping for the layer panel ------------------------------------
+// ~450 per-cell fields are far easier to scan by physical domain than as one
+// alphabetical list. Rules run in order; the first match wins, so more specific
+// domains (glacial sediment, groundwater, ocean temperature) precede broad ones.
+export const LAYER_TOPICS = [
+  { id: 'terrain', title: 'Terrain & tectonics' },
+  { id: 'climate', title: 'Climate & atmosphere' },
+  { id: 'ocean', title: 'Oceans & coasts' },
+  { id: 'water', title: 'Rivers, lakes & groundwater' },
+  { id: 'ice', title: 'Ice & permafrost' },
+  { id: 'sediment', title: 'Erosion & sediment' },
+  { id: 'soil', title: 'Soils' },
+  { id: 'life', title: 'Biomes & ecology' },
+  { id: 'resources', title: 'Resources & land use' },
+  { id: 'people', title: 'Settlements & societies' },
+  { id: 'mesh', title: 'Mesh & diagnostics' },
+  { id: 'other', title: 'Other fields' },
+];
+
+const TOPIC_RULES = [
+  ['mesh', /^(id|lat_deg|lon_deg|area_km2|atmospheric_cell)$|^(position_3d|normal_3d|healpix|s2_like|mesh_lod)|^cell_(edge|boundary|polygon|geometry)|neighbor_(edge|boundary)|boundary_vertex_count|equal_filled/],
+  ['ice', /glac|^ice_|_ice_|ice_sheet|permafrost|moraine|deglaciation|basal_sliding|active_layer|frost_months/],
+  ['people', /settlement|route|port_|_port|harbor|political|culture|language|frontier|navigab|transport_chokepoint|mountain_pass|oasis|accessibility|strait_access/],
+  ['resources', /agricultur|mining|\bore_|ore_genesis|petroleum|metallogenic|placer|fishery|^resource$|hydrothermal/],
+  ['ocean', /ocean|marine|reef|coastal|upwelling|bay_|continental_shelf|island_class|water_depth/],
+  ['water', /river|lake|basin|flow_|_flow|runoff|discharge|drainage|depression|spill|water_balance|hydrolog|hydraulic|channel|overflow|groundwater|aquifer|spring|infiltration|vadose|wetland|froude|manning|bankfull|floodplain|stream_power|karst|cave_|subterranean|is_water|water_body|water_budget|closed_basin/],
+  ['sediment', /sediment|erosion|erod|alluvium|deposition|hillslope|fluvial|bed_shear/],
+  ['soil', /soil|fertility/],
+  ['life', /biome|ecotone|vegetation|forest|species|productivity|wildfire|fire_|ecosystem|habitat|succession|guild/],
+  ['climate', /temperature|precip|climat|wind|monsoon|humid|moisture|rain|orographic|evapotranspiration|season|albedo|shortwave|longwave|energy|heat|radiative|emissivity|pressure|aridity|continentality|vapor|upwind|advected|vertical_velocity|dry_season|wet_season|growing_season/],
+  ['terrain', /elevation|relief|plate|boundary|crust|tectonic|rift|subduction|collision|fault|earthquake|seismic|volcan|orogen|uplift|subsidence|trench|ridge|transform|isostatic|landform|landmass|bedrock|lithology|dominant_tectonic|initial_/],
+];
+
+// Physical fields most people reach for first; shown as a "Featured" group.
+export const FEATURED_LAYER_NAMES = [
+  'elevation_m', 'biome', 'climate_class', 'temperature_c', 'precipitation_mm_y',
+  'plate_id', 'landform', 'is_water', 'runoff_mm_y', 'ice_thickness_m',
+  'soil_type', 'settlement_score', 'political_region_id',
+];
+
+export function layerTopic(layer) {
+  if (!layer) return 'other';
+  if (layer.source === 'cells_monthly') return 'climate';
+  const name = String(layer.name || '');
+  for (const [topic, pattern] of TOPIC_RULES) {
+    if (pattern.test(name)) return topic;
+  }
+  return 'other';
+}
+
+// Human label: sentence case without the unit suffix (the unit is shown
+// separately). The raw field name stays searchable and in the docs card.
+export function layerLabel(layer) {
+  const name = String(layer?.name || '');
+  const unitInfo = inferUnit(name);
+  let base = name;
+  if (unitInfo) {
+    for (const [suffix] of UNIT_RULES) {
+      if (base.endsWith(suffix) && !['_index', '_fraction', '_count', '_ph'].includes(suffix)) {
+        base = base.slice(0, -suffix.length);
+        break;
+      }
+    }
+  }
+  const words = base.replace(/\./g, ' · ').replace(/_/g, ' ').replace(/\s+/g, ' ').replace(/\bph$/, 'pH').trim();
+  if (!words) return name;
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+export function layerUnit(layer) {
+  const unit = inferUnit(String(layer?.name || ''))?.unit;
+  return unit && !['index', 'fraction', 'count', 'pH'].includes(unit) ? unit : '';
+}
+
 // Static UI guide shown in the help overlay. Kept here so the docs helper is the
 // single source of truth for "how does this thing work".
 export const UI_GUIDE = [
   {
+    title: 'Getting around',
+    items: [
+      ['Workflow', 'Home shows the three steps — <b>Configure</b> a world, <b>Generate</b> it as a background job, then <b>Explore</b> it on the Map and in Data.'],
+      ['Command palette', 'Press <kbd>Ctrl</kbd> <kbd>K</kbd> (<kbd>⌘</kbd> <kbd>K</kbd> on macOS) to jump to any view, layer, world, configuration, job or action.'],
+      ['Switch worlds', 'The world picker in the header lists every prepared world in the workspace. Map and Data follow the selection.'],
+      ['Background work', 'A running job shows in the header on every view; select it to follow progress. A notification appears when it finishes.'],
+    ],
+  },
+  {
     title: 'Layers',
     items: [
-      ['Pick a layer', 'Click any entry in the left panel. Layers are grouped by source family; click a group title to collapse it.'],
-      ['Search', 'Press <kbd>/</kbd> or click the filter box, then type. Matches the layer name, source family, and documentation text (unit, role, description, class names).'],
-      ['What am I looking at?', 'The docs card under the layer panel explains the active layer — unit, role, value range, and (for categoricals) the class list. Toggle it with <kbd>d</kbd>.'],
-      ['Colour scale', 'Numeric layers use viridis normalised to the 2nd–98th percentile (robust to outliers). The legend shows the scale; <kbd>≥</kbd>/<kbd>≤</kbd> markers mean values beyond the ends are clipped to the end colour. Categorical layers use one colour per class.'],
-      ['Missing data', 'Cells with no value render as flat grey — distinct from both ends of the colour ramp.'],
+      ['Pick a layer', 'Layers are grouped by topic — terrain, climate, water, ice, life, people. Click a group title to fold it; ☆ pins a layer to the top.'],
+      ['Search', 'Press <kbd>/</kbd> and type. Matches the field name, topic, unit, role, description and class names. The chips narrow to numeric, class or time-varying layers.'],
+      ['What am I looking at?', 'The “About this layer” card explains the active layer — unit, role, value range and, for classes, every category. Toggle it with <kbd>d</kbd>.'],
+      ['Color scale', 'Chosen from what the field measures: <b>Viridis</b> for amounts, <b>Cool–warm</b> centred on 0 for signed values, <b>Terrain</b> split at sea level for elevations that cross 0 m, and categorical colours for identifiers and classes. The range is the 2nd–98th percentile; triangles at the legend ends mean values beyond it are clipped to the end colour. Change either under “Colour scale” in the legend.'],
+      ['Legend', 'Ticks are round numbers. The bars above a ramp show how much of the planet’s surface has each colour, and a caret marks the value under the pointer. For classes, the share of the surface is listed next to each one; select a class to spotlight it (<kbd>Esc</kbd> clears).'],
+      ['Missing data', 'Cells without a value render in flat gray — distinct from every colour of the ramp.'],
     ],
   },
   {
-    title: 'Stage & month scrubbing',
+    title: 'Stages & months',
     items: [
-      ['Stage layers', 'Per-stage layers show a stage bar. Drag the slider, type an exact stage, or step with <kbd>,</kbd> / <kbd>.</kbd>. Neighbouring stages are prefetched.'],
-      ['Monthly layers', 'Monthly climate layers show a month control (1–12) instead; the colour scale is fixed across the year so you compare, not re-normalise.'],
-      ['Fixed scale', 'For both, the colour scale spans all stages/months, so what you see moving is real change in the data.'],
+      ['Time bar', 'Per-stage and monthly layers show a time bar. Drag, type an exact index, step with <kbd>,</kbd> / <kbd>.</kbd>, or press ▶ to play.'],
+      ['Fixed scale', 'The color scale spans every stage or month, so what you see moving is real change in the data. Stepping through time cross-fades briefly between slices.'],
+      ['Shareable view', 'The address bar keeps the layer, stage, month, projection, overlays and camera position. Copy it to return to exactly the same view.'],
     ],
   },
   {
-    title: 'Projection & camera',
+    title: 'Projection, camera & overlays',
     items: [
-      ['Globe / flat', 'Switch with the top-left buttons or <kbd>1</kbd> (globe), <kbd>2</kbd> (equirectangular), <kbd>3</kbd> (Mollweide). Transitions animate in the vertex shader.'],
-      ['Orbit', 'Drag to rotate, scroll to zoom, right-drag to pan (globe mode).'],
-    ],
-  },
-  {
-    title: 'Overlays',
-    items: [
-      ['Wireframe', '<kbd>w</kbd> — the cell mesh edges.'],
-      ['Plate boundaries', '<kbd>b</kbd> — tectonic plate boundary segments.'],
-      ['Graticule', '<kbd>g</kbd> — lat/lon grid lines.'],
-    ],
-  },
-  {
-    title: 'Export for GPT Image',
-    items: [
-      ['Export PNG', 'Downloads the current camera view in the final selected projection. Enabled overlays remain visible as spatial guides.'],
-      ['Prompt .md', 'Downloads a copy/paste GPT Image prompt paired to the PNG filename, with layer meaning, snapshot metadata, and an adaptive categorical or numeric colour codex.'],
-      ['No automatic generation', 'The workbench only creates local PNG and Markdown downloads. It never sends the map to an image-generation API.'],
+      ['Globe / flat', 'Switch with the toolbar or <kbd>1</kbd> globe, <kbd>2</kbd> equirectangular, <kbd>3</kbd> Mollweide. The place in the middle of the screen stays put while the map unrolls.'],
+      ['Move', 'Drag to move — the point you grab stays under the pointer. Scroll or pinch to zoom toward the pointer; double-click zooms in (<kbd>Shift</kbd> zooms out). The +, − and fit buttons do the same with one click.'],
+      ['Keyboard', 'Select the map, then use the arrow keys to move, <kbd>+</kbd> / <kbd>−</kbd> to zoom (<kbd>Shift</kbd> for bigger steps) and <kbd>0</kbd> to show the whole world.'],
+      ['Go anywhere', 'In the command palette type coordinates such as <code>12.5 N 40 W</code>, a cell number such as <code>cell 1234</code>, or the name of a place.'],
+      ['Overlays', '<kbd>w</kbd> cell outlines, <kbd>r</kbd> relief shading, <kbd>b</kbd> plate boundaries, <kbd>g</kbd> latitude/longitude grid (it gets finer as you zoom), <kbd>p</kbd> places — settlements, ports, ruins, sacred areas and landmasses.'],
+      ['Relief', 'Shades slopes of present-day elevation, lit from the north-west, with the vertical exaggeration shown in the button tooltip. Level ground and water keep their exact colours; it is off by default because shading changes how bright a colour looks.'],
+      ['Scale and position', 'The bottom-right corner shows the latitude and longitude under the pointer and a scale bar measured at the map centre. The bar hides on whole-world views, where no single scale is true.'],
+      ['More room', 'The panel button at the top-left hides the layer list.'],
     ],
   },
   {
     title: 'Cell inspector',
     items: [
-      ['Open', 'Click any cell to open the inspector on the right with every field for that cell.'],
-      ['Ledgers & monthly', 'Per-stage ledger sparklines (with a marker at the active stage) and the monthly series are drawn per cell.'],
-      ['Adjacency', 'Neighbouring cells are listed with edge flags (plate boundary, land/water, biome transition); click a neighbour to jump to it.'],
-      ['Filter fields', 'The filter box narrows the ~400 fields by name.'],
+      ['Open', 'Click any cell to see every field for it, with the active layer value on top. The selected cell keeps an amber outline; the target button (or <kbd>c</kbd>) centres the map on it.'],
+      ['Histories', 'Per-stage sparklines mark the active stage; monthly series show the seasonal cycle.'],
+      ['Neighbours', 'Adjacent cells are listed with edge flags (plate boundary, land/water, biome transition). Click one to jump to it.'],
+    ],
+  },
+  {
+    title: 'Export for GPT Image',
+    items: [
+      ['PNG', 'Downloads the current camera view in the final selected projection. Enabled overlays stay visible as spatial guides; view-only touches — the halo, hover and selection outlines, class spotlight and relief shading — are left out so every colour matches the codex.'],
+      ['Prompt', 'Downloads a Markdown prompt paired to the PNG filename, with layer meaning, view metadata and a color codex.'],
+      ['Local only', 'The workbench only creates local downloads. It never sends the map to an image-generation service.'],
     ],
   },
   {
     title: 'Reading the data honestly',
     items: [
-      ['Identifiers', 'Fields ending in <code>_id</code> (and <code>flow_to</code>/<code>spill_to</code>) are labels. The gradient is meaningless — read it as "same colour ≈ same group".'],
+      ['Identifiers', 'Fields ending in <code>_id</code> (and <code>flow_to</code>/<code>spill_to</code>) are labels, so they are drawn with categorical colours that repeat every 18 ids — read them as “same color ≈ same group”, and hover for the exact id.'],
+      ['Constant fields', 'A field with a single value everywhere is drawn in one colour and the legend says so, rather than inventing a 0-to-1 range.'],
       ['Indices vs measurements', 'Fields ending in <code>_index</code> are derived, normally 0–1; fields with unit suffixes (<code>_m</code>, <code>_mm_y</code>, <code>_c</code>…) are physical quantities.'],
       ['Residuals', 'Fields with <code>residual</code> in the name should be ~0 everywhere; large values flag a budget that does not close.'],
-      ['Ring seams', 'Visible gaps between cells in the flat projections are the documented boundary-ring mismatch, not a rendering bug — inspect <code>mean_neighbor_boundary_segment_mismatch_km</code>.'],
+      ['Ring seams', 'Gaps between cells in the flat projections are the documented boundary-ring mismatch, not a rendering bug — inspect <code>mean_neighbor_boundary_segment_mismatch_km</code>.'],
     ],
   },
 ];
 
 export const KEY_REFERENCE = [
-  ['/', 'Focus the layer search'],
-  ['d', 'Toggle the layer docs card'],
-  ['?', 'Toggle this help overlay'],
+  ['Ctrl K / ⌘ K', 'Open the command palette'],
+  ['?', 'Toggle this help'],
+  ['/', 'Search layers (Map)'],
+  ['d', 'Toggle the layer card (Map)'],
   ['1 / 2 / 3', 'Globe / equirectangular / Mollweide'],
-  [', / .', 'Previous / next stage (or month)'],
-  ['w / b / g', 'Wireframe / plate boundaries / graticule'],
-  ['Esc', 'Close help or the cell inspector'],
+  [', / .', 'Previous / next stage or month'],
+  ['Space', 'Play or pause the time bar'],
+  ['Arrows · + / − · 0', 'Move · zoom · whole world (map selected)'],
+  ['Double-click', 'Zoom in at the pointer (Shift: out)'],
+  ['w / r / b / g / p', 'Cells / relief / plates / grid / places'],
+  ['c', 'Centre on the selected cell'],
+  ['Ctrl Enter', 'Validate YAML (Configure)'],
+  ['Ctrl S', 'Save YAML (Configure)'],
+  ['Esc', 'Close dialogs, help or the inspector; clear a class spotlight'],
 ];

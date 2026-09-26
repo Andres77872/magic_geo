@@ -605,6 +605,30 @@ if(BUILD_TESTING)
   endif()
   add_test(NAME magic_geo_social_availability COMMAND magic_geo_social_availability_test "${CMAKE_CURRENT_BINARY_DIR}/native_social_unit_worlds.json")
 
+  # Exercise real summary/entity serialization without any world generation.
+  add_executable(magic_geo_watershed_summary_precision_test
+    cpp/tests/watershed_summary_precision_test.cpp
+    cpp/src/engine/core.cpp cpp/src/engine/water_features.cpp
+    cpp/src/engine/summary.cpp cpp/src/engine/process_serialization.cpp
+    cpp/src/engine/hydrology.cpp cpp/src/engine/entity_serialization.cpp
+    cpp/src/engine/numeric_serialization.cpp)
+  target_include_directories(magic_geo_watershed_summary_precision_test PRIVATE cpp/include cpp/src/engine)
+  if(OpenMP_CXX_FOUND)
+    target_link_libraries(magic_geo_watershed_summary_precision_test PRIVATE OpenMP::OpenMP_CXX)
+  endif()
+  if(MSVC)
+    target_compile_options(magic_geo_watershed_summary_precision_test PRIVATE /Gy /Gw)
+    target_link_options(magic_geo_watershed_summary_precision_test PRIVATE /OPT:REF)
+  elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(magic_geo_watershed_summary_precision_test PRIVATE -Wall -Wextra -Werror -ffunction-sections -fdata-sections -ffp-contract=off)
+    if(APPLE)
+      target_link_options(magic_geo_watershed_summary_precision_test PRIVATE -Wl,-dead_strip)
+    else()
+      target_link_options(magic_geo_watershed_summary_precision_test PRIVATE -Wl,--gc-sections)
+    endif()
+  endif()
+  add_test(NAME magic_geo_watershed_summary_precision COMMAND magic_geo_watershed_summary_precision_test)
+
   add_executable(
     magic_geo_settlement_climate_support_test
     cpp/tests/settlement_climate_support_test.cpp

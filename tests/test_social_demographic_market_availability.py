@@ -112,6 +112,24 @@ class RetainedSocialAvailability(TestCase):
         for key in ma.SUMMARY_FIELDS:
             if key in old["summary"] and not key.endswith("_model"):self.assertEqual(new["summary"][key],old["summary"][key])
 
+    def test_large_population_fragments_preserve_summary_and_record_reductions(self):
+        # These equation fragments expose compensated-sum rounding differences
+        # without claiming the edited populations satisfy the parent replay.
+        # The first pair distinguishes summary accumulation; the second also
+        # protects the builtin per-population representative sum.
+        for populations in (
+            (9652456173.379677, 117535283.227619),
+            (3615866226.365837, 4805326175.347339),
+        ):
+            with self.subTest(populations=populations):
+                world=deepcopy(source())
+                for history,population in zip(world["population_histories"],populations,strict=True):
+                    history["final_population"]=population
+                for economy,population in zip(world["economy_histories"],populations,strict=True):
+                    economy["steps"][-1]["population"]=population
+                result=demographic_fragment(world)
+                self.assertGreater(result["summary"]["total_household_cohort_population"],8e9)
+
     def test_complete_historical_archive_public_parity(self):
         world=deepcopy(legacy_human_water_world_readonly())
         self.assertEqual(demographic_public.validate_demographic_agents_replay(world),[])

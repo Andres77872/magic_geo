@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "generation_progress.hpp"
 
 namespace magic_geo::detail {
 
@@ -1181,6 +1182,12 @@ HydrologyStabilizationResult stabilize_numeric_depressions(
     for (int recomputation_index = 0;
          recomputation_index <= NUMERIC_DEPRESSION_CORRECTION_MAX_PASSES;
          ++recomputation_index) {
+        if (generation_progress_enabled()) {
+            emit_generation_progress("hydrology", "Recalculating climate and drainage",
+                "Water-balance pass " + std::to_string(recomputation_index + 1) +
+                (erosion_iteration >= 0 ? "; terrain iteration " + std::to_string(erosion_iteration) : "") +
+                ". Terrain changes can require another climate solve.");
+        }
         result.sea_level_adjustment_m += apply_sea_level(params, cells);
         result.sea_level_recompute_count++;
         label_marine_water_bodies(cells);
@@ -1195,6 +1202,7 @@ HydrologyStabilizationResult stabilize_numeric_depressions(
             recomputation_index
         ));
         result.hydrologic_water_budget_recompute_count++;
+        emit_generation_progress("hydrology", "Routing water into rivers and lakes", "Rechecking drainage and closed depressions after the climate calculation.");
         compute_flow_and_rivers(params, cells);
         result.hydrology_recompute_count++;
 

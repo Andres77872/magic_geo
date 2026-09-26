@@ -8,6 +8,7 @@ from typing import Annotated
 import typer
 
 from .._app import app
+from ...paths import RuntimePaths
 
 
 @app.command("serve")
@@ -20,17 +21,17 @@ def serve(
             exists=True,
             file_okay=False,
             dir_okay=True,
-            help="Optional cache from export-debug; auto-loads <workspace>/debug when present.",
+            help="Existing cache to open; otherwise discovers configured caches (default: <workspace>/debug).",
         ),
     ] = None,
     workspace: Annotated[
-        Path,
+        Path | None,
         typer.Option(
             "--workspace",
             envvar="MAGIC_GEO_WORKSPACE",
             help="Directory for browser-created configs, worlds, reports, and exports.",
         ),
-    ] = Path("runs"),
+    ] = None,
     host: Annotated[
         str,
         typer.Option("--host", envvar="MAGIC_GEO_HOST", help="Bind address."),
@@ -47,21 +48,13 @@ def serve(
     ] = 8642,
 ) -> None:
     """Serve the browser workbench; an existing debug cache is optional."""
-    project_root = Path.cwd().resolve()
-    resolved_workspace = (
-        workspace.resolve()
-        if workspace.is_absolute()
-        else (project_root / workspace).resolve()
-    )
     try:
-        resolved_workspace.relative_to(project_root)
-    except ValueError as exc:
-        typer.echo(
-            f"Web workspace must stay inside {project_root}: {workspace}",
-            err=True,
-        )
+        paths = RuntimePaths.resolve(workspace=workspace)
+    except (OSError, ValueError, RuntimeError) as exc:
+        typer.echo(f"Unable to resolve runtime paths: {exc}", err=True)
         raise typer.Exit(2) from exc
-    default_debug_dir = workspace / "debug"
+    workspace = Path(paths.display(paths.workspace)) if paths.project == Path.cwd().resolve() else paths.workspace
+    default_debug_dir = Path(paths.display(paths.debug_dir)) if paths.project == Path.cwd().resolve() else paths.debug_dir
     selected_debug_dir = (
         debug_dir
         if debug_dir is not None

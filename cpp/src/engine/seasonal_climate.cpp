@@ -1,4 +1,5 @@
 #include "seasonal_climate.hpp"
+#include "generation_progress.hpp"
 
 #include "climate_transport.hpp"
 #include "types/core.hpp"
@@ -48,6 +49,7 @@ PrescribedSeasonalClimate solve_prescribed_seasonal_climate(
         }
     }
 
+    emit_generation_progress("climate", "Preparing seasonal climate", "Building atmospheric heat transport and sunlight across the orbital year.");
     PrescribedSeasonalClimate result;
     result.options = options;
     result.mesh_backend = mesh_backend;
@@ -136,6 +138,7 @@ PrescribedSeasonalClimate solve_prescribed_seasonal_climate(
     }
     const SurfaceEnergySystem system(result.physical_columns.columns, result.transport_edges);
     result.solution = solve_adaptive_periodic_surface_energy_balance(system, intervals, initial, options.integration);
+    emit_generation_progress("climate", "Seasonal temperature calculation complete", "The seasonal cycle and monthly accuracy checks passed; continuing the water balance.");
     return result;
 }
 

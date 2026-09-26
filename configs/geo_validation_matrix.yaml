@@ -152,6 +152,8 @@ scenarios:
         plate_count: 10
       planet:
         axial_tilt_deg: 0.0
+        # A circular orbit removes eccentricity-driven seasons in this zero-season control.
+        orbital_eccentricity: 0.0
       erosion:
         iterations: 3
     expectations:
@@ -396,10 +398,11 @@ relations:
     metric: ice_cell_fraction
     minimum_difference: 0.05
 
-  - id: hothouse_has_less_ice
+  # The cold control has ice to lose; the temperate control can already be ice-free.
+  - id: hot_forcing_reduces_cold_control_ice
     left: hothouse
     operator: lt
-    right: earthlike_pair
+    right: snowball
     metric: ice_cell_fraction
     minimum_difference: 0.02
 

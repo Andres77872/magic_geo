@@ -30,7 +30,7 @@ template.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `MAGIC_GEO_WORLDS_DIR` | `./worlds` | Host directory where worlds are saved. Bind-mounted into the container workspace, so worlds survive rebuilds. |
-| `MAGIC_GEO_CONTAINER_WORKSPACE` | `/app/runs` | Absolute workspace path inside the container. Compose uses it for both the bind-mount target and the process's `MAGIC_GEO_WORKSPACE`. Must stay inside `/app`. |
+| `MAGIC_GEO_CONTAINER_WORKSPACE` | `/app/runs` | Absolute workspace path inside the container. Compose uses it for both the bind-mount target and the process's `MAGIC_GEO_WORKSPACE`. May be outside `/app`. |
 | `MAGIC_GEO_HOST` | `0.0.0.0` | Bind address inside the container. Keep `0.0.0.0` in Docker so the published port can reach the server. |
 | `MAGIC_GEO_PORT` | `8642` | Workbench port (bound inside the container and published on the host). |
 | `MAGIC_GEO_PUBLISH_HOST` | `127.0.0.1` | Host interface the port is published on. The workbench has no authentication — keep loopback unless a trusted boundary or authenticating proxy protects it. |
@@ -66,7 +66,7 @@ The workbench's security model is unchanged in Docker: job inputs are confined
 to the project root (`/app`, which includes the shipped `configs/` seeds) and
 job outputs to the workspace. Point `MAGIC_GEO_WORKSPACE` somewhere else only
 by changing `MAGIC_GEO_CONTAINER_WORKSPACE`, and only if the new path remains
-inside `/app`.
+inside or outside `/app`.
 
 ## Running CLI commands in the container
 
@@ -129,3 +129,23 @@ or user isolation. The compose file therefore publishes the port on
 container's network namespace. To serve it beyond the local machine, front it
 with an authenticating reverse proxy and set `MAGIC_GEO_PUBLISH_HOST`
 deliberately.
+
+## Independent storage settings
+
+The container accepts the same runtime settings as bare-metal installs:
+`MAGIC_GEO_CONFIG_PATH`, `MAGIC_GEO_CONFIG_DIR`, `MAGIC_GEO_SAVED_CONFIG_DIR`,
+`MAGIC_GEO_OUTPUT_DIR`, `MAGIC_GEO_DEBUG_DIR`, `MAGIC_GEO_REPORTS_DIR`,
+`MAGIC_GEO_EXPORTS_DIR`, `MAGIC_GEO_STATE_DIR`, `MAGIC_GEO_CALIBRATION_DIR`, and
+`MAGIC_GEO_PROJECT_ROOT`. Blank values keep repository defaults. See
+[Runtime storage](runtime_storage.md) for their defaults and precedence.
+
+For a single persistent volume, set `MAGIC_GEO_CONFIG_DIR=/app/runs/configs`
+and place your configurations in the mounted host directory's `configs/`
+subdirectory. Set `MAGIC_GEO_CONFIG_PATH=/app/runs/configs/world.yaml` to pin
+one as the startup configuration. Outputs, reports, exports, cache and job
+snapshots already default under the mounted workspace. If you change the
+container workspace, use its new absolute path in these settings.
+
+Paths in these variables refer to the container filesystem. Separate locations
+outside the mounted workspace need corresponding bind mounts and write
+permissions for the container user. Merely setting a path does not mount it.

@@ -35,6 +35,7 @@ try:
         _is_stage_history,
         _layer_entry,
         _mollweide_normalized,
+        _mollweide_theta,
         _numeric_stats,
         _write_vtu_stages,
         export_debug_cache,
@@ -795,12 +796,19 @@ class MeshExportTests(TestCase):
         self.assertEqual(_mollweide_normalized(90.0, 0.0), (0.0, 1.0))
         self.assertEqual(_mollweide_normalized(-90.0, 0.0), (0.0, -1.0))
 
-        # Just outside the pole clamp the Newton denominator underflows, so the
-        # solver must bail out with theta still equal to the latitude.
-        near_pole_deg = 90.0 - 1e-6
-        x_value, y_value = _mollweide_normalized(near_pole_deg, 180.0)
-        self.assertEqual(y_value, math.sin(math.radians(near_pole_deg)))
-        self.assertAlmostEqual(x_value, math.cos(math.radians(near_pole_deg)), places=12)
+        # Just outside the pole clamp Newton's derivative vanishes. The solver
+        # must still satisfy the auxiliary-angle identity there instead of
+        # stalling at theta = latitude, which was 0.1° wrong at 89.9°.
+        for near_pole_deg in (90.0 - 1e-6, 89.99, 89.9, -89.9):
+            with self.subTest(latitude=near_pole_deg):
+                theta = _mollweide_theta(math.radians(near_pole_deg))
+                self.assertAlmostEqual(
+                    2.0 * theta + math.sin(2.0 * theta),
+                    math.pi * math.sin(math.radians(near_pole_deg)),
+                    places=13,
+                )
+                x_value, y_value = _mollweide_normalized(near_pole_deg, 180.0)
+                self.assertEqual((x_value, y_value), (math.cos(theta), math.sin(theta)))
 
         # A mid-latitude point does iterate, and must satisfy the Mollweide
         # auxiliary-angle identity 2*theta + sin(2*theta) == pi * sin(lat).

@@ -694,19 +694,35 @@ def _xyz_from_lat_lon(lat_deg: float, lon_deg: float) -> tuple[float, float, flo
     return (cos_lat * math.cos(lon), cos_lat * math.sin(lon), math.sin(lat))
 
 
+def _mollweide_theta(latitude: float) -> float:
+    """Solve 2θ + sin 2θ = π sin φ for the Mollweide auxiliary angle θ.
+
+    Newton's derivative vanishes at the poles, so iteration starts there from
+    the asymptotic solution π/2 − θ ≈ (3πδ²/8)^(1/3), δ = π/2 − |φ|, and runs to
+    convergence (a fixed 8 steps from θ = φ was 0.1° wrong at 89.9°).  Mirrors
+    ``mollweideTheta`` in ``debug_ui/map-navigation.js``.
+    """
+
+    half = math.pi / 2.0
+    if abs(latitude) >= half - 1.0e-12:
+        return math.copysign(half, latitude)
+    target = math.pi * math.sin(latitude)
+    delta = half - abs(latitude)
+    theta = math.copysign(half - (3.0 * math.pi * delta * delta / 8.0) ** (1.0 / 3.0), latitude) if abs(latitude) > 1.4 else latitude
+    for _ in range(50):
+        derivative = 2.0 + 2.0 * math.cos(2.0 * theta)
+        if derivative < 1.0e-15:
+            break
+        step = (2.0 * theta + math.sin(2.0 * theta) - target) / derivative
+        theta = max(-half, min(half, theta - step))
+        if abs(step) < 1.0e-14:
+            break
+    return theta
+
+
 def _mollweide_normalized(lat_deg: float, lon_deg: float) -> tuple[float, float]:
-    lat = math.radians(lat_deg)
-    lon = math.radians(lon_deg)
-    if abs(abs(lat) - math.pi / 2.0) < 1e-9:
-        theta = math.copysign(math.pi / 2.0, lat)
-    else:
-        theta = lat
-        for _ in range(8):
-            denominator = 2.0 + 2.0 * math.cos(2.0 * theta)
-            if abs(denominator) < 1e-12:
-                break
-            theta -= (2.0 * theta + math.sin(2.0 * theta) - math.pi * math.sin(lat)) / denominator
-    return (lon / math.pi) * math.cos(theta), math.sin(theta)
+    theta = _mollweide_theta(math.radians(lat_deg))
+    return (math.radians(lon_deg) / math.pi) * math.cos(theta), math.sin(theta)
 
 
 def _wrap_lon_near(lon_deg: float, anchor_deg: float) -> float:

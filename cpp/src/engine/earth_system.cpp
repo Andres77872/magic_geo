@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "generation_progress.hpp"
 
 namespace magic_geo::detail {
 
@@ -927,6 +928,7 @@ void erode(
 ) {
     const int n = static_cast<int>(cells.size());
     for (int iter = 0; iter < params.erosion_iterations; ++iter) {
+        emit_generation_progress("erosion", "Evolving terrain", "Moving plates and transporting rock, soil and river sediment; then recalculating climate and drainage.", iter + 1, params.erosion_iterations);
         const FeedbackReference previous = capture_feedback_reference(cells);
         const std::vector<double> tectonic_elevation_change = advance_plate_motion_and_crust(
             params,

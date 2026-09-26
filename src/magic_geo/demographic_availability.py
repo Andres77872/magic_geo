@@ -30,6 +30,16 @@ def _aggregate(values, *, mean=False, complete=True):
     return _calc(lambda v:v/max(1,len(values)) if mean else v,total)
 
 
+def _summary_aggregate(values, *, mean=False, complete=True):
+    # Historical summaries and their independent replay add each contribution
+    # in order. Compensated builtin sum can change the six-decimal result for
+    # large populations. Per-record reductions retain _aggregate's builtin sum.
+    if not complete or any(v is None for v in values):return None
+    total=0.0
+    for value in values:total+=value
+    return _calc(lambda v:v/max(1,len(values)) if mean else v,total)
+
+
 def _market_pressure(world):
     result={p["id"]:0.0 for p in world["political_regions"]}
     for exchange in world["market_exchanges"]:
@@ -139,15 +149,15 @@ def aggregate_agents(world):
             {"final_agent_population":h["final_population"],"mean_labor_participation_index":labor}))
         pa[p["id"]]["demographic_agent_history_id"]=hid
     complete_firms=all(r["firm_selection_complete"] for r in ra.values())
-    estimates={"total_household_cohort_population":_aggregate([h["population"] for h in raw_households]),
-        "total_firm_employment_capacity":_aggregate([f["employment_capacity"] for f in raw_firms],complete=complete_firms),
-        "mean_household_resilience_index":_aggregate([_calc(lambda v:1.0-v,h["vulnerability_index"]) for h in raw_households],mean=True),
-        "mean_household_migration_propensity_index":_aggregate([h["migration_propensity_index"] for h in raw_households],mean=True),
-        "mean_household_consumption_pressure_index":_aggregate([h["consumption_pressure_index"] for h in raw_households],mean=True),
-        "mean_firm_productivity_index":_aggregate([f["productivity_index"] for f in raw_firms],mean=True,complete=complete_firms),
-        "mean_firm_market_dependency_index":_aggregate([f["market_dependency_index"] for f in raw_firms],mean=True,complete=complete_firms),
-        "mean_firm_supply_chain_risk_index":_aggregate([f["supply_chain_risk_index"] for f in raw_firms],mean=True,complete=complete_firms),
-        "mean_demographic_vulnerability_index":_aggregate([s["vulnerability_index"] for s in raw_histories],mean=True),
+    estimates={"total_household_cohort_population":_summary_aggregate([h["population"] for h in raw_households]),
+        "total_firm_employment_capacity":_summary_aggregate([f["employment_capacity"] for f in raw_firms],complete=complete_firms),
+        "mean_household_resilience_index":_summary_aggregate([_calc(lambda v:1.0-v,h["vulnerability_index"]) for h in raw_households],mean=True),
+        "mean_household_migration_propensity_index":_summary_aggregate([h["migration_propensity_index"] for h in raw_households],mean=True),
+        "mean_household_consumption_pressure_index":_summary_aggregate([h["consumption_pressure_index"] for h in raw_households],mean=True),
+        "mean_firm_productivity_index":_summary_aggregate([f["productivity_index"] for f in raw_firms],mean=True,complete=complete_firms),
+        "mean_firm_market_dependency_index":_summary_aggregate([f["market_dependency_index"] for f in raw_firms],mean=True,complete=complete_firms),
+        "mean_firm_supply_chain_risk_index":_summary_aggregate([f["supply_chain_risk_index"] for f in raw_firms],mean=True,complete=complete_firms),
+        "mean_demographic_vulnerability_index":_summary_aggregate([s["vulnerability_index"] for s in raw_histories],mean=True),
         "high_vulnerability_household_count":None if any(h["vulnerability_index"] is None for h in raw_households) else sum(h["vulnerability_index"]>=.65 for h in raw_households)}
     summary=_record({"household_cohort_count":len(households),"firm_agent_count":len(firms),"demographic_agent_history_count":len(histories),
         "demographic_agent_step_count":len(raw_histories),"firm_selection_complete":complete_firms,
@@ -241,8 +251,8 @@ def individual_agents(world, aggregate):
         "individual_birth_event_count":event_counts["birth"],"individual_death_event_count":event_counts["death"],
         "individual_marriage_event_count":event_counts["marriage"],"property_transfer_event_count":event_counts["property_transfer"],
         "individual_sampling_complete":not unavailable,"individual_sampling_unavailable_region_ids":unavailable,"individual_sampling_known_zero_region_ids":known_zero},
-        {"mean_individual_lifespan_years":_aggregate(raw_lifespans,mean=True,complete=not unavailable),
-         "total_property_transfer_value_index":_aggregate(raw_transfers,complete=not unavailable)})
+        {"mean_individual_lifespan_years":_summary_aggregate(raw_lifespans,mean=True,complete=not unavailable),
+         "total_property_transfer_value_index":_summary_aggregate(raw_transfers,complete=not unavailable)})
     summary["individual_summary_estimate_availability"]=summary.pop("estimate_availability")
     return {"individual_agents":people,"individual_life_events":events,"summary":summary}
 

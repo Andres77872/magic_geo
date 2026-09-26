@@ -30,6 +30,10 @@ def workbench(tmp_path):
 
 @pytest.mark.parametrize("path", [
     "/", "/index.html", "/app.js", "/style.css", "/layer_docs.js",
+    "/config-workbench.js", "/operations-workbench.js",
+    "/home-workbench.js", "/command-palette.js", "/new-world.js", "/ui.js", "/palettes.js",
+    "/colormaps.js", "/map-navigation.js",
+    "/landing.html", "/landing.css", "/assets/workbench-map.webp",
     "/vendor/OrbitControls.js", "/vendor/three.module.js", "/vendor/three.core.js",
 ])
 def test_workbench_assets_keep_revalidation_headers_on_200_and_304(workbench, path):

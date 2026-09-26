@@ -42,6 +42,7 @@ magic_geo = [
   "debug_ui/*.css",
   "debug_ui/*.js",
   "debug_ui/vendor/*.js",
+  "debug_ui/assets/*.webp",
 ]
 
 [tool.pytest.ini_options]

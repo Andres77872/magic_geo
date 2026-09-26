@@ -1,5 +1,6 @@
 #include "internal.hpp"
 #include "world.hpp"
+#include "generation_progress.hpp"
 
 namespace magic_geo::detail {
 
@@ -38,11 +39,13 @@ GeographicFoundation prepare_geographic_foundation(const Params& params) {
     GeneratedWorld world;
     EarthSystemState& earth = world.earth;
 
+    emit_generation_progress("mesh", "Building the planet mesh", "Creating spherical cells and their neighbours.");
     earth.cells = build_mesh(params);
     if (params.plate_count >= static_cast<int>(earth.cells.size())) {
         throw std::runtime_error("plate_count must be smaller than generated mesh cell count");
     }
 
+    emit_generation_progress("tectonics", "Forming plates and terrain", "Assigning tectonic plates, crust and initial elevations.");
     earth.plates = generate_plates(params);
     const std::vector<int> seeds = choose_plate_seeds(
         params,
@@ -133,6 +136,7 @@ GeographicFoundation prepare_geographic_foundation(const Params& params) {
         earth.crust_dry_rock_accounting
     );
 
+    emit_generation_progress("hydrology", "Balancing the initial climate and water", "Calculating sea level, temperature, rainfall and drainage.");
     const HydrologyStabilizationResult initial_stabilization =
         stabilize_numeric_depressions(
             params,
@@ -177,6 +181,7 @@ GeographicFoundation prepare_geographic_foundation(const Params& params) {
         &earth.climate_cache
     );
 
+    emit_generation_progress("cryosphere", "Forming ice and glaciers", "Calculating ice coverage, glacial sediment and the resulting water balance.");
     const FeedbackReference pre_cryosphere_reference =
         capture_feedback_reference(earth.cells);
     derive_cryosphere_state(params, earth.cells);
@@ -230,6 +235,7 @@ GeneratedWorld finish_legacy_generation(GeographicFoundation&& foundation, bool 
         &pre_cryosphere_reference
     ));
 
+    emit_generation_progress("natural_systems", "Building natural regions", "Deriving soils, biomes, rivers, lakes, coasts and geological basins.");
     summarize_plates(params, earth.cells, earth.plates);
     derive_soils_biomes_resources(params, earth.cells);
     derive_landforms(earth.cells);
@@ -245,6 +251,7 @@ GeneratedWorld finish_legacy_generation(GeographicFoundation&& foundation, bool 
     );
 
     if (include_society) {
+        emit_generation_progress("settlements", "Placing settlements and trade routes", "Connecting habitable places and forming political regions.");
         society.availability.enabled = params.temperature_model == ClimateTemperatureModel::prescribed_seasonal;
         society.settlements = generate_settlements(params, earth.cells);
         society.routes = generate_routes(params, earth.cells, society.settlements);
@@ -260,6 +267,7 @@ GeneratedWorld finish_legacy_generation(GeographicFoundation&& foundation, bool 
             society.settlements,
             society.routes
         );
+        emit_generation_progress("history", "Building cultures and history", "Deriving cultures, historical events, populations and territorial change.");
         society.cultural_layers = generate_cultural_layers(
             params,
             earth.cells,
@@ -313,6 +321,7 @@ GeneratedWorld finish_legacy_generation(GeographicFoundation&& foundation, bool 
             &society.availability
         );
     }
+    emit_generation_progress("natural_systems", "Checking the generated geography", "Calculating native calibration diagnostics.");
     world.calibration_checks = generate_calibration_checks(
         earth.cells,
         natural.watersheds

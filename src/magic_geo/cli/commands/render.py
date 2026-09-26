@@ -8,13 +8,14 @@ from typing import Annotated
 import typer
 
 from .._app import _load_world_for_cli, app
+from .._paths import runtime_path
 from ...io import write_raster_map, write_svg_map
 
 
 @app.command("render")
 def render(
     world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated .json or .mgeo world.")],
-    output: Annotated[Path, typer.Option("--output", "-o", help="SVG map output path.")] = Path(
+    output: Annotated[Path, typer.Option("--output", "-o", help="SVG map output path.", callback=runtime_path)] = Path(
         "runs/world.svg"
     ),
     width: Annotated[int, typer.Option("--width", min=320, max=6400, help="SVG width in pixels.")] = 1600,
@@ -60,7 +61,7 @@ def render(
 @app.command("render-raster")
 def render_raster(
     world: Annotated[Path, typer.Option("--world", "-w", exists=True, help="Generated .json or .mgeo world.")],
-    output: Annotated[Path, typer.Option("--output", "-o", help="PPM raster map output path.")] = Path(
+    output: Annotated[Path, typer.Option("--output", "-o", help="PPM raster map output path.", callback=runtime_path)] = Path(
         "runs/world.ppm"
     ),
     width: Annotated[int, typer.Option("--width", min=320, max=6400, help="Raster width in pixels.")] = 1600,

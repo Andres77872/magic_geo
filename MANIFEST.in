@@ -6,7 +6,7 @@ recursive-include cpp *.cpp *.cu *.hpp *.md
 recursive-include configs *.json *.yaml
 recursive-include docs *.md
 recursive-include scripts *.mjs *.py
-recursive-include src/magic_geo *.css *.html *.js *.py *.yaml
+recursive-include src/magic_geo *.css *.html *.js *.py *.yaml *.webp
 recursive-include tests *.py
 global-exclude *.dll *.dylib *.so
 global-exclude *.py[cod]

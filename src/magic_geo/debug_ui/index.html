@@ -1,252 +1,615 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="magic-geo workbench — configure, generate and explore simulated planets locally.">
+<meta name="color-scheme" content="dark light">
 <title>magic-geo workbench</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%235eead4'/%3E%3Cstop offset='1' stop-color='%233b82f6'/%3E%3C/linearGradient%3E%3C/defs%3E%3Ccircle cx='16' cy='16' r='12' fill='url(%23g)'/%3E%3Cpath d='M9 13c2-1.5 4-.5 5 1.5s3 2 4.5 1 3.5-1 4.5 1M10 20.5c2 1 3.5 0 5 1s2.5 1.5 4.5.5' stroke='%230b1220' stroke-opacity='.5' stroke-width='1.8' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+<script>
+  // Apply the saved or system theme before first paint to avoid a flash.
+  try {
+    const saved = JSON.parse(localStorage.getItem('magic-geo.theme') || 'null');
+    const theme = saved === 'light' || saved === 'dark' ? saved
+      : (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+    document.documentElement.dataset.theme = theme;
+  } catch (_) { /* storage can be unavailable; keep the dark default */ }
+</script>
 <link rel="stylesheet" href="./style.css">
 <script type="importmap">
 { "imports": { "three": "./vendor/three.module.js" } }
 </script>
 </head>
 <body>
-<header id="workbench-header">
-  <a id="brand" href="#map" aria-label="magic-geo workbench home">
-    <span class="brand-mark" aria-hidden="true">◎</span>
-    <span><strong>magic-geo</strong><small>workbench</small></span>
-  </a>
-  <nav id="view-tabs" role="tablist" aria-label="Workbench views">
-    <button type="button" id="tab-map" role="tab" class="view-tab active" data-view="map" aria-controls="view-map" aria-selected="true">Map</button>
-    <button type="button" id="tab-data" role="tab" class="view-tab" data-view="data" aria-controls="view-data" aria-selected="false">Data</button>
-    <button type="button" id="tab-config" role="tab" class="view-tab" data-view="config" aria-controls="view-config" aria-selected="false">Config</button>
-    <button type="button" id="tab-operations" role="tab" class="view-tab" data-view="operations" aria-controls="view-operations" aria-selected="false">Operations</button>
-    <button type="button" id="tab-api" role="tab" class="view-tab" data-view="api" aria-controls="view-api" aria-selected="false">API</button>
+<svg class="icon-sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 6h9"/><path d="M17 6h3"/><circle cx="15" cy="6" r="2"/><path d="M4 12h3"/><path d="M11 12h9"/><circle cx="9" cy="12" r="2"/><path d="M4 18h11"/><path d="M19 18h1"/><circle cx="17" cy="18" r="2"/></symbol>
+  <symbol id="i-play-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M10 8.5v7l6-3.5z"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18z"/></symbol>
+  <symbol id="i-table" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18"/><path d="M3 15h18"/><path d="M9 10v10"/></symbol>
+  <symbol id="i-code" viewBox="0 0 24 24"><path d="m8 8-4 4 4 4"/><path d="m16 8 4 4-4 4"/><path d="m13.5 5-3 14"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></symbol>
+  <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .9-1 1.7"/><path d="M12 17h.01"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+  <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.8"/><path d="m21 16-5-5-9 9"/></symbol>
+  <symbol id="i-file-text" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h6"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.3-4.9L4 8"/><path d="M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.3 4.9L20 16"/><path d="M20 20v-4h-4"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-dice" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 9h.01M15 15h.01M15 9h.01M9 15h.01M12 12h.01"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 5 5 9-10"/></symbol>
+  <symbol id="i-check-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2 20h20z"/><path d="M12 9v5"/><path d="M12 17h.01"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6"/><path d="M12 7.5h.01"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+  <symbol id="i-prev" viewBox="0 0 24 24"><path d="M18 6 10 12l8 6z"/><path d="M6 6v12"/></symbol>
+  <symbol id="i-next" viewBox="0 0 24 24"><path d="m6 6 8 6-8 6z"/><path d="M18 6v12"/></symbol>
+  <symbol id="i-graticule" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3v18M5 7.5h14M5 16.5h14"/></symbol>
+  <symbol id="i-mesh" viewBox="0 0 24 24"><path d="M12 3 3 8v8l9 5 9-5V8z"/><path d="M12 3v18M3 8l18 8M21 8 3 16"/></symbol>
+  <symbol id="i-plates" viewBox="0 0 24 24"><path d="M3 8c3 0 4 3 7 3s3-4 6-4 5 2 5 2"/><path d="M3 16c3 0 4-2 6-2s4 4 7 4 5-2 5-2"/></symbol>
+  <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6"/><path d="M20 4 11 13"/><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><rect x="9.5" y="9.5" width="5" height="5"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/></symbol>
+  <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="M11 3l1.8 4.9L18 10l-5.2 2.1L11 17l-1.8-4.9L4 10l5.2-2.1z"/><path d="M19 14.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></symbol>
+  <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></symbol>
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15H6.5A1.5 1.5 0 0 0 5 19.5z"/><path d="M5 19.5A1.5 1.5 0 0 0 6.5 21H19v-3"/></symbol>
+  <symbol id="i-save" viewBox="0 0 24 24"><path d="M5 3h11l3 3v13a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M7 3v5h8V3"/><path d="M7 21v-7h10v7"/></symbol>
+  <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></symbol>
+  <symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></symbol>
+  <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5.5" rx="8" ry="2.5"/><path d="M4 5.5v13c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5v-13"/><path d="M4 12c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5"/></symbol>
+  <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></symbol>
+  <symbol id="i-check-list" viewBox="0 0 24 24"><path d="m4 6 1.5 1.5L8 5"/><path d="M11 6h9"/><path d="m4 12 1.5 1.5L8 11"/><path d="M11 12h9"/><path d="m4 18 1.5 1.5L8 17"/><path d="M11 18h9"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
+  <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+  <symbol id="i-maximize" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/><circle cx="12" cy="12" r="4"/></symbol>
+  <symbol id="i-mountain" viewBox="0 0 24 24"><path d="m3 19 6.5-11 4 6.5 2.5-3.5L21 19z"/><path d="m8 10.5 1.5 1.5 1.5-1.5"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 21s-6-5.6-6-11a6 6 0 0 1 12 0c0 5.4-6 11-6 11z"/><circle cx="12" cy="10" r="2.2"/></symbol>
+  <symbol id="i-palette" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18c1.1 0 1.7-.8 1.7-1.7 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.2 0-.9.8-1.7 1.7-1.7H16a5 5 0 0 0 5-5c0-3.9-4-7.2-9-7.2z"/><circle cx="7.5" cy="11" r="1"/><circle cx="10.5" cy="7" r="1"/><circle cx="15" cy="7.5" r="1"/></symbol>
+  <symbol id="i-collapse" viewBox="0 0 24 24"><path d="m7 15 5-5 5 5"/><path d="m7 20 5-5 5 5" opacity=".45"/></symbol>
+</svg>
+
+<a class="skip-link" href="#workbench">Skip to workspace</a>
+
+<div class="app-shell">
+  <nav id="app-rail" aria-label="Workbench">
+    <a id="brand" href="#home" aria-label="magic-geo workbench home">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><defs><linearGradient id="brand-gradient" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5eead4"/><stop offset="1" stop-color="#3b82f6"/></linearGradient></defs><circle cx="16" cy="16" r="12" fill="url(#brand-gradient)"/><path d="M9 13c2-1.5 4-.5 5 1.5s3 2 4.5 1 3.5-1 4.5 1M10 20.5c2 1 3.5 0 5 1s2.5 1.5 4.5.5" stroke="#0b1220" stroke-opacity=".5" stroke-width="1.8" fill="none" stroke-linecap="round"/></svg>
+      <span class="brand-text"><strong>magic-geo</strong><small>workbench</small></span>
+    </a>
+    <div id="view-tabs" role="tablist" aria-label="Workbench views" aria-orientation="vertical">
+      <button type="button" id="tab-home" role="tab" class="view-tab active" data-view="home" aria-controls="view-home" aria-selected="true" title="Home — workflow and recent worlds"><svg class="icon" aria-hidden="true"><use href="#i-home"/></svg><span>Home</span></button>
+      <button type="button" id="tab-config" role="tab" class="view-tab" data-view="config" aria-controls="view-config" aria-selected="false" title="Configure — create and edit world YAML"><svg class="icon" aria-hidden="true"><use href="#i-sliders"/></svg><span>Configure</span></button>
+      <button type="button" id="tab-operations" role="tab" class="view-tab" data-view="operations" aria-controls="view-operations" aria-selected="false" title="Jobs — generate, validate, render and export"><svg class="icon" aria-hidden="true"><use href="#i-play-circle"/></svg><span>Jobs</span></button>
+      <button type="button" id="tab-map" role="tab" class="view-tab" data-view="map" aria-controls="view-map" aria-selected="false" title="Map — explore layers on the globe"><svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg><span>Map</span></button>
+      <button type="button" id="tab-data" role="tab" class="view-tab" data-view="data" aria-controls="view-data" aria-selected="false" title="Data — browse tables and records"><svg class="icon" aria-hidden="true"><use href="#i-table"/></svg><span>Data</span></button>
+      <button type="button" id="tab-api" role="tab" class="view-tab" data-view="api" aria-controls="view-api" aria-selected="false" title="API &amp; system — backend and OpenAPI"><svg class="icon" aria-hidden="true"><use href="#i-code"/></svg><span>API</span></button>
+    </div>
+    <div class="rail-footer">
+      <a class="rail-link" href="./landing.html" title="About magic-geo"><svg class="icon" aria-hidden="true"><use href="#i-book"/></svg><span>About</span></a>
+    </div>
   </nav>
-  <div id="server-state">
-    <label class="sr-only" for="world-select">Selected debug cache</label>
-    <select id="world-select" aria-label="Selected debug cache" title="Switch between workspace debug caches" disabled>
-      <option value="">Loading caches…</option>
-    </select>
-    <span id="cache-state" class="state-pill pending" role="status" aria-live="polite">Connecting…</span>
-    <span id="workspace-state"></span>
-  </div>
-</header>
 
-<main id="workbench">
-  <section id="view-map" class="workbench-view" data-view-panel="map" role="tabpanel" aria-labelledby="tab-map">
-    <div id="app">
-      <aside id="sidebar" aria-label="Map layers">
-        <header id="world-info">
-          <h1>Layers</h1>
-          <div id="world-meta"></div>
-        </header>
-        <label class="sr-only" for="layer-search">Filter layers</label>
-        <input id="layer-search" type="search" placeholder="Filter layers… ( / )" autocomplete="off">
-        <nav id="layer-list" aria-label="Available layers"></nav>
-        <section id="docs-card" class="hidden" aria-label="Active layer documentation">
-          <div id="docs-card-head">
-            <span id="docs-card-title">Layer docs</span>
-            <div id="docs-card-actions">
-              <button type="button" id="docs-help-open" title="Help (?)" aria-label="Open help">?</button>
-              <button type="button" id="docs-card-toggle" title="Collapse layer documentation" aria-label="Toggle layer documentation" aria-expanded="true">▾</button>
-            </div>
-          </div>
-          <div id="docs-card-body"></div>
-        </section>
-      </aside>
-
-      <div id="viewport">
-        <canvas id="globe" tabindex="0" aria-label="Interactive world globe. Drag to rotate, scroll to zoom, and select a cell for details."></canvas>
-        <div id="map-empty" class="empty-state hidden" role="status">
-          <div>
-            <span class="empty-icon" aria-hidden="true">◎</span>
-            <h2>No debug cache loaded</h2>
-            <p>Create a configuration and run a generation operation. The map becomes available as soon as a debug cache is produced.</p>
-            <div class="button-row">
-              <button type="button" class="primary" data-go-view="config">Create configuration</button>
-              <button type="button" data-go-view="operations">Open operations</button>
-            </div>
-          </div>
-        </div>
-        <div id="topbar">
-          <div class="control-group" id="projection-controls" aria-label="Projection">
-            <button type="button" data-proj="globe" class="active" title="Globe (1)" aria-pressed="true">Globe</button>
-            <button type="button" data-proj="equirect" title="Equirectangular (2)" aria-pressed="false">Equirect</button>
-            <button type="button" data-proj="mollweide" title="Mollweide (3)" aria-pressed="false">Mollweide</button>
-          </div>
-          <div class="control-group" id="overlay-controls" aria-label="Map overlays">
-            <button type="button" id="toggle-wireframe" title="Mesh wireframe (w)" aria-pressed="false">Wire</button>
-            <button type="button" id="toggle-plates" title="Plate boundaries (b)" aria-pressed="false">Plates</button>
-            <button type="button" id="toggle-graticule" title="Graticule (g)" aria-pressed="false">Grid</button>
-          </div>
-          <div class="control-group" id="export-controls" aria-label="Export current map">
-            <button type="button" id="export-map-image" title="Export the current map reference as PNG" disabled>Export PNG</button>
-            <button type="button" id="export-image-prompt" title="Export a GPT Image prompt and color codex as Markdown" disabled>Prompt .md</button>
-          </div>
-          <div class="control-group" id="help-controls">
-            <button type="button" id="toggle-help" title="Help (?)" aria-label="Toggle help" aria-controls="help-overlay" aria-expanded="false">?</button>
-          </div>
-          <div id="topbar-right">
-            <div id="legend">
-              <div id="legend-head">
-                <div id="legend-title"></div>
-                <button type="button" id="legend-info" title="Layer docs (d)" aria-label="Toggle layer documentation" aria-pressed="true">ⓘ</button>
-              </div>
-              <canvas id="legend-ramp" width="160" height="10" role="img" aria-label="Layer color scale"></canvas>
-              <div id="legend-labels"><span id="legend-min"></span><span id="legend-max"></span></div>
-              <div id="legend-categories"></div>
-            </div>
-          </div>
-        </div>
-        <div id="stagebar" class="hidden">
-          <button type="button" id="stage-back" title="Previous stage (,)" aria-label="Previous stage">◀</button>
-          <label class="sr-only" for="stage-slider">Stage or month</label>
-          <input id="stage-slider" type="range" min="0" max="0" value="0" step="1">
-          <label class="sr-only" for="stage-number">Exact stage or month</label>
-          <input id="stage-number" type="number" min="0" max="0" value="0">
-          <button type="button" id="stage-fwd" title="Next stage (.)" aria-label="Next stage">▶</button>
-          <span id="stage-label"></span>
-        </div>
-        <div id="map-status-row">
-          <div id="status" role="status" aria-live="polite"></div>
-          <div id="map-hover"></div>
-        </div>
-      </div>
-
-      <aside id="inspector" class="hidden" aria-label="Selected cell inspector">
-        <header>
-          <h2 id="inspector-title">Cell</h2>
-          <button type="button" id="inspector-close" aria-label="Close cell inspector">×</button>
-        </header>
-        <div id="inspector-body"></div>
-      </aside>
+  <header id="workbench-header">
+    <div class="header-title">
+      <span id="header-view-title">Home</span>
     </div>
-  </section>
-
-  <section id="view-data" class="workbench-view page-view" data-view-panel="data" role="tabpanel" aria-labelledby="tab-data" hidden>
-    <header class="page-heading">
-      <div><p class="eyebrow">Generated world</p><h1>Data browser</h1><p>Inspect every exported scalar, layer, stage summary, family, section, and skipped output.</p></div>
-      <button type="button" id="data-refresh">Refresh catalog</button>
-    </header>
-    <div id="data-unavailable" class="notice warning hidden" role="status">A debug cache is required for world data. Config, Operations, and API remain available.</div>
-    <div id="data-workspace" class="split-workspace">
-      <aside class="tool-panel" aria-label="Data selection">
-        <label for="data-kind">Data type</label>
-        <select id="data-kind">
-          <option value="overview">Overview</option>
-          <option value="scalars">Scalars</option>
-          <option value="skipped">Skipped outputs</option>
-          <option value="layers">Layer catalog</option>
-          <option value="cells">Cell schema</option>
-          <option value="stages">Stage summaries</option>
-          <option value="families">Record families</option>
-          <option value="sections">Model sections</option>
+    <button type="button" id="command-open" class="command-trigger" aria-haspopup="dialog" aria-controls="command-palette" title="Search layers, worlds and actions (Ctrl+K)">
+      <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+      <span class="command-trigger-text">Search layers, worlds, actions…</span>
+      <kbd class="command-shortcut" id="command-shortcut">Ctrl K</kbd>
+    </button>
+    <button type="button" id="job-activity" class="job-activity hidden" title="Show active job"></button>
+    <div id="server-state">
+      <div class="world-picker">
+        <svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg>
+        <label class="sr-only" for="world-select">Selected world</label>
+        <select id="world-select" aria-label="Selected world" title="Switch the world shown in Map and Data" disabled>
+          <option value="">Loading worlds…</option>
         </select>
-        <div id="data-resource-wrap" class="field-stack hidden">
-          <label for="data-resource">Resource</label>
-          <select id="data-resource"></select>
-        </div>
-        <div id="family-detail-wrap" class="field-stack hidden">
-          <label for="family-detail">Family detail</label>
-          <select id="family-detail"><option value="full">Full nested records</option><option value="scalars">Scalar columns</option></select>
-        </div>
-        <div id="data-page-controls" class="field-stack hidden">
-          <label for="data-limit">Rows per page</label>
-          <select id="data-limit"><option value="10" selected>10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select>
-          <div class="pager">
-            <button type="button" id="data-prev" aria-label="Previous page">←</button>
-            <span id="data-page-label">0–0</span>
-            <button type="button" id="data-next" aria-label="Next page">→</button>
+      </div>
+      <span id="cache-state" class="state-pill pending" role="status" aria-live="polite">Connecting…</span>
+      <span id="workspace-state"></span>
+    </div>
+    <div class="header-actions">
+      <button type="button" id="theme-toggle" class="icon-button" aria-label="Switch to light theme" title="Switch theme">
+        <svg class="icon icon-theme-dark" aria-hidden="true"><use href="#i-moon"/></svg>
+        <svg class="icon icon-theme-light" aria-hidden="true"><use href="#i-sun"/></svg>
+      </button>
+      <button type="button" id="toggle-help" class="icon-button" title="Help and keyboard shortcuts (?)" aria-label="Help and keyboard shortcuts" aria-controls="help-overlay" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-help"/></svg></button>
+    </div>
+  </header>
+
+  <main id="workbench" tabindex="-1">
+    <!-- ================================================================ HOME -->
+    <section id="view-home" class="workbench-view page-view" data-view-panel="home" role="tabpanel" aria-labelledby="tab-home">
+      <div class="home-hero">
+        <div class="home-hero-copy">
+          <p class="eyebrow">magic-geo workbench</p>
+          <h1>Build a planet, then explore every layer of it.</h1>
+          <p class="lede">Choose a world definition, run the simulation — tectonics, climate, water, ice, soils, life and civilization — and inspect the result on an interactive globe. Everything runs locally on this machine.</p>
+          <div class="button-row">
+            <button type="button" class="primary large" data-action="new-world"><svg class="icon" aria-hidden="true"><use href="#i-sparkles"/></svg>New world</button>
+            <button type="button" class="large" data-go-view="map" id="home-open-map"><svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg>Open map</button>
+            <button type="button" class="ghost large" data-action="command"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>Search everything</button>
           </div>
         </div>
-      </aside><article class="content-panel">
-        <div id="data-title-row"><div><p class="eyebrow" id="data-eyebrow">Catalog</p><h2 id="data-title">Overview</h2></div><div class="button-row"><a id="data-raw-link" class="button hidden" target="_blank" rel="noopener">Open raw JSON ↗</a><span id="data-loading" class="state-pill hidden">Loading…</span></div></div>
-        <div id="data-output" class="data-output" tabindex="0"></div>
-      </article>
-    </div>
-  </section>
-
-  <section id="view-config" class="workbench-view page-view" data-view-panel="config" role="tabpanel" aria-labelledby="tab-config" hidden>
-    <header class="page-heading">
-      <div><p class="eyebrow">World definition</p><h1>Configuration</h1><p>Current profiles solve a seasonal energy budget. Choose infrared optical depth, edit YAML, then validate and save.</p></div>
-      <div class="button-row">
-        <button type="button" id="config-download">Download YAML</button>
-        <button type="button" id="config-save" class="primary">Save configuration</button>
+        <div class="home-hero-art" aria-hidden="true">
+          <div class="orb"><div class="orb-ring"></div></div>
+        </div>
       </div>
-    </header>
-    <div class="config-grid">
-      <section class="content-panel editor-panel">
-        <div class="form-toolbar">
-          <div><label for="config-profile">Profile</label><select id="config-profile"></select></div>
-          <button type="button" id="config-reset">Reset from profile</button>
-          <div><label for="config-name">Save as</label><input id="config-name" type="text" value="world" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" title="Letters, digits, dot, underscore, or dash; must start with a letter or digit" autocomplete="off"></div>
-          <button type="button" id="config-validate" class="primary">Validate YAML</button>
+
+      <ol class="workflow" aria-label="Workflow">
+        <li class="workflow-step" id="home-step-config">
+          <div class="step-index">1</div>
+          <div class="step-body">
+            <h2>Configure</h2>
+            <p class="step-status" data-home="config-status">Looking for configurations…</p>
+            <p class="muted">A YAML file sets the seed, planet size, mesh resolution, tectonics, climate and erosion.</p>
+            <div class="button-row">
+              <button type="button" data-action="new-world"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>From a profile</button>
+              <button type="button" class="ghost" data-go-view="config">Open editor<svg class="icon" aria-hidden="true"><use href="#i-arrow-right"/></svg></button>
+            </div>
+          </div>
+        </li>
+        <li class="workflow-step" id="home-step-generate">
+          <div class="step-index">2</div>
+          <div class="step-body">
+            <h2>Generate</h2>
+            <p class="step-status" data-home="job-status">No jobs in this session.</p>
+            <p class="muted">Generation runs in the background, one job at a time. Keep exploring while it works.</p>
+            <div class="button-row">
+              <button type="button" data-go-view="operations">Go to jobs<svg class="icon" aria-hidden="true"><use href="#i-arrow-right"/></svg></button>
+            </div>
+          </div>
+        </li>
+        <li class="workflow-step" id="home-step-explore">
+          <div class="step-index">3</div>
+          <div class="step-body">
+            <h2>Explore</h2>
+            <p class="step-status" data-home="map-status">Checking for a world…</p>
+            <p class="muted">Switch projections, scrub stages and months, inspect any cell, and export map references.</p>
+            <div class="button-row">
+              <button type="button" data-go-view="map">Map<svg class="icon" aria-hidden="true"><use href="#i-arrow-right"/></svg></button>
+              <button type="button" class="ghost" data-go-view="data">Data browser</button>
+            </div>
+          </div>
+        </li>
+      </ol>
+
+      <div class="home-grid">
+        <section class="content-panel home-worlds" aria-labelledby="home-worlds-title">
+          <div class="panel-heading">
+            <div><p class="eyebrow">Library</p><h2 id="home-worlds-title">Worlds</h2></div>
+            <div class="panel-tools">
+              <label class="sr-only" for="home-world-filter">Filter worlds</label>
+              <input id="home-world-filter" type="search" placeholder="Filter worlds…" autocomplete="off">
+            </div>
+          </div>
+          <div id="home-worlds" class="world-list" aria-live="polite"><p class="muted">Loading worlds…</p></div>
+        </section>
+        <div class="home-side">
+          <section class="content-panel" aria-labelledby="home-examples-title">
+            <div class="panel-heading"><div><p class="eyebrow">Start from an example</p><h2 id="home-examples-title">Example seeds</h2></div></div>
+            <div id="home-examples" class="example-list"><p class="muted">Loading examples…</p></div>
+          </section>
+          <section class="content-panel" aria-labelledby="home-system-title">
+            <div class="panel-heading"><div><p class="eyebrow">This machine</p><h2 id="home-system-title">System</h2></div><button type="button" class="ghost small" data-go-view="api">Details</button></div>
+            <dl id="home-system" class="kv-list"><dt>Status</dt><dd>Connecting…</dd></dl>
+          </section>
+          <section class="content-panel tips-panel" aria-label="Tips">
+            <p class="eyebrow">Tips</p>
+            <ul class="tips">
+              <li><kbd>Ctrl</kbd> <kbd>K</kbd> opens the command palette — jump to any layer, world or action.</li>
+              <li><kbd>?</kbd> shows all keyboard shortcuts.</li>
+              <li>Pin layers with <svg class="icon inline" aria-hidden="true"><use href="#i-star"/></svg> to keep them at the top of the map’s layer list.</li>
+            </ul>
+          </section>
         </div>
-        <label class="sr-only" for="config-yaml">World YAML configuration</label>
-        <textarea id="config-yaml" spellcheck="false" aria-describedby="config-result" placeholder="Loading configuration template…"></textarea>
-        <div id="config-result" class="validation-result" role="status" aria-live="polite">Choose a profile or edit the template, then validate.</div>
-        <div class="form-toolbar">
-          <span id="config-saved-status" class="muted" role="status">Save a configuration to use it in generation.</span>
-          <button type="button" id="config-generate" disabled>Use saved config for generation →</button>
+      </div>
+    </section>
+
+    <!-- ================================================================= MAP -->
+    <section id="view-map" class="workbench-view" data-view-panel="map" role="tabpanel" aria-labelledby="tab-map" hidden>
+      <div id="app">
+        <aside id="sidebar" aria-label="Map layers">
+          <header id="world-info">
+            <div class="world-info-head">
+              <h1><svg class="icon" aria-hidden="true"><use href="#i-layers"/></svg>Layers</h1>
+              <button type="button" id="layer-collapse-all" class="icon-button small" title="Collapse all groups" aria-label="Collapse all layer groups"><svg class="icon" aria-hidden="true"><use href="#i-collapse"/></svg></button>
+            </div>
+            <div id="world-meta"></div>
+          </header>
+          <div class="search-field">
+            <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+            <label class="sr-only" for="layer-search">Filter layers</label>
+            <input id="layer-search" type="search" placeholder="Search 400+ layers…" autocomplete="off" aria-describedby="layer-search-hint">
+            <kbd id="layer-search-hint" title="Press / to search">/</kbd>
+          </div>
+          <div id="layer-filters" class="chip-row" role="group" aria-label="Layer type filter">
+            <button type="button" class="chip active" data-layer-filter="all" aria-pressed="true">All</button>
+            <button type="button" class="chip" data-layer-filter="numeric" aria-pressed="false">Numeric</button>
+            <button type="button" class="chip" data-layer-filter="categorical" aria-pressed="false">Classes</button>
+            <button type="button" class="chip" data-layer-filter="time" aria-pressed="false">Over time</button>
+          </div>
+          <nav id="layer-list" aria-label="Available layers"></nav>
+          <section id="docs-card" class="hidden" aria-label="Active layer documentation">
+            <div id="docs-card-head">
+              <span id="docs-card-title"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg>About this layer</span>
+              <div id="docs-card-actions">
+                <button type="button" id="docs-help-open" class="icon-button small" title="Help (?)" aria-label="Open help"><svg class="icon" aria-hidden="true"><use href="#i-help"/></svg></button>
+                <button type="button" id="docs-card-toggle" class="icon-button small" title="Collapse layer documentation" aria-label="Toggle layer documentation" aria-expanded="true">▾</button>
+              </div>
+            </div>
+            <div id="docs-card-body"></div>
+          </section>
+        </aside>
+
+        <div id="viewport" class="map-surface">
+          <canvas id="globe" tabindex="0" role="application" aria-roledescription="map" aria-label="World map" aria-describedby="map-instructions"></canvas>
+          <p id="map-instructions" class="sr-only">Drag or use the arrow keys to move, scroll or press plus and minus to zoom, 0 to show the whole world. Select a cell to inspect it.</p>
+          <div id="map-announcer" class="sr-only" role="status" aria-live="polite"></div>
+          <div id="map-places" aria-hidden="true"></div>
+          <div id="map-tooltip" class="map-tooltip" hidden aria-hidden="true"></div>
+          <div id="map-empty" class="empty-state hidden" role="status">
+            <div>
+              <div class="empty-orb" aria-hidden="true"></div>
+              <h2>No world to show yet</h2>
+              <p>Generate a world with “Prepare browser map” enabled, or choose an existing world from the picker at the top. Generated worlds appear here automatically.</p>
+              <div class="button-row">
+                <button type="button" class="primary" data-action="new-world"><svg class="icon" aria-hidden="true"><use href="#i-sparkles"/></svg>Create a world</button>
+                <button type="button" data-go-view="operations">Open jobs</button>
+              </div>
+            </div>
+          </div>
+          <div id="topbar">
+            <button type="button" id="sidebar-toggle" class="map-button" title="Hide the layer panel" aria-label="Hide the layer panel" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-panel"/></svg></button>
+            <div class="control-group" id="projection-controls" role="group" aria-label="Projection">
+              <button type="button" data-proj="globe" class="active" title="Globe (1)" aria-pressed="true"><svg class="icon" aria-hidden="true"><use href="#i-globe"/></svg><span>Globe</span></button>
+              <button type="button" data-proj="equirect" title="Equirectangular (2)" aria-pressed="false"><span>Equirect</span></button>
+              <button type="button" data-proj="mollweide" title="Mollweide (3)" aria-pressed="false"><span>Mollweide</span></button>
+            </div>
+            <div class="control-group" id="overlay-controls" role="group" aria-label="Map overlays">
+              <button type="button" id="toggle-wireframe" title="Cell outlines (w)" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-mesh"/></svg><span>Cells</span></button>
+              <button type="button" id="toggle-relief" title="Relief shading from elevation (r) — changes colour brightness on slopes" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-mountain"/></svg><span>Relief</span></button>
+              <button type="button" id="toggle-plates" title="Tectonic plate boundaries (b)" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-plates"/></svg><span>Plates</span></button>
+              <button type="button" id="toggle-graticule" title="Latitude/longitude grid (g)" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-graticule"/></svg><span>Grid</span></button>
+              <button type="button" id="toggle-places" title="Places: settlements, ports, ruins, sacred areas and landmasses (p)" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-pin"/></svg><span>Places</span></button>
+            </div>
+            <div class="control-group" id="export-controls" role="group" aria-label="Export current map">
+              <button type="button" id="export-map-image" title="Export the current map reference as PNG" disabled><svg class="icon" aria-hidden="true"><use href="#i-image"/></svg><span>PNG</span></button>
+              <button type="button" id="export-image-prompt" title="Export a GPT Image prompt and color codex as Markdown" disabled><svg class="icon" aria-hidden="true"><use href="#i-file-text"/></svg><span>Prompt</span></button>
+            </div>
+            <div id="topbar-right">
+              <div id="legend">
+                <div id="legend-head">
+                  <div id="legend-title"></div>
+                  <button type="button" id="legend-info" class="active" title="Layer docs (d)" aria-label="Toggle layer documentation" aria-pressed="true"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg></button>
+                </div>
+                <canvas id="legend-histogram" width="240" height="26" aria-hidden="true" hidden></canvas>
+                <div id="legend-scale" class="legend-scale">
+                  <span class="legend-extend under" aria-hidden="true"></span>
+                  <div class="legend-ramp-wrap">
+                    <canvas id="legend-ramp" width="240" height="10" role="img" aria-label="Layer color scale"></canvas>
+                    <span id="legend-marker" class="legend-marker" hidden aria-hidden="true"></span>
+                    <div id="legend-ticks" aria-hidden="true"></div>
+                  </div>
+                  <span class="legend-extend over" aria-hidden="true"></span>
+                </div>
+                <div id="legend-labels"><span id="legend-min"></span><span id="legend-unit"></span><span id="legend-max"></span></div>
+                <div id="legend-categories" role="group" aria-label="Classes — select one to spotlight it"></div>
+                <p id="legend-note"></p>
+                <details id="legend-options" hidden>
+                  <summary><svg class="icon" aria-hidden="true"><use href="#i-palette"/></svg>Colour scale</summary>
+                  <div class="legend-option-grid">
+                    <label for="legend-colormap">Colours</label>
+                    <select id="legend-colormap">
+                      <option value="auto">Automatic</option>
+                      <option value="viridis">Viridis — sequential</option>
+                      <option value="coolwarm">Cool–warm — diverging at 0</option>
+                      <option value="terrain">Terrain — split at sea level</option>
+                    </select>
+                    <label for="legend-range">Range</label>
+                    <select id="legend-range">
+                      <option value="robust">2nd–98th percentile</option>
+                      <option value="full">Full minimum–maximum</option>
+                    </select>
+                  </div>
+                </details>
+              </div>
+            </div>
+          </div>
+          <div id="stagebar" class="hidden">
+            <button type="button" id="stage-play" class="map-button" title="Play through stages or months (space)" aria-label="Play" aria-pressed="false"><svg class="icon icon-play" aria-hidden="true"><use href="#i-play"/></svg><svg class="icon icon-pause" aria-hidden="true"><use href="#i-pause"/></svg></button>
+            <button type="button" id="stage-back" class="map-button" title="Previous stage (,)" aria-label="Previous stage"><svg class="icon" aria-hidden="true"><use href="#i-prev"/></svg></button>
+            <label class="sr-only" for="stage-slider">Stage or month</label>
+            <input id="stage-slider" type="range" min="0" max="0" value="0" step="1">
+            <button type="button" id="stage-fwd" class="map-button" title="Next stage (.)" aria-label="Next stage"><svg class="icon" aria-hidden="true"><use href="#i-next"/></svg></button>
+            <label class="sr-only" for="stage-number">Exact stage or month</label>
+            <input id="stage-number" type="number" min="0" max="0" value="0">
+            <span id="stage-label"></span>
+          </div>
+          <div id="map-status-row">
+            <div id="status" role="status" aria-live="polite"></div>
+            <div id="map-hover"></div>
+          </div>
+          <div id="map-corner">
+            <div id="map-nav" class="control-group vertical" role="group" aria-label="Map navigation">
+              <button type="button" id="map-zoom-in" title="Zoom in (+)" aria-label="Zoom in"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg></button>
+              <button type="button" id="map-zoom-out" title="Zoom out (−)" aria-label="Zoom out"><svg class="icon" aria-hidden="true"><use href="#i-minus"/></svg></button>
+              <button type="button" id="map-fit" title="Show the whole world (0)" aria-label="Show the whole world"><svg class="icon" aria-hidden="true"><use href="#i-maximize"/></svg></button>
+            </div>
+            <div id="map-readout">
+              <div id="map-scale" hidden><span id="map-scale-bar"></span><span id="map-scale-label"></span></div>
+              <div id="map-coords" title="Latitude and longitude under the pointer (or of the view centre)"></div>
+            </div>
+          </div>
         </div>
-      </section>
-      <aside class="content-panel schema-panel">
-        <div class="panel-heading"><div><p class="eyebrow">Reference</p><h2>Schema fields</h2></div><input id="schema-search" type="search" placeholder="Filter fields…" aria-label="Filter schema fields"></div>
-        <p id="config-schema-status" class="muted" role="status">Loading the current configuration schema…</p>
-        <div id="schema-docs" class="schema-docs"></div>
-      </aside>
-    </div>
-  </section>
 
-  <section id="view-operations" class="workbench-view page-view" data-view-panel="operations" role="tabpanel" aria-labelledby="tab-operations" hidden>
-    <header class="page-heading">
-      <div><p class="eyebrow">Shared CLI services</p><h1>Operations</h1><p>Run generation, validation, calibration, rendering, and export jobs from the same typed operation catalog.</p></div>
-      <button type="button" id="jobs-refresh">Refresh jobs</button>
-    </header>
-    <div class="operations-grid">
-      <section class="content-panel operation-launcher">
-        <label for="operation-select">Operation</label>
-        <select id="operation-select"></select>
-        <p id="operation-description" class="muted"></p>
-        <form id="operation-form">
-          <div id="operation-fields"></div>
-          <button type="submit" class="primary">Start job</button>
-        </form>
-        <div id="operation-result" role="status" aria-live="polite"></div>
-      </section>
-      <section class="content-panel jobs-panel">
-        <div class="panel-heading"><div><p class="eyebrow">Background work</p><h2>Jobs</h2></div><span id="jobs-poll-state" class="state-pill">Live</span></div>
-        <div id="jobs-list" class="jobs-list"></div>
-      </section>
-      <section class="content-panel job-detail-panel">
-        <div class="panel-heading"><div><p class="eyebrow">Selected job</p><h2 id="job-detail-title">No job selected</h2></div><button type="button" id="job-cancel" class="danger hidden">Cancel job</button></div>
-        <div id="job-detail" class="job-detail"><p class="muted">Select a job to inspect progress, logs, and artifacts.</p></div>
-      </section>
-    </div>
-  </section>
+        <aside id="inspector" class="hidden" aria-label="Selected cell inspector">
+          <header>
+            <div class="inspector-heading">
+              <svg class="icon" aria-hidden="true"><use href="#i-layers"/></svg>
+              <h2 id="inspector-title">Cell</h2>
+            </div>
+            <div class="inspector-actions">
+              <button type="button" id="inspector-locate" class="icon-button" aria-label="Centre the map on this cell" title="Centre the map on this cell (c)"><svg class="icon" aria-hidden="true"><use href="#i-target"/></svg></button>
+              <button type="button" id="inspector-close" class="icon-button" aria-label="Close cell inspector" title="Close (Esc)"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+            </div>
+          </header>
+          <div id="inspector-body"></div>
+        </aside>
+      </div>
+    </section>
 
-  <section id="view-api" class="workbench-view page-view" data-view-panel="api" role="tabpanel" aria-labelledby="tab-api" hidden>
-    <header class="page-heading">
-      <div><p class="eyebrow">Runtime contract</p><h1>Backend &amp; API</h1><p>Inspect compute capabilities and use the live OpenAPI explorer.</p></div>
-      <div class="button-row"><button type="button" id="backend-refresh">Refresh backend</button><a class="button primary" href="/api/docs" target="_blank" rel="noopener">Open Swagger ↗</a></div>
-    </header>
-    <div class="api-grid">
-      <section class="content-panel backend-panel"><div class="panel-heading"><div><p class="eyebrow">Compute</p><h2>Backend information</h2></div></div><div id="backend-output" class="data-output"></div></section>
-      <section class="content-panel api-panel"><div class="panel-heading"><div><p class="eyebrow">OpenAPI</p><h2>Interactive documentation</h2></div></div><iframe id="api-docs-frame" title="Swagger API documentation" src="/api/docs"></iframe></section>
-    </div>
-  </section>
-</main>
+    <!-- ================================================================ DATA -->
+    <section id="view-data" class="workbench-view page-view" data-view-panel="data" role="tabpanel" aria-labelledby="tab-data" hidden>
+      <header class="page-heading">
+        <div><p class="eyebrow">Generated world</p><h1>Data browser</h1><p>Every exported scalar, layer, stage summary, record family and model section — the same data the map draws, as tables.</p></div>
+        <button type="button" id="data-refresh"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>Refresh catalog</button>
+      </header>
+      <div id="data-unavailable" class="notice warning hidden" role="status"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg><span>No world is selected, so there is no data to browse yet. Generate a world with its browser map prepared, or pick one from the world selector. Configure, Jobs and API still work.</span></div>
+      <div id="data-workspace" class="split-workspace">
+        <aside class="tool-panel" aria-label="Data selection">
+          <label for="data-kind">What to browse</label>
+          <select id="data-kind">
+            <option value="overview">Overview</option>
+            <option value="families">Record families</option>
+            <option value="stages">Stage summaries</option>
+            <option value="sections">Model sections</option>
+            <option value="scalars">World scalars</option>
+            <option value="layers">Layer catalog</option>
+            <option value="cells">Cell schema</option>
+            <option value="skipped">Skipped outputs</option>
+          </select>
+          <div id="data-resource-wrap" class="field-stack hidden">
+            <label for="data-resource-search">Filter</label>
+            <input id="data-resource-search" type="search" placeholder="Find a family, section or history…">
+            <label for="data-resource">Resource</label>
+            <select id="data-resource"></select>
+          </div>
+          <div id="family-detail-wrap" class="field-stack hidden">
+            <label for="family-detail">Detail</label>
+            <select id="family-detail"><option value="full">Full nested records</option><option value="scalars">Scalar columns only</option></select>
+          </div>
+          <div id="data-page-controls" class="field-stack hidden">
+            <label for="data-limit">Rows per page</label>
+            <select id="data-limit"><option value="10" selected>10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select>
+            <div class="pager">
+              <button type="button" id="data-prev" aria-label="Previous page"><svg class="icon" aria-hidden="true"><use href="#i-prev"/></svg></button>
+              <span id="data-page-label">0–0</span>
+              <button type="button" id="data-next" aria-label="Next page"><svg class="icon" aria-hidden="true"><use href="#i-next"/></svg></button>
+            </div>
+          </div>
+        </aside>
+        <article class="content-panel data-panel">
+          <div id="data-title-row"><div><p class="eyebrow" id="data-eyebrow">Catalog</p><h2 id="data-title">Overview</h2></div><div class="button-row"><a id="data-raw-link" class="button hidden" target="_blank" rel="noopener">Raw JSON<svg class="icon" aria-hidden="true"><use href="#i-external"/></svg></a><span id="data-loading" class="state-pill pending hidden">Loading…</span></div></div>
+          <div id="data-output" class="data-output" tabindex="0"></div>
+        </article>
+      </div>
+    </section>
 
+    <!-- ============================================================== CONFIG -->
+    <section id="view-config" class="workbench-view page-view" data-view-panel="config" role="tabpanel" aria-labelledby="tab-config" hidden>
+      <header class="page-heading">
+        <div><p class="eyebrow">World definition</p><h1>Configure a world</h1><p>Open an existing YAML file or start from a profile, validate it against the schema, save it, then continue to generation.</p></div>
+        <div class="button-row">
+          <button type="button" class="primary" data-action="new-world"><svg class="icon" aria-hidden="true"><use href="#i-sparkles"/></svg>New world…</button>
+        </div>
+      </header>
+      <ol class="stepper" aria-label="Configuration steps">
+        <li data-config-step="open"><span>1</span>Open or create</li>
+        <li data-config-step="validate"><span>2</span>Edit &amp; validate</li>
+        <li data-config-step="save"><span>3</span>Save</li>
+        <li data-config-step="generate"><span>4</span>Generate</li>
+      </ol>
+      <section class="content-panel config-library" aria-label="Configuration files">
+        <div class="file-picker"><label for="config-file"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg>Existing configuration</label><select id="config-file"><option value="">Discovering configurations…</option></select></div>
+        <button type="button" id="config-open">Open file</button>
+        <button type="button" id="config-files-refresh" class="icon-button" title="Refresh the file list" aria-label="Refresh the file list"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg></button>
+        <p id="config-discovery-status" class="muted" role="status">Searching configured directories…</p>
+      </section>
+      <div class="config-grid">
+        <section class="content-panel editor-panel">
+          <div class="form-toolbar">
+            <div><label for="config-profile">Profile</label><select id="config-profile"></select></div>
+            <button type="button" id="config-reset">Reset from profile</button>
+            <div class="grow"><label for="config-name">File name</label><input id="config-name" type="text" value="world" pattern="[A-Za-z0-9][A-Za-z0-9._\-]*" title="Letters, digits, dot, underscore, or dash; must start with a letter or digit" autocomplete="off"></div>
+            <button type="button" id="config-validate"><svg class="icon" aria-hidden="true"><use href="#i-check-circle"/></svg>Validate</button>
+          </div>
+          <p id="config-source" class="path-context">New configuration</p>
+          <div class="code-editor">
+            <div class="code-gutter" id="config-gutter" aria-hidden="true"></div>
+            <div class="code-area">
+              <pre class="code-highlight" id="config-highlight" aria-hidden="true"></pre>
+              <label class="sr-only" for="config-yaml">World YAML configuration</label>
+              <textarea id="config-yaml" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" aria-describedby="config-result config-editor-help" placeholder="Loading configuration template…"></textarea>
+            </div>
+          </div>
+          <p id="config-editor-help" class="field-help"><kbd>Ctrl</kbd>+<kbd>Enter</kbd> validates · <kbd>Ctrl</kbd>+<kbd>S</kbd> saves · <kbd>Tab</kbd> moves to the next control</p>
+          <div id="config-result" class="validation-result" role="status" aria-live="polite">Choose a profile or edit the template, then validate.</div>
+          <div class="editor-footer">
+            <span id="config-saved-status" class="muted" role="status">Save a configuration to use it in generation.</span>
+            <div class="button-row">
+              <button type="button" id="config-download" class="ghost"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>Download</button>
+              <button type="button" id="config-save"><svg class="icon" aria-hidden="true"><use href="#i-save"/></svg>Save</button>
+              <button type="button" id="config-generate" hidden disabled>Prepare generation</button>
+              <button type="button" id="config-save-generate" class="primary">Save &amp; generate<svg class="icon" aria-hidden="true"><use href="#i-arrow-right"/></svg></button>
+            </div>
+          </div>
+        </section>
+        <aside class="content-panel schema-panel">
+          <div class="panel-heading"><div><p class="eyebrow">Reference</p><h2>Schema fields</h2></div><input id="schema-search" type="search" placeholder="Filter fields…" aria-label="Filter schema fields"></div>
+          <p id="config-schema-status" class="muted" role="status">Loading the current configuration schema…</p>
+          <div id="schema-docs" class="schema-docs"></div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ========================================================== OPERATIONS -->
+    <section id="view-operations" class="workbench-view page-view" data-view-panel="operations" role="tabpanel" aria-labelledby="tab-operations" hidden>
+      <header class="page-heading">
+        <div><p class="eyebrow">Create &amp; process</p><h1>Jobs</h1><p>Generate worlds, validate them, render maps and export data. Jobs run one at a time in the background — follow each stage here or from the header while you explore.</p></div>
+        <button type="button" id="jobs-refresh"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>Refresh</button>
+      </header>
+      <div class="operations-grid">
+        <section class="content-panel job-detail-panel">
+          <div class="panel-heading"><div><p class="eyebrow">Selected job</p><h2 id="job-detail-title" tabindex="-1">No job selected</h2></div><button type="button" id="job-cancel" class="danger hidden"><svg class="icon" aria-hidden="true"><use href="#i-stop"/></svg>Cancel job</button></div>
+          <p id="job-announcement" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
+          <p id="job-connection" class="job-connection" role="status"></p>
+          <div id="job-actions" class="button-row"></div>
+          <div id="job-detail" class="job-detail"><div class="empty-inline"><svg class="icon" aria-hidden="true"><use href="#i-play-circle"/></svg><p>Start a new job, or select one from the history, to follow its progress, logs and outputs here.</p></div></div>
+        </section>
+        <section class="content-panel operation-launcher">
+          <div class="panel-heading"><div><p class="eyebrow">New job</p><h2>Start a job</h2></div></div>
+          <div id="operation-quick" class="chip-row" role="group" aria-label="Common operations"></div>
+          <label for="operation-select">Operation</label>
+          <select id="operation-select"></select>
+          <p id="operation-description" class="muted"></p>
+          <form id="operation-form">
+            <div id="operation-fields"></div>
+            <button type="submit" class="primary">Start job</button>
+          </form>
+          <div id="operation-result" role="status" aria-live="polite"></div>
+        </section>
+        <section class="content-panel jobs-panel">
+          <div class="panel-heading"><div><p class="eyebrow">This session</p><h2>History</h2></div><span id="jobs-poll-state" class="state-pill">Live</span></div>
+          <div id="jobs-list" class="jobs-list"></div>
+        </section>
+      </div>
+    </section>
+
+    <!-- ================================================================= API -->
+    <section id="view-api" class="workbench-view page-view" data-view-panel="api" role="tabpanel" aria-labelledby="tab-api" hidden>
+      <header class="page-heading">
+        <div><p class="eyebrow">Runtime contract</p><h1>API &amp; system</h1><p>Compute capabilities of the native engine, where files are stored, and the live OpenAPI explorer for scripting the same workflows.</p></div>
+        <div class="button-row"><button type="button" id="backend-refresh"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>Refresh</button><a class="button primary" href="/api/docs" target="_blank" rel="noopener">Swagger UI<svg class="icon" aria-hidden="true"><use href="#i-external"/></svg></a><a class="button" href="/api/redoc" target="_blank" rel="noopener">ReDoc<svg class="icon" aria-hidden="true"><use href="#i-external"/></svg></a></div>
+      </header>
+      <div class="api-grid">
+        <div class="api-side">
+          <section class="content-panel backend-panel"><div class="panel-heading"><div><p class="eyebrow">Compute</p><h2>Native engine</h2></div><svg class="icon muted-icon" aria-hidden="true"><use href="#i-cpu"/></svg></div><div id="backend-output" class="data-output"></div></section>
+          <section class="content-panel storage-panel"><div class="panel-heading"><div><p class="eyebrow">Storage</p><h2>File locations</h2></div><svg class="icon muted-icon" aria-hidden="true"><use href="#i-folder"/></svg></div><p class="muted">Set when the server starts. Relative paths are anchored to the project; override them with <code>MAGIC_GEO_*</code> environment variables.</p><dl id="storage-paths" class="kv-list"></dl></section>
+          <section class="content-panel"><div class="panel-heading"><div><p class="eyebrow">Quick reference</p><h2>Common endpoints</h2></div></div>
+            <ul class="endpoint-list">
+              <li><span class="method get">GET</span><code>/api/status</code><span>Selected world and storage</span></li>
+              <li><span class="method get">GET</span><code>/api/worlds</code><span>Discovered world caches</span></li>
+              <li><span class="method post">POST</span><code>/api/config/render</code><span>Profile + overrides → YAML</span></li>
+              <li><span class="method post">POST</span><code>/api/jobs</code><span>Queue an operation</span></li>
+              <li><span class="method get">GET</span><code>/api/jobs/{id}</code><span>Progress, logs, artifacts</span></li>
+              <li><span class="method get">GET</span><code>/api/layer/{id}</code><span>Float32 or Arrow values</span></li>
+              <li><span class="method get">GET</span><code>/api/cell/{id}</code><span>Every field for one cell</span></li>
+            </ul>
+          </section>
+        </div>
+        <section class="content-panel api-panel"><div class="panel-heading"><div><p class="eyebrow">OpenAPI</p><h2>Interactive documentation</h2></div></div><iframe id="api-docs-frame" title="Swagger API documentation" data-src="/api/docs" loading="lazy"></iframe></section>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- Help & shortcuts -->
 <div id="help-overlay" class="hidden" role="dialog" aria-modal="true" aria-labelledby="help-title">
   <div id="help-panel">
     <header id="help-header">
-      <h2 id="help-title">magic-geo workbench — help</h2>
-      <button type="button" id="help-close" title="Close (Esc)" aria-label="Close help">×</button>
+      <h2 id="help-title"><svg class="icon" aria-hidden="true"><use href="#i-keyboard"/></svg>Help &amp; keyboard shortcuts</h2>
+      <button type="button" id="help-close" class="icon-button" title="Close (Esc)" aria-label="Close help"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
     </header>
     <div id="help-body"></div>
   </div>
 </div>
 
+<!-- Command palette -->
+<dialog id="command-palette" class="command-palette" aria-label="Command palette">
+  <div class="command-input-row">
+    <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+    <input id="command-input" type="text" role="combobox" aria-expanded="true" aria-controls="command-results" aria-autocomplete="list" placeholder="Type a layer, world, config or action…" autocomplete="off" spellcheck="false">
+    <kbd>Esc</kbd>
+  </div>
+  <div id="command-results" role="listbox" aria-label="Results"></div>
+  <div class="command-footer"><span><kbd>↑</kbd><kbd>↓</kbd> navigate</span><span><kbd>Enter</kbd> run</span><span><kbd>Esc</kbd> close</span></div>
+</dialog>
+
+<!-- New world wizard -->
+<dialog id="new-world-dialog" class="modal" aria-labelledby="new-world-title">
+  <form id="new-world-form" method="dialog" novalidate>
+    <header class="modal-header">
+      <div><p class="eyebrow">New world</p><h2 id="new-world-title">Start from a profile</h2></div>
+      <button type="button" class="icon-button" data-close-dialog aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+    </header>
+    <div class="modal-body">
+      <fieldset class="profile-fieldset">
+        <legend>Profile</legend>
+        <div id="new-world-profiles" class="profile-cards"></div>
+      </fieldset>
+      <div class="form-grid">
+        <div class="form-field">
+          <label for="new-world-name">World name</label>
+          <input id="new-world-name" name="name" type="text" required pattern="[A-Za-z0-9][A-Za-z0-9 ._\-]*" maxlength="80" autocomplete="off" placeholder="e.g. aurora">
+          <span class="field-help">Used as <code>run.name</code> and for the file and output names.</span>
+        </div>
+        <div class="form-field">
+          <label for="new-world-seed">Seed</label>
+          <div class="input-with-button">
+            <input id="new-world-seed" name="seed" type="number" min="0" step="1" required inputmode="numeric">
+            <button type="button" id="new-world-dice" class="icon-button" title="Random seed" aria-label="Random seed"><svg class="icon" aria-hidden="true"><use href="#i-dice"/></svg></button>
+          </div>
+          <span class="field-help">Same seed + same settings = the same planet.</span>
+        </div>
+        <div class="form-field full">
+          <label id="new-world-cells-label">Resolution</label>
+          <div id="new-world-cells" class="segmented" role="radiogroup" aria-labelledby="new-world-cells-label"></div>
+          <span class="field-help" id="new-world-cells-help">More cells show finer detail but take longer to generate.</span>
+        </div>
+      </div>
+      <details class="modal-advanced">
+        <summary>Planet &amp; tectonics</summary>
+        <div id="new-world-advanced" class="form-grid"></div>
+      </details>
+      <div id="new-world-result" class="validation-result hidden" role="status" aria-live="polite"></div>
+    </div>
+    <footer class="modal-footer">
+      <span class="muted modal-footnote">Creates a YAML file you can fine-tune in the editor.</span>
+      <div class="button-row">
+        <button type="button" class="ghost" data-close-dialog>Cancel</button>
+        <button type="button" id="new-world-edit">Open in editor</button>
+        <button type="submit" id="new-world-create" class="primary"><svg class="icon" aria-hidden="true"><use href="#i-sparkles"/></svg>Create &amp; generate</button>
+      </div>
+    </footer>
+  </form>
+</dialog>
+
+<div id="toast-region" class="toast-region" aria-live="polite" aria-relevant="additions"></div>
+
+<datalist id="config-path-options"></datalist>
 <script type="module" src="./app.js"></script>
 </body>
 </html>

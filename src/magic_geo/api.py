@@ -33,6 +33,7 @@ from .fault_systems import enrich_world_with_fault_systems
 from .geology_realism import enrich_world_with_geology_realism
 from .glacial_landforms import enrich_world_with_glacial_landforms
 from .geo_evolution_provenance import enrich_world_with_geo_evolution_provenance
+from .generation_progress import emit_progress
 from .graph_diagnostics import (
     enrich_world_with_graph_diagnostics,
     enrich_world_with_physical_graph_diagnostics,
@@ -206,20 +207,24 @@ def _enrich_physical_foundation(world: dict[str, Any], config: WorldConfig) -> N
     evolved relief, climate, hydrology, soils, biomes, and resources; these
     Python layers diagnose that final state and add linked derived records.
     """
+    emit_progress("geography_enrichment", "Building map geometry", "Preparing spherical indexes, cell boundaries and map detail levels.")
     require_grounded_ice(world)
     enrich_world_with_mesh_lod(world)
     enrich_world_with_spherical_index(world)
     enrich_world_with_cell_geometry(world)
+    emit_progress("geography_enrichment", "Describing geology and oceans", "Linking tectonic zones, faults, sea level and ocean circulation.")
     enrich_world_with_geology_realism(world)
     enrich_world_with_tectonic_zones(world)
     enrich_world_with_fault_systems(world)
     enrich_world_with_sea_level_diagnostics(world)
     enrich_world_with_ocean_circulation(world)
+    emit_progress("geography_enrichment", "Adding climate diagnostics", "Deriving seasonal histories, energy balance and climate records from the generated climate.")
     enrich_world_with_climate_continentality(world)
     enrich_world_with_seasonal_climate_history(world)
     enrich_world_with_climate_energy_balance(world, config.planet)
     enrich_world_with_planet_realism(world, config.planet)
     enrich_world_with_climate_realism(world)
+    emit_progress("geography_enrichment", "Describing rivers, lakes and sediment", "Linking watersheds, water flows and sediment history.")
     enrich_world_with_lake_overflow_history(world)
     enrich_world_with_watershed_diagnostics(world)
     enrich_world_with_hydrology_realism(world)
@@ -227,12 +232,14 @@ def _enrich_physical_foundation(world: dict[str, Any], config: WorldConfig) -> N
     enrich_world_with_river_network_evolution(world)
     enrich_world_with_sediment_transport_history(world)
     enrich_world_with_sequence_stratigraphy(world)
+    emit_progress("geography_enrichment", "Describing ice and soils", "Adding glacier history, ice stability and soil profiles.")
     enrich_world_with_ice_sheet_history(world)
     enrich_world_with_ice_sheet_stability(world)
     enrich_world_with_ice_flowline_history(world)
     enrich_world_with_soil_diagnostics(world)
     # Publish seasonal biome diagnostics before the linked frozen-ground
     # records, which also consume soil moisture and organic matter.
+    emit_progress("geography_enrichment", "Describing biomes and groundwater", "Linking frozen ground, vegetation, aquifers, wetlands and river channels.")
     enrich_world_with_biome_diagnostics(world)
     enrich_world_with_permafrost_diagnostics(world)
     enrich_world_with_glacial_landforms(world)
@@ -253,10 +260,12 @@ def _enrich_ecosystems_and_resources(world: dict[str, Any]) -> None:
     In a full world, ports must exist before reef records link nearby ports.
     In a geo-only world those optional human inputs have been removed.
     """
+    emit_progress("ecosystems", "Building ecosystems", "Calculating reefs, species ranges, ecological change and wildfire disturbance.")
     enrich_world_with_ecosystem_dynamics(world)
     enrich_world_with_reef_diagnostics(world)
     enrich_world_with_species_ranges(world)
     enrich_world_with_wildfire_disturbance(world)
+    emit_progress("resources", "Locating natural resources", "Linking mineral deposits, sedimentary resources and petroleum systems.")
     enrich_world_with_resource_deposits(world)
     enrich_world_with_ore_genesis(world)
     enrich_world_with_sedimentary_resource_systems(world)
@@ -276,28 +285,35 @@ def generate_world(config: WorldConfig) -> dict[str, Any]:
     # exports; suppress cells only after all linked records have been built.
     native_config = config_to_native(config)
     native_config["output"]["include_cells"] = True
+    emit_progress("native_generation", "Starting the world simulation", "Generating terrain, climate, water and settlements with the selected configuration.")
     world = native_generate_world(native_config)
     _require_configured_planet_snapshot(world, config)
     _enrich_physical_foundation(world, config)
+    emit_progress("settlements", "Describing settlements and territories", "Linking routes, political regions, cultures and historical geography.")
     enrich_world_with_settlement_route_models(world)
     enrich_world_with_political_geography_models(world)
     enrich_world_with_cultural_geography_models(world)
     enrich_world_with_historical_geography_model(world)
     enrich_world_with_civilization_geography_models(world)
     enrich_world_with_territorial_geography_model(world)
+    emit_progress("settlements", "Connecting ports and travel corridors", "Evaluating waterway navigation, port sites and route corridors.")
     enrich_world_with_navigability_diagnostics(world)
     enrich_world_with_port_sites(world)
     enrich_world_with_route_corridors(world)
     _enrich_ecosystems_and_resources(world)
+    emit_progress("settlements", "Describing land use", "Deriving land-use zones, natural frontiers and worldbuilding diagnostics.")
     enrich_world_with_land_use_zones(world)
     enrich_world_with_natural_frontiers(world)
     enrich_world_with_worldbuilding_realism(world)
+    emit_progress("history", "Building population and economic history", "Replaying population, economic changes and dynastic links.")
     enrich_world_with_population_history(world)
     enrich_world_with_economy_history(world)
     enrich_world_with_dynasty_genealogy(world)
+    emit_progress("economy", "Calculating logistics and markets", "Linking transport history, demographic agents and market clearing.")
     enrich_world_with_logistics_history(world)
     enrich_world_with_demographic_agents(world)
     enrich_world_with_market_clearing(world)
+    emit_progress("geometry", "Finalizing boundaries and world links", "Building graph diagnostics, boundary geometry and language history.")
     enrich_world_with_graph_diagnostics(world)
     enrich_world_with_boundary_geometry(world)
     enrich_world_with_phonology_history(world)
@@ -344,6 +360,7 @@ def generate_geo_world(config: WorldConfig) -> dict[str, Any]:
             "natural enrichers and layer validation consume per-cell state"
         )
 
+    emit_progress("native_generation", "Starting the geography simulation", "Generating terrain, climate and water with the selected configuration.")
     world = native_generate_geo_world(config_to_native(config))
     _require_configured_planet_snapshot(world, config)
     _strip_native_civilization_outputs(world)
@@ -353,6 +370,7 @@ def generate_geo_world(config: WorldConfig) -> dict[str, Any]:
     _enrich_ecosystems_and_resources(world)
 
     # Only physical graph and boundary products are valid in this scope.
+    emit_progress("geometry", "Finalizing geographic boundaries and links", "Building physical graph diagnostics, boundaries and geographic evolution records.")
     enrich_world_with_physical_graph_diagnostics(world)
     enrich_world_with_physical_boundary_geometry(world)
     enrich_world_with_geo_evolution_provenance(world)

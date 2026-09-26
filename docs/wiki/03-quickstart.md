@@ -567,7 +567,7 @@ A geo-only world renders fine, but `svg_map`/`raster_map` read `world.get("settl
 python -m pip install -e '.[debug]'
 magic-geo serve
 # Serving web workbench with automatic workspace cache discovery
-# (Config and Operations remain available) at http://127.0.0.1:8642
+# at http://127.0.0.1:8642 — Home, Configure, Jobs and API work before any world exists
 ```
 
 | Flag | Type | Default | Env var | Help text (verbatim) |
@@ -592,42 +592,51 @@ Source: `src/magic_geo/cli/commands/serve.py:13-47`. Flags beat env vars, env va
 
 ### The first tour
 
-Five tabs, hash-routed (`src/magic_geo/debug_ui/index.html:18-23`). Their left-to-right order in the tab bar is **Map, Data, Config, Operations, API**, and Map is the active tab on load; the table below is ordered by the sequence to *work* through on a first run, not by tab position:
+The workbench opens on **Home**. The navigation rail lists the views in workflow order — **Home, Configure, Jobs, Map, Data, API** — and each has a hash address (`#home`, `#config`, `#operations`, `#map`, `#data`, `#api`). The fastest first run:
 
-| Visit order | Tab | Panel id | First thing to do |
-|---|---|---|---|
-| 1 | **Config** | `#view-config` | Pick a profile, edit the YAML in the textarea, press **Validate YAML**, then **Save configuration**. The browser default save name is `web-config.yaml` (`src/magic_geo/debug_server.py:844`) into `<workspace>/configs`. |
-| 2 | **Operations** | `#view-operations` | Select **Generate world**, confirm the fields, press **Start job**. Every operation is a typed background job that runs `sys.executable -m magic_geo <command> …` — the argv is fixed and typed, never shell-evaluated. |
-| 3 | **Map** | `#view-map` | Once the job finishes, the prepared cache is selected automatically and the globe renders `cells/elevation_m`. |
-| 4 | **Data** | `#view-data` | Browse `overview / scalars / skipped / layers / cells / stages / families / sections` with an "Open raw JSON ↗" link to the exact revision-pinned API URL. |
-| 5 | **API** | `#view-api` | Backend probe panel plus the embedded Swagger UI at `/api/docs`. |
+| Step | Where | What to do |
+|---|---|---|
+| 1 | **Home → New world** | Pick the `smoke` profile (fast) or `earthlike`, keep the suggested name and random seed, leave *Resolution* at *Profile default*, and press **Create & generate**. The dialog renders YAML on the server from the profile plus your choices (`POST /api/config/render`), saves it to `<workspace>/configs/<name>.yaml`, and queues a Generate job. |
+| 2 | **Jobs** (opens automatically) | Follow the phases — generate, write the world, prepare the browser map — with measured elapsed time. You can switch views; the header pill and the tab title keep showing the phase. |
+| 3 | Notification → **Open map** | The new world, written to `<workspace>/<name>/world.json` with its browser map in `<workspace>/<name>/debug`, opens on the globe at `cells/elevation_m`. It also appears in the header world picker and the Home library. |
+| 4 | **Map** | Try *Featured → Biome* or *Climate class*, press `3` for Mollweide, click a cell, open *Monthly climate* and press ▶. |
+| 5 | **Data** | Browse *Overview*, record families, stage summaries and model sections; *Raw JSON* opens the exact revision-pinned API URL. |
+| 6 | **API** | Engine capabilities, storage locations and the embedded Swagger UI at `/api/docs`. |
 
-The `generate` job form defaults (`src/magic_geo/web_jobs.py:110-125`):
+Prefer YAML? Open **Configure**, choose a file under *Existing configuration* (for example `configs/seeds/continental_realm.yaml`), edit, **Validate** (`Ctrl+Enter`), then **Save & generate**. Anything is also one `Ctrl+K` away in the command palette.
+
+The `generate` job form defaults (`_OPERATIONS["generate"]` in `src/magic_geo/web_jobs.py`); arriving from Configure or the New world dialog rewrites the two untouched output defaults to the per-world folder:
 
 | Field | Flag | Default | Notes |
 |---|---|---|---|
-| YAML config | `--config` | `runs/configs/world.yaml` | matches the Config view's default saved path |
-| World file | `--output` | `runs/world.json` | |
+| YAML config | `--config` | the discovered default configuration | filled with the saved file when you come from Configure |
+| World file | `--output` | `runs/world.json` | `runs/<name>/world.json` when prepared from a saved file |
 | Markdown summary | `--summary` | unset | |
 | Cells CSV | `--cells-csv` | unset | |
 | Cell count override | `--cells` | unset, `minimum=128` | |
 | Natural geography only | `--geo-only` | `false` | |
 | World serialization | `--format` | `auto` | `auto` / `json` / `mgeo` |
-| **Prepare browser cache** | *(no CLI flag)* | `true` | runs `export-debug` after generation and selects the cache |
-| **Browser cache directory** | *(no CLI flag)* | `runs/debug` | |
+| **Prepare browser map** | *(no CLI flag)* | `true` | runs `export-debug` after generation and opens the result |
+| **Browser map folder** | *(no CLI flag)* | `runs/debug` | `runs/<name>/debug` when prepared from a saved file |
 | **Include ParaView VTU** | *(no CLI flag)* | `false` | |
 
 Map view controls worth trying immediately:
 
 | Control | Keys | Effect |
 |---|---|---|
-| Projection | `1` / `2` / `3` | Globe, Equirect, Mollweide (morphs between them) |
-| Overlays | `w` / `b` / `g` | Wireframe, Plate boundaries, Graticule |
-| Stage scrubbing | `,` / `.` | Step the stage slider for `*_stage` layers |
-| Layer search | `/` | Filters by source, name, role, unit, family, description, category names |
-| Layer docs card | `d` | Toggles the curated description panel |
+| Command palette | `Ctrl K` / `⌘ K` | Jump to any layer, world, configuration, job or action |
+| Move and zoom | drag, scroll, double-click; arrows, `+` / `-`, `0` when the map has focus | The point you grab stays under the pointer; `0` shows the whole world |
+| Go to | `Ctrl K`, then `12.5 N 40 W`, `cell 1234` or a place | Flies there |
+| Projection | `1` / `2` / `3` | Globe, Equirect, Mollweide (the map unrolls around the centre) |
+| Overlays | `w` / `r` / `b` / `g` / `p` | Cell outlines, relief, plate boundaries, graticule, places |
+| Time bar | `,` / `.` / `space` | Step or play stages and months |
+| Layer search | `/` | Matches name, label, topic, unit, role, description and class names |
+| Pin a layer | ☆ | Keeps it in the *Pinned* group at the top |
+| Layer card | `d` | Toggles *About this layer* |
 | Close inspector | `Esc` | |
-| Export | buttons | **Export PNG** and **Prompt .md** — the browser counterparts of `magic-geo export-debug-map` |
+| Export | **PNG** / **Prompt** | The browser counterparts of `magic-geo export-debug-map` |
+
+The complete tour — every view, shortcut and accessibility feature — is the [web workbench guide](../debug_ui_guide.md).
 
 ### Doing the same thing from the CLI
 

@@ -1,4 +1,5 @@
 #include "periodic_energy_balance.hpp"
+#include "generation_progress.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -44,7 +45,9 @@ Cycle integrate_year(
     double year_duration,
     const std::vector<double>& initial,
     const PeriodicSurfaceEnergyOptions& options,
-    std::size_t& total_step_attempts
+    std::size_t& total_step_attempts,
+    GenerationProgressCadence& progress,
+    int evaluation
 ) {
     const auto& columns = system.columns();
     const auto count = columns.size();
@@ -70,6 +73,13 @@ Cycle integrate_year(
         const std::size_t subdivisions = options.thermal_subdivisions.empty() ? 1 : options.thermal_subdivisions[interval_index];
         step_options.duration_seconds = interval.duration_seconds / static_cast<double>(subdivisions);
         for (std::size_t substep = 0; substep < subdivisions; ++substep) {
+            if (substep % 64 == 0 && progress.ready()) {
+                emit_generation_progress("climate", "Solving seasonal temperatures",
+                    "Seasonal cycle evaluation " + std::to_string(evaluation) +
+                    "; month " + std::to_string(interval.month_index + 1) +
+                    " of 12. Repeating cycles until temperatures and energy balance converge.",
+                    interval.month_index + 1, 12);
+            }
             if (total_step_attempts >= options.maximum_integration_steps) {
                 throw PeriodicSurfaceEnergyWorkLimit(total_step_attempts);
             }
@@ -260,7 +270,8 @@ PeriodicSurfaceEnergyYear solve_periodic_surface_energy_balance(
         if (!illuminated[find_component(i)]) initial[i] = 0.0;
     }
     std::size_t total_step_attempts = 0;
-    auto current = integrate_year(system, intervals, month_durations, year_duration, initial, options, total_step_attempts);
+    GenerationProgressCadence progress;
+    auto current = integrate_year(system, intervals, month_durations, year_duration, initial, options, total_step_attempts, progress, 1);
     int evaluations = 1;
     std::vector<double> previous_direction, previous_shift;
     for (int iteration = 0; iteration <= options.maximum_periodic_iterations; ++iteration) {
@@ -313,7 +324,7 @@ PeriodicSurfaceEnergyYear solve_periodic_surface_energy_balance(
             ++evaluations;
             Cycle candidate;
             try {
-                candidate = integrate_year(system, intervals, month_durations, year_duration, trial, options, total_step_attempts);
+                candidate = integrate_year(system, intervals, month_durations, year_duration, trial, options, total_step_attempts, progress, evaluations);
             } catch (const PeriodicSurfaceEnergyStepError&) {
                 // A rejected shooting candidate must not alter the frozen
                 // thermal partition or the last accepted secant history.

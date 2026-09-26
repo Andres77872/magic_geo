@@ -612,12 +612,16 @@ std::string summary_json(
         }
     }
     flow_cycle_cell_count = static_cast<int>(cells.size()) - summary_processed_flow_cells;
+    const std::string published_zero_polygon_area = num(0.0, params.float_precision);
     for (const Watershed& watershed : watersheds) {
         largest_watershed_area = std::max(largest_watershed_area, watershed.area_km2);
         if (!watershed.boundary_ring.empty()) {
             watershed_geometry_count++;
         }
-        if (watershed.dissolved_polygon_area_km2 > 0.0) {
+        // Count the same positive-area records that watersheds_json publishes.
+        // Using its formatter also preserves fixed-decimal halfway rounding.
+        if (watershed.dissolved_polygon_area_km2 > 0.0 &&
+            num(watershed.dissolved_polygon_area_km2, params.float_precision) != published_zero_polygon_area) {
             watershed_polygon_count++;
             largest_watershed_polygon_area = std::max(largest_watershed_polygon_area, watershed.dissolved_polygon_area_km2);
             watershed_polygon_area_error_sum += watershed.polygon_area_error_fraction;

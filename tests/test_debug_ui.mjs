@@ -5,6 +5,21 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 
+// Helper modules import each other; the harness concatenates them in
+// dependency order instead, so their import lines are dropped.
+const uiSource = (name) => readFileSync(new URL(`../src/magic_geo/debug_ui/${name}.js`, import.meta.url), 'utf8')
+  .replace(/^import .*;\n/gm, '').replace(/^export /gm, '');
+const CONTROLLERS = [
+  ['config-workbench', 'createConfigWorkbench'],
+  ['operations-workbench', 'createOperationsWorkbench'],
+  ['home-workbench', 'createHomeWorkbench'],
+  ['command-palette', 'createCommandPalette'],
+  ['new-world', 'createNewWorldDialog'],
+];
+const controllerSources = CONTROLLERS.map(([name]) => uiSource(name));
+// Shared helper modules are imported by app.js; the harness provides them as
+// the module scope would, so app.js never sees an undeclared import binding.
+const helperSources = ['ui', 'layer_docs', 'palettes', 'colormaps', 'map-navigation'].map(uiSource);
 const source = readFileSync(new URL('../src/magic_geo/debug_ui/app.js', import.meta.url), 'utf8')
   .replace(/^import .*;\n/gm, '')
   .replace(/main\(\)\.catch\([\s\S]*$/, '');
@@ -25,9 +40,12 @@ function element() {
     get innerHTML() { return html; },
     set innerHTML(value) { html = value; children.length = 0; },
     dataset: {}, children, options: children,
-    classList: { add: (name) => classes.add(name), remove: (name) => classes.delete(name), contains: (name) => classes.has(name) },
+    classList: { toggle: (name, force) => { const on = force ?? !classes.has(name); if (on) classes.add(name); else classes.delete(name); return on; }, add: (name) => classes.add(name), remove: (name) => classes.delete(name), contains: (name) => classes.has(name) },
     appendChild(child) { children.push(child); },
     querySelector() { return null; }, querySelectorAll() { return []; },
+    attributes: {}, listeners: {},
+    setAttribute(name, value) { this.attributes[name] = value; },
+    addEventListener(name, action) { this.listeners[name] = action; },
     checkValidity() { return true; }, focus() {},
   };
 }
@@ -335,7 +353,15 @@ function workbench() {
     window: { confirm: () => true },
     Option: class { constructor(text, value) { this.text = text; this.value = value; } },
   });
+  // Controllers have their own module scope. Missing imports must fail here
+  // just as they do in a browser, rather than seeing app.js globals by accident.
+  for (const [index, [, name]] of CONTROLLERS.entries()) {
+    const moduleContext = vm.createContext({ document: context.document, window: context.window, Option: context.Option, URLSearchParams, console });
+    context[name] = vm.runInContext(controllerSources[index] + `\n${name}`, moduleContext);
+  }
+  for (const helper of helperSources) vm.runInContext(helper, context);
   vm.runInContext(source, context);
+  vm.runInContext('initializeWorkbenchControllers()', context);
   const run = (code) => vm.runInContext(code, context);
   return { context, get, run, state: run('state') };
 }
@@ -799,11 +825,11 @@ test('a template arriving after validation begins invalidates the older YAML res
   const validation = deferred();
   app.get('#config-profile').value = 'smoke';
   app.get('#config-yaml').value = 'seed: 1';
-  app.context.fetchTemplate = () => template.promise;
-  app.context.fetchJson = () => validation.promise;
+  app.state.configSchema = seasonalSchema();
+  app.context.fetchJson = (url) => url.startsWith('/api/config/template') ? template.promise : validation.promise;
   const resetting = app.run('resetConfigTemplate()');
   const validating = app.run('validateConfig()');
-  template.resolve('seed: 2');
+  template.resolve({ profile: 'smoke', yaml: 'seed: 2', config: { config_version: 2 } });
   await resetting;
   validation.resolve({ valid: true });
   await validating;
@@ -858,7 +884,9 @@ test('saved custom workspace configuration is passed to the generation form', as
   app.get('#operation-fields').querySelector = () => configInput;
   app.context.renderOperationForm = () => {};
   app.context.setView = (name) => { app.state.activeView = name; };
+  app.get('#operation-result').dataset.jobId = 'previous-job';
   app.run('generateFromSavedConfig()');
+  assert.equal(app.get('#operation-result').dataset.jobId, undefined);
   assert.equal(app.get('#operation-select').value, 'generate');
   assert.equal(configInput.value, 'runs/custom/configs/climate-review.yaml');
   assert.equal(app.state.activeView, 'operations');
@@ -965,7 +993,7 @@ for (const pending of ['submission', 'list refresh']) {
       await submitting;
       assert.equal(app.state.operationSubmitting, false);
       assert.equal(app.submit.disabled, false);
-      assert.match(app.get('#operation-result').textContent, /Started job created/);
+      assert.match(app.get('#operation-result').textContent, /Job created completed/);
       assert.equal(app.requests.filter(([, method]) => method === 'POST').length, 1);
       assert.deepEqual(app.snapshot(), current);
       assert.equal(app.requests.some(([url]) => url === '/api/jobs/created'), false);
@@ -1016,10 +1044,9 @@ test('the map sizes values and reports world cells independently of polygon vert
     constructor(data) { this.image = { data }; this.position = { set() {} }; }
     setPixelRatio() {} add() {} setAttribute() {} setIndex() {}
   }
-  for (const name of ['WebGLRenderer', 'Scene', 'Color', 'PerspectiveCamera', 'BufferGeometry', 'BufferAttribute', 'DataTexture', 'ShaderMaterial', 'Mesh', 'Vector4', 'WebGLRenderTarget']) {
+  for (const name of ['WebGLRenderer', 'Scene', 'Color', 'PerspectiveCamera', 'BufferGeometry', 'BufferAttribute', 'DataTexture', 'ShaderMaterial', 'Mesh', 'Vector4', 'WebGLRenderTarget', 'SphereGeometry']) {
     app.context.THREE[name] = RenderObject;
   }
-  app.context.OrbitControls = RenderObject;
   app.context.resizeRenderer = () => {};
   app.context.window.location = { href: 'http://localhost/' };
   const fixture = meshFixture();
@@ -1154,7 +1181,9 @@ test('unavailable numeric export codex has no invented ramp and scopes masked ra
   assert.match(masked, /Complete layer\/time-axis available-value range: 0 index to 0 index/);
   assert.doesNotMatch(masked, /Complete layer\/time-axis raw range/);
   assert.match(masked, /Current slice: 2 finite cells/);
-  assert.match(masked, /Viridis normalized/);
+  // A constant layer has one colour; the codex must not invent a 0-to-1 ramp.
+  assert.match(masked, /Every finite cell in this layer has the value 0 index, drawn in a single color/);
+  assert.doesNotMatch(masked, /normalized over|Scale position/);
 
   delete app.context.snapshot.layer.availability;
   app.context.snapshot.layer.stats = { min: 0, max: 9.25, p2: 0, p98: 9.25 };
@@ -1388,7 +1417,8 @@ for (const monthly of [false, true]) {
     await app.run('activateLayer(layers.A, { stage: 2, month: 2 })');
     app.calls.length = 0;
     app.scrub(8);
-    app.get('#stage-number').value = '4';
+    // Months are typed 1-12 like their label; stages by their 0-based index.
+    app.get('#stage-number').value = monthly ? '5' : '4';
     app.dispatch('#stage-number', 'change');
     await app.settle();
     const displayed = app.snapshot();
@@ -1397,7 +1427,8 @@ for (const monthly of [false, true]) {
     assert.deepEqual(app.calls, [4]);
     assert.deepEqual(app.snapshot(), displayed);
     assert.equal(app.state.exportSnapshot[monthly ? 'month' : 'stage'], 4);
-    assert.equal(app.get('#stage-label').textContent, monthly ? 'month 5' : 'stage_idx 4');
+    assert.equal(app.get('#stage-label').textContent, monthly ? 'month 5 · May' : 'stage_idx 4');
+    assert.equal(app.get('#stage-number').value, monthly ? '5' : '4', 'the box and the label agree');
   });
 }
 
@@ -1558,4 +1589,635 @@ test('inspector close and cache reset discard detached marker targets', async ()
     app.run('updateInspectorStageMarkers()');
     assert.equal(node.innerHTML, before);
   }
+});
+
+test('opening a config preserves exact YAML and enables generation without a redundant save', async () => {
+  const app = workbench();
+  const yaml = '# keep this\nconfig_version: 2\nrun:\n  seed: 18446744073709551615\n';
+  app.context.fetchJson = async () => ({ path: '/external/configs/world.yaml', name: 'world.yaml', revision: 'r1', valid: true, yaml });
+  await app.run("openConfigFile('/external/configs/world.yaml', {initial:true})");
+  assert.equal(app.get('#config-yaml').value, yaml);
+  assert.equal(app.get('#config-generate').disabled, false);
+  assert.equal(app.state.savedConfig.path, '/external/configs/world.yaml');
+  assert.equal(app.run('configHasUnsavedChanges()'), false);
+  app.get('#config-yaml').value += '# editing\n';
+  app.run('configEdited()');
+  assert.equal(app.get('#config-generate').disabled, true);
+  assert.equal(app.run('configHasUnsavedChanges()'), true);
+});
+
+test('config file response cannot replace edits made during loading', async () => {
+  const app = workbench();
+  const pending = deferred();
+  app.context.fetchJson = () => pending.promise;
+  const opening = app.run("openConfigFile('/external/world.yaml', {initial:true})");
+  app.get('#config-yaml').value = 'local draft';
+  app.run('configEdited()');
+  pending.resolve({path: '/external/world.yaml', name: 'world.yaml', yaml:'server file', valid:true});
+  await opening;
+  assert.equal(app.get('#config-yaml').value, 'local draft');
+  assert.equal(app.state.configSource, null);
+});
+
+test('competing config opens commit only the last selected file', async () => {
+  const app = workbench();
+  const first = deferred(), second = deferred();
+  app.context.fetchJson = (url) => url.includes('first') ? first.promise : second.promise;
+  const older = app.run("openConfigFile('/first.yaml', {initial:true})");
+  const newer = app.run("openConfigFile('/second.yaml', {initial:true})");
+  second.resolve({path:'/second.yaml', name:'second.yaml', yaml:'second', valid:true});
+  await newer;
+  first.resolve({path:'/first.yaml', name:'first.yaml', yaml:'first', valid:true});
+  await older;
+  assert.equal(app.get('#config-yaml').value, 'second');
+  assert.equal(app.state.configSource.path, '/second.yaml');
+});
+
+test('save of an opened file sends its revision and never force-retries a stale source', async () => {
+  const app = workbench();
+  app.get('#config-name').value = 'world.yaml';
+  app.get('#config-yaml').value = 'edited';
+  app.state.configSource = {name:'world.yaml', path:'/external/world.yaml', revision:'old'};
+  let calls = 0, prompts = 0;
+  app.context.window.confirm = () => { prompts += 1; return true; };
+  app.context.fetchJson = async (_url, options) => {
+    calls += 1;
+    assert.equal(options.body.path, '/external/world.yaml');
+    assert.equal(options.body.revision, 'old');
+    throw Object.assign(new Error('File changed on disk'), {status:409});
+  };
+  await app.run('saveConfig()');
+  assert.equal(calls, 1);
+  assert.equal(prompts, 0);
+  assert.equal(app.get('#config-yaml').value, 'edited');
+  assert.match(app.get('#config-result').textContent, /changed on disk/);
+});
+
+test('disabled cache options are omitted and invalid numeric inputs are rejected before submit', () => {
+  const app = workbench();
+  app.get('#operation-fields').querySelectorAll = () => [
+    {name:'debug_output', value:'/old/cache', disabled:true, dataset:{valueType:'path'}},
+    {name:'cells', value:'128', dataset:{valueType:'integer'}},
+  ];
+  assert.equal(JSON.stringify(app.run('collectOperationArguments()')), '{"cells":128}');
+  app.get('#operation-fields').querySelectorAll = () => [
+    {name:'cells', value:'1.5', dataset:{valueType:'integer'}},
+  ];
+  assert.throws(() => app.run('collectOperationArguments()'), /whole number/);
+});
+
+test('data resource filtering is recoverable when nothing matches', () => {
+  const app = workbench();
+  app.state.catalog = {families:{river_network:{row_count:12}, settlements:{row_count:3}}};
+  app.get('#data-kind').value = 'families';
+  app.get('#data-resource-search').value = 'river network';
+  app.run('populateDataResources()');
+  assert.equal(app.get('#data-resource').children.length, 1);
+  assert.equal(app.get('#data-resource').children[0].value, 'river_network');
+  app.get('#data-resource-search').value = 'absent';
+  app.run('populateDataResources()');
+  assert.equal(app.get('#data-resource').disabled, true);
+  assert.equal(app.get('#data-resource-wrap').classList.contains('hidden'), false);
+  app.get('#data-resource-search').value = '';
+  app.run('populateDataResources()');
+  assert.equal(app.get('#data-resource').disabled, false);
+  assert.equal(app.get('#data-resource').children.length, 2);
+});
+
+test('generation shows measured stage work without inventing overall completion', () => {
+  const app = workbench();
+  app.context.job = { id: 'climate', operation: 'generate', status: 'running', elapsed_seconds: 91,
+    phase_elapsed_seconds: 14, seconds_since_activity: 2,
+    progress: { phase: 'climate', label: 'Calculating seasonal climate', detail: 'Climate cycle 3, month 7 of 12.', current: 7, total: 12 } };
+  app.run('renderJobDetail(job)');
+  const html = app.get('#job-detail').innerHTML;
+  assert.match(html, /Calculating seasonal climate/);
+  assert.match(html, /max="12" value="7"/);
+  assert.match(html, /7 \/ 12 · current stage/);
+  assert.match(html, /1m 31s/);
+  assert.doesNotMatch(html, /NaN|58%/);
+  app.context.job.progress = { label: 'Preparing map data' };
+  app.run('renderJobDetail(job)');
+  assert.match(app.get('#job-detail').innerHTML, /Overall percentage and finish time are not estimated/);
+  assert.doesNotMatch(app.get('#job-detail').innerHTML, /value="0"/);
+});
+
+test('queue wait and stop acknowledgement use worker state', () => {
+  const app = workbench();
+  app.context.job = { id: 'waiting', operation: 'generate', status: 'queued', queue_position: 3, elapsed_seconds: 0, phase_elapsed_seconds: 72 };
+  app.run('renderJobDetail(job)');
+  assert.match(app.get('#job-detail').innerHTML, /Queue position 3/);
+  assert.match(app.get('#job-detail').innerHTML, /1m 12s/);
+  app.context.job = { ...app.context.job, status: 'running', cancel_requested: true, cancellable: false };
+  app.run('renderJobDetail(job)');
+  assert.match(app.get('#job-detail').innerHTML, /Waiting for the worker and its subprocesses to stop/);
+  assert.equal(app.get('#job-cancel').disabled, true);
+  assert.equal(app.get('#job-cancel').textContent, 'Stopping…');
+});
+
+test('map failure preserves the generated world and recovery uses its immutable snapshot', () => {
+  const app = workbench();
+  app.get('#operation-form').querySelector = () => element();
+  app.state.operations = [{ name: 'export-debug' }];
+  app.context.setView = () => {};
+  app.context.job = { id: 'saved', operation: 'generate', status: 'failed', world_available: true,
+    world_path: '/workspace/.web/artifacts/saved/world.json', error: 'Map export: unavailable dependency',
+    artifacts: [{ name: 'output', available: true, path: '/workspace/world.json' }] };
+  app.run('renderJobDetail(job)');
+  assert.match(app.get('#job-detail').innerHTML, /World saved · browser map failed/);
+  assert.match(app.get('#job-detail').innerHTML, /Map export: unavailable dependency/);
+  assert.doesNotMatch(app.get('#job-detail').innerHTML, /<progress/);
+  const action = app.get('#job-actions').children.find((button) => button.textContent === 'Prepare browser map');
+  action.listeners.click();
+  assert.equal(app.state.operationDrafts['export-debug'].world, app.context.job.world_path);
+});
+
+test('active detail updates preserve disclosure nodes and unchanged logs', () => {
+  const app = workbench();
+  app.context.job = { id: 'same', operation: 'generate', status: 'running', log: 'first output', progress: { label: 'Climate' } };
+  app.run('renderJobDetail(job)');
+  const root = app.get('#job-detail');
+  const original = root.innerHTML;
+  const status = element(), artifacts = element(), log = element(), meta = element();
+  log.textContent = 'first output';
+  root.querySelector = (selector) => ({ '.job-status-content': status, '.job-artifacts': artifacts, '.job-log': log, '.job-meta': meta })[selector] || null;
+  app.context.job.progress = { label: 'Erosion', current: 2, total: 4 };
+  app.run('renderJobDetail(job)');
+  assert.equal(root.innerHTML, original, 'interactive disclosure subtree was not replaced');
+  assert.match(status.innerHTML, /Erosion/);
+  assert.equal(log.textContent, 'first output');
+});
+
+test('a slow job poll is coalesced and its response still updates the UI', async () => {
+  const app = workbench();
+  const reply = deferred();
+  let calls = 0;
+  app.context.fetchJson = () => { calls += 1; return reply.promise; };
+  const first = app.run('refreshJobs()');
+  const second = app.run('refreshJobs()');
+  assert.equal(calls, 1);
+  reply.resolve({ jobs: [{ id: 'finished', status: 'succeeded', operation: 'render' }] });
+  await Promise.all([first, second]);
+  assert.equal(app.state.jobs[0].id, 'finished');
+  assert.equal(app.get('#jobs-poll-state').textContent, 'Live');
+  assert.equal(app.state.jobsRefreshPending, null);
+});
+
+test('failed terminal detail refresh preserves the snapshot and recovers on next poll', async () => {
+  const app = workbench();
+  const job = { id: 'finished', operation: 'render', status: 'succeeded', log: 'saved' };
+  let fail = false;
+  app.context.fetchJson = async (url) => {
+    if (url === '/api/jobs') return { jobs: [job] };
+    if (fail) throw new Error('Temporary detail failure');
+    return job;
+  };
+  await app.run('selectJob("finished")');
+  const snapshot = app.get('#job-detail').innerHTML;
+  fail = true;
+  await app.run('selectJob("finished")');
+  assert.equal(app.get('#job-detail').innerHTML, snapshot);
+  assert.match(app.get('#job-connection').textContent, /Temporary detail failure/);
+  fail = false;
+  await app.run('refreshJobs()');
+  assert.equal(app.state.jobDetailFailed, false);
+  assert.equal(app.get('#job-connection').textContent, '');
+});
+
+test('reload discovers running work and retains visible background completion', async () => {
+  const app = workbench();
+  let job = { id: 'running', operation: 'generate', status: 'running', progress: { label: 'Calculating climate' } };
+  app.context.fetchJson = async (url) => url === '/api/jobs' ? { jobs: [job] } : job;
+  await app.run('refreshJobs()');
+  assert.equal(app.state.selectedJobId, 'running');
+  assert.match(app.get('#job-activity').textContent, /Calculating climate/);
+  job = { ...job, status: 'succeeded', cache_dir: '/workspace/debug' };
+  await app.run('refreshJobs()');
+  assert.match(app.get('#job-activity').textContent, /Browser map ready/);
+});
+
+test('stage changes update job history without replacing its focused row', () => {
+  const app = workbench();
+  app.state.jobs = [{ id: 'stable', status: 'running', operation: 'generate', progress: { label: 'Climate' } }];
+  app.run('renderJobs()');
+  const row = app.get('#jobs-list').children[0];
+  app.state.jobs[0].progress.label = 'Erosion';
+  app.run('renderJobs()');
+  assert.equal(app.get('#jobs-list').children[0], row);
+  assert.match(row.innerHTML, /Erosion/);
+  assert.match(row.attributes['aria-label'], /stable, Erosion/);
+});
+
+test('confirmed cancellation is terminal even when cancellation-requested remains true', () => {
+  const app = workbench();
+  app.context.job = { id: 'stopped', operation: 'generate', status: 'cancelled', cancel_requested: true, cancellable: false };
+  app.run('renderJobDetail(job)');
+  assert.match(app.get('#job-detail').innerHTML, /Job cancelled/);
+  assert.doesNotMatch(app.get('#job-detail').innerHTML, /Stopping the job|Waiting for the worker and its subprocesses/);
+  assert.equal(app.get('#job-cancel').classList.contains('hidden'), true);
+});
+
+test('persistent activity follows actual running work ahead of newer queued jobs', async () => {
+  const app = workbench();
+  const running = { id: 'older', operation: 'generate', status: 'running', progress: { label: 'Climate is running' } };
+  app.context.fetchJson = async (url) => url === '/api/jobs'
+    ? { jobs: [{ id: 'newer', status: 'queued', operation: 'generate' }, running] } : running;
+  await app.run('refreshJobs()');
+  assert.equal(app.state.selectedJobId, 'older');
+  assert.match(app.get('#job-activity').textContent, /Climate is running/);
+});
+
+test('an older cancellation completion cannot enable another selected job cancellation', async () => {
+  const app = workbench();
+  const response = deferred();
+  app.state.selectedJobId = 'old';
+  const newer = { id: 'new', status: 'running', cancel_requested: true, cancellable: false };
+  app.context.fetchJson = (url) => url.endsWith('/cancel') ? response.promise : Promise.resolve(url === '/api/jobs' ? { jobs: [newer] } : newer);
+  const cancel = app.run('cancelSelectedJob()');
+  app.state.selectedJobId = 'new';
+  app.state.selectedJob = newer;
+  app.get('#job-cancel').disabled = true;
+  app.get('#job-cancel').textContent = 'Stopping…';
+  response.resolve({ id: 'old', status: 'cancelled' });
+  await cancel;
+  assert.equal(app.get('#job-cancel').disabled, true);
+  assert.equal(app.get('#job-cancel').textContent, 'Stopping…');
+});
+
+test('terminal map supersession refreshes the selected result and removes the stale map action', async () => {
+  const app = workbench();
+  let job = { id: 'older', operation: 'generate', status: 'succeeded', cache_dir: '/workspace/debug', world_available: true,
+    artifacts: [{ name: 'output', path: '/workspace/world.json', available: true }] };
+  app.context.fetchJson = async (url) => url === '/api/jobs' ? { jobs: [job] } : job;
+  await app.run('selectJob("older")');
+  assert.ok(app.get('#job-actions').children.some((button) => button.textContent === 'Open map'));
+  job = { ...job, cache_dir: null, map_superseded: true };
+  await app.run('refreshJobs()');
+  assert.match(app.get('#job-detail').innerHTML, /newer job replaced the browser map/);
+  assert.ok(!app.get('#job-actions').children.some((button) => button.textContent === 'Open map'));
+  assert.ok(app.get('#job-actions').children.some((button) => button.textContent === 'Prepare browser map'));
+});
+
+test('cancelled output destinations cannot be mistaken for produced artifacts', () => {
+  const app = workbench();
+  app.context.job = { id: 'cancelled', operation: 'generate', status: 'cancelled', artifacts: [
+    { name: 'output', path: '/workspace/world.json', kind: 'file', available: false },
+    { name: 'debug_output', path: '/workspace/debug', kind: 'cache', available: false },
+  ] };
+  app.run('renderJobDetail(job)');
+  assert.match(app.get('#job-detail').innerHTML, /No download produced by this job/);
+  assert.match(app.get('#job-detail').innerHTML, /No browser map for this job/);
+  app.context.job = { ...app.context.job, status: 'succeeded', cache_dir: '/workspace/debug' };
+  app.run('renderJobDetail(job)');
+  assert.match(app.get('#job-detail').innerHTML, /Available via Open map/);
+});
+
+// ---------------------------------------------------------------------------
+// Workbench redesign: navigation, discovery and feedback helpers
+
+test('layer topics group physical domains and labels keep units separate', () => {
+  const app = workbench();
+  const topic = (name, source = 'cells') => app.run(`layerTopic(${JSON.stringify({ name, source })})`);
+  assert.equal(topic('elevation_m'), 'terrain');
+  assert.equal(topic('precipitation_mm_y'), 'climate');
+  assert.equal(topic('groundwater_recharge_mm_y'), 'water');
+  assert.equal(topic('glacial_sediment_net_m'), 'ice');
+  assert.equal(topic('ocean_current_temperature_c'), 'ocean');
+  assert.equal(topic('settlement_score'), 'people');
+  assert.equal(topic('precipitation_monthly_mm', 'cells_monthly'), 'climate');
+  assert.equal(app.run("layerLabel({ name: 'precipitation_mm_y' })"), 'Precipitation');
+  assert.equal(app.run("layerUnit({ name: 'precipitation_mm_y' })"), 'mm/year');
+  assert.equal(app.run("layerLabel({ name: 'soil_ph' })"), 'Soil pH');
+  assert.equal(app.run("layerLabel({ name: 'agricultural_potential_index' })"), 'Agricultural potential index');
+  assert.equal(app.run("layerUnit({ name: 'agricultural_potential_index' })"), '');
+});
+
+test('categorical guide colors are semantic, unique per layer and stable for unlisted codes', () => {
+  const app = workbench();
+  const palette = app.run("categoryPalette(['ocean', 'hot_desert', 'forest', 'marine'])");
+  assert.equal(palette[0], '#2c5d8f', 'ocean reads as water');
+  assert.equal(palette[1], '#e3c58f', 'desert reads as dry land');
+  assert.equal(new Set(palette).size, palette.length, 'marine must not reuse the ocean color');
+  assert.equal(app.run("categoryColor(0, ['Af', 'BWh'])"), '#0000ff');
+  assert.equal(app.run("categoryColor(1, ['Af', 'BWh'])"), '#ff0000');
+  assert.equal(app.run("categoryColor(5, ['basalt', 'granite'])"), '#edc948');
+  assert.equal(app.run("Array.from(categoryPaletteData(['ocean']).slice(0, 4)).join(',')"), '44,93,143,255');
+});
+
+test('command palette ranks direct matches first and limits noisy groups', () => {
+  const app = workbench();
+  app.state.manifest = { layers: [
+    { id: 'cells/species_record_descriptors_supported', source: 'cells', name: 'species_record_descriptors_supported', kind: 'categorical' },
+    { id: 'cells/precipitation_mm_y', source: 'cells', name: 'precipitation_mm_y', kind: 'numeric' },
+    ...Array.from({ length: 60 }, (_, index) => ({ id: `cells/elevation_${index}`, source: 'cells', name: `elevation_${index}`, kind: 'numeric' })),
+  ] };
+  app.state.worlds = [{ cache_dir: 'runs/aurora/debug', name: 'aurora', cell_count: 512 }];
+  const precip = app.run("commandPalette.search('precip')");
+  assert.equal(precip[0].title, 'Precipitation');
+  const elevation = app.run("commandPalette.search('elevation')");
+  assert.ok(elevation.filter((item) => item.group === 'Layers').length <= 40);
+  assert.equal(app.run("commandPalette.search('aurora')")[0].group, 'Worlds');
+  const suggested = app.run("commandPalette.search('')");
+  assert.ok(suggested.some((item) => item.title === 'New world from a profile…'));
+  assert.ok(!suggested.some((item) => item.group === 'Layers'), 'an empty query shows actions, not 60 layers');
+});
+
+test('YAML highlighting escapes markup and colours keys, numbers and comments', () => {
+  const app = workbench();
+  const line = app.run(`configWorkbench.highlightYamlLine("  seed: 42 # <b>note</b>")`);
+  assert.match(line, /<span class="tok-key">seed<\/span>/);
+  assert.match(line, /<span class="tok-num">42<\/span>/);
+  assert.match(line, /<span class="tok-com"># &lt;b&gt;note&lt;\/b&gt;<\/span>/);
+  assert.doesNotMatch(line, /<b>/);
+  assert.match(app.run(`configWorkbench.highlightYamlLine("name: 'a # not a comment'")`), /tok-str/);
+  assert.doesNotMatch(app.run(`configWorkbench.highlightYamlLine("name: 'a # not a comment'")`), /tok-com/);
+  assert.match(app.run(`configWorkbench.highlightYamlLine("preserve: true")`), /tok-bool/);
+});
+
+test('generation from a saved file gives each world its own untouched output folders', () => {
+  const app = workbench();
+  app.state.status = { workspace: 'runs', paths: { output_dir: 'runs' } };
+  app.state.operations = [{ name: 'generate', fields: [
+    { name: 'output', default: 'runs/world.json' }, { name: 'debug_output', default: 'runs/debug' },
+  ] }];
+  app.state.savedConfig = { path: 'runs/configs/aurora.yaml', yaml: 'x', name: 'aurora.yaml', valid: true };
+  app.get('#config-generate').disabled = false;
+  const inputs = { config: element(), output: element(), debug_output: element() };
+  Object.entries(inputs).forEach(([name, input]) => { input.name = name; });
+  inputs.output.value = 'runs/world.json';
+  inputs.debug_output.value = 'custom/cache';
+  app.get('#operation-fields').querySelectorAll = () => Object.values(inputs);
+  app.get('#operation-fields').querySelector = (selector) => (selector === '[name="config"]' ? inputs.config : null);
+  app.context.renderOperationForm = () => {};
+  app.context.setView = (name) => { app.state.activeView = name; };
+  app.run('generateFromSavedConfig()');
+  assert.equal(inputs.config.value, 'runs/configs/aurora.yaml');
+  assert.equal(inputs.output.value, 'runs/aurora/world.json');
+  assert.equal(inputs.debug_output.value, 'custom/cache', 'a typed destination is never replaced');
+});
+
+test('view hashes carry shareable map state without leaking into other views', () => {
+  const app = workbench();
+  const parsed = app.run("parseViewHash('#map?layer=cells%2Fbiome&stage=3&month=7&proj=mollweide')");
+  assert.equal(parsed.name, 'map');
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.mapParams)), { layer: 'cells/biome', stage: 3, month: 6, projection: 'mollweide' });
+  assert.equal(app.run("parseViewHash('#config').mapParams"), null);
+  assert.equal(app.run("parseViewHash('#map?proj=spiral').mapParams"), null, 'unknown projections are ignored');
+  app.state.activeLayer = { id: 'cells_monthly/temperature_monthly_c', kind: 'numeric_monthly' };
+  app.state.month = 6;
+  app.state.projection = 'equirect';
+  assert.equal(app.run('mapUrlHash()'), '#map?layer=cells_monthly%2Ftemperature_monthly_c&month=7&proj=equirect');
+});
+
+test('job notifications fire only for transitions observed in this session', () => {
+  const app = workbench();
+  const toasts = [];
+  app.context.toast = (options) => { toasts.push(options); return { dismiss() {} }; };
+  app.state.operations = [{ name: 'generate', title: 'Generate world' }];
+  app.state.worlds = [{ cache_dir: 'runs/aurora/debug', name: 'aurora' }];
+  const running = [{ id: 'a', operation: 'generate', status: 'running', progress: { label: 'Solving climate' } }];
+  app.run(`onJobsChanged(null, ${JSON.stringify(running)})`);
+  assert.equal(toasts.length, 0, 'initial load never announces old results');
+  assert.equal(app.context.document.title, 'Solving climate · magic-geo');
+  app.run(`onJobsChanged(${JSON.stringify(running)}, ${JSON.stringify([{ ...running[0], status: 'succeeded', cache_dir: 'runs/aurora/debug' }])})`);
+  assert.equal(toasts.length, 1);
+  assert.equal(toasts[0].tone, 'success');
+  assert.match(toasts[0].message, /aurora/);
+  assert.equal(toasts[0].action.label, 'Open map');
+  assert.equal(app.context.document.title, 'magic-geo workbench');
+  app.run(`onJobsChanged(${JSON.stringify(running)}, ${JSON.stringify([{ ...running[0], status: 'failed', error: 'native core missing' }])})`);
+  assert.equal(toasts[1].tone, 'error');
+  assert.match(toasts[1].message, /native core missing/);
+});
+
+test('home lists the selected world first and explains an empty workspace', () => {
+  const app = workbench();
+  app.state.activeView = 'home';
+  app.state.status = { cache_dir: 'runs/b/debug', version: '0.1.0', workspace: 'runs' };
+  app.state.cacheAvailable = true;
+  app.state.configFiles = [{ path: 'configs/seeds/aurora.yaml', name: 'aurora.yaml', world_name: 'aurora_realm', valid: true }];
+  app.state.worlds = [
+    { cache_dir: 'runs/a/debug', name: 'Older <world>', cell_count: 128, modified_ns: 2e18 },
+    { cache_dir: 'runs/b/debug', name: 'Current', cell_count: 4096, modified_ns: 1e18 },
+  ];
+  app.run('renderHome()');
+  const worlds = app.get('#home-worlds').innerHTML;
+  assert.ok(worlds.indexOf('Current') < worlds.indexOf('Older'), 'the world on screen is listed first');
+  assert.match(worlds, /Older &lt;world&gt;/);
+  assert.match(worlds, /4,096 cells/);
+  assert.match(app.get('#home-examples').innerHTML, /aurora realm/);
+  assert.match(app.get('[data-home="map-status"]').textContent, /Current · 4,096 cells/);
+  app.state.worlds = [];
+  app.run('renderHome()');
+  assert.match(app.get('#home-worlds').innerHTML, /No prepared worlds in this workspace yet/);
+});
+
+// ---------------------------------------------------------------------------
+// World view: colour scales, navigation and map chrome
+
+const colormapCases = JSON.parse(readFileSync(new URL('./fixtures/colormap_scale_cases.json', import.meta.url), 'utf8')).cases;
+
+test('numeric layers resolve to the same scales and colours as the CLI export', () => {
+  const app = workbench();
+  assert.ok(colormapCases.length >= 8);
+  for (const testCase of colormapCases) {
+    app.context.testLayer = testCase.layer;
+    const scale = app.run('numericScale(testLayer)');
+    assert.equal(scale.mode, testCase.scale.mode, testCase.why);
+    assert.equal(scale.colormap, testCase.scale.colormap, testCase.why);
+    assert.ok(Math.abs(scale.lo - testCase.scale.lo) < 1e-9 && Math.abs(scale.hi - testCase.scale.hi) < 1e-9, testCase.why);
+    for (const [value, color] of testCase.samples) {
+      app.context.sampleValue = value;
+      assert.equal(app.run('scaleHex(numericScale(testLayer), sampleValue)'), color, `${testCase.layer.name} at ${value}`);
+    }
+  }
+  // The shader samples floor(t * 256); t = 1 must stay on the last texel.
+  assert.equal(app.run('lutIndex(1)'), 255);
+  assert.equal(app.run('lutIndex(0.5)'), 128);
+  assert.equal(app.run('lutIndex(Number.NaN)'), 0);
+});
+
+test('legend ticks are nice numbers and a split scale always labels its pivot', () => {
+  const app = workbench();
+  assert.deepEqual(Array.from(app.run('niceTicks(0, 100, 5)')), [0, 20, 40, 60, 80, 100]);
+  assert.deepEqual(Array.from(app.run('niceTicks(-0.3, 0.7, 5)')), [-0.2, 0, 0.2, 0.4, 0.6]);
+  const terrain = app.run("numericScale({ name: 'elevation_m', kind: 'numeric', stats: { min: -9000, max: 7000, p2: -6000, p98: 3000 } })");
+  app.context.terrain = terrain;
+  const ticks = Array.from(app.run('scaleTicks(terrain, 5)'));
+  assert.ok(ticks.includes(0), 'sea level is labelled');
+  assert.equal(app.run('scalePosition(terrain, 0)'), 0.5);
+  for (const t of [0, 0.25, 0.5, 0.75, 1]) {
+    app.context.t = t;
+    assert.ok(Math.abs(app.run('scalePosition(terrain, scaleValueAt(terrain, t))') - t) < 1e-12);
+  }
+  assert.match(app.run('scaleSummary(terrain)'), /Terrain · 2nd–98th percentile · split at 0/);
+  app.state.scaleOptions = { colormap: 'viridis', range: 'full' };
+  const full = app.run("numericScale({ name: 'elevation_m', kind: 'numeric', stats: { min: -9000, max: 7000, p2: -6000, p98: 3000 } }, state.scaleOptions)");
+  assert.deepEqual([full.colormap, full.mode, full.lo, full.hi, full.clipLow, full.clipHigh], ['viridis', 'linear', -9000, 7000, false, false]);
+});
+
+test('map projections round-trip and fly-to follows van Wijk and Nuij', () => {
+  const app = workbench();
+  for (const projection of ['equirect', 'mollweide']) {
+    for (const [lat, lon] of [[0, 0], [45, 90], [-60, -150], [89, 179], [-33.9, 151.2]]) {
+      app.context.point = { lat, lon, projection };
+      const back = app.run('(() => { const [x, y] = projectToPlane(point.lat, point.lon, point.projection); return unprojectFromPlane(x, y, point.projection); })()');
+      assert.ok(Math.abs(back.lat - lat) < 1e-6 && Math.abs(back.lon - lon) < 1e-6, `${projection} ${lat},${lon}`);
+    }
+  }
+  assert.equal(app.run('unprojectFromPlane(1.9, 0.9, "mollweide")'), null, 'corners outside the ellipse are off the map');
+  assert.equal(app.run('wrapLongitude(190)'), -170);
+  assert.equal(app.run('wrapLongitude(-540)'), -180);
+  assert.ok(Math.abs(app.run('greatCircleAngle({ lat: 0, lon: 0 }, { lat: 0, lon: 90 })') - Math.PI / 2) < 1e-12);
+  const middle = app.run('interpolateGreatCircle({ lat: 0, lon: 0 }, { lat: 0, lon: 90 })(0.5)');
+  assert.ok(Math.abs(middle.lat) < 1e-9 && Math.abs(middle.lon - 45) < 1e-9);
+  // The optimal path starts and ends exactly at the two views, and zooms out
+  // in between when the pan is long relative to the view width.
+  const path = app.run('zoomPath([0, 0, 1], [10, 0, 1])');
+  assert.deepEqual(Array.from(path.at(0)).map((v) => Number(v.toFixed(9))), [0, 0, 1]);
+  assert.deepEqual(Array.from(path.at(1)).map((v) => Number(v.toFixed(9))), [10, 0, 1]);
+  assert.ok(path.at(0.5)[2] > 3, 'long pans rise to a wider view');
+  const zoomOnly = app.run('zoomPath([0, 0, 1], [0, 0, 8])');
+  assert.ok(Math.abs(zoomOnly.length - Math.log(8) / 1.42) < 1e-12);
+  assert.equal(app.run('formatLatLon(12.345, -56.789, 2)'), '12.35° N, 56.79° W');
+  assert.equal(app.run('formatLatLon(-0.001, 0, 1)'), '0.0°, 0.0°');
+  assert.equal(app.run('niceDistance(734)'), 500);
+  assert.equal(app.run('formatDistance(12500)'), '12,500 km');
+  assert.equal(app.run('formatDistance(0.25)'), '250 m');
+});
+
+function navigatorHarness(app, { width = 800, height = 400, reduced = true } = {}) {
+  const listeners = {};
+  app.context.fakeElement = {
+    getBoundingClientRect: () => ({ left: 0, top: 0, width, height }),
+    addEventListener: (type, listener) => { listeners[type] = listener; },
+    classList: { add() {}, remove() {} },
+  };
+  app.context.fakeCamera = {
+    fov: 50, near: 0.1, far: 100, position: { set() {} }, up: { set() {} }, lookAt() {}, updateProjectionMatrix() {},
+  };
+  app.context.fakeMorph = { value: 0, proj2D: 0 };
+  app.context.AbortController = AbortController;
+  app.context.reduced = reduced;
+  const nav = app.run('createMapNavigator({ element: fakeElement, camera: fakeCamera, getMorph: () => fakeMorph, cellCount: 4096, reducedMotion: () => reduced, now: () => 0 })');
+  return { nav, listeners, morph: app.context.fakeMorph, width, height };
+}
+
+test('the navigator keeps the same place and scale across projections', () => {
+  const app = workbench();
+  const { nav, morph, width, height } = navigatorHarness(app);
+  nav.setView({ lat: 35, lon: -120, span: 0.2 });
+  nav.update();
+  const centre = nav.screenToLatLon(width / 2, height / 2);
+  assert.ok(Math.abs(centre.lat - 35) < 1e-6 && Math.abs(centre.lon + 120) < 1e-6, 'globe centre ray hits the view centre');
+  // Scale bar maths: 0.2 rad over 400 px on a 6371 km planet ≈ 3.19 km/px.
+  assert.ok(Math.abs(nav.kilometresPerPixel(6371) / ((0.2 * 6371) / height) - 1) < 0.02);
+  for (const [projection, blend] of [['equirect', 0], ['mollweide', 1]]) {
+    nav.setProjection(projection);
+    Object.assign(morph, { value: 1, proj2D: blend });
+    nav.update();
+    const flat = nav.screenToLatLon(width / 2, height / 2);
+    assert.ok(Math.abs(flat.lat - 35) < 1e-6 && Math.abs(flat.lon + 120) < 1e-6, `${projection} keeps the centre`);
+    assert.ok(Math.abs(nav.view.span - 0.2) < 1e-12, `${projection} keeps the scale`);
+  }
+  // The centre maps back to the middle of the screen.
+  const screen = nav.latLonToScreen(35, -120);
+  assert.ok(screen.visible && Math.abs(screen.x - width / 2) < 1e-6 && Math.abs(screen.y - height / 2) < 1e-6);
+});
+
+test('keyboard and animated moves respect focus scope and reduced motion', () => {
+  const app = workbench();
+  const { nav, listeners } = navigatorHarness(app);
+  nav.setView({ lat: 0, lon: 0, span: 1 });
+  let prevented = false;
+  const key = (value, extra = {}) => listeners.keydown({ key: value, shiftKey: false, preventDefault() { prevented = true; }, stopPropagation() {}, ...extra });
+  key('+');
+  nav.update();
+  assert.ok(prevented, 'handled keys do not scroll the page');
+  assert.ok(Math.abs(nav.view.span - 0.5) < 1e-12, '+ zooms in one level at once under reduced motion');
+  key('-', { shiftKey: true });
+  assert.ok(Math.abs(nav.view.span - 2) < 1e-12, 'shift doubles the zoom step');
+  key('ArrowRight');
+  assert.ok(nav.view.lon > 0 && Math.abs(nav.view.lat) < 1e-9, 'ArrowRight reveals the east');
+  key('ArrowUp');
+  assert.ok(nav.view.lat > 0, 'ArrowUp reveals the north');
+  prevented = false;
+  key('x');
+  assert.equal(prevented, false, 'unbound keys fall through');
+  nav.flyTo({ lat: 40, lon: 100, span: 0.3 });
+  assert.deepEqual([nav.view.lat, nav.view.lon, Number(nav.view.span.toFixed(12))], [40, 100, 0.3]);
+  nav.setView({ lat: 0, lon: 0, span: 1e-9 });
+  assert.ok(nav.view.span >= nav.minSpan(), 'zoom stops before cells fill the screen many times over');
+});
+
+test('a fitted whole-world view refits when the map resizes, until the user moves it', () => {
+  const app = workbench();
+  let size = { width: 400, height: 400 };
+  const { nav, listeners } = navigatorHarness(app);
+  app.context.fakeElement.getBoundingClientRect = () => ({ left: 0, top: 0, ...size });
+  nav.setView({ ...nav.home(), fit: true });
+  const square = nav.view.span;
+  size = { width: 1200, height: 400 };
+  nav.resize();
+  assert.ok(Math.abs(nav.view.span - nav.fitSpan()) < 1e-12 && nav.view.span !== square, 'refitted to the new shape');
+  nav.setProjection('equirect', { animate: false });
+  assert.ok(Math.abs(nav.view.span - nav.fitSpan('equirect')) < 1e-12, 'a whole-world globe becomes the whole flat map');
+  listeners.keydown({ key: '+', shiftKey: false, preventDefault() {}, stopPropagation() {} });
+  const zoomed = nav.view.span;
+  size = { width: 600, height: 400 };
+  nav.resize();
+  assert.equal(nav.view.span, zoomed, 'a view the user chose is kept on resize');
+});
+
+test('map URLs carry the camera and overlays, and ignore malformed values', () => {
+  const app = workbench();
+  const parsed = app.run("parseViewHash('#map?layer=cells%2Felevation_m&show=cells,relief,bogus&at=35.00,-120.00,20.00')");
+  const params = JSON.parse(JSON.stringify(parsed.mapParams));
+  assert.deepEqual(params.show, ['cells', 'relief']);
+  assert.equal(params.view.lat, 35);
+  assert.equal(params.view.lon, -120);
+  assert.ok(Math.abs(params.view.span - (20 * Math.PI) / 180) < 1e-12);
+  for (const bad of ['at=95,0,10', 'at=0,0,-1', 'at=a,b,c', 'at=1,2']) {
+    assert.equal(app.run(`parseViewHash('#map?${bad}').mapParams`), null, bad);
+  }
+  app.state.activeLayer = { id: 'cells/biome', kind: 'categorical' };
+  app.state.overlays.wireframe = true;
+  app.state.relief = true;
+  app.run('three.controls = { view: { lat: -12.345, lon: 45.678, span: Math.PI / 6 } }');
+  assert.equal(app.run('mapUrlHash()'), '#map?layer=cells%2Fbiome&show=cells%2Crelief&at=-12.35%2C45.68%2C30.00');
+});
+
+test('the command palette jumps to typed coordinates and cell numbers', () => {
+  const app = workbench();
+  app.state.mapReady = true;
+  app.state.cellCount = 100;
+  const titles = (query) => Array.from(app.run(`commandQueryItems(${JSON.stringify(query)})`)).map((item) => item.title);
+  assert.deepEqual(titles('12.5 N, 40 W'), ['12.50° N, 40.00° W']);
+  assert.deepEqual(titles('-33.9 151.2'), ['33.90° S, 151.20° E']);
+  assert.deepEqual(titles('cell 42'), ['Cell 42']);
+  assert.deepEqual(titles('42'), ['Cell 42']);
+  assert.deepEqual(titles('cell 100'), [], 'cells beyond the world are not offered');
+  assert.deepEqual(titles('95, 10'), [], 'latitudes beyond the poles are rejected');
+  assert.deepEqual(titles('elevation'), []);
+  app.state.mapReady = false;
+  assert.deepEqual(titles('12, 40'), [], 'nothing to jump to without a map');
+});
+
+test('hover readouts show units, class names and identifiers honestly', () => {
+  const app = workbench();
+  app.context.numeric = { id: 'cells/temperature_c', source: 'cells', name: 'temperature_c', kind: 'numeric', stats: { min: -30, max: 30, p2: -25, p98: 25 } };
+  app.context.classes = { id: 'cells/biome', source: 'cells', name: 'biome', kind: 'categorical', categories: ['ocean', 'desert'] };
+  app.context.ids = { id: 'cells/plate_id', source: 'cells', name: 'plate_id', kind: 'numeric', stats: { min: 0, max: 13, p2: 0, p98: 13 } };
+  assert.equal(app.run('hoverValueText(numeric, 12.5)'), '12.5 °C');
+  assert.equal(app.run('hoverValueText(numeric, 3.0e38)'), '—');
+  assert.equal(app.run('hoverValueText(classes, 1)'), 'desert');
+  assert.equal(app.run('hoverValueText(classes, -1)'), 'no data');
+  app.run('state.activeLayer = ids; state.scale = numericScale(ids)');
+  assert.equal(app.run('hoverValueText(ids, 7)'), 'id 7');
+  assert.equal(app.run('hoverValueText(ids, -1)'), 'none (−1)');
+  // Coordinates are shown to the precision the mesh supports.
+  app.state.cellCount = 4096;
+  assert.equal(app.run('coordinateDigits()'), 1);
+  app.state.cellCount = 163842;
+  assert.equal(app.run('coordinateDigits()'), 2);
 });

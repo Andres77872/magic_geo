@@ -9,13 +9,14 @@ from typing import Annotated
 import typer
 
 from .._app import app
+from .._paths import runtime_path
 from ...api import backend_info
 from ...config import ConfigError, create_config, parse_config_overrides
 
 
 @app.command("init-config")
 def init_config(
-    output: Annotated[Path, typer.Option("--output", "-o", help="New YAML config path.")] = Path(
+    output: Annotated[Path, typer.Option("--output", "-o", help="New YAML config path.", callback=runtime_path)] = Path(
         "magic-geo.yaml"
     ),
     profile: Annotated[

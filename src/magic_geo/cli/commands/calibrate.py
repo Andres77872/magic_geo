@@ -11,6 +11,7 @@ import typer
 from pydantic import ValidationError
 
 from .._app import _load_world_for_cli, app
+from .._paths import runtime_path
 from ...calibration import (
     CalibrationError,
     derive_calibration_targets,
@@ -37,11 +38,12 @@ def calibrate(
         typer.Option(
             "--targets",
             "-t",
-            exists=True,
+            exists=False,
             help="JSON calibration target ranges derived from external datasets.",
+            callback=runtime_path,
         ),
     ],
-    output: Annotated[Path, typer.Option("--output", "-o", help="Calibration report JSON path.")] = Path(
+    output: Annotated[Path, typer.Option("--output", "-o", help="Calibration report JSON path.", callback=runtime_path)] = Path(
         "runs/calibration.json"
     ),
     summary: Annotated[Path | None, typer.Option("--summary", help="Optional Markdown calibration report path.")] = None,
@@ -95,15 +97,16 @@ def calibrate(
 def calibrate_ensemble(
     config: Annotated[
         Path,
-        typer.Option("--config", "-c", exists=True, help="Base YAML config path."),
+        typer.Option("--config", "-c", exists=False, help="Base YAML config path.", callback=runtime_path),
     ],
     matrix: Annotated[
         Path,
         typer.Option(
             "--matrix",
             "-m",
-            exists=True,
+            exists=False,
             help="JSON manifest containing explicit seed/cell-count ensemble members.",
+            callback=runtime_path,
         ),
     ],
     targets: Annotated[
@@ -111,13 +114,14 @@ def calibrate_ensemble(
         typer.Option(
             "--targets",
             "-t",
-            exists=True,
+            exists=False,
             help="Calibration target JSON path; repeat for multiple non-overlapping target bundles.",
+            callback=runtime_path,
         ),
     ],
     output: Annotated[
         Path,
-        typer.Option("--output", "-o", help="Calibration ensemble report JSON path."),
+        typer.Option("--output", "-o", help="Calibration ensemble report JSON path.", callback=runtime_path),
     ] = Path("runs/calibration_ensemble.json"),
     summary: Annotated[
         Path | None,
@@ -206,11 +210,12 @@ def derive_targets(
         typer.Option(
             "--sources",
             "-s",
-            exists=True,
+            exists=False,
             help="JSON source manifest for deriving calibration target ranges from local raster/vector data.",
+            callback=runtime_path,
         ),
     ],
-    output: Annotated[Path, typer.Option("--output", "-o", help="Derived calibration targets JSON path.")] = Path(
+    output: Annotated[Path, typer.Option("--output", "-o", help="Derived calibration targets JSON path.", callback=runtime_path)] = Path(
         "runs/calibration_targets.json"
     ),
     summary: Annotated[Path | None, typer.Option("--summary", help="Optional Markdown target derivation report path.")] = None,

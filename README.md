@@ -1,17 +1,45 @@
 # magic-geo
 
-`magic-geo` is a causal planet generator with equivalent CLI, Python, and local
-web-workbench entry points. The Python layer owns configuration, validation,
-orchestration, and file output. The heavy planet generation work runs in a C++
-shared library loaded through `ctypes`: spherical mesh construction, plate
-assignment, boundary classification, topography, climate fields, hydrology,
-erosion, cryosphere, soils, biomes, resources, settlements, routes, political
-geography, cultures, languages, population pressure, conflicts, dynasties,
-and ruins. Logistics networks, market clearing, and campaign operations are
-added afterwards by the Python enrichment layer.
+**Procedural planets, simulated from plate to biome.**
 
-The browser UI is local and self-hosted; it does not upload worlds or configs to
-an external service.
+magic-geo is an open-source, causal planet generator. A C++20 engine builds a
+spherical mesh, then simulates:
+
+- plate tectonics, relief and isostasy
+- a twelve-month seasonal energy-balance climate
+- rivers, lakes and groundwater
+- erosion, ice and permafrost
+- soils, biomes and ecosystems
+- resources, settlements, routes, borders, cultures and history
+
+A Python layer handles configuration, validation, enrichment and file output.
+You can drive it from a **local web workbench**, the **CLI** or **Python**. All
+three run the same pipeline and write the same world format (JSON or binary
+`.mgeo`).
+
+![The magic-geo workbench: a 4,096-cell planet on the globe, colored by biome with relief shading and place markers](src/magic_geo/debug_ui/assets/workbench-map.webp)
+
+- **Configure → generate → explore.** Start from a profile or edit the YAML,
+  run generation as a background job, then explore about 500 layers on a globe,
+  equirectangular or Mollweide map, and browse every record in tables.
+- **Reproducible.** The same seed and configuration produce the same planet.
+  Configurations are validated against a versioned JSON Schema.
+- **Honest outputs.** Unavailable estimates stay unavailable instead of turning
+  into zeros. Budgets carry their residuals, and unresolved physics is labelled
+  as unresolved.
+- **Local.** The browser UI is self-hosted and never uploads worlds or
+  configurations.
+
+## Documentation
+
+| I want to… | Read |
+|---|---|
+| Generate my first planet | [Quickstart](docs/wiki/03-quickstart.md) · [Web workbench guide](docs/debug_ui_guide.md) |
+| Install, build or deploy | [Installation and build](docs/wiki/02-installation-and-build.md) · [Docker deployment](docs/docker_deployment.md) · [Runtime storage](docs/runtime_storage.md) |
+| Look up an option, command or field | [Configuration reference](docs/wiki/05-configuration-reference.md) · [CLI reference](docs/wiki/06-cli-reference.md) · [World schema](docs/wiki/10-world-schema.md) · [REST API & jobs](docs/wiki/15-web-workbench.md) · [Layer reference](docs/layers_reference.md) |
+| Understand how it works | [Overview](docs/wiki/01-overview.md) · [Architecture](docs/wiki/04-architecture.md) · [Glossary](docs/wiki/21-glossary.md) · [Full wiki index](docs/wiki/README.md) |
+
+The running workbench also serves a product overview at `/landing.html`.
 
 ## Quick Start
 
@@ -66,8 +94,23 @@ before requesting its wheel. A locally produced Linux tag such as
 
 ## Web Workbench
 
-Install the optional web dependencies and start it without any required cache
-argument:
+```bash
+./scripts/dev.sh
+# http://127.0.0.1:8642
+```
+
+`scripts/dev.sh` creates or reuses `.venv`, installs any missing dependencies,
+builds the native core incrementally, and serves the workbench with Python
+reload. It works from any directory.
+
+- UI edits appear when you refresh the browser.
+- Restart the script after C++ changes so the core is rebuilt.
+- Python reload stops active jobs. Use `--no-reload` for long runs.
+- Other flags: `--no-build` uses an existing core, `--install` refreshes
+  dependencies, `--port 8765` changes the port.
+- Optional local settings go in `.env.local` (copy it from `.env.local.example`).
+
+To run it from an installed package instead:
 
 ```bash
 python -m pip install -e '.[debug]'
@@ -75,42 +118,68 @@ magic-geo serve
 # http://127.0.0.1:8642
 ```
 
-`serve` works before a world exists. The Config view creates and validates YAML;
-Operations runs generation, validation, calibration, SVG/raster rendering, and
-debug/Rerun exports as typed background jobs; Data browses every exported
-scalar, layer, stage summary and retained stage extra, complete nested record
-family, model section, and skipped-output diagnostic. A successful Generate job can prepare a debug cache
-and open it in the map automatically. Browser output defaults are rooted at the
-configured workspace: the prepared-cache and browser
-`export-debug` default is `<workspace>/debug` (`runs/debug` by default). This is
-different from CLI `export-debug` with no `--output`, which uses
-`<world parent>/debug`. Use `-d <cache>` only to select a custom existing cache,
-and `--workspace <dir>` to change and confine browser-created outputs. The
-`--workspace`, `--host`, and `--port` options also read the
-`MAGIC_GEO_WORKSPACE`, `MAGIC_GEO_HOST`, and `MAGIC_GEO_PORT` environment
-variables (explicit flags win), which is how the Docker deployment configures
-the server from `.env`.
+The server starts even before any world exists. The workbench is organized
+around the workflow:
 
-Browser cache exports are built in staging and published only after success, so
-a failed or cancelled replacement does not damage the selected cache. File
-download links serve immutable per-job snapshots; reports produced by a
-validation or calibration policy remain downloadable even when that policy
-makes the job exit nonzero.
+| View | What you do there |
+|---|---|
+| **Home** | See the configure → generate → explore steps with live status, the library of prepared worlds, example seeds and system info |
+| **Configure** | Start from the **New world** dialog (profile, name, seed, resolution) or edit YAML with syntax colouring, schema reference, validation and atomic, revision-checked saves |
+| **Jobs** | Generate, validate, calibrate, render and export as typed background jobs, and follow each phase |
+| **Map** | Explore about 500 layers grouped by topic, with pinning and search, on a globe that you grab and fly around, or unrolled into an equirectangular or Mollweide map. Each field gets a fitting colour scale (sea level, zero, identifiers), with relief, cell outlines, places and a scale bar. Play stages and months, inspect any cell, and export a PNG with its GPT Image prompt. |
+| **Data** | Browse every exported scalar, layer, stage summary, record family and model section as tables |
+| **API** | Check native backend capabilities, storage paths and the live OpenAPI explorer |
 
-Cache-backed browser requests carry the selected manifest revision; a publish
-or hot reload makes stale reads fail and retry after status refresh instead of
-mixing mesh/table data from two worlds. JSON cache views normalize non-finite
-Parquet values to `null`, while binary Float32/Arrow layer responses retain
-their numeric missing-value semantics.
+Three features work in every view:
 
-The workbench is a trusted-local, single-user tool. It has no authentication or
-user isolation, so keep the default loopback binding unless a trusted network
-boundary or authenticating reverse proxy protects it.
+- **Command palette** (<kbd>Ctrl</kbd>/<kbd>⌘</kbd> <kbd>K</kbd>). Jump to any
+  layer, world, configuration, job or action.
+- **Notifications.** A notification appears when background work finishes, with
+  **Open map** when the world is ready.
+- **Themes.** Light and dark.
 
-See the [web workbench architecture](https://github.com/Andres77872/magic_geo/blob/master/docs/debugger.md),
-[UI guide](https://github.com/Andres77872/magic_geo/blob/master/docs/debug_ui_guide.md),
-[deep refactor review](https://github.com/Andres77872/magic_geo/blob/master/docs/web_refactor_review.md), and live Swagger
-documentation at `/api/docs`.
+Each new world is generated into its own folder, for example
+`runs/<name>/world.json` and `runs/<name>/debug`, so it never replaces the one
+on screen. Map links such as
+`#map?layer=cells%2Fbiome&proj=mollweide` are shareable.
+
+Browser output defaults are rooted at the configured workspace (`runs` by
+default).
+
+- `--workspace <dir>` moves and confines the files the browser creates.
+- `-d <cache>` opens one specific existing browser map (debug cache).
+- `--workspace`, `--host` and `--port` also read `MAGIC_GEO_WORKSPACE`,
+  `MAGIC_GEO_HOST` and `MAGIC_GEO_PORT`. Explicit flags win.
+- Browser `export-debug` defaults to `<workspace>/debug`. CLI `export-debug`
+  without `--output` uses `<world parent>/debug` instead.
+
+Storage can live outside the source checkout; see
+[runtime paths and config discovery](docs/runtime_storage.md).
+
+Guarantees:
+
+- **Safe map publishing.** Browser maps are built in a staging folder and
+  published only after success, so a failed or cancelled export never damages
+  the map on screen.
+- **Immutable downloads.** Job downloads are per-job snapshots.
+- **Consistent reads.** Cache-backed requests carry the manifest revision, so a
+  hot reload cannot mix data from two worlds.
+- **Valid JSON.** JSON views normalize non-finite values to `null`. Binary
+  Float32 and Arrow layer responses keep their numeric missing-value semantics.
+
+The workbench is a trusted-local, single-user tool with no authentication or
+user isolation. Keep the default loopback binding unless a trusted network
+boundary or an authenticating reverse proxy protects it.
+
+Read next:
+
+- [Web workbench guide](docs/debug_ui_guide.md): tour, views, shortcuts,
+  accessibility and troubleshooting.
+- [Web workbench reference](docs/wiki/15-web-workbench.md): jobs, REST routes
+  and the security model.
+- [Architecture notes](docs/debugger.md).
+- [Workbench redesign record](docs/workbench_redesign.md).
+- Live Swagger documentation at `/api/docs`.
 
 ## Docker Deployment
 

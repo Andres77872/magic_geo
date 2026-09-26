@@ -10,17 +10,19 @@ import typer
 from pydantic import ValidationError
 
 from .._app import app
+from .._paths import runtime_path
 from ...api import generate_geo_world, generate_world
 from ...config import load_config
+from ...generation_progress import emit_progress
 from ...io import write_cells_csv, write_summary_markdown, write_world
 
 
 @app.command("generate")
 def generate(
-    config: Annotated[Path, typer.Option("--config", "-c", exists=True, help="YAML config path.")] = Path(
+    config: Annotated[Path, typer.Option("--config", "-c", exists=False, help="YAML config path.", callback=runtime_path)] = Path(
         "magic-geo.yaml"
     ),
-    output: Annotated[Path, typer.Option("--output", "-o", help="World .json or fast .mgeo output path.")] = Path(
+    output: Annotated[Path, typer.Option("--output", "-o", help="World .json or fast .mgeo output path.", callback=runtime_path)] = Path(
         "runs/world.json"
     ),
     summary: Annotated[Path | None, typer.Option("--summary", help="Optional Markdown summary path.")] = None,
@@ -44,6 +46,7 @@ def generate(
     ] = "auto",
 ) -> None:
     """Generate a planet from YAML config."""
+    emit_progress("config", "Reading world configuration", "Loading and validating the selected YAML configuration.")
     try:
         world_config = load_config(config)
         if cells is not None:
@@ -75,10 +78,13 @@ def generate(
         raise typer.Exit(2) from exc
     # The generation pipeline owns this object and its JSON-value invariants;
     # skip the otherwise-public recursive preflight on the hot save path.
+    emit_progress("saving_world", "Saving the generated world", "Writing the complete world file to the selected output path.")
     write_world(output, world, format=world_format, validate_model=False)
     if summary is not None:
+        emit_progress("saving_summary", "Writing the world summary", "Saving the requested Markdown report.")
         write_summary_markdown(summary, world)
     if cells_csv is not None:
+        emit_progress("saving_cells", "Writing the cell table", "Saving the requested per-cell CSV export.")
         write_cells_csv(cells_csv, world)
 
     s = world["summary"]

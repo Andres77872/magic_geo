@@ -6,10 +6,22 @@
 // shader. Projection morph blends vertex positions between the unit sphere
 // and precomputed equirectangular/Mollweide plane positions. Picking renders
 // encoded cell ids into an offscreen target and reads one pixel.
+//
+// Frames are drawn on demand (requestRender) rather than continuously, and the
+// camera is driven by map-navigation.js, which keeps one geographic view
+// (centre + visible span) across the globe and the flat projections.
 
+import { createConfigWorkbench } from './config-workbench.js';
+import { createOperationsWorkbench } from './operations-workbench.js';
+import { createHomeWorkbench } from './home-workbench.js';
+import { createCommandPalette } from './command-palette.js';
+import { createNewWorldDialog } from './new-world.js';
 import * as THREE from 'three';
-import { OrbitControls } from './vendor/OrbitControls.js';
-import { describeLayer, docsCoverage, layerTooltip, searchTerms, UI_GUIDE, KEY_REFERENCE } from './layer_docs.js';
+import { createMapNavigator, formatLatLon, niceDistance, formatDistance, mollweideTheta } from './map-navigation.js';
+import { COLORMAPS, colormapRgba, colormapHex, numericScale, scalePosition, scaleValueAt, scaleHex, scaleTicks, scaleSummary, identifierHex } from './colormaps.js';
+import { describeLayer, docsCoverage, layerTooltip, searchTerms, UI_GUIDE, KEY_REFERENCE, LAYER_TOPICS, FEATURED_LAYER_NAMES, layerTopic, layerLabel, layerUnit } from './layer_docs.js';
+import { icon, toast, applyTheme, toggleTheme, currentTheme, storageGet, storageSet, relativeTime, formatCount, hueFor, isMacPlatform, prefersReducedMotion } from './ui.js';
+import { categoryHex, hexBytes } from './palettes.js';
 
 const MISSING_SENTINEL = 3.0e38;   // NaN replacement survives every GPU driver
 const PLANE_SCALE = new THREE.Vector2(2.0, 1.0); // equirect/mollweide plane half-extent
@@ -20,6 +32,16 @@ const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December',
 ];
+const VIEWS = ['home', 'config', 'operations', 'map', 'data', 'api'];
+const VIEW_TITLES = {
+  home: 'Home', config: 'Configure', operations: 'Jobs', map: 'Map', data: 'Data', api: 'API & system',
+};
+const STAGE_PLAY_INTERVAL_MS = 650;
+const MAX_PIXEL_RATIO = 2;             // 3× screens would draw 9× the pixels for no visible gain
+const MORPH_TIME_CONSTANT_MS = 150;    // projection morph eases out with this time constant
+const VALUE_FADE_MS = 220;             // cross-fade between time slices of the same layer
+const RELIEF_LIGHT = { azimuthDeg: 315, altitudeDeg: 45 };   // cartographic NW light
+const pixelRatio = () => Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
 
 // ---------------------------------------------------------------------------
 // Small utilities
@@ -288,46 +310,23 @@ function familyAvailabilityMarkup(name, rows, detail = 'full', availability = nu
     + `Containment describes modeled cells only; it does not demonstrate physical containment. ${coverageHelp}</div>`;
 }
 
-function viridis(t) {
-  const c = [
-    [0.2777273272234177, 0.005407344544966578, 0.3340998053353061],
-    [0.1050930431085774, 1.404613529898575, 1.384590162594685],
-    [-0.3308618287255563, 0.214847559468213, 0.09509516302823659],
-    [-4.634230498983486, -5.799100973351585, -19.33244095627987],
-    [6.228269936347081, 14.17993336680509, 56.69055260068105],
-    [4.776384997670288, -13.74514537774601, -65.35303263337234],
-    [-5.435455855934631, 4.645852612178535, 26.3124352495832],
-  ];
-  const rgb = [0, 0, 0];
-  for (let ch = 0; ch < 3; ch += 1) {
-    let acc = c[6][ch];
-    for (let k = 5; k >= 0; k -= 1) acc = acc * t + c[k][ch];
-    rgb[ch] = Math.min(1, Math.max(0, acc));
-  }
-  return rgb;
+// Guide color for a category code, as CSS hex. See palettes.js for the scheme.
+function categoryColor(index, categories = []) {
+  return categoryHex(index, categories);
 }
 
-function categoryColor(index) {
-  const hue = (index * 0.61803398875) % 1;
-  const color = new THREE.Color();
-  color.setHSL(hue, 0.55, 0.55);
-  return [color.r, color.g, color.b];
+// 256-entry RGBA lookup the fragment shader samples by category code.
+function categoryPaletteData(categories = []) {
+  const data = new Uint8Array(256 * 4);
+  for (let code = 0; code < 256; code += 1) {
+    data.set([...hexBytes(categoryHex(code, categories)), 255], code * 4);
+  }
+  return data;
 }
 
 function mollweide(latDeg, lonDeg) {
-  const lat = (latDeg * Math.PI) / 180;
-  const lon = (lonDeg * Math.PI) / 180;
-  let theta = lat;
-  if (Math.abs(Math.abs(lat) - Math.PI / 2) < 1e-9) {
-    theta = Math.sign(lat) * (Math.PI / 2);
-  } else {
-    for (let i = 0; i < 8; i += 1) {
-      const denom = 2 + 2 * Math.cos(2 * theta);
-      if (Math.abs(denom) < 1e-12) break;
-      theta -= (2 * theta + Math.sin(2 * theta) - Math.PI * Math.sin(lat)) / denom;
-    }
-  }
-  return [(lon / Math.PI) * Math.cos(theta), Math.sin(theta)];
+  const theta = mollweideTheta((latDeg * Math.PI) / 180);
+  return [(((lonDeg * Math.PI) / 180) / Math.PI) * Math.cos(theta), Math.sin(theta)];
 }
 
 function latLonToXyz(latDeg, lonDeg, radius = 1) {
@@ -356,18 +355,34 @@ const MORPH_CHUNK = /* glsl */ `
   }
 `;
 
+// Fill: one flat value per cell. aEdge is 1 at a cell's centre vertex and 0 on
+// its boundary ring, so vEdge / |∇vEdge| is the fragment's distance to the
+// cell boundary in screen pixels (Bærentzen et al. 2006, specialised to fan
+// triangles). That drives anti-aliased outlines of constant pixel width and
+// the hover/selection rings without extra geometry.
 const FILL_VERTEX = /* glsl */ `
   in vec2 aPosEq;
   in vec2 aPosMo;
   in float aCellId;
+  in float aEdge;
+  in float aRelief;
   uniform highp sampler2D uValues;
+  uniform highp sampler2D uPrevValues;
   uniform int uTexWidth;
-  out float vValue;
+  flat out float vValue;
+  flat out float vPrevValue;
+  flat out float vCellId;
+  out float vEdge;
+  out float vRelief;
   ${MORPH_CHUNK}
   void main() {
     int id = int(aCellId + 0.5);
     ivec2 texel = ivec2(id % uTexWidth, id / uTexWidth);
     vValue = texelFetch(uValues, texel, 0).r;
+    vPrevValue = texelFetch(uPrevValues, texel, 0).r;
+    vCellId = aCellId;
+    vEdge = aEdge;
+    vRelief = aRelief;
     vec3 pos = morphedPosition(position, aPosEq, aPosMo);
     gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
   }
@@ -375,29 +390,106 @@ const FILL_VERTEX = /* glsl */ `
 
 const FILL_FRAGMENT = /* glsl */ `
   out vec4 outColor;
-  in float vValue;
+  flat in float vValue;
+  flat in float vPrevValue;
+  flat in float vCellId;
+  in float vEdge;
+  in float vRelief;
   uniform float uMin;
   uniform float uMax;
-  uniform float uCategorical;
+  uniform float uPivot;
+  uniform int uMode;             // 0 linear, 1 two-slope, 2 identifier, 3 categorical
   uniform sampler2D uColormap;
-  vec3 hsl2rgb(vec3 hsl) {
-    vec3 rgb = clamp(abs(mod(hsl.x * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
-    float c = (1.0 - abs(2.0 * hsl.z - 1.0)) * hsl.y;
-    return hsl.z + c * (rgb - 0.5);
+  uniform sampler2D uCategoryPalette;
+  uniform float uFade;           // < 1 while cross-fading from the previous slice
+  uniform float uHoverCell;
+  uniform float uSelectedCell;
+  uniform float uHighlightCode;  // categorical class spotlighted from the legend
+  uniform float uOutlines;
+  uniform float uReliefStrength;
+  uniform vec3 uMissingColor;
+  uniform vec3 uSelectColor;
+
+  bool isMissing(float v) {
+    return v > 1.0e37 || isnan(v) || (uMode >= 2 && v < -0.5);
   }
+
+  vec3 colorFor(float v) {
+    if (isMissing(v)) return uMissingColor;
+    if (uMode == 3) {
+      int code = clamp(int(v + 0.5), 0, 255);
+      return texelFetch(uCategoryPalette, ivec2(code, 0), 0).rgb;
+    }
+    if (uMode == 2) {
+      int code = int(mod(floor(v + 0.5), 18.0));
+      return texelFetch(uCategoryPalette, ivec2(code, 0), 0).rgb;
+    }
+    float t;
+    if (uMode == 1) {
+      t = v <= uPivot
+        ? (uPivot > uMin ? 0.5 * (v - uMin) / (uPivot - uMin) : 0.5)
+        : (uMax > uPivot ? 0.5 + 0.5 * (v - uPivot) / (uMax - uPivot) : 0.5);
+    } else {
+      t = (v - uMin) / max(uMax - uMin, 1.0e-12);
+    }
+    // The same texel the legend and both exports use: floor(t * 256).
+    int index = min(255, int(floor(clamp(t, 0.0, 1.0) * 256.0)));
+    return texelFetch(uColormap, ivec2(index, 0), 0).rgb;
+  }
+
   void main() {
-    if (vValue > 1.0e37 || isnan(vValue)) {
-      outColor = vec4(0.16, 0.18, 0.21, 1.0);
-      return;
+    vec2 gradient = vec2(dFdx(vEdge), dFdy(vEdge));
+    float scale = max(length(gradient), 1.0e-6);
+    float edgePx = vEdge / scale;          // distance to this cell's boundary
+    float cellPx = 1.0 / scale;            // centre-to-boundary size on screen
+
+    bool missing = isMissing(vValue);
+    vec3 color = colorFor(vValue);
+    if (uFade < 1.0) color = mix(colorFor(vPrevValue), color, uFade);
+    if (!missing && uReliefStrength > 0.0) color *= mix(1.0, vRelief, uReliefStrength);
+    if (uHighlightCode > -0.5 && uMode == 3 && (missing || abs(floor(vValue + 0.5) - uHighlightCode) > 0.5)) {
+      color = mix(color, uMissingColor, 0.8);
     }
-    if (uCategorical > 0.5) {
-      if (vValue < -0.5) { outColor = vec4(0.16, 0.18, 0.21, 1.0); return; }
-      float hue = fract(vValue * 0.61803398875);
-      outColor = vec4(hsl2rgb(vec3(hue, 0.55, 0.55)), 1.0);
-      return;
+    if (uOutlines > 0.5) {
+      float line = 1.0 - smoothstep(0.35, 1.25, edgePx);
+      float fade = smoothstep(3.0, 9.0, cellPx);   // hide outlines on cells only a few px wide
+      color = mix(color, color * 0.35, line * fade * 0.85);
     }
-    float t = clamp((vValue - uMin) / max(uMax - uMin, 1.0e-12), 0.0, 1.0);
-    outColor = vec4(texture(uColormap, vec2(t, 0.5)).rgb, 1.0);
+    if (abs(vCellId - uSelectedCell) < 0.5) {
+      color = mix(color, uSelectColor, 1.0 - smoothstep(2.6, 3.4, edgePx));
+      color = mix(color, vec3(0.02), 1.0 - smoothstep(0.7, 1.3, edgePx));
+    } else if (abs(vCellId - uHoverCell) < 0.5) {
+      color = mix(color, vec3(1.0), 0.14);
+      color = mix(color, vec3(1.0), 0.9 * (1.0 - smoothstep(1.2, 2.0, edgePx)));
+    }
+    outColor = vec4(color, 1.0);
+  }
+`;
+
+// Atmosphere halo on a back-facing shell around the globe. Its brightness is
+// a function of how close the view ray passes to the planet's limb, so it
+// only ever lights the background around the globe, never a data pixel.
+const ATMOSPHERE_VERTEX = /* glsl */ `
+  out vec3 vWorld;
+  void main() {
+    vec4 world = modelMatrix * vec4(position, 1.0);
+    vWorld = world.xyz;
+    gl_Position = projectionMatrix * viewMatrix * world;
+  }
+`;
+
+const ATMOSPHERE_FRAGMENT = /* glsl */ `
+  out vec4 outColor;
+  in vec3 vWorld;
+  uniform vec3 uGlowColor;
+  uniform float uOpacity;
+  uniform float uOuter;
+  void main() {
+    vec3 direction = normalize(vWorld - cameraPosition);
+    float closest = length(cross(cameraPosition, direction));   // ray-to-centre distance, radii
+    float t = clamp((closest - 1.0) / (uOuter - 1.0), 0.0, 1.0);
+    float glow = pow(1.0 - t, 2.6) * uOpacity;
+    outColor = vec4(uGlowColor, glow);   // additive: adds uGlowColor × glow
   }
 `;
 
@@ -450,7 +542,7 @@ const state = {
   status: null,
   catalog: null,
   cacheAvailable: false,
-  activeView: 'map',
+  activeView: 'home',
   manifest: null,
   meshInfo: null,
   cellCount: 0,
@@ -510,12 +602,137 @@ const state = {
   configEditRevision: 0,
   configResultRequest: 0,
   savedConfig: null,
+  configFiles: [],
+  configFilesRequest: 0,
+  configFileRequest: 0,
+  configSource: null,
+  configBaseline: '',
+  configSaveDirectory: '',
+  configSaving: false,
+  operationDrafts: {},
+  renderedOperation: null,
+  selectedJob: null,
+  worlds: null,              // last /api/worlds listing, for Home and the palette
+  backend: null,             // last /api/backend report
+  pinnedLayers: [],          // layer ids pinned to the top of the layer list
+  layerFilter: 'all',        // all | numeric | categorical | time
+  playing: false,            // time-bar playback
+  playTimer: 0,
+  singleKeyShortcuts: true,  // WCAG 2.1.4: single-character map shortcuts can be turned off
+  pendingMapParams: null,    // layer/stage/month/projection/view requested by the URL
+  renderRequested: true,     // draw the next animation frame (render on demand)
+  scaleOptions: { colormap: 'auto', range: 'robust' },  // numeric colour-scale choice
+  scale: null,               // resolved numeric scale of the displayed slice
+  relief: false,             // hillshade from present-day elevation (off: colours stay exact)
+  reliefReady: false,
+  highlightCode: -1,         // categorical class spotlighted from the legend
+  hoverPoint: null,          // {lat, lon} under the pointer
+  pointerClient: null,       // last pointer position over the map, for the tooltip
+  planetRadiusKm: null,      // from planet_parameters, for the scale bar and distances
+  cellAreas: null,           // Float32Array of cell areas (km²) for area-weighted legends
+  valueFade: null,           // { start } while a time-slice cross-fade runs
+  lastMoveAnnounce: '',
+  jobsLoaded: false,
+  statusFailed: false,
 };
 
 const three = {};
 
+let configWorkbench;
+let operationsWorkbench;
+let homeWorkbench;
+let commandPalette;
+let newWorldDialog;
+function initializeWorkbenchControllers() {
+  const services = {
+    state, $, fetchJson: (...args) => fetchJson(...args),
+    escapeHtml: (...args) => escapeHtml(...args),
+    displayCell: (...args) => displayCell(...args),
+    setView: (...args) => setView(...args),
+  };
+  configWorkbench = createConfigWorkbench({
+    ...services,
+    downloadBlob: (...args) => downloadBlob(...args),
+    renderOperationForm: (...args) => renderOperationForm(...args),
+  });
+  operationsWorkbench = createOperationsWorkbench({
+    ...services,
+    optionalJson: (...args) => optionalJson(...args),
+    formatValue: (...args) => formatValue(...args),
+    jsonText: (...args) => jsonText(...args),
+    beginCacheTransition: (...args) => beginCacheTransition(...args),
+    loadServerStatus: (...args) => loadServerStatus(...args),
+    onJobsChanged: (...args) => onJobsChanged(...args),
+  });
+  homeWorkbench = createHomeWorkbench({
+    ...services,
+    icon: (...args) => icon(...args),
+    relativeTime: (...args) => relativeTime(...args),
+    formatCount: (...args) => formatCount(...args),
+    hueFor: (...args) => hueFor(...args),
+    selectWorld: (...args) => selectWorldByPath(...args),
+    openExample: (...args) => openExample(...args),
+    generateExample: (...args) => openExample(...args),
+  });
+  commandPalette = createCommandPalette({
+    $, escapeHtml: (...args) => escapeHtml(...args),
+    icon: (...args) => icon(...args),
+    getItems: () => commandItems(),
+    getQueryItems: (query) => commandQueryItems(query),
+  });
+  newWorldDialog = createNewWorldDialog({
+    ...services,
+    icon: (...args) => icon(...args),
+    toast: (...args) => toast(...args),
+    loadGeneratedConfig: (...args) => configWorkbench.loadGeneratedConfig(...args),
+    adoptSavedConfig: (...args) => configWorkbench.adoptSavedConfig(...args),
+    refreshConfigFiles: (...args) => refreshConfigFiles(...args),
+    startGeneration: (...args) => startGeneration(...args),
+  });
+}
+function renderHome() { homeWorkbench?.renderHome(); }
+// View controllers share services, while owning their form and request logic.
+function configHasUnsavedChanges(...args) { return configWorkbench.configHasUnsavedChanges(...args); }
+function refreshConfigFiles(...args) { return Promise.resolve(configWorkbench.refreshConfigFiles(...args)).finally(renderHome); }
+function openConfigFile(...args) { return configWorkbench.openConfigFile(...args); }
+function fetchTemplate(...args) { return configWorkbench.fetchTemplate(...args); }
+function normalizeProfiles(...args) { return configWorkbench.normalizeProfiles(...args); }
+function resolveSchemaNode(...args) { return configWorkbench.resolveSchemaNode(...args); }
+function flattenSchema(...args) { return configWorkbench.flattenSchema(...args); }
+function schemaValueText(...args) { return configWorkbench.schemaValueText(...args); }
+function renderSchemaDocs(...args) { return configWorkbench.renderSchemaDocs(...args); }
+function resetConfigTemplate(...args) { return configWorkbench.resetConfigTemplate(...args); }
+function validationErrorMarkup(...args) { return configWorkbench.validationErrorMarkup(...args); }
+function validateConfig(...args) { return configWorkbench.validateConfig(...args); }
+function configNameRaw(...args) { return configWorkbench.configNameRaw(...args); }
+function configFilename(...args) { return configWorkbench.configFilename(...args); }
+function downloadConfig(...args) { return configWorkbench.downloadConfig(...args); }
+function updateSavedConfigControls(...args) { return configWorkbench.updateSavedConfigControls(...args); }
+function configEdited(...args) { return configWorkbench.configEdited(...args); }
+function generateFromSavedConfig(...args) { return configWorkbench.generateFromSavedConfig(...args); }
+function saveConfig(...args) { return configWorkbench.saveConfig(...args); }
+function loadConfigWorkbench(...args) { return Promise.resolve(configWorkbench.loadConfigWorkbench(...args)).finally(renderHome); }
+function prepareOperation(...args) { return operationsWorkbench.prepareOperation(...args); }
+function renderJobActions(...args) { return operationsWorkbench.renderJobActions(...args); }
+function normalizeOperations(...args) { return operationsWorkbench.normalizeOperations(...args); }
+function operationArguments(...args) { return operationsWorkbench.operationArguments(...args); }
+function renderOperationForm(...args) { return operationsWorkbench.renderOperationForm(...args); }
+function updateOperationDependencies(...args) { return operationsWorkbench.updateOperationDependencies(...args); }
+function collectOperationArguments(...args) { return operationsWorkbench.collectOperationArguments(...args); }
+function submitOperation(...args) { return operationsWorkbench.submitOperation(...args); }
+function normalizeJobs(...args) { return operationsWorkbench.normalizeJobs(...args); }
+function jobStatus(...args) { return operationsWorkbench.jobStatus(...args); }
+function jobIsActive(...args) { return operationsWorkbench.jobIsActive(...args); }
+function renderJobs(...args) { return operationsWorkbench.renderJobs(...args); }
+function artifactMarkup(...args) { return operationsWorkbench.artifactMarkup(...args); }
+function renderJobDetail(...args) { return operationsWorkbench.renderJobDetail(...args); }
+function selectJob(...args) { return operationsWorkbench.selectJob(...args); }
+function refreshJobs(...args) { return operationsWorkbench.refreshJobs(...args); }
+function cancelSelectedJob(...args) { return operationsWorkbench.cancelSelectedJob(...args); }
+function loadOperations(...args) { return operationsWorkbench.loadOperations(...args); }
+
 // Console access for debugging the debugger itself.
-window.__magicGeo = { state, three };
+window.__magicGeo = { state, three, pickCell: (...args) => pickCell(...args) };
 
 // ---------------------------------------------------------------------------
 // Data access
@@ -561,6 +778,9 @@ async function optionalJson(url, options = {}) {
     return null;
   }
 }
+
+// Keyboard events can target the document itself, which has no closest().
+const targetWithin = (event, selector) => Boolean(event.target?.closest?.(selector));
 
 const isStageLayer = (layer) => Boolean(layer?.kind?.endsWith('_stage'));
 const isCategoricalLayer = (layer) => Boolean(layer?.kind?.startsWith('categorical'));
@@ -660,16 +880,13 @@ async function buildScene(context) {
 
   const canvas = $('#globe');
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setPixelRatio(pixelRatio());
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x10141a);
+  const flatBackground = new THREE.Color(MAP_BACKGROUND_HEX);
+  const backdrop = makeBackdropTexture();
+  scene.background = backdrop || flatBackground;
   const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 100);
   camera.position.set(0, 0, 3.0);
-  const controls = new OrbitControls(camera, canvas);
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.08;
-  controls.minDistance = 1.05;
-  controls.maxDistance = 12;
 
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3));
@@ -677,24 +894,39 @@ async function buildScene(context) {
   geometry.setAttribute('aPosMo', new THREE.BufferAttribute(mesh.posMo, 2));
   const idFloats = Float32Array.from(mesh.cellIds);
   geometry.setAttribute('aCellId', new THREE.BufferAttribute(idFloats, 1));
+  // Every triangle is (cell centre, ring i, ring i+1): its first vertex is a
+  // centre, so the boundary-distance attribute follows from the index buffer.
+  const edgeWeights = new Float32Array(mesh.cellIds.length);
+  for (let index = 0; index < mesh.indices.length; index += 3) edgeWeights[mesh.indices[index]] = 1;
+  geometry.setAttribute('aEdge', new THREE.BufferAttribute(edgeWeights, 1));
+  const reliefShade = new Float32Array(mesh.cellIds.length).fill(1);
+  const reliefAttribute = new THREE.BufferAttribute(reliefShade, 1);
+  geometry.setAttribute('aRelief', reliefAttribute);
   geometry.setIndex(new THREE.BufferAttribute(mesh.indices, 1));
 
-  // Value texture: square-ish R32F texture indexed by cell id.
+  // Value textures: square-ish R32F textures indexed by cell id. The previous
+  // slice is kept for the short cross-fade when stepping through time.
   const texWidth = Math.max(1, Math.ceil(Math.sqrt(state.cellCount)));
   const texHeight = Math.max(1, Math.ceil(state.cellCount / texWidth));
-  const texData = new Float32Array(texWidth * texHeight).fill(MISSING_SENTINEL);
-  const valueTexture = new THREE.DataTexture(texData, texWidth, texHeight, THREE.RedFormat, THREE.FloatType);
-  valueTexture.minFilter = THREE.NearestFilter;
-  valueTexture.magFilter = THREE.NearestFilter;
-  valueTexture.needsUpdate = true;
+  const makeValueTexture = () => {
+    const data = new Float32Array(texWidth * texHeight).fill(MISSING_SENTINEL);
+    const texture = new THREE.DataTexture(data, texWidth, texHeight, THREE.RedFormat, THREE.FloatType);
+    texture.minFilter = THREE.NearestFilter;
+    texture.magFilter = THREE.NearestFilter;
+    texture.needsUpdate = true;
+    return texture;
+  };
+  const valueTexture = makeValueTexture();
+  const previousValueTexture = makeValueTexture();
 
-  const colormapData = new Uint8Array(256 * 4);
-  for (let i = 0; i < 256; i += 1) {
-    const [r, g, b] = viridis(i / 255);
-    colormapData.set([r * 255, g * 255, b * 255, 255], i * 4);
-  }
-  const colormapTexture = new THREE.DataTexture(colormapData, 256, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+  const colormapTexture = new THREE.DataTexture(colormapRgba('viridis'), 256, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+  colormapTexture.minFilter = THREE.NearestFilter;
+  colormapTexture.magFilter = THREE.NearestFilter;
   colormapTexture.needsUpdate = true;
+  const categoryTexture = new THREE.DataTexture(categoryPaletteData([]), 256, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+  categoryTexture.minFilter = THREE.NearestFilter;
+  categoryTexture.magFilter = THREE.NearestFilter;
+  categoryTexture.needsUpdate = true;
 
   const sharedUniforms = {
     uMorph: { value: 0 },
@@ -707,11 +939,23 @@ async function buildScene(context) {
     uniforms: {
       ...sharedUniforms,
       uValues: { value: valueTexture },
+      uPrevValues: { value: previousValueTexture },
       uTexWidth: { value: texWidth },
       uMin: { value: 0 },
       uMax: { value: 1 },
+      uPivot: { value: 0 },
+      uMode: { value: 0 },
       uCategorical: { value: 0 },
       uColormap: { value: colormapTexture },
+      uCategoryPalette: { value: categoryTexture },
+      uFade: { value: 1 },
+      uHoverCell: { value: -1 },
+      uSelectedCell: { value: -1 },
+      uHighlightCode: { value: -1 },
+      uOutlines: { value: 0 },
+      uReliefStrength: { value: 0 },
+      uMissingColor: { value: new THREE.Color(MISSING_COLOR_HEX) },
+      uSelectColor: { value: new THREE.Color('#ffc34d') },
     },
     side: THREE.DoubleSide,
   });
@@ -719,19 +963,23 @@ async function buildScene(context) {
   fillMesh.frustumCulled = false;
   scene.add(fillMesh);
 
-  const wireMaterial = new THREE.ShaderMaterial({
+  const atmosphereMaterial = new THREE.ShaderMaterial({
     glslVersion: THREE.GLSL3,
-    vertexShader: FLAT_VERTEX,
-    fragmentShader: FLAT_FRAGMENT,
-    uniforms: { ...sharedUniforms, uLift: { value: 0.001 }, uColor: { value: new THREE.Vector4(1, 1, 1, 0.10) } },
-    wireframe: true,
+    vertexShader: ATMOSPHERE_VERTEX,
+    fragmentShader: ATMOSPHERE_FRAGMENT,
+    uniforms: {
+      uGlowColor: { value: new THREE.Color('#5d9cff') },
+      uOpacity: { value: 0.55 },
+      uOuter: { value: 1.12 },
+    },
+    side: THREE.BackSide,
     transparent: true,
     depthWrite: false,
+    blending: THREE.AdditiveBlending,
   });
-  const wireMesh = new THREE.Mesh(geometry, wireMaterial);
-  wireMesh.frustumCulled = false;
-  wireMesh.visible = false;
-  scene.add(wireMesh);
+  const atmosphere = new THREE.Mesh(new THREE.SphereGeometry(1.12, 96, 48), atmosphereMaterial);
+  atmosphere.frustumCulled = false;
+  scene.add(atmosphere);
 
   const pickMaterial = new THREE.ShaderMaterial({
     glslVersion: THREE.GLSL3,
@@ -745,15 +993,55 @@ async function buildScene(context) {
     magFilter: THREE.NearestFilter,
   });
 
+  const controls = createMapNavigator({
+    element: canvas,
+    camera,
+    getMorph: () => state.morph,
+    cellCount: state.cellCount,
+    reducedMotion: () => prefersReducedMotion(),
+  });
+
   Object.assign(three, {
-    renderer, scene, camera, controls, geometry,
-    fillMesh, fillMaterial, wireMesh, pickMaterial, pickTarget,
-    valueTexture, colormapTexture, texWidth, texHeight,
+    renderer, scene, camera, controls, geometry, backdrop, flatBackground,
+    fillMesh, fillMaterial, pickMaterial, pickTarget,
+    atmosphere, atmosphereMaterial, reliefAttribute,
+    valueTexture, previousValueTexture, colormapTexture, categoryTexture, texWidth, texHeight,
     plateLines: null, plateLinesLoading: null, plateLinesAbortController: null,
-    graticuleLines: null, sharedUniforms,
+    graticuleLines: null, graticuleStep: 0, sharedUniforms,
   });
   resizeRenderer();
+  controls.setView?.({ ...(controls.home?.() ?? {}), fit: true });
   return true;
+}
+
+// A soft vignette behind the map for depth. Exports swap in the flat
+// MAP_BACKGROUND_HEX, which is the background colour their codex documents.
+function makeBackdropTexture() {
+  if (typeof THREE.CanvasTexture !== 'function') return null;
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext?.('2d');
+  if (!context) return null;
+  canvas.width = 512;
+  canvas.height = 512;
+  const gradient = context.createRadialGradient(256, 236, 20, 256, 256, 360);
+  gradient.addColorStop(0, '#182334');
+  gradient.addColorStop(0.55, '#111822');
+  gradient.addColorStop(1, '#0a0d12');
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, 512, 512);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
+// Uniform writes tolerate materials that predate a uniform (and test doubles).
+function setUniform(name, value) {
+  const uniform = three.fillMaterial?.uniforms?.[name];
+  if (uniform) uniform.value = value;
+}
+
+function requestRender() {
+  state.renderRequested = true;
 }
 
 function makeLineSegments(segments, color, opacity, lift) {
@@ -840,22 +1128,37 @@ async function ensurePlateLines() {
   return loading;
 }
 
-function buildGraticule() {
-  if (three.graticuleLines) return;
-  const segments = [];
-  for (let lat = -60; lat <= 60; lat += 30) {
-    for (let lon = -180; lon < 180; lon += 5) {
-      segments.push([lat, lon, lat, lon + 5]);
-    }
+// Graticule spacing follows the zoom so there are always a few lines in view:
+// 30° for the whole world, then 10°, 5° and 1° as the view narrows.
+function graticuleStepFor(spanRadians) {
+  const spanDeg = (spanRadians * 180) / Math.PI;
+  if (spanDeg > 70) return 30;
+  if (spanDeg > 25) return 10;
+  if (spanDeg > 8) return 5;
+  return 1;
+}
+
+function buildGraticule(step = graticuleStepFor(three.controls?.view?.span ?? 2)) {
+  if (three.graticuleLines && three.graticuleStep === step) return;
+  if (three.graticuleLines) {
+    three.scene.remove(three.graticuleLines);
+    three.graticuleLines.geometry.dispose();
+    three.graticuleLines.material.dispose();
+    three.graticuleLines = null;
   }
-  for (let lon = -180; lon < 180; lon += 30) {
-    for (let lat = -85; lat < 85; lat += 5) {
-      segments.push([lat, lon, lat + 5, lon]);
-    }
+  const segments = [];
+  const along = Math.min(step, 5);   // segment length keeps lines curved on the globe
+  for (let lat = -90 + step; lat < 90; lat += step) {
+    for (let lon = -180; lon < 180; lon += along) segments.push([lat, lon, lat, lon + along]);
+  }
+  for (let lon = -180; lon < 180; lon += step) {
+    for (let lat = -90; lat < 90; lat += along) segments.push([lat, lon, Math.min(90, lat + along), lon]);
   }
   three.graticuleLines = makeLineSegments(segments, [0.45, 0.55, 0.7], 0.28, 0.002);
-  three.graticuleLines.visible = false;
+  three.graticuleLines.visible = state.overlays.graticule;
+  three.graticuleStep = step;
   three.scene.add(three.graticuleLines);
+  requestRender();
 }
 
 // ---------------------------------------------------------------------------
@@ -868,48 +1171,71 @@ function resizeRenderer() {
   const height = Math.max(1, canvas.clientHeight || canvas.parentElement.clientHeight || 1);
   // devicePixelRatio changes with browser zoom and monitor moves; re-apply it
   // here so the canvas stays sharp (it is otherwise captured once at startup).
-  three.renderer.setPixelRatio(window.devicePixelRatio);
+  const ratio = pixelRatio();
+  three.renderer.setPixelRatio(ratio);
   three.renderer.setSize(width, height, false);
   three.camera.aspect = width / height;
   three.camera.updateProjectionMatrix();
-  three.pickTarget.setSize(
-    Math.max(1, Math.floor(width * window.devicePixelRatio)),
-    Math.max(1, Math.floor(height * window.devicePixelRatio)),
-  );
+  three.pickTarget.setSize(Math.max(1, Math.floor(width * ratio)), Math.max(1, Math.floor(height * ratio)));
+  three.controls?.resize?.();
   state.pickDirty = true;
+  requestRender();
 }
 
-function animate() {
-  requestAnimationFrame(animate);
-  if (!state.mapReady || !three.sharedUniforms || !three.renderer || !three.scene || !three.camera) return;
+// Ease the projection morph with a fixed time constant, independent of the
+// display's refresh rate. Returns true while it is still moving.
+function updateMorph(elapsedMs) {
   const morph = state.morph;
-  const before = `${morph.value.toFixed(4)}|${morph.proj2D.toFixed(4)}`;
-  morph.value += (morph.target - morph.value) * 0.12;
-  if (Math.abs(morph.target - morph.value) < 0.002) morph.value = morph.target;
+  const k = 1 - Math.exp(-Math.max(0, elapsedMs) / MORPH_TIME_CONSTANT_MS);
+  const before = `${morph.value}|${morph.proj2D}`;
+  morph.value += (morph.target - morph.value) * k;
+  if (Math.abs(morph.target - morph.value) < 0.001) morph.value = morph.target;
   // Only blend the 2D projection choice while flat, otherwise snap.
   if (morph.value < 0.05) {
     morph.proj2D = morph.proj2DTarget;
   } else {
-    morph.proj2D += (morph.proj2DTarget - morph.proj2D) * 0.12;
-    if (Math.abs(morph.proj2DTarget - morph.proj2D) < 0.002) morph.proj2D = morph.proj2DTarget;
+    morph.proj2D += (morph.proj2DTarget - morph.proj2D) * k;
+    if (Math.abs(morph.proj2DTarget - morph.proj2D) < 0.001) morph.proj2D = morph.proj2DTarget;
   }
-  three.sharedUniforms.uMorph.value = morph.value;
-  three.sharedUniforms.uProj2D.value = morph.proj2D;
-  if (`${morph.value.toFixed(4)}|${morph.proj2D.toFixed(4)}` !== before) state.pickDirty = true;
+  return `${morph.value}|${morph.proj2D}` !== before;
+}
 
-  if (state.activeView === 'map') {
-    three.controls.update();
-    three.renderer.render(three.scene, three.camera);
+let lastFrameTime = 0;
+function animate(time = 0) {
+  requestAnimationFrame(animate);
+  const elapsed = lastFrameTime ? Math.min(100, time - lastFrameTime) : 16;
+  lastFrameTime = time;
+  if (!state.mapReady || !three.sharedUniforms || !three.renderer || !three.scene || !three.camera) return;
+  let moved = updateMorph(elapsed);
+  three.sharedUniforms.uMorph.value = state.morph.value;
+  three.sharedUniforms.uProj2D.value = state.morph.proj2D;
+  if (three.controls.update(time)) moved = true;
+  if (moved) {
+    state.pickDirty = true;
+    state.renderRequested = true;
   }
+  if (state.valueFade) {
+    const fade = Math.min(1, (time - state.valueFade.start) / VALUE_FADE_MS);
+    setUniform('uFade', fade);
+    if (fade >= 1) state.valueFade = null;
+    state.renderRequested = true;
+  }
+  if (!state.renderRequested || state.activeView !== 'map') return;
+  state.renderRequested = false;
+  if (three.atmosphere) {
+    const globeness = 1 - state.morph.value;
+    three.atmosphere.visible = globeness > 0.02;
+    three.atmosphereMaterial.uniforms.uOpacity.value = 0.55 * globeness * globeness;
+  }
+  three.renderer.render(three.scene, three.camera);
+  updateMapOverlays();
 }
 
 function renderPickBuffer() {
-  const { renderer, scene, camera, pickTarget, fillMesh, wireMesh, pickMaterial } = three;
-  const overlays = [three.plateLines, three.graticuleLines].filter(Boolean);
-  const visibility = overlays.map((line) => line.visible);
-  overlays.forEach((line) => { line.visible = false; });
-  const wireVisible = wireMesh.visible;
-  wireMesh.visible = false;
+  const { renderer, scene, camera, pickTarget, fillMesh, pickMaterial } = three;
+  const hidden = [three.plateLines, three.graticuleLines, three.atmosphere].filter(Boolean);
+  const visibility = hidden.map((object) => object.visible);
+  hidden.forEach((object) => { object.visible = false; });
   const previousMaterial = fillMesh.material;
   fillMesh.material = pickMaterial;
   const previousBackground = scene.background;
@@ -921,39 +1247,204 @@ function renderPickBuffer() {
 
   fillMesh.material = previousMaterial;
   scene.background = previousBackground;
-  wireMesh.visible = wireVisible;
-  overlays.forEach((line, index) => { line.visible = visibility[index]; });
+  hidden.forEach((object, index) => { object.visible = visibility[index]; });
   state.pickDirty = false;
 }
 
-function pickCell(clientX, clientY) {
+function pickPixel(clientX, clientY) {
   const rect = three.renderer.domElement.getBoundingClientRect();
-  const x = Math.floor((clientX - rect.left) * window.devicePixelRatio);
-  const y = Math.floor((rect.bottom - clientY) * window.devicePixelRatio);
-  if (x < 0 || y < 0 || x >= three.pickTarget.width || y >= three.pickTarget.height) return -1;
+  const ratio = three.pickTarget.width / Math.max(1, rect.width);
+  const x = Math.floor((clientX - rect.left) * ratio);
+  const y = Math.floor((rect.bottom - clientY) * ratio);
+  if (x < 0 || y < 0 || x >= three.pickTarget.width || y >= three.pickTarget.height) return null;
   if (state.pickDirty) renderPickBuffer();
-  const pixel = new Uint8Array(4);
-  three.renderer.readRenderTargetPixels(three.pickTarget, x, y, 1, 1, pixel);
+  return { x, y };
+}
+
+const decodePickedId = (pixel) => {
   const id = pixel[0] + pixel[1] * 256 + pixel[2] * 65536;
   return id >= state.cellCount ? -1 : id;
+};
+
+function pickCell(clientX, clientY) {
+  const at = pickPixel(clientX, clientY);
+  if (!at) return -1;
+  const pixel = new Uint8Array(4);
+  three.renderer.readRenderTargetPixels(three.pickTarget, at.x, at.y, 1, 1, pixel);
+  return decodePickedId(pixel);
+}
+
+// Hover picking reads back asynchronously (WebGL2 pixel-pack buffer + fence,
+// three.js r165+), so pointer moves never stall the GPU pipeline.
+let pickSequence = 0;
+async function pickCellAsync(clientX, clientY) {
+  const renderer = three.renderer;
+  if (typeof renderer?.readRenderTargetPixelsAsync !== 'function') return pickCell(clientX, clientY);
+  const at = pickPixel(clientX, clientY);
+  if (!at) return -1;
+  const sequence = ++pickSequence;
+  const pixel = new Uint8Array(4);
+  try {
+    await renderer.readRenderTargetPixelsAsync(three.pickTarget, at.x, at.y, 1, 1, pixel);
+  } catch (_) {
+    return null;
+  }
+  return sequence === pickSequence ? decodePickedId(pixel) : null;
 }
 
 // ---------------------------------------------------------------------------
 // Layer activation and legend
 
-function uploadValues(values) {
-  state.values = values;
+function uploadValues(values, { fade = false } = {}) {
   const data = three.valueTexture.image.data;
+  const previous = three.previousValueTexture?.image?.data;
+  // Cross-fade only between time slices of one layer, where the colour scale
+  // is shared, so every intermediate colour is between two real values.
+  if (fade && previous && state.values && !prefersReducedMotion()) {
+    previous.set(data);
+    three.previousValueTexture.needsUpdate = true;
+    setUniform('uFade', 0);
+    state.valueFade = { start: typeof performance !== 'undefined' ? performance.now() : 0 };
+  } else {
+    setUniform('uFade', 1);
+    state.valueFade = null;
+  }
+  state.values = values;
   data.fill(MISSING_SENTINEL);
   data.set(values.subarray(0, Math.min(values.length, data.length)));
   three.valueTexture.needsUpdate = true;
+  requestRender();
+}
+
+// Resolve and apply the colour scale of a numeric layer, or the categorical
+// palette. The resolved scale is the single source for the shader, legend,
+// tooltip and export codex.
+function applyLayerColors(layer) {
+  const categorical = isCategoricalLayer(layer);
+  const scale = categorical ? null : numericScale(layer, state.scaleOptions);
+  state.scale = scale;
+  const mode = categorical ? 3 : scale.mode === 'identifier' ? 2 : scale.mode === 'two-slope' ? 1 : 0;
+  setUniform('uMin', scale ? scale.lo : 0);
+  setUniform('uMax', scale ? scale.hi : 1);
+  setUniform('uPivot', scale ? scale.pivot : 0);
+  setUniform('uMode', mode);
+  setUniform('uCategorical', categorical ? 1 : 0);
+  setUniform('uHighlightCode', -1);
+  state.highlightCode = -1;
+  if (three.colormapTexture && scale?.colormap && three.colormapName !== scale.colormap) {
+    three.colormapTexture.image.data.set(colormapRgba(scale.colormap));
+    three.colormapTexture.needsUpdate = true;
+    three.colormapName = scale.colormap;
+  }
+  if (three.categoryTexture && (categorical || mode === 2)) {
+    three.categoryTexture.image.data.set(categoryPaletteData(categorical ? layer.categories || [] : []));
+    three.categoryTexture.needsUpdate = true;
+  }
+  requestRender();
+}
+
+// Area-weighted distribution of the displayed slice: per class for
+// categorical layers, per scale position for numeric ones. Cells are
+// near-equal-area Voronoi polygons, but weighting by area keeps the shares
+// exact ("share of the surface", not "share of cells").
+function sliceDistribution(layer, values, scale) {
+  const weights = state.cellAreas?.length === values.length ? state.cellAreas : null;
+  const distribution = { weighted: Boolean(weights), total: 0, missing: 0, classes: new Map(), bins: null, distinct: null };
+  const categorical = isCategoricalLayer(layer);
+  const bins = !categorical && scale && scale.mode !== 'identifier' && scale.mode !== 'constant' ? new Float64Array(48) : null;
+  const distinct = scale?.mode === 'identifier' ? new Set() : null;
+  for (let index = 0; index < values.length; index += 1) {
+    const weight = weights ? weights[index] : 1;
+    distribution.total += weight;
+    const value = values[index];
+    if (!isRenderedValue(value) || ((categorical || distinct) && value < -0.5)) {
+      distribution.missing += weight;
+      continue;
+    }
+    if (categorical) {
+      const code = Math.round(value);
+      distribution.classes.set(code, (distribution.classes.get(code) || 0) + weight);
+    } else if (distinct) {
+      if (distinct.size <= 100000) distinct.add(Math.round(value));
+    } else if (bins) {
+      const t = scalePosition(scale, value);
+      bins[Math.min(bins.length - 1, Math.floor(t * bins.length))] += weight;
+    }
+  }
+  distribution.bins = bins;
+  distribution.distinct = distinct ? distinct.size : null;
+  return distribution;
+}
+
+function percentLabel(part, total) {
+  if (!total) return '0%';
+  const percent = (part / total) * 100;
+  if (percent > 0 && percent < 0.1) return '<0.1%';
+  return `${percent < 10 ? percent.toFixed(1) : percent.toFixed(0)}%`;
+}
+
+function drawLegendRamp(scale) {
+  const ramp = $('#legend-ramp');
+  const context = ramp?.getContext?.('2d');
+  if (!context) return;
+  for (let x = 0; x < ramp.width; x += 1) {
+    const t = x / Math.max(1, ramp.width - 1);
+    context.fillStyle = scale.mode === 'identifier'
+      ? identifierHex(Math.floor(t * 17.999))
+      : colormapHex(scale.colormap, scale.mode === 'constant' ? 0.5 : t);
+    context.fillRect(x, 0, 1, ramp.height);
+  }
+}
+
+function drawLegendHistogram(distribution) {
+  const canvas = $('#legend-histogram');
+  const context = canvas?.getContext?.('2d');
+  if (!context) return;
+  const bins = distribution?.bins;
+  canvas.hidden = !bins;
+  context.clearRect?.(0, 0, canvas.width, canvas.height);
+  if (!bins) return;
+  const peak = Math.max(...bins);
+  if (!(peak > 0)) return;
+  const width = canvas.width / bins.length;
+  context.fillStyle = 'rgba(203, 213, 225, 0.55)';
+  bins.forEach((value, index) => {
+    if (!value) return;
+    const height = Math.max(1, (value / peak) * (canvas.height - 1));
+    context.fillRect(index * width + 0.5, canvas.height - height, Math.max(1, width - 1), height);
+  });
+}
+
+function legendTicksMarkup(scale, unit) {
+  const ticks = scaleTicks(scale, 5).filter((tick) => {
+    const t = scalePosition(scale, tick);
+    return t !== null && t > 0.06 && t < 0.94;
+  });
+  return ticks.map((tick) => {
+    const t = scalePosition(scale, tick);
+    return `<span class="legend-tick" style="left:${(t * 100).toFixed(2)}%">${escapeHtml(formatValue(tick))}</span>`;
+  }).join('');
 }
 
 function updateLegend(layer) {
   $('#legend-title').textContent = layer ? `${layer.source} / ${layer.name}${layer.applicability?.field === 'grounded_ice_surface_applicable' ? ' · grounded ice only' : ''}${layer.applicability ? ` · ${layer.unavailable_cell_count || 0} unavailable · ${layer.inapplicable_cell_count || 0} inapplicable` : ''}` : 'no layer';
   const ramp = $('#legend-ramp');
   const categoriesBox = $('#legend-categories');
+  const scaleBox = $('#legend-scale');
+  const unitLabel = $('#legend-unit');
+  const ticks = $('#legend-ticks');
+  const note = $('#legend-note');
+  const options = $('#legend-options');
   categoriesBox.innerHTML = '';
+  if (ticks) ticks.innerHTML = '';
+  if (note) note.textContent = '';
+  scaleBox?.classList?.remove('clip-under');
+  scaleBox?.classList?.remove('clip-over');
+  drawLegendHistogram(null);
+  const marker = $('#legend-marker');
+  if (marker) marker.hidden = true;
+  if (unitLabel) unitLabel.textContent = layer && !isCategoricalLayer(layer) && typeof layerUnit === 'function' ? layerUnit(layer) : '';
+  if (options) options.hidden = !layer || isCategoricalLayer(layer);
   if (!layer) { ramp.style.display = 'none'; return; }
   if (layer.marine_distance && !layer.stats) {
     ramp.style.display = 'none';
@@ -971,49 +1462,108 @@ function updateLegend(layer) {
     $('#legend-max').title = '';
     return;
   }
+  const distribution = state.values && state.values.length === state.cellCount
+    ? sliceDistribution(layer, state.values, isCategoricalLayer(layer) ? null : state.scale || numericScale(layer, state.scaleOptions))
+    : null;
+  const shareWord = distribution?.weighted ? 'of the surface' : 'of cells';
   if (isCategoricalLayer(layer)) {
     ramp.style.display = 'none';
     $('#legend-min').textContent = '';
     $('#legend-max').textContent = '';
     (layer.categories || []).forEach((category, index) => {
-      const [r, g, b] = categoryColor(index);
-      const chip = document.createElement('div');
-      chip.className = 'legend-chip';
-      chip.innerHTML = `<i style="background: rgb(${r * 255 | 0},${g * 255 | 0},${b * 255 | 0})"></i><span></span>`;
-      chip.lastChild.textContent = category;
+      const share = distribution ? distribution.classes.get(index) || 0 : null;
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = `legend-chip${share === 0 ? ' empty' : ''}`;
+      chip.dataset.code = String(index);
+      chip.setAttribute?.('aria-pressed', 'false');
+      chip.title = `Show only “${category}” — click again to show every class`;
+      chip.innerHTML = `<i style="background: ${categoryColor(index, layer.categories)}"></i><span>${escapeHtml(category)}</span>${share === null ? '' : `<em>${escapeHtml(percentLabel(share, distribution.total))}</em>`}`;
       categoriesBox.appendChild(chip);
     });
+    if (note && distribution) {
+      note.textContent = `Shares are ${shareWord}${distribution.missing ? ` · no data ${percentLabel(distribution.missing, distribution.total)}` : ''}. Select a class to spotlight it.`;
+    }
     return;
   }
+  const scale = state.scale && state.activeLayer === layer ? state.scale : numericScale(layer, state.scaleOptions);
   ramp.style.display = 'block';
-  const context = ramp.getContext('2d');
-  for (let x = 0; x < ramp.width; x += 1) {
-    const [r, g, b] = viridis(x / (ramp.width - 1));
-    context.fillStyle = `rgb(${r * 255 | 0},${g * 255 | 0},${b * 255 | 0})`;
-    context.fillRect(x, 0, 1, ramp.height);
-  }
-  const [lo, hi] = layerRange(layer);
-  const stats = layer.stats || {};
-  // Mark ends that clip data: the ramp normalises to p2–p98, so a true min/max
-  // beyond the ramp end is compressed into the end colour. Without this cue a
-  // heavy-tailed layer (e.g. flow_accumulation) looks like it tops out at p98.
-  const loClip = stats.min !== undefined && stats.min < lo - Math.abs(lo) * 1e-6;
-  const hiClip = stats.max !== undefined && stats.max > hi + Math.abs(hi) * 1e-6;
+  drawLegendRamp(scale);
+  const unit = layerUnit(layer);
   const minEl = $('#legend-min');
   const maxEl = $('#legend-max');
-  minEl.textContent = (loClip ? '≤ ' : '') + formatValue(lo);
-  maxEl.textContent = (hiClip ? '≥ ' : '') + formatValue(hi);
-  minEl.title = loClip ? `clipped — true min ${formatValue(stats.min)}` : '';
-  maxEl.title = hiClip ? `clipped — true max ${formatValue(stats.max)}` : '';
+  minEl.title = '';
+  maxEl.title = '';
+  if (scale.mode === 'identifier') {
+    minEl.textContent = distribution?.distinct !== null && distribution?.distinct !== undefined
+      ? `${formatCount(distribution.distinct)} distinct ids` : 'Identifiers';
+    maxEl.textContent = 'colours repeat every 18';
+    if (unitLabel) unitLabel.textContent = '';
+    if (note) note.textContent = 'Labels, not amounts: equal colours mean the same group only when the ids match. −1 (none) is drawn in the no-data grey. Hover a cell for its id.';
+    return;
+  }
+  if (scale.mode === 'constant') {
+    minEl.textContent = `Every cell = ${valueWithUnit(scale.value, unit)}`;
+    maxEl.textContent = '';
+    if (note) note.textContent = 'This layer does not vary in this world, so it has a single colour.';
+    return;
+  }
+  drawLegendHistogram(distribution);
+  if (ticks) ticks.innerHTML = legendTicksMarkup(scale, unit);
+  const [lo, hi] = [scale.lo, scale.hi];
+  // Mark ends that clip data: a true min/max beyond the ramp is compressed
+  // into the end colour. Without this cue a heavy-tailed layer (e.g.
+  // flow_accumulation) looks like it tops out at the percentile.
+  minEl.textContent = (scale.clipLow ? '≤ ' : '') + formatValue(lo);
+  maxEl.textContent = (scale.clipHigh ? '≥ ' : '') + formatValue(hi);
+  minEl.title = scale.clipLow ? `clipped — true min ${formatValue(scale.dataMin)}` : '';
+  maxEl.title = scale.clipHigh ? `clipped — true max ${formatValue(scale.dataMax)}` : '';
+  scaleBox?.classList?.toggle('clip-under', Boolean(scale.clipLow));
+  scaleBox?.classList?.toggle('clip-over', Boolean(scale.clipHigh));
+  scaleBox?.style?.setProperty?.('--extend-under', colormapHex(scale.colormap, 0));
+  scaleBox?.style?.setProperty?.('--extend-over', colormapHex(scale.colormap, 1));
+  if (note) {
+    const time = isStageLayer(layer) ? ' · same scale for every stage' : layer.kind === 'numeric_monthly' ? ' · same scale for every month' : '';
+    const bars = distribution?.bins ? ` · bars show the share ${shareWord}` : '';
+    note.textContent = `${scaleSummary(scale)}${time}${bars}`;
+  }
+}
+
+// Caret on the legend ramp at the hovered cell's value; for class maps the
+// hovered class chip is outlined instead.
+function updateLegendMarker() {
+  const marker = $('#legend-marker');
+  const layer = state.activeLayer;
+  const value = state.hoverCell >= 0 && state.values ? state.values[state.hoverCell] : undefined;
+  document.querySelectorAll('#legend-categories .legend-chip.hovered').forEach((chip) => chip.classList.remove('hovered'));
+  if (!marker) return;
+  if (!layer || !isRenderedValue(value)) { marker.hidden = true; return; }
+  if (isCategoricalLayer(layer)) {
+    marker.hidden = true;
+    document.querySelector(`#legend-categories .legend-chip[data-code="${Math.round(value)}"]`)?.classList.add('hovered');
+    return;
+  }
+  const t = scalePosition(state.scale, value);
+  if (t === null) { marker.hidden = true; return; }
+  marker.hidden = false;
+  marker.style.left = `${(t * 100).toFixed(2)}%`;
+}
+
+function setHighlightCode(code) {
+  state.highlightCode = Number.isInteger(code) && code >= 0 && code !== state.highlightCode ? code : -1;
+  setUniform('uHighlightCode', state.highlightCode);
+  document.querySelectorAll('#legend-categories .legend-chip').forEach((chip) => {
+    const active = Number(chip.dataset.code) === state.highlightCode;
+    chip.classList.toggle('active', active);
+    chip.setAttribute('aria-pressed', String(active));
+  });
+  $('#legend-categories')?.classList?.toggle('spotlight', state.highlightCode >= 0);
+  requestRender();
 }
 
 function layerRange(layer) {
-  const stats = layer.stats || {};
-  let lo = stats.p2 ?? stats.min ?? 0;
-  let hi = stats.p98 ?? stats.max ?? 1;
-  if (lo === hi) { lo = stats.min ?? 0; hi = stats.max ?? lo + 1; }
-  if (lo === hi) hi = lo + 1;
-  return [lo, hi];
+  const scale = numericScale(layer, state.scaleOptions);
+  return [scale.lo, scale.hi];
 }
 
 // ---------------------------------------------------------------------------
@@ -1096,14 +1646,6 @@ function mapExportFileNames(snapshot, projection, viewFingerprint) {
     image: `${base}.png`,
     prompt: `${base}.gpt-image-prompt.md`,
   };
-}
-
-function rgbBytes(rgb) {
-  return rgb.map((channel) => Math.max(0, Math.min(255, Math.floor(channel * 255))));
-}
-
-function rgbHex(rgb) {
-  return `#${rgbBytes(rgb).map((channel) => channel.toString(16).padStart(2, '0')).join('')}`;
 }
 
 function markdownInline(value) {
@@ -1249,20 +1791,29 @@ async function captureMapCanvas(snapshot, generation) {
   const source = renderer.domElement;
   if (!source.width || !source.height) throw new Error('The map canvas has no drawable size.');
 
-  // Snap the morph out of any in-flight transition. The OrbitControls camera
-  // pose only matches the projection once the morph reaches its target, so
-  // exporting mid-transition would otherwise bake a globe camera onto the
-  // flat plane and silently produce a clipped/offset PNG.
+  // Snap the morph out of any in-flight transition. The camera pose only
+  // matches the projection once the morph reaches its target, so exporting
+  // mid-transition would otherwise bake a globe camera onto the flat plane
+  // and silently produce a clipped/offset PNG.
   const morph = state.morph;
   morph.value = morph.target;
   morph.proj2D = morph.proj2DTarget;
   state.pickDirty = true;
+  three.controls.stop?.();
 
   const priorTarget = renderer.getRenderTarget();
   const priorMorph = sharedUniforms.uMorph.value;
   const priorProjection = sharedUniforms.uProj2D.value;
   const targetMorph = state.projection === 'globe' ? 0 : 1;
   const targetProjection = state.projection === 'mollweide' ? 1 : 0;
+  // The PNG is a reference image whose colours the codex lists exactly, so
+  // view-only decoration stays out of it: halo, hover and selection rings,
+  // class spotlight, relief shading and any cross-fade in progress.
+  const uniforms = three.fillMaterial.uniforms;
+  const decoration = ['uHoverCell', 'uSelectedCell', 'uHighlightCode', 'uReliefStrength', 'uFade']
+    .filter((name) => uniforms[name]).map((name) => [name, uniforms[name].value]);
+  const neutral = { uHoverCell: -1, uSelectedCell: -1, uHighlightCode: -1, uReliefStrength: 0, uFade: 1 };
+  const atmosphereVisible = three.atmosphere?.visible;
 
   // Render the selected projection's final state synchronously. Copying it to
   // a 2D canvas immediately avoids depending on preserveDrawingBuffer and also
@@ -1272,6 +1823,9 @@ async function captureMapCanvas(snapshot, generation) {
     renderer.setRenderTarget(null);
     sharedUniforms.uMorph.value = targetMorph;
     sharedUniforms.uProj2D.value = targetProjection;
+    decoration.forEach(([name]) => { uniforms[name].value = neutral[name]; });
+    if (three.atmosphere) three.atmosphere.visible = false;
+    if (three.flatBackground) scene.background = three.flatBackground;
     three.controls.update();
     renderer.render(scene, camera);
 
@@ -1284,6 +1838,9 @@ async function captureMapCanvas(snapshot, generation) {
   } finally {
     sharedUniforms.uMorph.value = priorMorph;
     sharedUniforms.uProj2D.value = priorProjection;
+    decoration.forEach(([name, value]) => { uniforms[name].value = value; });
+    if (three.atmosphere) three.atmosphere.visible = atmosphereVisible;
+    if (three.backdrop) scene.background = three.backdrop;
     renderer.setRenderTarget(null);
     renderer.render(scene, camera);
     renderer.setRenderTarget(priorTarget);
@@ -1352,7 +1909,7 @@ function buildCategoricalCodex(snapshot, doc, summary) {
   const rows = [...codes].sort((a, b) => a - b).map((code) => {
     const label = declared[code] ?? `unlisted category code ${code}`;
     const count = counts.get(code) || 0;
-    return `| ${rgbHex(categoryColor(code))} | ${code} | ${markdownInline(label)} | ${count} | ${shareLabel(count, summary.total)} |`;
+    return `| ${categoryColor(code, declared)} | ${code} | ${markdownInline(label)} | ${count} | ${shareLabel(count, summary.total)} |`;
   });
 
   return [
@@ -1378,9 +1935,25 @@ function uniqueNumericValues(values, limit) {
   return [...unique].sort((a, b) => a - b);
 }
 
-function numericGuideColor(value, lo, hi) {
-  const t = Math.max(0, Math.min(1, (value - lo) / Math.max(hi - lo, 1.0e-12)));
-  return rgbHex(viridis(t));
+function numericGuideColor(value, scale) {
+  return scaleHex(scale, value);
+}
+
+function numericScaleIntro(scale, unit) {
+  if (scale.mode === 'identifier') {
+    return 'The diagnostic image draws identifiers with 18 repeating categorical colors (id modulo 18). Colors label groups and carry no magnitude; −1 (none) uses the missing-data color.';
+  }
+  if (scale.mode === 'constant') {
+    return `Every finite cell in this layer has the value ${valueWithUnit(scale.value, unit)}, drawn in a single color.`;
+  }
+  const map = COLORMAPS[scale.colormap] || COLORMAPS.viridis;
+  const pivot = valueWithUnit(scale.pivot, unit);
+  const shape = scale.colormap === 'coolwarm'
+    ? ` It is a diverging scale centred on ${pivot}: blue below, light grey at ${pivot}, red above.`
+    : scale.mode === 'two-slope'
+      ? ` It is split at ${pivot}: values below use the blue lower half and values from ${pivot} up use the green-to-white upper half, so the sharp color change marks ${pivot}.`
+      : '';
+  return `The diagnostic image uses ${map.label} normalized over ${valueWithUnit(scale.lo, unit)} to ${valueWithUnit(scale.hi, unit)}.${shape} Values below or above that display range are clamped to its endpoint colors. Interpolate continuously between listed anchors.`;
 }
 
 function buildNumericCodex(snapshot, doc, summary) {
@@ -1399,22 +1972,27 @@ function buildNumericCodex(snapshot, doc, summary) {
       'Current slice: 0 finite cells; no available-value range.',
     ].join('\n');
   }
-  const [lo, hi] = layerRange(snapshot.layer);
+  const scale = snapshot.scale || numericScale(snapshot.layer);
   const stats = snapshot.layer.stats || {};
   const unit = doc.unit;
-  const lines = [
-    `The diagnostic image uses Viridis normalized over ${valueWithUnit(lo, unit)} to ${valueWithUnit(hi, unit)}. Values below or above that display range are clamped to its endpoint colors. Interpolate continuously between listed anchors.`,
-    '',
-  ];
+  const lines = [numericScaleIntro(scale, unit), ''];
 
-  const exactValues = doc.role === 'identifier' ? uniqueNumericValues(snapshot.values, 64) : null;
+  const exactValues = doc.role === 'identifier' || scale.mode === 'identifier' ? uniqueNumericValues(snapshot.values, 64) : null;
   if (exactValues?.length) {
     lines.push(
       'This identifier slice has at most 64 distinct values, so the exact rendered value-to-color mapping is listed. The values are labels, not magnitudes.',
       '',
       '| Guide color | Exact value/code |',
       '|---|---:|',
-      ...exactValues.map((value) => `| ${numericGuideColor(value, lo, hi)} | ${markdownInline(valueWithUnit(value, unit))} |`),
+      ...exactValues.map((value) => `| ${scale.mode === 'identifier' && value < -0.5 ? MISSING_COLOR_HEX : numericGuideColor(value, scale)} | ${markdownInline(valueWithUnit(value, unit))} |`),
+    );
+  } else if (scale.mode === 'identifier') {
+    lines.push('This identifier slice has more than 64 distinct values; each id uses the palette color at position (id mod 18).');
+  } else if (scale.mode === 'constant') {
+    lines.push(
+      '| Guide color | Encoded value |',
+      '|---|---:|',
+      `| ${numericGuideColor(scale.value, scale)} | ${markdownInline(valueWithUnit(scale.value, unit))} |`,
     );
   } else {
     lines.push(
@@ -1423,9 +2001,9 @@ function buildNumericCodex(snapshot, doc, summary) {
     );
     for (let index = 0; index < NUMERIC_CODEX_STOPS; index += 1) {
       const t = index / (NUMERIC_CODEX_STOPS - 1);
-      const value = lo + (hi - lo) * t;
+      const value = scaleValueAt(scale, t);
       const boundary = index === 0 ? ' (and below)' : index === NUMERIC_CODEX_STOPS - 1 ? ' (and above)' : '';
-      lines.push(`| ${rgbHex(viridis(t))} | ${markdownInline(valueWithUnit(value, unit))}${boundary} | ${(t * 100).toFixed(1)}% |`);
+      lines.push(`| ${colormapHex(scale.colormap, t)} | ${markdownInline(valueWithUnit(value, unit))}${boundary} | ${(t * 100).toFixed(1)}% |`);
     }
   }
 
@@ -1485,7 +2063,7 @@ function timeContextLines(snapshot) {
 
 function overlayPrompt(view) {
   const lines = [];
-  if (view.overlays.wireframe) lines.push('White cell/triangle wireframe lines are diagnostic geometry: remove them completely in the final image.');
+  if (view.overlays.wireframe) lines.push('Dark cell outlines are diagnostic geometry: remove them completely in the final image.');
   if (view.overlays.plates) lines.push('Coral plate-boundary lines are structural guides: they may inform terrain transitions, but remove the literal lines in the final image.');
   if (view.overlays.graticule) lines.push('Blue-gray latitude/longitude grid lines are alignment guides: remove them completely in the final image.');
   if (!lines.length) lines.push('No diagnostic overlays are enabled in the reference image.');
@@ -1543,7 +2121,7 @@ ${overlayPrompt(view)}
 - Projection/view: ${markdownInline(projectionLabel(view.projection))}
 - Reference raster: ${view.width} × ${view.height} pixels; preserve this aspect ratio
 - Camera position (world x, y, z): \`[${view.cameraPose.position.map(exactViewNumber).join(', ')}]\`
-- OrbitControls target (world x, y, z): \`[${view.cameraPose.target.map(exactViewNumber).join(', ')}]\`
+- Camera target (world x, y, z): \`[${view.cameraPose.target.map(exactViewNumber).join(', ')}]\`
 - Camera up vector (world x, y, z): \`[${view.cameraPose.up.map(exactViewNumber).join(', ')}]\`
 - Vertical field of view: ${exactViewNumber(view.cameraPose.verticalFovDegrees)} degrees
 - Complete cell slice: ${snapshot.values.length} cells
@@ -1635,7 +2213,8 @@ function updateDocsCard(layer) {
   }
 
   const parts = [];
-  parts.push(`<div class="docs-name">${escapeHtml(doc.title)}</div>`);
+  parts.push(`<div class="docs-name">${escapeHtml(layerLabel(layer))}</div>`);
+  parts.push(`<div class="docs-id">${escapeHtml(layer.id ?? doc.title)}</div>`);
 
   const pills = [];
   if (doc.roleBadge) {
@@ -1654,15 +2233,14 @@ function updateDocsCard(layer) {
   if (doc.stats) {
     parts.push('<div class="docs-range">'
       + `<span class="rk">min / max</span><span class="rv">${escapeHtml(doc.stats.min)} … ${escapeHtml(doc.stats.max)}</span>`
-      + `<span class="rk">colour scale</span><span class="rv">${escapeHtml(doc.stats.p2)} … ${escapeHtml(doc.stats.p98)} (p2–p98)</span>`
+      + `<span class="rk">colour scale</span><span class="rv">${escapeHtml(docsScaleText(layer))}</span>`
       + '</div>');
   }
 
   if (doc.categories) {
     parts.push('<div class="docs-cats">');
     doc.categories.forEach((category, index) => {
-      const [r, g, b] = categoryColor(index);
-      parts.push(`<span class="docs-cat"><i style="background: rgb(${r * 255 | 0},${g * 255 | 0},${b * 255 | 0})"></i>${escapeHtml(category)}</span>`);
+      parts.push(`<span class="docs-cat"><i style="background: ${categoryColor(index, doc.categories)}"></i>${escapeHtml(category)}</span>`);
     });
     parts.push('</div>');
   }
@@ -1676,6 +2254,18 @@ function updateDocsCard(layer) {
   }
 
   body.innerHTML = parts.join('');
+}
+
+// The scale actually in use, so the card never quotes a range the map does
+// not draw (identifiers and constant layers have none; diverging is ±max).
+function docsScaleText(layer) {
+  if (!layer || isCategoricalLayer(layer)) return 'one colour per class';
+  const scale = state.activeLayer === layer && state.scale ? state.scale : numericScale(layer, state.scaleOptions);
+  if (scale.mode === 'identifier') return 'categorical colours, id mod 18';
+  if (scale.mode === 'constant') return `one colour (${formatValue(scale.value)})`;
+  const map = COLORMAPS[scale.colormap]?.label || scale.colormap;
+  const range = scale.colormap === 'coolwarm' ? '±max, centred on 0' : scale.range === 'full' ? 'min–max' : 'p2–p98';
+  return `${formatValue(scale.lo)} … ${formatValue(scale.hi)} · ${map} (${range}${scale.mode === 'two-slope' ? ', split at 0' : ''})`;
 }
 
 function setDocsVisible(visible) {
@@ -1694,6 +2284,9 @@ function buildHelpOverlay() {
   const body = $('#help-body');
   const parts = [];
 
+  parts.push('<h3>Settings</h3><div class="help-setting">'
+    + `<input type="checkbox" id="setting-single-key"${state.singleKeyShortcuts ? ' checked' : ''}>`
+    + '<label for="setting-single-key">Single-key shortcuts (?, /, 1–3, w, b, g, d, space). Turn off if they conflict with speech input or assistive technology.</label></div>');
   parts.push('<h3>Keyboard</h3><div class="help-keygrid">');
   for (const [key, description] of KEY_REFERENCE) {
     const keys = key.split(' / ').map((k) => `<kbd>${escapeHtml(k)}</kbd>`).join(' / ');
@@ -1807,12 +2400,11 @@ async function activateLayer(layer, { stage = null, month = null } = {}) {
   }
   if (requestSeq !== state.fetchSeq || !cacheContextIsCurrent(context)) return;
   // Superseded because the layer, stage, month, or selected cache changed.
-  uploadValues(values);
-
-  const [lo, hi] = layerRange(layer);
-  three.fillMaterial.uniforms.uMin.value = lo;
-  three.fillMaterial.uniforms.uMax.value = hi;
-  three.fillMaterial.uniforms.uCategorical.value = isCategoricalLayer(layer) ? 1 : 0;
+  const sameLayer = displayed?.layer === layer && displayed.values === state.values;
+  const keepHighlight = sameLayer ? state.highlightCode : -1;
+  uploadValues(values, { fade: sameLayer && (displayed.stage !== requestedStage || displayed.month !== requestedMonth) });
+  applyLayerColors(layer);
+  if (keepHighlight >= 0) state.highlightCode = keepHighlight;
   state.layerLoading = false;
   state.exportSnapshot = Object.freeze({
     cacheIdentity: context.identity,
@@ -1824,14 +2416,20 @@ async function activateLayer(layer, { stage = null, month = null } = {}) {
     stage: requestedStage,
     month: requestedMonth,
     values,
+    scale: state.scale,
   });
   updateInspectorStageMarkers();
   updateLegend(layer);
+  if (state.highlightCode >= 0) { const code = state.highlightCode; state.highlightCode = -1; setHighlightCode(code); }
+  updateLegendMarker();
   updateDocsCard(layer);
   updateStageBar();
   prefetchNeighborStages(layer, requestedStage);
   updateExportControls();
   updateStatus();
+  updateInspectorSummary();
+  if (state.playing && !stageBarConfig()) setPlaying(false);
+  updateMapUrl();
 }
 
 // ---------------------------------------------------------------------------
@@ -1859,7 +2457,8 @@ function stageBarConfig() {
     return {
       max: (layer.month_count || 12) - 1,
       value: state.month,
-      label: (value = state.month) => `month ${value + 1}`,
+      offset: 1,   // months are typed and read 1–12, like the label
+      label: (value = state.month) => `month ${value + 1}${MONTH_NAMES[value] ? ` · ${MONTH_NAMES[value].slice(0, 3)}` : ''}`,
       set: (value) => activateLayer(layer, { month: value }),
     };
   }
@@ -1873,12 +2472,14 @@ function updateStageBar() {
   if (!config) return;
   const slider = $('#stage-slider');
   const number = $('#stage-number');
+  const offset = config.offset || 0;
   slider.max = String(config.max);
-  number.max = String(config.max);
+  number.min = String(offset);
+  number.max = String(config.max + offset);
   // Don't move the thumb or overwrite the number field while the user is
   // interacting with it (mid-drag or typing); the debounced fetch lands shortly.
   if (document.activeElement !== slider) slider.value = String(config.value);
-  if (document.activeElement !== number) number.value = String(config.value);
+  if (document.activeElement !== number) number.value = String(config.value + offset);
   $('#stage-label').textContent = config.label();
 }
 
@@ -1889,95 +2490,250 @@ function stepStage(delta) {
   if (next !== config.value) config.set(next);
 }
 
+// Time-bar playback. Each tick waits for the previous slice to commit, so a
+// slow layer request never queues a burst of stage fetches.
+function setPlaying(playing) {
+  const config = stageBarConfig();
+  state.playing = Boolean(playing && config && config.max > 0);
+  if (state.playTimer) window.clearInterval(state.playTimer);
+  state.playTimer = 0;
+  const button = $('#stage-play');
+  if (button) {
+    button.setAttribute('aria-pressed', String(state.playing));
+    button.setAttribute('aria-label', state.playing ? 'Pause' : 'Play');
+    button.title = state.playing ? 'Pause (space)' : 'Play through stages or months (space)';
+  }
+  if (!state.playing) return;
+  state.playTimer = window.setInterval(() => {
+    const current = stageBarConfig();
+    if (!current || state.activeView !== 'map' || document.hidden) { setPlaying(false); return; }
+    if (state.layerLoading) return;
+    current.set(current.value >= current.max ? 0 : current.value + 1);
+  }, STAGE_PLAY_INTERVAL_MS);
+}
+
+// Overlays a shared link restores, with how to read and switch each one.
+const MAP_URL_OVERLAYS = [
+  ['cells', () => state.overlays.wireframe, () => $('#toggle-wireframe').click()],
+  ['relief', () => state.relief, () => setRelief(true)],
+  ['plates', () => state.overlays.plates, () => $('#toggle-plates').click()],
+  ['grid', () => state.overlays.graticule, () => $('#toggle-graticule').click()],
+  ['places', () => state.overlays.places, () => setPlacesVisible(true)],
+];
+
+// Keep the map view shareable: the hash carries layer, time slice,
+// projection, overlays and the camera (centre and visible span).
+function mapUrlHash() {
+  const params = new URLSearchParams();
+  const layer = state.exportSnapshot?.layer || state.activeLayer;
+  if (layer) params.set('layer', layer.id);
+  if (layer && isStageLayer(layer)) params.set('stage', String(state.stage));
+  if (layer?.kind === 'numeric_monthly') params.set('month', String(state.month + 1));
+  if (state.projection !== 'globe') params.set('proj', state.projection);
+  const shown = MAP_URL_OVERLAYS.filter(([, isOn]) => isOn()).map(([name]) => name);
+  if (shown.length) params.set('show', shown.join(','));
+  const view = three.controls?.view;
+  if (view && [view.lat, view.lon, view.span].every(Number.isFinite)) {
+    // Centre and the visible span in degrees, like a map URL's @lat,lon,zoom.
+    params.set('at', [view.lat.toFixed(2), view.lon.toFixed(2), ((view.span * 180) / Math.PI).toFixed(2)].join(','));
+  }
+  const query = params.toString();
+  return `#map${query ? `?${query}` : ''}`;
+}
+
+function updateMapUrl() {
+  if (state.activeView !== 'map' || typeof history === 'undefined' || !window.location) return;
+  const hash = mapUrlHash();
+  if (window.location.hash !== hash) history.replaceState(null, '', hash);
+}
+
+function parseViewHash(hash) {
+  const raw = String(hash || '').replace(/^#/, '');
+  const [name, query = ''] = raw.split('?');
+  const params = new URLSearchParams(query);
+  const mapParams = {};
+  if (params.get('layer')) mapParams.layer = params.get('layer');
+  if (/^\d+$/.test(params.get('stage') || '')) mapParams.stage = Number(params.get('stage'));
+  if (/^\d+$/.test(params.get('month') || '')) mapParams.month = Math.max(0, Number(params.get('month')) - 1);
+  if (['globe', 'equirect', 'mollweide'].includes(params.get('proj'))) mapParams.projection = params.get('proj');
+  const show = (params.get('show') || '').split(',').filter((name) => MAP_URL_OVERLAYS.some(([known]) => known === name));
+  if (show.length) mapParams.show = show;
+  const at = (params.get('at') || '').split(',').map(Number);
+  if (at.length === 3 && at.every(Number.isFinite) && Math.abs(at[0]) <= 90 && Math.abs(at[1]) <= 540 && at[2] > 0) {
+    mapParams.view = { lat: at[0], lon: at[1], span: (at[2] * Math.PI) / 180 };
+  }
+  return { name, mapParams: Object.keys(mapParams).length ? mapParams : null };
+}
+
+// Apply URL-requested map state once the map (and its manifest) is ready.
+async function applyPendingMapParams() {
+  const params = state.pendingMapParams;
+  if (!params || !state.mapReady) return false;
+  state.pendingMapParams = null;
+  // A shared link opens directly on its view: no unrolling animation on load.
+  if (params.projection && params.projection !== state.projection) setProjection(params.projection, { animate: false });
+  if (params.view) three.controls?.setView(params.view);
+  for (const [name, isOn, turnOn] of MAP_URL_OVERLAYS) {
+    if (params.show?.includes(name) && !isOn()) void turnOn();
+  }
+  const layer = params.layer ? layerById(params.layer) : null;
+  if (!layer) return false;
+  await activateLayer(layer, { stage: params.stage ?? null, month: params.month ?? null });
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Layer list panel
 
+const SOURCE_GROUP_TITLES = {
+  cells_monthly: 'Monthly climate',
+  hydrologic_water_budget_history: 'Water budget · per stage',
+  numeric_depression_correction_history: 'Depression correction · per stage',
+};
+const KIND_BADGES = {
+  numeric_stage: ['stages', 'Varies by stage — use the time bar'],
+  categorical_stage: ['stages', 'Classes that vary by stage'],
+  numeric_monthly: ['monthly', 'Varies by month — use the time bar'],
+};
+
+function layerGroups(layers) {
+  const groups = [];
+  const pinned = state.pinnedLayers
+    .map((id) => layers.find((layer) => layer.id === id))
+    .filter(Boolean);
+  if (pinned.length) groups.push({ id: 'pinned', title: 'Pinned', layers: pinned, shortcut: true });
+  const featured = FEATURED_LAYER_NAMES
+    .map((name) => layers.find((layer) => layer.source === 'cells' && layer.name === name))
+    .filter(Boolean);
+  if (featured.length) groups.push({ id: 'featured', title: 'Featured', layers: featured, shortcut: true });
+  const byTopic = new Map(LAYER_TOPICS.map((topic) => [topic.id, []]));
+  const bySource = new Map();
+  for (const layer of layers) {
+    if (layer.source === 'cells' || layer.source === 'cells_monthly') {
+      const topic = layer.source === 'cells_monthly' ? null : layerTopic(layer);
+      if (topic) { byTopic.get(topic).push(layer); continue; }
+    }
+    if (!bySource.has(layer.source)) bySource.set(layer.source, []);
+    bySource.get(layer.source).push(layer);
+  }
+  for (const topic of LAYER_TOPICS) {
+    const members = byTopic.get(topic.id);
+    if (members.length) groups.push({ id: `topic-${topic.id}`, title: topic.title, layers: members });
+  }
+  for (const [source, members] of bySource) {
+    groups.push({ id: `source-${source}`, title: SOURCE_GROUP_TITLES[source] || source.replaceAll('_', ' '), layers: members });
+  }
+  return groups;
+}
+
+function layerRowMarkup(layer) {
+  const pinned = state.pinnedLayers.includes(layer.id);
+  const unit = layerUnit(layer);
+  const badge = KIND_BADGES[layer.kind];
+  const active = state.activeLayer?.id === layer.id;
+  const search = `${layer.id} ${layer.source} ${layer.name} ${layerLabel(layer)} ${searchTerms(layer)}`.toLowerCase();
+  const kind = isStageLayer(layer) || layer.kind === 'numeric_monthly' ? 'time' : isCategoricalLayer(layer) ? 'categorical' : 'numeric';
+  return `<div class="layer-row" data-kind-filter="${kind}">`
+    + `<button type="button" class="layer-item${active ? ' active' : ''}" data-layer-id="${escapeHtml(layer.id)}" data-search="${escapeHtml(search)}" title="${escapeHtml(layerTooltip(layer))}"${active ? ' aria-current="true"' : ''}>`
+    + `<span class="layer-label">${escapeHtml(layerLabel(layer))}</span>`
+    + (unit ? `<span class="layer-unit">${escapeHtml(unit)}</span>` : '')
+    + (isCategoricalLayer(layer) && !badge ? '<span class="badge" title="Discrete classes">classes</span>' : '')
+    + (badge ? `<span class="badge time" title="${escapeHtml(badge[1])}">${escapeHtml(badge[0])}</span>` : '')
+    + '</button>'
+    + `<button type="button" class="layer-pin" data-pin-layer="${escapeHtml(layer.id)}" aria-pressed="${pinned}" aria-label="${pinned ? 'Unpin' : 'Pin'} ${escapeHtml(layerLabel(layer))}" title="${pinned ? 'Unpin' : 'Pin to top'}">${icon('star')}</button>`
+    + '</div>';
+}
+
 function buildLayerList() {
   const container = $('#layer-list');
-  container.innerHTML = '';
-  const groups = new Map();
-  for (const layer of state.manifest.layers) {
-    if (!groups.has(layer.source)) groups.set(layer.source, []);
-    groups.get(layer.source).push(layer);
-  }
-  const kindBadge = { numeric_stage: 'stages', categorical_stage: 'stage cat', numeric_monthly: 'monthly', categorical: 'cat' };
-  const kindBadgeTitle = {
-    numeric_stage: 'varies by stage', categorical_stage: 'categorical, varies by stage',
-    numeric_monthly: 'varies by month', categorical: 'categorical',
-  };
-  let groupIndex = 0;
-  for (const [source, layers] of groups) {
-    const title = document.createElement('button');
-    title.type = 'button';
-    title.className = 'layer-group-title';
-    title.textContent = `${source} (${layers.length})`;
-    container.appendChild(title);
-    const body = document.createElement('div');
-    body.id = `layer-group-${groupIndex}`;
-    groupIndex += 1;
-    title.setAttribute('aria-controls', body.id);
-    title.setAttribute('aria-expanded', 'true');
-    container.appendChild(body);
-    title.addEventListener('click', () => {
-      const collapsed = !body.hidden;
-      body.hidden = collapsed;
-      title.setAttribute('aria-expanded', String(!collapsed));
-    });
-    for (const layer of layers) {
-      const item = document.createElement('button');
-      item.type = 'button';
-      item.className = 'layer-item';
-      item.dataset.layerId = layer.id;
-      item.dataset.search = `${layer.source} ${layer.name} ${searchTerms(layer)}`.toLowerCase();
-      item.title = layerTooltip(layer);
-      item.textContent = layer.name;
-      if (kindBadge[layer.kind]) {
-        const badge = document.createElement('span');
-        badge.className = 'badge';
-        badge.textContent = kindBadge[layer.kind];
-        badge.title = kindBadgeTitle[layer.kind];
-        item.appendChild(badge);
-      }
-      item.addEventListener('click', () => activateLayer(layer));
-      body.appendChild(item);
-    }
-  }
+  const layers = state.manifest?.layers || [];
+  const expanded = new Map([...container.querySelectorAll('.layer-group-title')]
+    .map((title) => [title.dataset.groupId, title.getAttribute('aria-expanded') === 'true']));
+  const activeGroup = state.activeLayer ? `topic-${layerTopic(state.activeLayer)}` : null;
+  const groups = layerGroups(layers);
+  container.innerHTML = groups.map((group, index) => {
+    const open = expanded.has(group.id) ? expanded.get(group.id)
+      : group.shortcut || group.id === activeGroup || (!groups.some((entry) => entry.shortcut) && index === 0);
+    return `<button type="button" class="layer-group-title${group.shortcut ? ' shortcut-group' : ''}" data-group-id="${escapeHtml(group.id)}" aria-controls="layer-group-${index}" aria-expanded="${open}">`
+      + `${icon('chevron-down', 'group-chevron')}<span class="group-name">${escapeHtml(group.title)}</span><span class="group-count">${group.layers.length}</span></button>`
+      + `<div id="layer-group-${index}" class="layer-group" data-group-id="${escapeHtml(group.id)}"${open ? '' : ' hidden'}>${group.layers.map(layerRowMarkup).join('')}</div>`;
+  }).join('');
+  filterLayerList($('#layer-search').value || '');
+}
+
+function layerById(id) {
+  return (state.manifest?.layers || []).find((layer) => layer.id === id) || null;
+}
+
+function togglePinnedLayer(id) {
+  const pinned = state.pinnedLayers.includes(id);
+  state.pinnedLayers = pinned ? state.pinnedLayers.filter((entry) => entry !== id) : [id, ...state.pinnedLayers].slice(0, 24);
+  storageSet('pinnedLayers', state.pinnedLayers);
+  buildLayerList();
+  $('#layer-list').querySelector(`[data-pin-layer="${CSS.escape(id)}"]`)?.focus();
+}
+
+function setLayerFilter(filter) {
+  state.layerFilter = ['numeric', 'categorical', 'time'].includes(filter) ? filter : 'all';
+  document.querySelectorAll('[data-layer-filter]').forEach((chip) => {
+    const active = chip.dataset.layerFilter === state.layerFilter;
+    chip.classList.toggle('active', active);
+    chip.setAttribute('aria-pressed', String(active));
+  });
+  filterLayerList($('#layer-search').value || '');
 }
 
 function filterLayerList(query) {
   const needle = query.trim().toLowerCase();
+  const kindFilter = state.layerFilter || 'all';
+  const filtering = Boolean(needle) || kindFilter !== 'all';
   let totalMatches = 0;
   document.querySelectorAll('#layer-list > .layer-group-title').forEach((title) => {
     const body = title.nextElementSibling;
-    if (needle && title.dataset.preSearchExpanded === undefined) {
+    if (filtering && title.dataset.preSearchExpanded === undefined) {
       title.dataset.preSearchExpanded = title.getAttribute('aria-expanded') || 'true';
-    } else if (!needle && title.dataset.preSearchExpanded !== undefined) {
+    } else if (!filtering && title.dataset.preSearchExpanded !== undefined) {
       title.setAttribute('aria-expanded', title.dataset.preSearchExpanded);
       delete title.dataset.preSearchExpanded;
     }
-    const items = [...body.querySelectorAll('.layer-item')];
+    // Pinned/Featured repeat layers from topic groups; hide them while filtering.
+    const shortcut = title.classList.contains('shortcut-group');
+    const rows = [...body.querySelectorAll('.layer-row')];
     let matches = 0;
-    items.forEach((item) => {
-      const visible = !needle || item.dataset.search.includes(needle);
-      item.hidden = !visible;
+    rows.forEach((row) => {
+      const item = row.querySelector('.layer-item');
+      const visible = (!needle || item.dataset.search.includes(needle))
+        && (kindFilter === 'all' || row.dataset.kindFilter === kindFilter);
+      row.hidden = !visible;
       if (visible) matches += 1;
     });
-    totalMatches += matches;
-    title.hidden = Boolean(needle) && matches === 0;
-    body.hidden = Boolean(needle) ? matches === 0 : title.getAttribute('aria-expanded') === 'false';
-    if (needle && matches) title.setAttribute('aria-expanded', 'true');
+    if (!shortcut) totalMatches += matches;
+    const hideGroup = filtering && (matches === 0 || shortcut);
+    title.hidden = hideGroup;
+    body.hidden = filtering ? hideGroup : title.getAttribute('aria-expanded') === 'false';
+    if (filtering && matches && !shortcut) title.setAttribute('aria-expanded', 'true');
   });
   const empty = $('#layer-list > .layer-list-empty');
-  if (needle && totalMatches === 0) {
+  if (filtering && totalMatches === 0) {
     if (!empty) {
       const row = document.createElement('div');
       row.className = 'layer-list-empty';
-      row.textContent = 'No layers match this filter.';
+      row.textContent = 'No layers match. Clear the search or choose “All”.';
       $('#layer-list').appendChild(row);
     }
   } else {
     empty?.remove();
   }
+}
+
+function collapseAllLayerGroups() {
+  const titles = [...document.querySelectorAll('#layer-list > .layer-group-title')];
+  const anyOpen = titles.some((title) => title.getAttribute('aria-expanded') === 'true');
+  titles.forEach((title) => {
+    title.setAttribute('aria-expanded', String(!anyOpen));
+    delete title.dataset.preSearchExpanded;
+  });
+  filterLayerList($('#layer-search').value || '');
 }
 
 // ---------------------------------------------------------------------------
@@ -1989,6 +2745,30 @@ function inspectorLedgerMarker(historyName) {
     && displayed.cacheRevision === (state.status?.cache_revision ?? null)
     && displayed.values === state.values && isStageLayer(displayed.layer)
     && displayed.layer.source === historyName ? displayed.stage : -1;
+}
+
+// The active layer's value for the selected cell, shown above the full record.
+function inspectorSummaryMarkup() {
+  const layer = state.exportSnapshot?.layer;
+  const values = state.exportSnapshot?.values;
+  if (!layer || !values || state.selectedCell < 0 || state.selectedCell >= values.length) return '';
+  const raw = values[state.selectedCell];
+  let text = '—';
+  if (raw !== undefined && raw < 1e37) {
+    text = isCategoricalLayer(layer)
+      ? String(layer.categories?.[Math.round(raw)] ?? `code ${Math.round(raw)}`)
+      : `${formatValue(raw)}${typeof layerUnit === 'function' && layerUnit(layer) ? ` ${layerUnit(layer)}` : ''}`;
+  }
+  const label = typeof layerLabel === 'function' ? layerLabel(layer) : layer.name;
+  return `<span>${escapeHtml(label)}${isStageLayer(layer) ? ` · stage ${state.exportSnapshot.stage}` : layer.kind === 'numeric_monthly' ? ` · month ${state.exportSnapshot.month + 1}` : ''}</span><strong>${escapeHtml(text)}</strong>`;
+}
+
+function updateInspectorSummary() {
+  const node = $('#inspector-body')?.querySelector?.('.inspector-summary');
+  if (!node) return;
+  const markup = inspectorSummaryMarkup();
+  node.hidden = !markup;
+  if (node.innerHTML !== markup) node.innerHTML = markup;
 }
 
 function updateInspectorStageMarkers() {
@@ -2034,6 +2814,9 @@ async function openInspector(cellId) {
   const requestId = ++state.inspectorRequest;
   state.inspectorSparklines = [];
   state.selectedCell = cellId;
+  state.selectedPoint = null;
+  setUniform('uSelectedCell', cellId);
+  requestRender();
   const inspector = $('#inspector');
   // Remember whether focus lives inside the panel: the innerHTML re-render
   // below destroys the focused element, and keyboard users would otherwise
@@ -2058,8 +2841,15 @@ async function openInspector(cellId) {
       || !cacheContextIsCurrent(context)) return;
 
   const cell = record.cell || {};
+  if (Number.isFinite(cell.lat_deg) && Number.isFinite(cell.lon_deg)) state.selectedPoint = { lat: cell.lat_deg, lon: cell.lon_deg };
   const parts = [];
   const ledgerSparklines = [];
+  const summary = inspectorSummaryMarkup();
+  parts.push(`<div class="inspector-summary"${summary ? '' : ' hidden'}>${summary}</div>`);
+  if (Number.isFinite(cell.lat_deg) && Number.isFinite(cell.lon_deg)) {
+    const area = Number.isFinite(cell.area_km2) ? ` · ${escapeHtml(formatCount(Math.round(cell.area_km2)))} km²` : '';
+    parts.push(`<p class="muted inspector-where">Centre ${escapeHtml(formatLatLon(cell.lat_deg, cell.lon_deg, coordinateDigits() + 1))}${area}</p>`);
+  }
   parts.push('<input id="inspector-filter" type="search" placeholder="Filter fields…" aria-label="Filter fields">');
   parts.push(speciesAvailabilityMarkup(cell));
   parts.push(landUseAvailabilityMarkup(cell));
@@ -2127,7 +2917,7 @@ async function openInspector(cellId) {
   body.querySelectorAll('a[data-cell]').forEach((anchor) => {
     anchor.addEventListener('click', (event) => {
       event.preventDefault();
-      openInspector(Number(anchor.dataset.cell));
+      void openInspector(Number(anchor.dataset.cell)).then(() => centreOnSelectedCell({ onlyIfHidden: true }));
     });
   });
   if (focusWasInside) {
@@ -2135,6 +2925,29 @@ async function openInspector(cellId) {
     title.setAttribute('tabindex', '-1');
     title.focus({ preventScroll: true });
   }
+}
+
+function centreOnSelectedCell({ onlyIfHidden = false } = {}) {
+  const point = state.selectedPoint;
+  if (!point || !three.controls) return;
+  if (onlyIfHidden) {
+    const screen = three.controls.latLonToScreen(point.lat, point.lon);
+    const box = three.renderer.domElement.getBoundingClientRect();
+    const margin = 60;
+    if (screen.visible && screen.x > margin && screen.y > margin
+        && screen.x < box.width - margin && screen.y < box.height - margin) return;
+  }
+  three.controls.flyTo({ lat: point.lat, lon: point.lon });
+}
+
+function closeInspector() {
+  $('#inspector').classList.add('hidden');
+  state.inspectorRequest += 1;
+  state.inspectorSparklines = [];
+  state.selectedCell = -1;
+  state.selectedPoint = null;
+  setUniform('uSelectedCell', -1);
+  resizeRenderer();
 }
 
 // ---------------------------------------------------------------------------
@@ -2154,18 +2967,449 @@ function updateStatus() {
   if (layer) bits.push(`${layer.source}/${layer.name}`);
   if (state.hoverCell >= 0) {
     bits.push(`cell ${state.hoverCell}`);
-    if (state.values && layer) {
-      const value = state.values[state.hoverCell];
-      if (value !== undefined && value < 1e37) {
-        bits.push(isCategoricalLayer(layer)
-          ? (layer.categories?.[Math.round(value)] ?? `code ${Math.round(value)}`)
-          : formatValue(value));
-      } else {
-        bits.push('—');
-      }
-    }
+    if (state.values && layer) bits.push(hoverValueText(layer, state.values[state.hoverCell]));
   }
   $('#map-hover').textContent = bits.join('  ·  ');
+  updateHoverChrome();
+}
+
+// ---------------------------------------------------------------------------
+// Map chrome: hover tooltip, coordinates, scale bar, relief
+
+// Decimal places that match the mesh: 1 dp is ~11 km, so a 350 km cell needs
+// one decimal and a 50 km cell two (ISO 6709 style, latitude first).
+function coordinateDigits() {
+  if (!(state.cellCount > 0)) return 2;
+  const spacingDeg = (Math.sqrt((4 * Math.PI) / state.cellCount) * 180) / Math.PI;
+  return Math.max(1, Math.min(3, Math.ceil(-Math.log10(spacingDeg / 10))));
+}
+
+function hoverValueText(layer, value) {
+  if (!layer || value === undefined || !isRenderedValue(value)) return '—';
+  if (isCategoricalLayer(layer)) {
+    return value < -0.5 ? 'no data' : (layer.categories?.[Math.round(value)] ?? `code ${Math.round(value)}`);
+  }
+  if (state.scale?.mode === 'identifier' && state.activeLayer === layer) {
+    return value < -0.5 ? 'none (−1)' : `id ${formatValue(value)}`;
+  }
+  return valueWithUnit(value, layerUnit(layer));
+}
+
+function hoverSwatch(layer, value) {
+  if (!isRenderedValue(value)) return MISSING_COLOR_HEX;
+  if (isCategoricalLayer(layer)) return value < -0.5 ? MISSING_COLOR_HEX : categoryColor(Math.round(value), layer.categories || []);
+  if (state.scale?.mode === 'identifier' && value < -0.5) return MISSING_COLOR_HEX;
+  return state.scale ? scaleHex(state.scale, value) : MISSING_COLOR_HEX;
+}
+
+function updateCoordsReadout() {
+  const coords = $('#map-coords');
+  if (!coords) return;
+  const digits = coordinateDigits();
+  const point = state.hoverPoint;
+  if (point) {
+    coords.textContent = formatLatLon(point.lat, point.lon, digits);
+  } else if (three.controls?.view) {
+    const view = three.controls.view;
+    coords.textContent = `Centre ${formatLatLon(view.lat, view.lon, digits)}`;
+  } else {
+    coords.textContent = '';
+  }
+}
+
+function updateHoverChrome() {
+  updateLegendMarker();
+  updateCoordsReadout();
+  const tooltip = $('#map-tooltip');
+  if (!tooltip) return;
+  const layer = state.activeLayer;
+  const pointer = state.pointerClient;
+  if (state.hoverCell < 0 || !layer || !pointer || three.controls?.isDragging?.() || state.activeView !== 'map') {
+    tooltip.hidden = true;
+    return;
+  }
+  const value = state.values?.[state.hoverCell];
+  const point = state.hoverPoint;
+  tooltip.innerHTML = `<div class="tip-value"><i style="background:${hoverSwatch(layer, value)}"></i><strong>${escapeHtml(hoverValueText(layer, value))}</strong></div>`
+    + `<div class="tip-layer">${escapeHtml(layerLabel(layer))}${isStageLayer(layer) || layer.kind === 'numeric_monthly' ? ` · ${escapeHtml(stageBarConfig()?.label() ?? '')}` : ''}</div>`
+    + `<div class="tip-meta">${point ? `${escapeHtml(formatLatLon(point.lat, point.lon, coordinateDigits()))} · ` : ''}cell ${state.hoverCell}</div>`;
+  tooltip.hidden = false;
+  const box = $('#viewport').getBoundingClientRect();
+  const width = tooltip.offsetWidth || 180;
+  const height = tooltip.offsetHeight || 60;
+  let x = pointer.x - box.left + 16;
+  let y = pointer.y - box.top + 18;
+  if (x + width > box.width - 8) x = pointer.x - box.left - width - 16;
+  if (y + height > box.height - 8) y = pointer.y - box.top - height - 14;
+  tooltip.style.transform = `translate(${Math.max(8, x).toFixed(0)}px, ${Math.max(8, y).toFixed(0)}px)`;
+}
+
+// Scale bar measured on the planet between two screen points 80 px apart
+// through the view centre (MapLibre's method), so it is exact at the centre in
+// every projection. Hidden for whole-world views, where scale varies too much
+// across the screen for one bar to be honest.
+function updateScaleBar() {
+  const bar = $('#map-scale');
+  if (!bar || !three.controls) return;
+  const radius = state.planetRadiusKm;
+  const view = three.controls.view;
+  const kmPerPx = radius ? three.controls.kilometresPerPixel(radius) : null;
+  if (!kmPerPx || view.span > 1.2) { bar.hidden = true; return; }
+  const km = niceDistance(kmPerPx * 110);
+  const px = km / kmPerPx;
+  bar.hidden = false;
+  $('#map-scale-bar').style.width = `${px.toFixed(1)}px`;
+  $('#map-scale-label').textContent = formatDistance(km);
+  const stretch = state.projection === 'equirect'
+    ? ' East–west distances stretch by 1/cos(latitude) on this map.' : '';
+  bar.title = `Scale at the map centre (${formatLatLon(view.lat, view.lon, 1)}); it changes away from the centre.${stretch}`;
+}
+
+function updateMapOverlays() {
+  if (!three.controls) return;
+  updateScaleBar();
+  updatePlaceMarkers();
+  if (!state.hoverPoint) updateCoordsReadout();
+  if (state.overlays.graticule) {
+    const step = graticuleStepFor(three.controls.view.span);
+    if (step !== three.graticuleStep) buildGraticule(step);
+  }
+}
+
+// Planet radius (for distances) and cell areas (for area-weighted legends).
+// The radius is cross-checked against the areas: a sphere's cells must sum to
+// 4πR², so a mismatch flags an inconsistent cache instead of a silent error.
+async function loadPlanetContext(context = currentCacheContext()) {
+  const areaLayer = layerById('cells/area_km2');
+  const [planet, areas] = await Promise.allSettled([
+    fetchJson(cacheRevisionUrl('/api/section/planet_parameters', context)),
+    areaLayer ? fetchLayerValues(areaLayer, 0, 0, context) : Promise.resolve(null),
+  ]);
+  if (!cacheContextIsCurrent(context)) return;
+  const declared = Number(planet.value?.radius_km);
+  let areaRadius = null;
+  const cellAreas = areas.value;
+  if (cellAreas?.length === state.cellCount && cellAreas.every((area) => area > 0 && area < 1e37)) {
+    state.cellAreas = cellAreas;
+    const total = cellAreas.reduce((sum, area) => sum + area, 0);
+    areaRadius = Math.sqrt(total / (4 * Math.PI));
+  }
+  state.planetRadiusKm = declared > 0 ? declared : areaRadius;
+  state.planetCheck = declared > 0 && areaRadius
+    ? { radiusKm: declared, areaRadiusKm: areaRadius, relativeError: Math.abs(areaRadius - declared) / declared }
+    : null;
+  if (state.planetCheck && state.planetCheck.relativeError > 0.01) {
+    console.warn(`Cell areas imply a radius of ${areaRadius.toFixed(1)} km, not the declared ${declared} km.`);
+  }
+  updateWorldMeta();
+  if (state.activeLayer) updateLegend(state.activeLayer);
+  requestRender();
+}
+
+function updateWorldMeta() {
+  const manifest = state.manifest;
+  if (!manifest) return;
+  const world = manifest.world || {};
+  const check = state.planetCheck;
+  const radius = state.planetRadiusKm
+    ? `R ${formatCount(Math.round(state.planetRadiusKm))} km${check ? (check.relativeError <= 0.01 ? ' ✓' : ' ⚠') : ''}`
+    : null;
+  $('#world-meta').innerHTML = [
+    `<span class="meta-name">${escapeHtml(world.name ?? 'world')}</span> · ${escapeHtml(formatCount(state.cellCount))} cells`,
+    [String(world.mesh_backend ?? '').replaceAll('_', ' '), world.generation_scope && world.generation_scope !== 'full' ? String(world.generation_scope).replaceAll('_', ' ') : null, radius]
+      .filter(Boolean).map(escapeHtml).join(' · '),
+    `${formatCount((manifest.layers || []).length)} layers · ${Object.keys(manifest.stage_histories || {}).length} stage histories`,
+  ].join('<br>');
+  const meta = $('#world-meta');
+  if (meta && check) {
+    meta.title = `Planet radius ${check.radiusKm} km. The ${formatCount(state.cellCount)} cell areas sum to 4πR² with R = ${check.areaRadiusKm.toFixed(1)} km (${(check.relativeError * 100).toFixed(3)}% difference).`;
+  }
+}
+
+// Hillshade from present-day elevation, computed once per world. Ocean floors
+// are flattened to sea level so the relief shows landforms, and the shade is
+// normalised by the flat-ground value, so level ground keeps its exact colour
+// and only slopes are lightened or darkened (light from 315°, 45° up).
+async function ensureRelief() {
+  if (state.reliefReady) return true;
+  const layer = layerById('cells/elevation_m');
+  if (!layer || !three.geometry || !three.reliefAttribute) return false;
+  const context = currentCacheContext();
+  const elevations = await fetchLayerValues(layer, 0, 0, context);
+  if (!cacheContextIsCurrent(context) || !three.reliefAttribute) return false;
+  computeRelief(elevations);
+  state.reliefReady = true;
+  return true;
+}
+
+function computeRelief(elevations) {
+  const positions = three.geometry.getAttribute('position').array;
+  const cellIds = three.geometry.getAttribute('aCellId').array;
+  const centre = three.geometry.getAttribute('aEdge').array;
+  const indices = three.geometry.getIndex().array;
+  const shade = three.reliefAttribute.array;
+  const vertexCount = cellIds.length;
+  const heightOf = (cell) => {
+    const value = elevations[cell];
+    return isRenderedValue(value) ? Math.max(0, value) : 0;
+  };
+
+  // Ring vertices at one Voronoi corner belong to different cells; merge
+  // them so the relief surface is continuous and shares smooth normals.
+  const node = new Int32Array(vertexCount);
+  const corners = new Map();
+  let nodeCount = 0;
+  const nodeHeight = [];
+  const nodeWeight = [];
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    let id;
+    if (centre[vertex] === 1) {
+      id = nodeCount++;
+    } else {
+      const key = `${Math.round(positions[vertex * 3] * 1e6)},${Math.round(positions[vertex * 3 + 1] * 1e6)},${Math.round(positions[vertex * 3 + 2] * 1e6)}`;
+      id = corners.get(key);
+      if (id === undefined) { id = nodeCount++; corners.set(key, id); }
+    }
+    node[vertex] = id;
+    nodeHeight[id] = (nodeHeight[id] || 0) + heightOf(cellIds[vertex]);
+    nodeWeight[id] = (nodeWeight[id] || 0) + 1;
+  }
+  const height = (vertex) => nodeHeight[node[vertex]] / nodeWeight[node[vertex]];
+
+  // Vertical exaggeration from the data: put the 90th-percentile land slope
+  // at 35°, so relief reads on any world size (small-scale maps need large
+  // exaggeration: a 350 km cell with 2 km of relief is a 0.3° slope).
+  const radiusM = (state.planetRadiusKm || 6371) * 1000;
+  const slopes = [];
+  for (let index = 0; index < indices.length; index += 3) {
+    const a = indices[index];
+    const b = indices[index + 1];
+    const rise = Math.abs(height(a) - height(b));
+    if (!rise) continue;
+    const run = Math.hypot(
+      positions[a * 3] - positions[b * 3], positions[a * 3 + 1] - positions[b * 3 + 1], positions[a * 3 + 2] - positions[b * 3 + 2],
+    ) * radiusM;
+    if (run > 0) slopes.push(rise / run);
+  }
+  slopes.sort((x, y) => x - y);
+  const typical = slopes.length ? slopes[Math.floor(slopes.length * 0.9)] : 0;
+  const exaggeration = typical > 0 ? Math.min(5000, Math.max(1, Math.tan((35 * Math.PI) / 180) / typical)) : 1;
+
+  const displaced = (vertex) => {
+    const scale = 1 + (height(vertex) * exaggeration) / radiusM;
+    return [positions[vertex * 3] * scale, positions[vertex * 3 + 1] * scale, positions[vertex * 3 + 2] * scale];
+  };
+  const normals = new Float64Array(nodeCount * 3);
+  for (let index = 0; index < indices.length; index += 3) {
+    const [p0, p1, p2] = [indices[index], indices[index + 1], indices[index + 2]].map(displaced);
+    const u = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+    const v = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+    let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+    if (n[0] * p0[0] + n[1] * p0[1] + n[2] * p0[2] < 0) n = n.map((component) => -component);
+    for (let corner = 0; corner < 3; corner += 1) {
+      const id = node[indices[index + corner]];
+      normals[id * 3] += n[0];
+      normals[id * 3 + 1] += n[1];
+      normals[id * 3 + 2] += n[2];
+    }
+  }
+  const azimuth = (RELIEF_LIGHT.azimuthDeg * Math.PI) / 180;
+  const altitude = (RELIEF_LIGHT.altitudeDeg * Math.PI) / 180;
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    const id = node[vertex];
+    const nLength = Math.hypot(normals[id * 3], normals[id * 3 + 1], normals[id * 3 + 2]) || 1;
+    const n = [normals[id * 3] / nLength, normals[id * 3 + 1] / nLength, normals[id * 3 + 2] / nLength];
+    const upLength = Math.hypot(positions[vertex * 3], positions[vertex * 3 + 1], positions[vertex * 3 + 2]) || 1;
+    const up = [positions[vertex * 3] / upLength, positions[vertex * 3 + 1] / upLength, positions[vertex * 3 + 2] / upLength];
+    // Local east/north in the render frame (planet axis is +y).
+    let east = [up[2], 0, -up[0]];
+    const eastLength = Math.hypot(east[0], east[2]);
+    east = eastLength > 1e-6 ? [east[0] / eastLength, 0, east[2] / eastLength] : [1, 0, 0];
+    const north = [up[1] * east[2] - up[2] * east[1], up[2] * east[0] - up[0] * east[2], up[0] * east[1] - up[1] * east[0]];
+    const horizontal = Math.cos(altitude);
+    const light = [0, 1, 2].map((axis) => horizontal * (Math.sin(azimuth) * east[axis] + Math.cos(azimuth) * north[axis]) + Math.sin(altitude) * up[axis]);
+    const lit = n[0] * light[0] + n[1] * light[1] + n[2] * light[2];
+    shade[vertex] = Math.min(1.6, Math.max(0.35, lit / Math.sin(altitude)));
+  }
+  three.reliefAttribute.needsUpdate = true;
+  state.reliefExaggeration = exaggeration;
+}
+
+async function setRelief(enabled) {
+  const button = $('#toggle-relief');
+  if (enabled && !(await ensureRelief().catch((error) => { console.error(error); return false; }))) {
+    enabled = false;
+    setExportMessage('Relief needs the cells/elevation_m layer, which this world does not have.', 5000);
+  }
+  state.relief = enabled;
+  setUniform('uReliefStrength', enabled ? 0.9 : 0);
+  button?.classList.toggle('active', enabled);
+  button?.setAttribute('aria-pressed', String(enabled));
+  if (button) {
+    button.title = enabled && state.reliefExaggeration
+      ? `Relief shading on — present-day elevation, ×${formatCount(Math.round(state.reliefExaggeration))} vertical exaggeration; slopes change colour brightness (r)`
+      : 'Relief shading from elevation (r) — changes colour brightness on slopes';
+  }
+  requestRender();
+  updateMapUrl();
+}
+
+// ---------------------------------------------------------------------------
+// Places: point records the world already carries (settlements, ports, ruins,
+// sacred areas, landmass centroids), shown as markers and searchable in the
+// command palette. Rows without valid coordinates are skipped, never guessed.
+
+const PLACE_SOURCES = [
+  { family: 'settlements', kind: 'settlement', label: 'Settlement', lat: 'lat_deg', lon: 'lon_deg', type: 'type', priority: 3 },
+  { family: 'port_sites', kind: 'port', label: 'Port site', lat: 'latitude_deg', lon: 'longitude_deg', type: 'site_type', priority: 2 },
+  { family: 'landmasses', kind: 'landmass', label: 'Landmass', lat: 'centroid_lat_deg', lon: 'centroid_lon_deg', type: null, priority: 2 },
+  { family: 'ruins', kind: 'ruin', label: 'Ruin', lat: 'lat_deg', lon: 'lon_deg', type: 'type', priority: 1 },
+  { family: 'sacred_areas', kind: 'sacred', label: 'Sacred area', lat: 'lat_deg', lon: 'lon_deg', type: 'type', priority: 1 },
+];
+const humanize = (value) => String(value ?? '').replaceAll('_', ' ').replace(/^./, (first) => first.toUpperCase());
+
+async function loadPlaces(context = currentCacheContext()) {
+  const families = state.manifest?.families || {};
+  const sources = PLACE_SOURCES.filter((source) => families[source.family]);
+  const capitals = new Map();
+  if (families.political_regions) {
+    const regions = await optionalJson(cacheRevisionUrl('/api/family/political_regions?limit=5000&detail=scalars', context));
+    for (const region of regions?.rows || []) {
+      if (Number.isInteger(region.capital_settlement_id)) capitals.set(region.capital_settlement_id, region.id);
+    }
+  }
+  const results = await Promise.all(sources.map((source) => optionalJson(
+    cacheRevisionUrl(`/api/family/${encodeURIComponent(source.family)}?limit=5000&detail=scalars`, context),
+  )));
+  if (!cacheContextIsCurrent(context)) return null;
+  const places = [];
+  sources.forEach((source, index) => {
+    for (const row of results[index]?.rows || []) {
+      const lat = Number(row[source.lat]);
+      const lon = Number(row[source.lon]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) continue;
+      const cellId = Number.isInteger(row.cell_id) && row.cell_id >= 0 && row.cell_id < state.cellCount ? row.cell_id : null;
+      const type = source.type ? humanize(row[source.type]) : '';
+      const capitalOf = source.kind === 'settlement' ? capitals.get(row.id) : undefined;
+      const area = Number(row.area_km2);
+      places.push({
+        id: `${source.family}:${row.id}`,
+        kind: capitalOf !== undefined ? 'capital' : source.kind,
+        title: `${type || source.label} ${row.id}`,
+        hint: [capitalOf !== undefined ? `Capital of region ${capitalOf}` : source.label,
+          source.kind === 'landmass' && area > 0 ? `${formatCount(Math.round(area))} km²` : null].filter(Boolean).join(' · '),
+        keywords: `${source.family} ${source.label} ${type} ${row.id}${capitalOf !== undefined ? ' capital' : ''}`,
+        lat, lon, cellId,
+        priority: capitalOf !== undefined ? 4 : source.priority,
+      });
+    }
+  });
+  state.places = places;
+  return places;
+}
+
+function flyToPlace(place) {
+  if (!three.controls || !place) return;
+  const span = Math.min(three.controls.view.span, 0.35);
+  three.controls.flyTo({ lat: place.lat, lon: place.lon, span });
+  if (place.cellId !== null) void openInspector(place.cellId);
+}
+
+function renderPlaceMarkers() {
+  const container = $('#map-places');
+  if (!container) return;
+  if (!state.overlays.places || !state.places?.length) { container.replaceChildren?.(); return; }
+  if (container.childElementCount !== state.places.length) {
+    container.innerHTML = state.places.map((place, index) => (
+      `<button type="button" tabindex="-1" class="place-marker kind-${place.kind}" data-place="${index}" title="${escapeHtml(`${place.title} — ${place.hint}`)}">`
+      + `<i></i><span>${escapeHtml(place.title)}</span></button>`
+    )).join('');
+  }
+  updatePlaceMarkers();
+}
+
+// Position markers for the current camera; labels are placed greedily by
+// priority (capitals first) and hidden where they would collide.
+function updatePlaceMarkers() {
+  const container = $('#map-places');
+  if (!container || !state.overlays.places || !three.controls || !state.places?.length) return;
+  const nodes = container.children;
+  const zoomedIn = three.controls.view.span < 0.9;
+  const placed = [];
+  const order = state.places.map((place, index) => index).sort((a, b) => state.places[b].priority - state.places[a].priority);
+  for (const index of order) {
+    const place = state.places[index];
+    const node = nodes[index];
+    if (!node) continue;
+    const screen = three.controls.latLonToScreen(place.lat, place.lon);
+    node.hidden = !screen.visible;
+    if (!screen.visible) continue;
+    node.style.transform = `translate(${screen.x.toFixed(1)}px, ${screen.y.toFixed(1)}px)`;
+    const wantsLabel = zoomedIn || place.priority >= 4;
+    let showLabel = false;
+    if (wantsLabel) {
+      const rect = { x: screen.x + 8, y: screen.y - 9, w: place.title.length * 6.6 + 10, h: 18 };
+      showLabel = !placed.some((other) => rect.x < other.x + other.w && other.x < rect.x + rect.w && rect.y < other.y + other.h && other.y < rect.y + rect.h);
+      if (showLabel) placed.push(rect);
+    }
+    node.classList.toggle('labelled', showLabel);
+  }
+}
+
+async function setPlacesVisible(visible) {
+  const button = $('#toggle-places');
+  if (visible && !state.places) {
+    const places = await loadPlaces().catch((error) => { console.error(error); return null; });
+    if (!places?.length) {
+      visible = false;
+      setExportMessage('This world has no located places (settlements, ports, ruins or landmasses).', 5000);
+    }
+  }
+  state.overlays.places = visible;
+  button?.classList.toggle('active', visible);
+  button?.setAttribute('aria-pressed', String(visible));
+  renderPlaceMarkers();
+  updateMapUrl();
+}
+
+// Palette entries built from what was typed: "12.5, -40", "12.5 N 40 W" or
+// "cell 1234" jump straight there.
+function commandQueryItems(query) {
+  if (!state.mapReady || !query) return [];
+  const items = [];
+  const cell = /^(?:cell\s*#?\s*)(\d+)$/i.exec(query) || (/^\d+$/.test(query) ? [query, query] : null);
+  if (cell) {
+    const id = Number(cell[1]);
+    if (id < state.cellCount) {
+      items.push({
+        group: 'Go to', title: `Cell ${id}`, hint: 'Select the cell and centre the map on it', icon: 'target',
+        run: () => { setView('map'); void openInspector(id).then(() => centreOnSelectedCell()); },
+      });
+    }
+  }
+  const coordinate = /^(-?\d+(?:\.\d+)?)\s*°?\s*([NnSs])?\s*[,;\s]\s*(-?\d+(?:\.\d+)?)\s*°?\s*([EeWw])?$/.exec(query);
+  if (coordinate) {
+    let lat = Number(coordinate[1]);
+    let lon = Number(coordinate[3]);
+    if (/[Ss]/.test(coordinate[2] || '')) lat = -Math.abs(lat);
+    if (/[Ww]/.test(coordinate[4] || '')) lon = -Math.abs(lon);
+    if (Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+      items.push({
+        group: 'Go to', title: formatLatLon(lat, lon, 2), hint: 'Centre the map on these coordinates', icon: 'globe',
+        run: () => { setView('map'); three.controls?.flyTo({ lat, lon, span: Math.min(three.controls.view.span, 0.5) }); },
+      });
+    }
+  }
+  return items;
+}
+
+function announceMapView() {
+  const announcer = $('#map-announcer');
+  if (!announcer || !three.controls || document.activeElement !== three.renderer?.domElement) return;
+  const view = three.controls.view;
+  const across = state.planetRadiusKm
+    ? `, showing about ${formatDistance(Number((view.span * state.planetRadiusKm).toPrecision(2)))} from top to bottom` : '';
+  announcer.textContent = `Centred on ${formatLatLon(view.lat, view.lon, 1)}${across}.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2234,9 +3478,14 @@ function collectionCount(collection) {
 }
 
 function setView(name, { updateHash = true } = {}) {
-  const valid = ['map', 'data', 'config', 'operations', 'api'];
-  const view = valid.includes(name) ? name : 'map';
+  const parsed = parseViewHash(name);
+  const view = VIEWS.includes(parsed.name) ? parsed.name : 'home';
+  if (parsed.mapParams) state.pendingMapParams = parsed.mapParams;
+  if (view !== 'map' && state.playing) setPlaying(false);
   state.activeView = view;
+  storageSet('lastView', view);
+  const heading = $('#header-view-title');
+  if (heading) heading.textContent = VIEW_TITLES[view];
   document.querySelectorAll('[data-view-panel]').forEach((panel) => { panel.hidden = panel.dataset.viewPanel !== view; });
   document.querySelectorAll('.view-tab').forEach((button) => {
     const active = button.dataset.view === view;
@@ -2246,20 +3495,35 @@ function setView(name, { updateHash = true } = {}) {
   });
   // User-initiated switches push a history entry so Back/Forward navigates
   // views; hashchange-driven sync (initial load, Back/Forward) skips this.
-  if (updateHash && window.location.hash !== `#${view}`) history.pushState(null, '', `#${view}`);
-  if (view === 'map' && state.mapReady) requestAnimationFrame(resizeRenderer);
+  if (updateHash && window.location.hash.split('?')[0] !== `#${view}`) history.pushState(null, '', `#${view}`);
+  if (view === 'map' && state.mapReady) {
+    requestAnimationFrame(resizeRenderer);
+    if (state.pendingMapParams) void applyPendingMapParams();
+    else updateMapUrl();
+  }
+  if (view === 'home') { renderHome(); refreshJobs(); }
   if (view === 'data' && state.catalog) loadDataSelection(false);
   if (view === 'operations') refreshJobs();
-  if (view === 'api') loadBackend();
+  if (view === 'api') {
+    const frame = $('#api-docs-frame');
+    if (!frame.getAttribute('src')) frame.setAttribute('src', frame.dataset.src);
+    loadBackend();
+  }
 }
 
 function applyServerStatus(status) {
   state.status = status || {};
+  if (status?.paths) {
+    $('#storage-paths').innerHTML = Object.entries(status.paths).filter(([, value]) => value)
+      .map(([key, value]) => `<dt>${escapeHtml(key.replaceAll('_', ' '))}</dt><dd><code>${escapeHtml(value)}</code></dd>`).join('');
+  }
   state.cacheAvailable = Boolean(status?.cache_available);
+  state.statusFailed = false;
   const badge = $('#cache-state');
   badge.className = `state-pill ${state.cacheAvailable ? 'available' : 'unavailable'}`;
-  badge.textContent = state.cacheAvailable ? 'Cache ready' : 'No cache';
-  badge.removeAttribute('title');
+  badge.textContent = state.cacheAvailable ? 'Map ready' : 'No world';
+  if (status?.cache_error) badge.title = status.cache_error;
+  else badge.removeAttribute('title');
   const context = [status?.cache_dir ? `cache ${status.cache_dir}` : null, status?.workspace ? `workspace ${status.workspace}` : null];
   if (status?.cache_error) context.push(`error: ${status.cache_error}`);
   if (status?.version) context.push(`v${status.version}`);
@@ -2269,6 +3533,7 @@ function applyServerStatus(status) {
   $('#map-empty').classList.toggle('hidden', state.cacheAvailable);
   $('#data-unavailable').classList.toggle('hidden', state.cacheAvailable);
   $('#data-workspace').classList.toggle('hidden', !state.cacheAvailable);
+  renderHome();
 }
 
 function cacheIdentityFor(status) {
@@ -2317,7 +3582,10 @@ function disposeMapScene() {
   materials.forEach((material) => material.dispose?.());
   three.pickMaterial?.dispose?.();
   three.valueTexture?.dispose?.();
+  three.previousValueTexture?.dispose?.();
+  three.backdrop?.dispose?.();
   three.colormapTexture?.dispose?.();
+  three.categoryTexture?.dispose?.();
   three.pickTarget?.dispose?.();
   three.renderer?.dispose?.();
   Object.keys(three).forEach((key) => { delete three[key]; });
@@ -2366,8 +3634,20 @@ function resetCacheDerivedState() {
   state.dataOffset = 0;
   state.dataTotal = 0;
   state.selectedCell = -1;
+  state.selectedPoint = null;
   state.hoverCell = -1;
-  state.overlays = { wireframe: false, plates: false, graticule: false };
+  state.hoverPoint = null;
+  state.highlightCode = -1;
+  state.scale = null;
+  state.valueFade = null;
+  state.relief = false;
+  state.reliefReady = false;
+  state.reliefExaggeration = null;
+  state.planetRadiusKm = null;
+  state.planetCheck = null;
+  state.cellAreas = null;
+  state.places = null;
+  state.overlays = { wireframe: false, plates: false, graticule: false, places: false };
   state.projection = 'globe';
   Object.assign(state.morph, { value: 0, target: 0, proj2D: 0, proj2DTarget: 0 });
   disposeMapScene();
@@ -2386,10 +3666,13 @@ function resetCacheDerivedState() {
     button.classList.toggle('active', active);
     button.setAttribute('aria-pressed', String(active));
   });
-  for (const id of ['toggle-wireframe', 'toggle-plates', 'toggle-graticule']) {
-    $(`#${id}`).classList.remove('active');
-    $(`#${id}`).setAttribute('aria-pressed', 'false');
+  for (const id of ['toggle-wireframe', 'toggle-plates', 'toggle-graticule', 'toggle-relief', 'toggle-places']) {
+    const button = $(`#${id}`);
+    button?.classList.remove('active');
+    button?.setAttribute('aria-pressed', 'false');
   }
+  $('#map-tooltip')?.setAttribute('hidden', '');
+  $('#map-places')?.replaceChildren?.();
   const mapEmpty = mapEmptyElements();
   mapEmpty.title.textContent = mapEmptyDefaultCopy.title;
   mapEmpty.detail.textContent = mapEmptyDefaultCopy.detail;
@@ -2401,6 +3684,7 @@ function resetCacheDerivedState() {
 }
 
 function showStatusRefreshFailure(error) {
+  state.statusFailed = true;
   const badge = $('#cache-state');
   badge.className = 'state-pill failed';
   badge.textContent = 'Status unavailable';
@@ -2437,6 +3721,10 @@ async function refreshWorlds({ force = false } = {}) {
   // the "unavailable" placeholder when no list was ever loaded.
   if (payload === null && state.worldsSignature !== null) return;
   const worlds = Array.isArray(payload?.worlds) ? payload.worlds : [];
+  if (payload !== null) {
+    state.worlds = worlds;
+    renderHome();
+  }
   const current = state.status?.cache_dir ?? '';
   const signature = JSON.stringify([payload === null, current, worlds.map((world) => [
     String(world.cache_dir ?? world.id ?? ''), String(world.name ?? ''), world.cell_count ?? null,
@@ -2462,7 +3750,7 @@ async function refreshWorlds({ force = false } = {}) {
     select.appendChild(new Option(`${name}${cells}`, value));
   }
   if (!select.options.length) {
-    select.appendChild(new Option(payload ? 'No workspace caches' : 'Cache list unavailable', ''));
+    select.appendChild(new Option(payload ? 'No worlds yet' : 'World list unavailable', ''));
   }
   if (current && [...select.options].some((option) => option.value === current)) {
     select.value = current;
@@ -2490,6 +3778,7 @@ async function switchWorld() {
     const badge = $('#cache-state');
     badge.className = 'state-pill failed';
     badge.textContent = 'Switch failed';
+    toast({ title: 'That world could not be opened', message: error.message || String(error), tone: 'error' });
     badge.title = error.message || String(error);
     // Rebuild the option list first, then restore the displayed selection to
     // the still-current cache; restoring before the rebuild would be wiped.
@@ -2579,12 +3868,7 @@ async function initializeMap(context = currentCacheContext()) {
     validateDisplayMetadata(manifest);
     state.manifest = manifest;
     state.cellCount = Number(manifest.world?.cell_count ?? 0);
-    const world = manifest.world || {};
-  $('#world-meta').innerHTML = [
-      `${escapeHtml(world.name ?? 'world')} · ${state.cellCount} cells`,
-      `${escapeHtml(world.mesh_backend ?? '')} · scope ${escapeHtml(world.generation_scope ?? 'full')}`,
-      `${(manifest.layers || []).length} layers · ${Object.keys(manifest.stage_histories || {}).length} stage histories`,
-    ].join('<br>');
+    updateWorldMeta();
 
     if (!await buildScene(context)) return;
     if (requestId !== state.mapRequest || !cacheContextIsCurrent(context)) return;
@@ -2592,11 +3876,16 @@ async function initializeMap(context = currentCacheContext()) {
     wireMapEvents();
     updateDocsCard(null);
     state.mapReady = true;
+    requestRender();
+    void loadPlanetContext(context);
+    void loadPlaces(context);
     if (!state.animationStarted) {
       state.animationStarted = true;
-      animate();
+      requestAnimationFrame(animate);
     }
 
+    renderHome();
+    if (await applyPendingMapParams()) return;
     const initial = manifest.layers?.find((layer) => layer.id === 'cells/elevation_m')
       || manifest.layers?.find((layer) => layer.kind === 'numeric')
       || manifest.layers?.[0];
@@ -2658,7 +3947,9 @@ function resourcesForKind(kind) {
 
 function populateDataResources() {
   const kind = $('#data-kind').value;
-  const names = resourcesForKind(kind);
+  const allNames = resourcesForKind(kind);
+  const query = $('#data-resource-search').value.trim().toLowerCase();
+  const names = allNames.filter((name) => name.replaceAll('_', ' ').toLowerCase().includes(query.replaceAll('_', ' ')));
   const resource = $('#data-resource');
   const previous = resource.value;
   resource.innerHTML = '';
@@ -2669,7 +3960,9 @@ function populateDataResources() {
     resource.appendChild(option);
   }
   if (names.includes(previous)) resource.value = previous;
-  $('#data-resource-wrap').classList.toggle('hidden', names.length === 0);
+  resource.disabled = names.length === 0;
+  if (!names.length) resource.appendChild(new Option('No matching resources', ''));
+  $('#data-resource-wrap').classList.toggle('hidden', allNames.length === 0);
   $('#family-detail-wrap').classList.toggle('hidden', kind !== 'families');
   $('#data-page-controls').classList.toggle('hidden', kind !== 'families');
 }
@@ -2683,14 +3976,15 @@ function catalogOverviewMarkup(catalog) {
     ['Scalars', collectionCount(catalog.scalars)],
     ['Skipped outputs', collectionCount(catalog.skipped_sections)],
   ];
-  const cards = metrics.map(([label, value]) => `<div class="metric-card"><span>${escapeHtml(label)}</span><strong>${value}</strong></div>`).join('');
+  const kinds = ['layers', 'stages', 'families', 'sections', 'scalars', 'skipped'];
+  const cards = metrics.map(([label, value], index) => `<button type="button" class="metric-card" data-data-kind="${kinds[index]}"><span>${escapeHtml(label)}</span><strong>${value}</strong></button>`).join('');
   const names = collectionNames(catalog.families).slice(0, 40);
   const familyList = names.map((name) => {
     const entry = !Array.isArray(catalog.families) ? catalog.families?.[name] : null;
     const rowCount = entry?.row_count !== undefined
       ? ` · ${escapeHtml(entry.row_count)} rows`
       : '';
-    return `<div class="catalog-item"><strong>${escapeHtml(name)}</strong><small>${escapeHtml(entry?.kind ?? 'record family')}${rowCount}</small></div>`;
+    return `<button type="button" class="catalog-item" data-data-kind="families" data-resource="${escapeHtml(name)}"><strong>${escapeHtml(name)}</strong><small>${escapeHtml(entry?.kind ?? 'record family')}${rowCount}</small></button>`;
   }).join('');
   return `<div class="metric-grid">${cards}</div><p class="eyebrow">Record families</p><div class="catalog-list">${familyList || '<p class="muted">No record families.</p>'}</div>`;
 }
@@ -2797,6 +4091,11 @@ async function loadDataSelection(resetOffset = true, context = currentCacheConte
         + familyAvailabilityMarkup(name, payload.rows || [], returnedDetail, payload.availability) + tableMarkup(payload.rows || []);
       dataTotal = Number(payload.total ?? payload.row_count ?? payload.rows?.length ?? 0);
     }
+    if (['families', 'sections', 'stages'].includes(kind) && !name) {
+      markup = `<div class="notice">${$('#data-resource-search').value.trim()
+        ? 'No resources match this filter. Clear the filter to browse all exported resources.'
+        : 'No resources of this type were exported.'}</div>`;
+    }
     if (requestId !== state.dataRequest || !cacheContextIsCurrent(context)) return;
     state.dataOffset = requestOffset;
     state.dataTotal = dataTotal;
@@ -2823,687 +4122,8 @@ async function loadDataSelection(resetOffset = true, context = currentCacheConte
 // ---------------------------------------------------------------------------
 // YAML configuration editor and schema reference
 
-async function fetchTemplate(profile) {
-  const version = state.configSchema?.['x-magic-geo']?.schema_version;
-  if (version !== 2) throw new Error('The current configuration schema is unavailable. Reload the workbench before resetting a profile.');
-  const payload = await fetchJson(`/api/config/template?${new URLSearchParams({ profile })}`);
-  if (payload?.profile !== profile || payload?.config?.config_version !== version
-      || typeof payload?.yaml !== 'string' || !payload.yaml.trim()) {
-    throw new Error('The profile template does not match configuration schema 2. Reload the workbench; your YAML has been kept.');
-  }
-  return payload.yaml;
-}
-
-function normalizeProfiles(payload) {
-  const source = Array.isArray(payload) ? payload : payload?.profiles ?? payload ?? [];
-  if (Array.isArray(source)) return source.map((entry) => (
-    typeof entry === 'string' ? { id: entry, label: entry } : {
-      id: String(entry.id ?? entry.name ?? entry.profile),
-      label: String(entry.label ?? entry.title ?? entry.name ?? entry.id),
-    }
-  )).filter((entry) => entry.id && entry.id !== 'undefined');
-  if (source && typeof source === 'object') return Object.entries(source).map(([id, entry]) => ({
-    id,
-    label: typeof entry === 'string' ? entry : entry?.label ?? entry?.title ?? id,
-  }));
-  return [];
-}
-
-function resolveSchemaNode(node, root) {
-  if (!node?.$ref || !node.$ref.startsWith('#/')) return node || {};
-  const resolved = node.$ref.slice(2).split('/').reduce((value, part) => value?.[part.replace(/~1/g, '/').replace(/~0/g, '~')], root);
-  if (!resolved) return node;
-  const { $ref, ...overrides } = node;
-  return { ...resolved, ...overrides };
-}
-
-function flattenSchema(schema) {
-  const fields = [];
-  const seen = new Set();
-  function visit(rawNode, path, required = new Set(), depth = 0) {
-    const node = resolveSchemaNode(rawNode, schema);
-    if (!node || depth > 12) return;
-    const properties = node.properties || {};
-    const nodeRequired = new Set(node.required || []);
-    for (const [name, rawChild] of Object.entries(properties)) {
-      const child = resolveSchemaNode(rawChild, schema);
-      const fieldPath = path ? `${path}.${name}` : name;
-      const key = `${fieldPath}:${child?.title || ''}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      let type = child.type;
-      if (!type && child.anyOf) type = child.anyOf.map((entry) => resolveSchemaNode(entry, schema).type).filter(Boolean).join(' | ');
-      if (!type && child.$ref) type = child.$ref.split('/').at(-1);
-      fields.push({
-        path: fieldPath,
-        type: type || (child.properties ? 'object' : 'value'),
-        required: nodeRequired.has(name) || required.has(name),
-        description: child.description || child.title || '',
-        help: fieldPath === 'climate.reference_infrared_optical_depth'
-          ? 'Infrared opacity (tau_ref), a dimensionless column parameter. The seasonal energy budget determines temperature.' : '',
-        default: child.default,
-        enum: child.enum,
-        constant: child.const,
-        minimum: child.minimum,
-        maximum: child.maximum,
-        exclusiveMinimum: child.exclusiveMinimum,
-        exclusiveMaximum: child.exclusiveMaximum,
-        exactIntegers: child['x-magic-geo-integer-display'],
-      });
-      if (child.properties || child.$ref) visit(child, fieldPath, nodeRequired, depth + 1);
-      const item = child.items ? resolveSchemaNode(child.items, schema) : null;
-      if (item?.properties) visit(item, `${fieldPath}[]`, new Set(item.required || []), depth + 1);
-    }
-  }
-  visit(schema, '');
-  return fields;
-}
-
-function schemaValueText(field, key, value) {
-  const exact = field.exactIntegers?.[key];
-  if (typeof value === 'number' && Number.isInteger(value) && !Number.isSafeInteger(value)) {
-    if (typeof exact === 'string' && /^-?(0|[1-9]\d*)$/.test(exact) && Number(exact) === value) return exact;
-    if (field.type === 'integer' || exact !== undefined) return 'exact integer unavailable';
-  }
-  return key === 'default' || key === 'const' ? displayCell(value) : String(value);
-}
-
-function renderSchemaDocs(query = '') {
-  const needle = query.trim().toLowerCase();
-  const matches = state.schemaFields.filter((field) => !needle || `${field.path} ${field.type} ${field.description} ${field.help || ''}`.toLowerCase().includes(needle));
-  $('#schema-docs').innerHTML = matches.map((field) => {
-    const defaultText = field.default !== undefined ? `Default: ${schemaValueText(field, 'default', field.default)}` : '';
-    const enumText = field.enum ? `Choices: ${field.enum.join(', ')}` : '';
-    const constraints = [
-      field.constant !== undefined ? `Fixed value: ${schemaValueText(field, 'const', field.constant)}` : '',
-      field.minimum !== undefined ? `Minimum: ${schemaValueText(field, 'minimum', field.minimum)} (inclusive)` : '',
-      field.maximum !== undefined ? `Maximum: ${schemaValueText(field, 'maximum', field.maximum)} (inclusive)` : '',
-      field.exclusiveMinimum !== undefined ? `Greater than: ${schemaValueText(field, 'exclusiveMinimum', field.exclusiveMinimum)}` : '',
-      field.exclusiveMaximum !== undefined ? `Less than: ${schemaValueText(field, 'exclusiveMaximum', field.exclusiveMaximum)}` : '',
-    ];
-    return `<article class="schema-field"><div><code>${escapeHtml(field.path)}</code><span class="schema-meta">${escapeHtml(field.type)}${field.required ? ' · required' : ''}</span></div>`
-      + `<p>${escapeHtml(field.description || 'No field description provided.')}</p>`
-      + (field.help ? `<p>${escapeHtml(field.help)}</p>` : '')
-      + `<small>${escapeHtml([defaultText, enumText, ...constraints].filter(Boolean).join(' · '))}</small></article>`;
-  }).join('') || '<p class="muted">No schema fields match this filter.</p>';
-}
-
-async function resetConfigTemplate() {
-  const profile = $('#config-profile').value;
-  if (!profile) return;
-  if (state.configEditRevision > 0
-      && !window.confirm('Replace the current YAML with the profile template?')) return;
-  const requestId = ++state.configTemplateRequest;
-  const resultRequest = ++state.configResultRequest;
-  const editor = $('#config-yaml');
-  const editRevision = state.configEditRevision;
-  const editorValue = editor.value;
-  $('#config-result').className = 'validation-result';
-  $('#config-result').textContent = `Loading ${profile} template…`;
-  try {
-    const template = await fetchTemplate(profile);
-    if (requestId !== state.configTemplateRequest || $('#config-profile').value !== profile) return;
-    if (state.configEditRevision !== editRevision || editor.value !== editorValue) {
-      if (resultRequest === state.configResultRequest) {
-        $('#config-result').textContent = `The ${profile} template was not applied because the YAML changed while it loaded. Choose Reset from profile to replace it.`;
-      }
-      return;
-    }
-    editor.value = template;
-    state.configEditRevision = 0;
-    // Applying a template changes the editor even if validation or saving was
-    // started while it loaded. Those earlier YAML results are now obsolete.
-    state.configResultRequest += 1;
-    updateSavedConfigControls();
-    $('#config-result').className = 'validation-result';
-    $('#config-result').textContent = `Loaded the ${profile} template. Validate after making changes.`;
-  } catch (error) {
-    if (requestId !== state.configTemplateRequest || resultRequest !== state.configResultRequest || $('#config-profile').value !== profile) return;
-    $('#config-result').className = 'validation-result invalid';
-    $('#config-result').textContent = error.message || String(error);
-  }
-}
-
-function validationErrorMarkup(payload) {
-  const detail = payload?.detail ?? payload?.errors ?? payload ?? [];
-  const errors = (!Array.isArray(detail) && Array.isArray(detail?.issues) && detail.issues.length)
-    ? detail.issues : detail;
-  const list = Array.isArray(errors) ? errors : [errors];
-  return list.filter(Boolean).map((error) => {
-    if (typeof error === 'string') return `<li>${escapeHtml(error)}</li>`;
-    const location = Array.isArray(error.loc) ? error.loc.join('.')
-      : Array.isArray(error.location) ? error.location.join('.')
-        : error.path ?? error.field ?? '';
-    const sourceLocation = error.line !== undefined
-      ? `${error.source ?? 'YAML'}:${error.line}${error.column !== undefined ? `:${error.column}` : ''}` : '';
-    const prefix = [sourceLocation, location].filter(Boolean).join(' · ');
-    return `<li>${prefix ? `<code>${escapeHtml(prefix)}</code>: ` : ''}${escapeHtml(error.msg ?? error.message ?? JSON.stringify(error))}</li>`;
-  }).join('');
-}
-
-async function validateConfig() {
-  const result = $('#config-result');
-  const button = $('#config-validate');
-  const requestId = ++state.configResultRequest;
-  const yaml = $('#config-yaml').value;
-  button.disabled = true;
-  result.className = 'validation-result';
-  result.textContent = 'Validating…';
-  try {
-    const payload = await fetchJson('/api/config/validate', { method: 'POST', body: { yaml } });
-    if (requestId !== state.configResultRequest || yaml !== $('#config-yaml').value) return false;
-    const valid = payload?.valid ?? payload?.ok ?? payload?.errors?.length === 0;
-    result.className = `validation-result ${valid ? 'valid' : 'invalid'}`;
-    result.innerHTML = valid
-      ? `✓ ${escapeHtml(payload?.message ?? 'Configuration is valid.')}`
-      : `<strong>Configuration is not valid.</strong><ul>${validationErrorMarkup(payload)}</ul>`;
-    return valid;
-  } catch (error) {
-    if (requestId !== state.configResultRequest || yaml !== $('#config-yaml').value) return false;
-    const detail = error.payload?.detail;
-    result.className = 'validation-result invalid';
-    result.innerHTML = detail
-      ? `<strong>Configuration is not valid.</strong><ul>${validationErrorMarkup({ detail })}</ul>`
-      : escapeHtml(error.message || String(error));
-    return false;
-  } finally {
-    button.disabled = false;
-  }
-}
-
-function configNameRaw() {
-  return $('#config-name').value.trim() || 'world';
-}
-
-function configFilename() {
-  const safe = configNameRaw().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+/, '') || 'world';
-  return safe.endsWith('.yaml') || safe.endsWith('.yml') ? safe : `${safe}.yaml`;
-}
-
-function downloadConfig() {
-  downloadBlob(new Blob([$('#config-yaml').value], { type: 'text/yaml;charset=utf-8' }), configFilename());
-}
-
-function updateSavedConfigControls() {
-  const saved = state.savedConfig;
-  const current = saved && saved.yaml === $('#config-yaml').value && saved.name === configNameRaw();
-  $('#config-generate').disabled = !current;
-  $('#config-saved-status').textContent = saved
-    ? `Saved ${saved.path}.${current ? ' Ready to generate.' : ' Save the current edits to generate them.'}`
-    : 'Save a configuration to use it in generation.';
-}
-
-function configEdited(yamlChanged = true) {
-  if (yamlChanged) state.configEditRevision += 1;
-  state.configResultRequest += 1;
-  $('#config-result').className = 'validation-result';
-  $('#config-result').textContent = 'Configuration changed. Validate to check the current YAML.';
-  updateSavedConfigControls();
-}
-
-function generateFromSavedConfig() {
-  if (!state.savedConfig || $('#config-generate').disabled) return;
-  $('#operation-select').value = 'generate';
-  renderOperationForm();
-  const config = $('#operation-fields').querySelector('[name="config"]');
-  if (!config) return;
-  config.value = state.savedConfig.path;
-  setView('operations');
-  config.focus();
-  $('#operation-result').textContent = `Using ${state.savedConfig.path}. Review the output paths and start the job.`;
-}
-
-async function saveConfig() {
-  const result = $('#config-result');
-  const nameInput = $('#config-name');
-  if (!nameInput.checkValidity()) {
-    nameInput.reportValidity();
-    return;
-  }
-  const button = $('#config-save');
-  const requestId = ++state.configResultRequest;
-  // Retries must save exactly the name and text whose overwrite was reviewed.
-  const snapshot = { yaml: $('#config-yaml').value, name: configNameRaw() };
-  button.disabled = true;
-  result.className = 'validation-result';
-  result.textContent = 'Saving…';
-  const submit = async (force) => fetchJson('/api/config/save', {
-    method: 'POST',
-    body: {
-      ...snapshot,
-      force,
-    },
-  });
-  const showSaved = (payload, replaced = false) => {
-    if (payload?.path) state.savedConfig = { ...snapshot, path: payload.path };
-    updateSavedConfigControls();
-    if (requestId !== state.configResultRequest) return;
-    result.className = 'validation-result valid';
-    result.textContent = `${replaced ? 'Replaced' : 'Saved'} ${payload?.path ?? snapshot.name}.`;
-  };
-  try {
-    const payload = await submit(false);
-    showSaved(payload);
-  } catch (error) {
-    if (requestId !== state.configResultRequest) return;
-    if (error.status === 409 && window.confirm(`The configuration "${snapshot.name}" already exists. Replace it with the submitted YAML?`)) {
-      try {
-        const payload = await submit(true);
-        showSaved(payload, true);
-        return;
-      } catch (overwriteError) {
-        error = overwriteError;
-      }
-    }
-    if (requestId !== state.configResultRequest) return;
-    result.className = 'validation-result invalid';
-    result.textContent = error.message || String(error);
-  } finally {
-    button.disabled = false;
-  }
-}
-
-async function loadConfigWorkbench() {
-  const requestId = ++state.configWorkbenchRequest;
-  state.configTemplateRequest += 1;
-  const editRevisionAtStart = state.configEditRevision;
-  const resultRequestAtStart = state.configResultRequest;
-  const editorValueAtStart = $('#config-yaml').value;
-  const select = $('#config-profile');
-  const previousProfile = select.value;
-  select.disabled = true;
-  $('#config-reset').disabled = true;
-  state.configSchema = null;
-  state.schemaFields = [];
-  select.innerHTML = '';
-  $('#config-schema-status').textContent = 'Loading the current configuration schema…';
-  $('#schema-docs').innerHTML = '';
-  try {
-    const [schemaPayload, profilePayload] = await Promise.all([
-      fetchJson('/api/config/schema'),
-      fetchJson('/api/config/profiles'),
-    ]);
-    if (requestId !== state.configWorkbenchRequest) return;
-    const schema = schemaPayload?.schema ?? schemaPayload;
-    const metadata = schema?.['x-magic-geo'];
-    const profiles = normalizeProfiles(profilePayload);
-    const declaredProfiles = metadata?.profiles;
-    if (metadata?.schema_version !== 2 || schema?.properties?.config_version?.const !== 2
-        || !Array.isArray(declaredProfiles) || !declaredProfiles.length
-        || declaredProfiles.some((profile) => profile?.values?.config_version !== 2)
-        || !profiles.length || new Set(profiles.map((profile) => profile.id)).size !== profiles.length
-        || profiles.length !== declaredProfiles.length
-        || profiles.some((profile) => !declaredProfiles.some((entry) => entry.name === profile.id))
-        || !profiles.some((profile) => profile.id === profilePayload?.default)) {
-      throw new Error('Configuration schema and profiles must declare the current version 2. Reload the workbench; your YAML has been kept.');
-    }
-    state.configSchema = schema;
-    state.schemaFields = flattenSchema(schema);
-    renderSchemaDocs($('#schema-search').value);
-    for (const profile of profiles) {
-      const option = document.createElement('option');
-      option.value = profile.id;
-      option.textContent = profile.label;
-      option.title = declaredProfiles.find((entry) => entry.name === profile.id)?.description || '';
-      select.appendChild(option);
-    }
-    select.value = profiles.some((profile) => profile.id === previousProfile) ? previousProfile : profilePayload.default;
-    select.disabled = false;
-    $('#config-reset').disabled = false;
-    $('#config-schema-status').textContent = 'Schema 2 · Seasonal energy model · config_version: 2 is required.';
-    if (!editorValueAtStart && state.configEditRevision === editRevisionAtStart
-        && $('#config-yaml').value === editorValueAtStart && state.configResultRequest === resultRequestAtStart) {
-      await resetConfigTemplate();
-    } else if (state.configResultRequest === resultRequestAtStart) {
-      $('#config-result').textContent = 'Profiles loaded. Your YAML was kept; use Reset from profile to replace it.';
-    }
-  } catch (error) {
-    if (requestId !== state.configWorkbenchRequest) return;
-    $('#config-schema-status').textContent = 'Current schema and profiles are unavailable.';
-    $('#schema-docs').innerHTML = `<div class="notice warning">${escapeHtml(error.message || String(error))}</div>`;
-    if (state.configResultRequest === resultRequestAtStart) {
-      $('#config-result').className = 'validation-result invalid';
-      $('#config-result').textContent = 'Profile loading failed. Your YAML was kept; validation, saving and downloading remain available.';
-    }
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Generic operations and background jobs
-
-function normalizeOperations(payload) {
-  const source = Array.isArray(payload) ? payload : payload?.operations ?? payload ?? [];
-  if (Array.isArray(source)) return source.map((entry) => (
-    typeof entry === 'string' ? { name: entry, title: entry } : {
-      ...entry,
-      name: String(entry.name ?? entry.id ?? entry.operation),
-      title: String(entry.title ?? entry.label ?? entry.name ?? entry.id ?? entry.operation),
-    }
-  )).filter((entry) => entry.name && entry.name !== 'undefined');
-  if (source && typeof source === 'object') return Object.entries(source).map(([name, entry]) => ({
-    ...(typeof entry === 'object' ? entry : {}), name,
-    title: typeof entry === 'string' ? entry : entry?.title ?? entry?.label ?? name,
-  }));
-  return [];
-}
-
-function operationArguments(operation) {
-  const schema = operation?.arguments ?? operation?.parameters ?? operation?.options ?? operation?.fields ?? operation?.schema ?? {};
-  if (Array.isArray(schema)) return schema.map((argument) => ({
-    ...argument,
-    name: String(argument.name ?? argument.id ?? argument.key),
-    type: argument.type ?? argument.kind ?? 'string',
-    required: Boolean(argument.required),
-  }));
-  const properties = schema.properties ?? schema;
-  const required = new Set(schema.required || operation?.required || []);
-  if (!properties || typeof properties !== 'object') return [];
-  return Object.entries(properties).map(([name, descriptor]) => ({
-    ...(descriptor && typeof descriptor === 'object' ? descriptor : { type: descriptor }),
-    name,
-    type: descriptor?.type ?? descriptor?.kind ?? 'string',
-    required: required.has(name) || Boolean(descriptor?.required),
-  }));
-}
-
-function renderOperationForm() {
-  const operation = state.operations.find((entry) => entry.name === $('#operation-select').value);
-  const unavailable = operation && operation.available === false;
-  $('#operation-description').textContent = `${operation?.description ?? operation?.help ?? 'No description supplied.'}${unavailable ? ` This operation is unavailable${operation.dependency ? ` until ${operation.dependency} is installed` : ''}.` : ''}`;
-  $('#operation-form').querySelector('button[type="submit"]').disabled = state.operationSubmitting || !operation || unavailable;
-  const fields = $('#operation-fields');
-  fields.innerHTML = '';
-  for (const argument of operationArguments(operation)) {
-    const wrapper = document.createElement('div');
-    wrapper.className = `operation-field ${['object', 'array', 'path_list'].includes(argument.type) ? 'full' : ''}`;
-    const id = `operation-arg-${argument.name.replace(/[^A-Za-z0-9_-]/g, '-')}`;
-    const label = document.createElement('label');
-    label.htmlFor = id;
-    label.innerHTML = `${escapeHtml(argument.label ?? argument.title ?? argument.name)}${argument.required ? ' <small>required</small>' : ''}`;
-    wrapper.appendChild(label);
-    const choices = argument.enum ?? argument.choices;
-    let input;
-    if (Array.isArray(choices)) {
-      input = document.createElement('select');
-      if (!argument.required) input.appendChild(new Option('—', ''));
-      choices.forEach((choice) => input.appendChild(new Option(String(choice), String(choice))));
-    } else if (argument.type === 'boolean' || typeof argument.default === 'boolean') {
-      input = document.createElement('select');
-      input.appendChild(new Option('Default', ''));
-      input.appendChild(new Option('Yes', 'true'));
-      input.appendChild(new Option('No', 'false'));
-    } else if (argument.type === 'object' || argument.type === 'array' || argument.type === 'path_list') {
-      input = document.createElement('textarea');
-      input.placeholder = argument.type === 'path_list' ? 'One path per line' : argument.type === 'array' ? '["value"]' : '{"key": "value"}';
-    } else {
-      input = document.createElement('input');
-      input.type = ['integer', 'number'].includes(argument.type) ? 'number' : 'text';
-      if (argument.type === 'integer') input.step = '1';
-      if (argument.type === 'number') input.step = 'any';
-      if (argument.minimum !== undefined) input.min = String(argument.minimum);
-      if (argument.maximum !== undefined) input.max = String(argument.maximum);
-      input.placeholder = argument.placeholder ?? '';
-    }
-    input.id = id;
-    input.name = argument.name;
-    input.dataset.valueType = argument.type ?? typeof argument.default ?? 'string';
-    input.required = Boolean(argument.required);
-    if (argument.default !== undefined && argument.default !== null) {
-      input.value = typeof argument.default === 'object' ? JSON.stringify(argument.default, null, 2) : String(argument.default);
-    }
-    wrapper.appendChild(input);
-    if (argument.description ?? argument.help) {
-      const help = document.createElement('span');
-      help.className = 'field-help';
-      help.textContent = argument.description ?? argument.help;
-      wrapper.appendChild(help);
-    }
-    fields.appendChild(wrapper);
-  }
-}
-
-function collectOperationArguments() {
-  const argumentsObject = {};
-  for (const input of $('#operation-fields').querySelectorAll('[name]')) {
-    const raw = input.value.trim();
-    if (!raw) continue;
-    const type = input.dataset.valueType;
-    if (type === 'integer') argumentsObject[input.name] = Number(raw);
-    else if (type === 'number') argumentsObject[input.name] = Number(raw);
-    else if (type === 'boolean') argumentsObject[input.name] = raw === 'true';
-    else if (type === 'array' || type === 'object') {
-      try {
-        argumentsObject[input.name] = JSON.parse(raw);
-      } catch (error) {
-        throw new Error(`${input.name}: invalid JSON — ${error.message}`);
-      }
-    }
-    else if (type === 'path_list') argumentsObject[input.name] = raw.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
-    else argumentsObject[input.name] = raw;
-  }
-  return argumentsObject;
-}
-
-async function submitOperation(event) {
-  event.preventDefault();
-  if (state.operationSubmitting) return;
-  const result = $('#operation-result');
-  const submitButton = $('#operation-form').querySelector('button[type="submit"]');
-  const selectionRequest = state.jobSelectionRequest;
-  state.operationSubmitting = true;
-  submitButton.disabled = true;
-  result.textContent = 'Starting job…';
-  try {
-    const payload = await fetchJson('/api/jobs', {
-      method: 'POST',
-      body: { operation: $('#operation-select').value, arguments: collectOperationArguments() },
-    });
-    const submittedJobId = String(payload?.id ?? payload?.job_id ?? '');
-    result.textContent = `Started job ${submittedJobId}.`;
-    await refreshJobs();
-    if (submittedJobId && selectionRequest === state.jobSelectionRequest) {
-      await selectJob(submittedJobId, { automatic: true });
-    }
-  } catch (error) {
-    result.innerHTML = `<div class="notice warning">The job could not be started. ${escapeHtml(error.message || String(error))}</div>`;
-  } finally {
-    state.operationSubmitting = false;
-    const operation = state.operations.find((entry) => entry.name === $('#operation-select').value);
-    submitButton.disabled = !operation || operation.available === false;
-  }
-}
-
-function normalizeJobs(payload) {
-  const jobs = Array.isArray(payload) ? payload : payload?.jobs ?? [];
-  return jobs.map((job) => ({ ...job, id: String(job.id ?? job.job_id) }));
-}
-
-function jobStatus(job) {
-  return String(job?.status ?? job?.state ?? 'unknown').toLowerCase();
-}
-
-function jobIsActive(job) {
-  return ['pending', 'queued', 'running', 'cancelling', 'canceling'].includes(jobStatus(job));
-}
-
-function renderJobs() {
-  const list = $('#jobs-list');
-  // Re-rendering replaces every row node, so skip it while the visible
-  // selection/id/status shape is unchanged: polling must not drop keyboard
-  // focus or swap a node out from under a click.
-  const signature = `${state.selectedJobId}|${state.jobs.map((job) => `${job.id}:${jobStatus(job)}`).join('|')}`;
-  if (signature === state.jobsSignature) return;
-  state.jobsSignature = signature;
-  if (!state.jobs.length) {
-    list.innerHTML = '<p class="muted">No jobs have been submitted.</p>';
-    return;
-  }
-  list.innerHTML = '';
-  for (const job of state.jobs) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    const isSelected = state.selectedJobId === job.id;
-    button.className = `job-row ${isSelected ? 'active' : ''}`;
-    const operation = job.operation ?? job.name ?? 'job';
-    const status = jobStatus(job);
-    // Concise accessible name; the grid layout stays purely visual.
-    button.setAttribute('aria-label', `${operation}, status ${status}`);
-    if (isSelected) button.setAttribute('aria-current', 'true');
-    button.innerHTML = `<strong>${escapeHtml(operation)}</strong><span class="state-pill ${escapeHtml(status)}">${escapeHtml(status)}</span>`
-      + `<small>${escapeHtml(job.id)}</small><small>${escapeHtml(job.created_at ?? job.started_at ?? '')}</small>`;
-    button.addEventListener('click', () => selectJob(job.id));
-    list.appendChild(button);
-  }
-}
-
-function artifactMarkup(artifacts, jobId) {
-  const list = Array.isArray(artifacts) ? artifacts : artifacts && typeof artifacts === 'object'
-    ? Object.entries(artifacts).map(([name, value]) => (typeof value === 'object' ? { name, ...value } : { name, path: value }))
-    : [];
-  if (!list.length) return '';
-  return '<div class="artifact-list"><p class="eyebrow">Artifacts</p>' + list.map((artifact, index) => {
-    const name = artifact.name ?? artifact.label ?? artifact.path ?? 'artifact';
-    const url = artifact.url ?? artifact.download_url ?? artifact.href
-      ?? (artifact.available && jobId ? `/api/jobs/${encodeURIComponent(jobId)}/artifacts/${index}` : null);
-    // Only allow same-origin paths and http(s) URLs: escapeHtml neutralizes
-    // markup in the href but not a javascript: scheme from server data.
-    if (url && (/^\//.test(url) || /^https?:\/\//i.test(url))) {
-      return `<a href="${escapeHtml(url)}" download>${escapeHtml(name)} ↓</a>`;
-    }
-    return `<div class="catalog-item"><strong>${escapeHtml(name)}</strong><small>${escapeHtml(artifact.path ?? artifact.kind ?? '')}</small></div>`;
-  }).join('') + '</div>';
-}
-
-function renderJobDetail(job) {
-  if (!job) return;
-  const status = jobStatus(job);
-  $('#job-detail-title').textContent = `${job.operation ?? job.name ?? 'Job'} · ${job.id ?? job.job_id}`;
-  const reportedProgress = job.progress ?? job.progress_fraction ?? undefined;
-  const progressRaw = Number(reportedProgress ?? (['succeeded', 'completed'].includes(status) ? 1 : 0));
-  const progress = progressRaw <= 1 ? progressRaw * 100 : progressRaw;
-  // The server reports no progress field for active jobs; a bar pinned at 0%
-  // would imply no work has happened, so render an indeterminate bar instead.
-  const progressMarkup = jobIsActive(job) && reportedProgress === undefined
-    ? '<progress class="job-progress" max="100"></progress>'
-    : `<progress class="job-progress" max="100" value="${Math.max(0, Math.min(100, progress || 0))}">${formatValue(progress)}%</progress>`;
-  const logs = Array.isArray(job.logs) ? job.logs.join('\n') : job.logs ?? job.log ?? job.message ?? '';
-  const meta = [
-    ['Status', status], ['Created', job.created_at], ['Started', job.started_at],
-    ['Finished', job.finished_at ?? job.completed_at], ['Error', job.error],
-  ].filter(([, value]) => value !== undefined && value !== null && value !== '');
-  $('#job-detail').innerHTML = `<span class="state-pill ${escapeHtml(status)}">${escapeHtml(status)}</span>`
-    + progressMarkup
-    + `<dl class="job-meta">${meta.map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(displayCell(value))}</dd>`).join('')}</dl>`
-    + `<p class="eyebrow">Arguments</p><pre class="json-block">${escapeHtml(jsonText(job.arguments ?? {}))}</pre>`
-    + `<p class="eyebrow" style="margin-top:12px">Logs</p><pre class="job-log">${escapeHtml(String(logs || 'No log output.'))}</pre>`
-    + artifactMarkup(job.artifacts ?? job.outputs, job.id ?? job.job_id);
-  $('#job-cancel').classList.toggle('hidden', !jobIsActive(job));
-}
-
-async function selectJob(id, { preserveScroll = false, automatic = false } = {}) {
-  if (!automatic) state.jobSelectionRequest += 1;
-  const changingJob = state.selectedJobId !== String(id);
-  state.selectedJobId = String(id);
-  const requestId = ++state.jobDetailRequest;
-  const oldLog = $('#job-detail').querySelector('.job-log');
-  const oldScroll = oldLog?.scrollTop ?? 0;
-  const wasAtBottom = oldLog ? oldLog.scrollHeight - oldLog.clientHeight - oldScroll < 8 : true;
-  if (changingJob) {
-    state.selectedJobStatus = null;
-    $('#job-cancel').classList.add('hidden');
-    $('#job-detail-title').textContent = `Loading job ${id}…`;
-    $('#job-detail').textContent = 'Loading job details…';
-  }
-  renderJobs();
-  try {
-    const job = await fetchJson(`/api/jobs/${encodeURIComponent(id)}`);
-    if (requestId !== state.jobDetailRequest || state.selectedJobId !== String(id)) return;
-    state.selectedJobStatus = jobStatus(job);
-    renderJobDetail({ ...job, id: String(job.id ?? job.job_id ?? id) });
-    if (preserveScroll) {
-      const newLog = $('#job-detail').querySelector('.job-log');
-      if (newLog) newLog.scrollTop = wasAtBottom ? newLog.scrollHeight : oldScroll;
-    }
-  } catch (error) {
-    if (requestId !== state.jobDetailRequest || state.selectedJobId !== String(id)) return;
-    $('#job-detail').innerHTML = `<div class="notice warning">${escapeHtml(error.message || String(error))}</div>`;
-  }
-}
-
-async function refreshJobs() {
-  const requestId = ++state.jobListRequest;
-  let payload;
-  try {
-    payload = await fetchJson('/api/jobs');
-  } catch (error) {
-    if (requestId === state.jobListRequest) {
-      $('#jobs-poll-state').className = 'state-pill failed';
-      $('#jobs-poll-state').textContent = 'Offline';
-      $('#jobs-poll-state').title = error.message || String(error);
-    }
-    return;
-  }
-  if (requestId !== state.jobListRequest) return;
-  $('#jobs-poll-state').className = 'state-pill available';
-  $('#jobs-poll-state').textContent = 'Live';
-  $('#jobs-poll-state').title = '';
-  state.jobs = normalizeJobs(payload);
-  renderJobs();
-  if (state.selectedJobId) {
-    const selected = state.jobs.find((job) => job.id === state.selectedJobId);
-    if (!selected) {
-      // The job vanished server-side (restart or pruning); drop the stale
-      // detail view instead of offering a Cancel button that would 404.
-      state.selectedJobId = null;
-      state.selectedJobStatus = null;
-      $('#job-detail-title').textContent = 'No job selected';
-      $('#job-detail').innerHTML = '<div class="notice warning">The selected job is no longer available — it was removed from the server.</div>';
-      $('#job-cancel').classList.add('hidden');
-      state.jobsSignature = null;
-      renderJobs();
-    } else if (jobIsActive(selected) || jobStatus(selected) !== state.selectedJobStatus) {
-      await selectJob(selected.id, { preserveScroll: true, automatic: true });
-    }
-  }
-}
-
-async function cancelSelectedJob() {
-  if (!state.selectedJobId) return;
-  const jobId = state.selectedJobId;
-  if (!window.confirm('Cancel this job?')) return;
-  const button = $('#job-cancel');
-  button.disabled = true;
-  try {
-    await fetchJson(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
-    await refreshJobs();
-    if (state.selectedJobId === jobId) await selectJob(jobId, { automatic: true });
-  } catch (error) {
-    if (state.selectedJobId === jobId) {
-      $('#job-detail').insertAdjacentHTML('afterbegin', `<div class="notice warning">${escapeHtml(error.message || String(error))}</div>`);
-    }
-  } finally {
-    button.disabled = false;
-  }
-}
-
-async function loadOperations() {
-  const payload = await optionalJson('/api/operations');
-  state.operations = normalizeOperations(payload);
-  const select = $('#operation-select');
-  select.innerHTML = '';
-  for (const operation of state.operations) {
-    const option = document.createElement('option');
-    option.value = operation.name;
-    option.textContent = operation.title;
-    select.appendChild(option);
-  }
-  if (!state.operations.length) {
-    select.appendChild(new Option('No operations available', ''));
-    $('#operation-form').querySelector('button[type="submit"]').disabled = true;
-  }
-  renderOperationForm();
-  await refreshJobs();
-}
 
 // ---------------------------------------------------------------------------
 // Backend/API view and workbench event wiring
@@ -3515,33 +4135,240 @@ async function loadBackend() {
   try {
     const payload = await fetchJson('/api/backend');
     if (requestId !== state.backendRequest) return;
-    output.innerHTML = `<pre>${escapeHtml(jsonText(payload))}</pre>`;
+    state.backend = payload && typeof payload === 'object' ? payload : null;
+    output.innerHTML = backendSummaryMarkup(payload)
+      + `<details><summary>Full capability report</summary><pre>${escapeHtml(jsonText(payload))}</pre></details>`;
+    renderHome();
   } catch (error) {
     if (requestId !== state.backendRequest) return;
     output.innerHTML = `<div class="notice warning">${escapeHtml(error.message || String(error))}</div>`;
   }
 }
 
+function backendSummaryMarkup(report) {
+  if (!report || typeof report !== 'object') return '';
+  const stat = (label, value, detail = '') => `<div class="backend-stat"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong>${detail ? `<small>${escapeHtml(detail)}</small>` : ''}</div>`;
+  const stats = [];
+  if (report.active_backend || report.selected_backend) {
+    stats.push(stat('Active backend', String(report.active_backend || report.selected_backend).toUpperCase(), report.backend_fallback_used ? `Fallback: ${report.backend_fallback_reason || 'yes'}` : `Requested ${report.requested_backend ?? 'auto'}`));
+  }
+  if (report.native_core || 'openmp_enabled' in report) {
+    stats.push(stat('Native core', String(report.native_core || 'native'), report.openmp_enabled ? `OpenMP · ${report.openmp_max_threads} threads` : 'OpenMP not enabled'));
+  }
+  if ('cuda_available' in report) {
+    stats.push(stat('CUDA', report.cuda_available ? (report.cuda_device_name || 'Available') : 'Unavailable', report.cuda_available ? '' : String(report.cuda_capability_status || report.cuda_error || '').replaceAll('_', ' ')));
+  }
+  if ('opencl_available' in report) {
+    stats.push(stat('OpenCL', report.opencl_available ? (report.opencl_device_name || 'Available') : 'Unavailable', String(report.opencl_capability_status || '').replaceAll('_', ' ')));
+  }
+  return stats.length ? `<div class="backend-summary">${stats.join('')}</div>` : '';
+}
+
+// ---------------------------------------------------------------------------
+// Cross-view actions: world selection, example configs, generation handoff
+
+async function selectWorldByPath(cacheDir, { openMap = false } = {}) {
+  if (!cacheDir) return;
+  if (cacheDir !== state.status?.cache_dir) {
+    const select = $('#world-select');
+    if (![...select.options].some((option) => option.value === cacheDir)) select.appendChild(new Option(cacheDir, cacheDir));
+    select.value = cacheDir;
+    await switchWorld();
+    if (state.status?.cache_dir !== cacheDir) return;
+  }
+  if (openMap) setView('map');
+}
+
+async function openExample(path) {
+  setView('config');
+  await openConfigFile(path);
+}
+
+async function startGeneration({ config, name }) {
+  const values = { config };
+  const destinations = configWorkbench.worldOutputDefaults(config);
+  if (destinations) Object.assign(values, destinations.values);
+  prepareOperation('generate', values);
+  await submitOperation({ preventDefault() {} });
+  toast({
+    title: `Generating ${name || 'world'}`,
+    message: 'Progress shows here and in the header. You will be notified when the map is ready.',
+    tone: 'info',
+  });
+}
+
+// Toast when background work reaches a terminal state during this session, and
+// mirror the active job into the tab badge and document title.
+function onJobsChanged(previous, jobs) {
+  const active = jobs.find((job) => jobIsActive(job) && jobStatus(job) !== 'queued') || jobs.find(jobIsActive);
+  const jobsTab = $('#tab-operations');
+  if (jobsTab?.querySelector) {
+    let dot = jobsTab.querySelector('.badge-dot');
+    if (active && !dot) {
+      dot = document.createElement('span');
+      dot.className = 'badge-dot';
+      dot.setAttribute('aria-hidden', 'true');
+      jobsTab.appendChild(dot);
+    } else if (!active && dot) dot.remove();
+  }
+  if (typeof document !== 'undefined') {
+    const label = active ? (active.progress?.label || jobStatus(active)) : '';
+    document.title = active ? `${label} · magic-geo` : 'magic-geo workbench';
+  }
+  renderHome();
+  if (!Array.isArray(previous)) return;
+  const before = new Map(previous.map((job) => [job.id, jobStatus(job)]));
+  for (const job of jobs) {
+    const was = before.get(job.id);
+    const now = jobStatus(job);
+    if (!was || was === now || !['queued', 'pending', 'running', 'cancelling', 'canceling'].includes(was)) continue;
+    const title = operationsWorkbench.operationTitle(job.operation);
+    const view = () => { setView('operations'); void selectJob(job.id); };
+    if (now === 'succeeded') {
+      const mapReady = Boolean(job.cache_dir);
+      const world = (state.worlds || []).find((entry) => entry.cache_dir === job.cache_dir);
+      const worldName = world?.name || String(job.cache_dir || '').split('/').filter(Boolean).at(-2) || 'The new world';
+      toast({
+        title: mapReady ? 'World ready to explore' : `${title} finished`,
+        message: mapReady ? `${worldName} has been generated and its browser map is ready.` : 'Results and downloads are on the job page.',
+        tone: 'success',
+        action: mapReady
+          ? { label: 'Open map', onClick: () => { void selectWorldByPath(job.cache_dir, { openMap: true }); } }
+          : { label: 'View job', onClick: view },
+      });
+    } else if (now === 'failed') {
+      toast({ title: `${title} failed`, message: job.error || 'Open the job to see what went wrong.', tone: 'error', action: { label: 'View job', onClick: view } });
+    } else if (now === 'cancelled' || now === 'canceled') {
+      toast({ title: `${title} cancelled`, tone: 'warning' });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Command palette catalog
+
+function commandItems() {
+  const items = [];
+  const go = (view) => () => {
+    setView(view);
+    document.querySelector(`.view-tab[data-view="${view}"]`)?.focus();
+  };
+  const viewIcons = { home: 'home', config: 'sliders', operations: 'play-circle', map: 'globe', data: 'table', api: 'code' };
+  for (const view of VIEWS) {
+    items.push({
+      group: 'Go to', title: VIEW_TITLES[view], icon: viewIcons[view],
+      keywords: `${view} view page open`, suggested: true, run: go(view), boost: 40,
+    });
+  }
+  const action = (title, iconName, run, extra = {}) => items.push({ group: 'Actions', title, icon: iconName, run, suggested: true, ...extra });
+  action('New world from a profile…', 'sparkles', () => newWorldDialog.open(), { keywords: 'create generate planet wizard profile', boost: 60 });
+  action('Validate YAML', 'check-circle', () => { setView('config'); void validateConfig(); }, { keywords: 'config check schema', suggested: false });
+  action('Save configuration', 'save', () => { setView('config'); void saveConfig(); }, { keywords: 'config yaml write', suggested: false });
+  action(currentTheme() === 'light' ? 'Switch to dark theme' : 'Switch to light theme', currentTheme() === 'light' ? 'moon' : 'sun', () => toggleTheme(), { keywords: 'theme appearance dark light mode color' });
+  action('Keyboard shortcuts & help', 'keyboard', () => setHelpVisible(true), { keywords: 'help keys shortcuts', shortcut: '?' });
+  action('Refresh jobs', 'refresh', () => refreshJobs(), { keywords: 'reload poll jobs', suggested: false });
+  if (state.mapReady) {
+    action('Export map as PNG', 'image', () => { setView('map'); void downloadMapImage(); }, { keywords: 'download screenshot image export', suggested: false });
+    action('Export GPT Image prompt', 'file-text', () => { setView('map'); downloadImagePrompt(); }, { keywords: 'download markdown prompt export', suggested: false });
+    for (const [projection, label, key] of [['globe', 'Globe', '1'], ['equirect', 'Equirectangular', '2'], ['mollweide', 'Mollweide', '3']]) {
+      action(`Projection: ${label}`, 'globe', () => { setView('map'); setProjection(projection); }, { keywords: 'map projection view', shortcut: key, suggested: false });
+    }
+    for (const [id, label, key, iconName] of [
+      ['toggle-wireframe', 'Toggle cell outlines', 'w', 'mesh'], ['toggle-relief', 'Toggle relief shading', 'r', 'mountain'],
+      ['toggle-plates', 'Toggle plate boundaries', 'b', 'plates'], ['toggle-graticule', 'Toggle latitude/longitude grid', 'g', 'graticule'],
+      ['toggle-places', 'Toggle places (settlements, ports, ruins)', 'p', 'target'],
+    ]) {
+      action(label, iconName, () => { setView('map'); $(`#${id}`)?.click(); }, { keywords: 'overlay map mesh wireframe hillshade terrain', shortcut: key, suggested: false });
+    }
+    action('Show the whole world', 'maximize', () => { setView('map'); three.controls?.reset(); }, { keywords: 'fit reset zoom out home view', shortcut: '0', suggested: false });
+    if (state.selectedPoint) action('Centre on the selected cell', 'target', () => { setView('map'); centreOnSelectedCell(); }, { keywords: 'locate focus zoom cell', shortcut: 'c', suggested: false });
+    for (const place of state.places || []) {
+      items.push({
+        group: 'Places', title: place.title, hint: `${place.hint} · ${formatLatLon(place.lat, place.lon, 1)}`,
+        icon: 'target', keywords: `${place.keywords} place go fly`,
+        run: () => { setView('map'); flyToPlace(place); },
+      });
+    }
+  }
+  for (const operation of state.operations || []) {
+    items.push({ group: 'Start a job', title: operation.title, hint: operation.description, icon: 'play-circle', keywords: `${operation.name} job run operation`,
+      run: () => { setView('operations'); operationsWorkbench.chooseOperation(operation.name); $('#operation-select').focus(); } });
+  }
+  for (const layer of state.manifest?.layers || []) {
+    const pinned = state.pinnedLayers.includes(layer.id);
+    items.push({
+      group: 'Layers', title: layerLabel(layer), hint: `${layer.id}${layerUnit(layer) ? ` · ${layerUnit(layer)}` : ''}`,
+      icon: pinned ? 'star' : 'layers', keywords: `${layer.id} ${layer.name} ${layerTopic(layer)}`,
+      suggested: pinned, boost: pinned ? 30 : 0,
+      run: () => { setView('map'); void activateLayer(layer); },
+    });
+  }
+  const current = state.status?.cache_dir;
+  for (const world of state.worlds || []) {
+    const dir = String(world.cache_dir ?? world.id ?? '');
+    items.push({
+      group: 'Worlds', title: String(world.name ?? dir), hint: `${dir}${world.cell_count ? ` · ${formatCount(world.cell_count)} cells` : ''}${dir === current ? ' · showing' : ''}`,
+      icon: 'globe', keywords: `${dir} world cache map`, run: () => selectWorldByPath(dir, { openMap: true }),
+    });
+  }
+  for (const file of state.configFiles || []) {
+    items.push({
+      group: 'Configurations', title: String(file.world_name || file.name), hint: `${file.path}${file.valid ? '' : ' · needs repair'}`,
+      icon: 'file-text', keywords: `${file.path} ${file.name} yaml config`, run: () => openExample(file.path),
+    });
+  }
+  for (const job of state.jobs || []) {
+    items.push({
+      group: 'Jobs', title: `${operationsWorkbench.operationTitle(job.operation)} · ${job.id}`, hint: jobStatus(job),
+      icon: 'clock', keywords: `${job.operation} ${job.id} job ${jobStatus(job)}`,
+      run: () => { setView('operations'); void selectJob(job.id); },
+    });
+  }
+  return items;
+}
+
 function wireWorkbenchEvents() {
+  $('.skip-link').addEventListener('click', (event) => { event.preventDefault(); $('#workbench').focus(); });
   document.querySelectorAll('.view-tab').forEach((button) => button.addEventListener('click', () => setView(button.dataset.view)));
   $('#view-tabs').addEventListener('keydown', (event) => {
-    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
     const tabs = [...document.querySelectorAll('.view-tab')];
     const current = Math.max(0, tabs.indexOf(document.activeElement));
+    const forward = event.key === 'ArrowRight' || event.key === 'ArrowDown';
     const next = event.key === 'Home' ? 0
       : event.key === 'End' ? tabs.length - 1
-        : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+        : (current + (forward ? 1 : -1) + tabs.length) % tabs.length;
     tabs[next].focus();
     tabs[next].click();
   });
-  document.querySelectorAll('[data-go-view]').forEach((button) => button.addEventListener('click', () => {
-    setView(button.dataset.goView);
-    document.querySelector(`.view-tab[data-view="${button.dataset.goView}"]`)?.focus();
-  }));
+  // Delegated so dynamically rendered cards (Home, empty states) share one path.
+  document.addEventListener('click', (event) => {
+    const goView = event.target?.closest?.('[data-go-view]');
+    if (goView && !goView.disabled) {
+      setView(goView.dataset.goView);
+      document.querySelector(`.view-tab[data-view="${goView.dataset.goView}"]`)?.focus();
+      return;
+    }
+    const actionButton = event.target?.closest?.('[data-action]');
+    if (!actionButton || actionButton.disabled) return;
+    if (actionButton.dataset.action === 'new-world') void newWorldDialog.open();
+    if (actionButton.dataset.action === 'command') commandPalette.open();
+  });
   window.addEventListener('hashchange', () => setView(window.location.hash.slice(1), { updateHash: false }));
-  $('#brand').addEventListener('click', (event) => { event.preventDefault(); setView('map'); });
+  $('#brand').addEventListener('click', (event) => { event.preventDefault(); setView('home'); });
   $('#world-select').addEventListener('change', switchWorld);
+  $('#theme-toggle').addEventListener('click', () => toggleTheme());
+  $('#command-open').addEventListener('click', () => commandPalette.open());
+  commandPalette.wire();
+  homeWorkbench.wireHome();
+  document.addEventListener('keydown', (event) => {
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'k') {
+      event.preventDefault();
+      if (!$('#help-overlay').classList.contains('hidden')) setHelpVisible(false);
+      commandPalette.toggle();
+    }
+  });
 
   // Help is reachable without a cache, so it is wired here rather than in
   // wireMapEvents(), which only runs after a successful map initialization.
@@ -3557,13 +4384,29 @@ function wireWorkbenchEvents() {
       event.stopPropagation();
       return;
     }
-    if (event.key !== '?' || event.target.closest('input, textarea, select')) return;
+    if (event.key !== '?' || !state.singleKeyShortcuts || targetWithin(event, 'input, textarea, select, dialog')) return;
     event.preventDefault();
     setHelpVisible($('#help-overlay').classList.contains('hidden'));
   });
+  $('#help-body').addEventListener('change', (event) => {
+    if (event.target.id !== 'setting-single-key') return;
+    state.singleKeyShortcuts = event.target.checked;
+    storageSet('singleKeyShortcuts', state.singleKeyShortcuts);
+  });
 
   $('#data-refresh').addEventListener('click', () => loadCatalog(true));
-  $('#data-kind').addEventListener('change', () => { populateDataResources(); loadDataSelection(true); });
+  $('#data-kind').addEventListener('change', () => { $('#data-resource-search').value = ''; populateDataResources(); loadDataSelection(true); });
+  $('#data-resource-search').addEventListener('input', () => { populateDataResources(); loadDataSelection(true); });
+  $('#data-output').addEventListener('click', (event) => {
+    const target = event.target.closest('[data-data-kind]');
+    if (!target) return;
+    $('#data-kind').value = target.dataset.dataKind;
+    $('#data-resource-search').value = '';
+    populateDataResources();
+    if (target.dataset.resource) $('#data-resource').value = target.dataset.resource;
+    loadDataSelection(true);
+    $('#data-kind').focus();
+  });
   $('#data-resource').addEventListener('change', () => loadDataSelection(true));
   $('#family-detail').addEventListener('change', () => loadDataSelection(true));
   $('#data-limit').addEventListener('change', () => loadDataSelection(true));
@@ -3585,6 +4428,16 @@ function wireWorkbenchEvents() {
     $('#config-result').className = 'validation-result';
     $('#config-result').textContent = `Selected ${profile}. Choose Reset from profile to replace the editor.`;
   });
+  $('#config-open').addEventListener('click', () => openConfigFile($('#config-file').value));
+  $('#config-files-refresh').addEventListener('click', () => refreshConfigFiles());
+  $('#config-save-generate').addEventListener('click', async () => {
+    // An unchanged saved file needs no second write; go straight to generation.
+    if (!$('#config-generate').disabled || await saveConfig()) generateFromSavedConfig();
+  });
+  $('#config-yaml').addEventListener('scroll', () => configWorkbench.syncEditorScroll(), { passive: true });
+  window.addEventListener('beforeunload', (event) => {
+    if (configHasUnsavedChanges()) { event.preventDefault(); event.returnValue = ''; }
+  });
   $('#config-reset').addEventListener('click', resetConfigTemplate);
   $('#config-validate').addEventListener('click', validateConfig);
   $('#config-save').addEventListener('click', saveConfig);
@@ -3592,20 +4445,28 @@ function wireWorkbenchEvents() {
   $('#config-generate').addEventListener('click', generateFromSavedConfig);
   $('#config-name').addEventListener('input', () => configEdited(false));
   $('#schema-search').addEventListener('input', (event) => renderSchemaDocs(event.target.value));
-  $('#config-yaml').addEventListener('input', configEdited);
+  $('#config-yaml').addEventListener('input', () => configEdited());
   $('#config-yaml').addEventListener('keydown', (event) => {
-    if (event.key !== 'Tab') return;
-    event.preventDefault();
-    const field = event.target;
-    const start = field.selectionStart;
-    field.setRangeText('  ', start, field.selectionEnd, 'end');
-    configEdited();
+    if (!(event.ctrlKey || event.metaKey)) return;
+    if (event.key === 'Enter') { event.preventDefault(); void validateConfig(); }
+    if (event.key.toLowerCase() === 's') { event.preventDefault(); void saveConfig(); }
   });
 
-  $('#operation-select').addEventListener('change', renderOperationForm);
+  $('#operation-select').addEventListener('change', () => { renderOperationForm(); operationsWorkbench.renderQuickOperations(); });
+  $('#operation-quick').addEventListener('click', (event) => {
+    const chip = event.target.closest('[data-quick-operation]');
+    if (chip) operationsWorkbench.chooseOperation(chip.dataset.quickOperation);
+  });
   $('#operation-form').addEventListener('submit', submitOperation);
+  $('#operation-fields').addEventListener('change', updateOperationDependencies);
   $('#jobs-refresh').addEventListener('click', refreshJobs);
   $('#job-cancel').addEventListener('click', cancelSelectedJob);
+  $('#job-activity').addEventListener('click', () => {
+    const id = state.activityJobId;
+    if (id) selectJob(id);
+    setView('operations');
+    $('#job-detail-title').scrollIntoView({ block: 'start', behavior: 'smooth' });
+  });
   $('#backend-refresh').addEventListener('click', loadBackend);
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Tab' || $('#help-overlay').classList.contains('hidden')) return;
@@ -3625,7 +4486,7 @@ function wireWorkbenchEvents() {
 // ---------------------------------------------------------------------------
 // Interaction wiring
 
-function setProjection(projection) {
+function setProjection(projection, { animate = true } = {}) {
   state.projection = projection;
   document.querySelectorAll('#projection-controls button').forEach((button) => {
     const active = button.dataset.proj === projection;
@@ -3635,11 +4496,16 @@ function setProjection(projection) {
   state.morph.target = projection === 'globe' ? 0 : 1;
   if (projection === 'equirect') state.morph.proj2DTarget = 0;
   if (projection === 'mollweide') state.morph.proj2DTarget = 1;
-  if (projection !== 'globe') {
-    three.controls.target.set(0, 0, 0);
-    three.camera.position.set(0, 0, 3.4);
+  // The navigator keeps the same centre and scale; the camera follows the
+  // morph so the place you were looking at stays put while the map unrolls.
+  three.controls?.setProjection?.(projection, { animate });
+  if (!animate || prefersReducedMotion()) {
+    state.morph.value = state.morph.target;
+    state.morph.proj2D = state.morph.proj2DTarget;
   }
   state.pickDirty = true;
+  requestRender();
+  updateMapUrl();
 }
 
 function wireMapEvents() {
@@ -3649,15 +4515,24 @@ function wireMapEvents() {
   const bind = (target, type, listener) => target.addEventListener(type, listener, { signal: controller.signal });
   let resizeFrame = 0;
   controller.signal.addEventListener('abort', () => cancelAnimationFrame(resizeFrame));
-  bind(window, 'resize', () => {
-    // Drag-resize fires a burst of events and each full resize reallocates the
-    // GPU pick target, so coalesce to one resize per frame.
+  // Drag-resize fires a burst of events and each full resize reallocates the
+  // GPU pick target, so coalesce to one resize per frame.
+  const scheduleResize = () => {
     if (resizeFrame) return;
     resizeFrame = requestAnimationFrame(() => {
       resizeFrame = 0;
       resizeRenderer();
     });
-  });
+  };
+  bind(window, 'resize', scheduleResize);   // also catches devicePixelRatio changes
+  // Layout changes that are not window resizes (panels opening, the sidebar
+  // collapsing, fonts settling) must resize the drawing buffer too, or the
+  // camera aspect goes stale and the map is drawn squashed.
+  if (typeof ResizeObserver === 'function' && three.renderer?.domElement instanceof Element) {
+    const observer = new ResizeObserver(scheduleResize);
+    observer.observe(three.renderer.domElement);
+    controller.signal.addEventListener('abort', () => observer.disconnect());
+  }
 
   document.querySelectorAll('#projection-controls button').forEach((button) => {
     bind(button, 'click', () => setProjection(button.dataset.proj));
@@ -3665,9 +4540,17 @@ function wireMapEvents() {
 
   bind($('#toggle-wireframe'), 'click', () => {
     state.overlays.wireframe = !state.overlays.wireframe;
-    three.wireMesh.visible = state.overlays.wireframe;
+    setUniform('uOutlines', state.overlays.wireframe ? 1 : 0);
     $('#toggle-wireframe').classList.toggle('active', state.overlays.wireframe);
     $('#toggle-wireframe').setAttribute('aria-pressed', String(state.overlays.wireframe));
+    requestRender();
+    updateMapUrl();
+  });
+  bind($('#toggle-relief'), 'click', () => { void setRelief(!state.relief); });
+  bind($('#toggle-places'), 'click', () => { void setPlacesVisible(!state.overlays.places); });
+  bind($('#map-places'), 'click', (event) => {
+    const marker = event.target.closest?.('[data-place]');
+    if (marker) flyToPlace(state.places?.[Number(marker.dataset.place)]);
   });
   bind($('#toggle-plates'), 'click', async () => {
     state.overlays.plates = !state.overlays.plates;
@@ -3676,11 +4559,15 @@ function wireMapEvents() {
     if (!state.overlays.plates) {
       cancelPlateLinesLoad();
       if (three.plateLines) three.plateLines.visible = false;
+      requestRender();
+      updateMapUrl();
       return;
     }
     try {
       const ready = await ensurePlateLines();
       if (ready && three.plateLines) three.plateLines.visible = state.overlays.plates;
+      requestRender();
+      updateMapUrl();
     } catch (error) {
       console.error(error);
       if (!state.overlays.plates) return;
@@ -3696,12 +4583,67 @@ function wireMapEvents() {
     $('#toggle-graticule').setAttribute('aria-pressed', String(state.overlays.graticule));
     buildGraticule();
     three.graticuleLines.visible = state.overlays.graticule;
+    requestRender();
+    updateMapUrl();
   });
+  bind($('#map-zoom-in'), 'click', () => three.controls.zoomBy(0.5));
+  bind($('#map-zoom-out'), 'click', () => three.controls.zoomBy(2));
+  bind($('#map-fit'), 'click', () => three.controls.reset());
+  bind($('#legend-categories'), 'click', (event) => {
+    const chip = event.target.closest?.('.legend-chip');
+    if (chip) setHighlightCode(Number(chip.dataset.code));
+  });
+  const scaleOptionChanged = () => {
+    state.scaleOptions = { colormap: $('#legend-colormap').value || 'auto', range: $('#legend-range').value || 'robust' };
+    const layer = state.activeLayer;
+    if (!layer || isCategoricalLayer(layer) || state.layerLoading) return;
+    applyLayerColors(layer);
+    if (state.exportSnapshot?.layer === layer) state.exportSnapshot = Object.freeze({ ...state.exportSnapshot, scale: state.scale });
+    updateLegend(layer);
+    updateDocsCard(layer);
+    updateStatus();
+  };
+  bind($('#legend-colormap'), 'change', scaleOptionChanged);
+  bind($('#legend-range'), 'change', scaleOptionChanged);
 
   bind($('#export-map-image'), 'click', () => { void downloadMapImage(); });
   bind($('#export-image-prompt'), 'click', downloadImagePrompt);
 
   bind($('#layer-search'), 'input', (event) => filterLayerList(event.target.value));
+  bind($('#layer-list'), 'click', (event) => {
+    const pin = event.target.closest('[data-pin-layer]');
+    if (pin) { togglePinnedLayer(pin.dataset.pinLayer); return; }
+    const item = event.target.closest('.layer-item');
+    if (item) {
+      const layer = layerById(item.dataset.layerId);
+      if (layer) void activateLayer(layer);
+      return;
+    }
+    const title = event.target.closest('.layer-group-title');
+    if (!title) return;
+    const body = title.nextElementSibling;
+    const expanded = title.getAttribute('aria-expanded') !== 'true';
+    title.setAttribute('aria-expanded', String(expanded));
+    if (title.dataset.preSearchExpanded !== undefined) title.dataset.preSearchExpanded = String(expanded);
+    body.hidden = !expanded;
+  });
+  bind($('#layer-filters'), 'click', (event) => {
+    const chip = event.target.closest('[data-layer-filter]');
+    if (chip) setLayerFilter(chip.dataset.layerFilter);
+  });
+  bind($('#layer-collapse-all'), 'click', collapseAllLayerGroups);
+  bind($('#sidebar-toggle'), 'click', () => {
+    const collapsed = !$('#app').classList.contains('sidebar-collapsed');
+    $('#app').classList.toggle('sidebar-collapsed', collapsed);
+    const button = $('#sidebar-toggle');
+    button.setAttribute('aria-pressed', String(collapsed));
+    const label = collapsed ? 'Show the layer panel' : 'Hide the layer panel';
+    button.setAttribute('aria-label', label);
+    button.title = label;
+    window.setTimeout(resizeRenderer, 220);
+  });
+  bind($('#stage-play'), 'click', () => setPlaying(!state.playing));
+  controller.signal.addEventListener('abort', () => setPlaying(false));
 
   bind($('#legend-info'), 'click', () => setDocsVisible(!state.docsVisible));
 
@@ -3717,7 +4659,7 @@ function wireMapEvents() {
     const value = Number(slider.value);
     // Scrub feedback is immediate; the expensive layer fetch is coalesced so
     // dragging across N stages issues one request instead of N.
-    number.value = String(value);
+    number.value = String(value + (config.offset || 0));
     $('#stage-label').textContent = config.label(value);
     const layer = state.activeLayer;
     const selectionSeq = state.fetchSeq;
@@ -3731,18 +4673,15 @@ function wireMapEvents() {
   });
   bind(number, 'change', () => {
     const config = stageBarConfig();
-    if (config) config.set(Math.min(Number(number.max), Math.max(0, Number(number.value))));
+    if (!config) return;
+    const typed = Math.round(Number(number.value)) - (config.offset || 0);
+    if (Number.isFinite(typed)) config.set(Math.min(config.max, Math.max(0, typed)));
   });
   bind($('#stage-back'), 'click', () => stepStage(-1));
   bind($('#stage-fwd'), 'click', () => stepStage(1));
 
-  bind($('#inspector-close'), 'click', () => {
-    $('#inspector').classList.add('hidden');
-    state.inspectorRequest += 1;
-    state.inspectorSparklines = [];
-    state.selectedCell = -1;
-    resizeRenderer();
-  });
+  bind($('#inspector-close'), 'click', closeInspector);
+  bind($('#inspector-locate'), 'click', () => centreOnSelectedCell());
 
   bind($('#docs-card-toggle'), 'click', () => {
     state.docsCollapsed = !state.docsCollapsed;
@@ -3752,9 +4691,41 @@ function wireMapEvents() {
   const canvas = three.renderer.domElement;
   let lastMove = 0;
   let downAt = null;
-  bind(canvas, 'pointerdown', (event) => { downAt = [event.clientX, event.clientY]; });
+  const setHover = (cell, point) => {
+    const next = cell ?? -1;
+    state.hoverPoint = point;
+    if (next !== state.hoverCell) {
+      state.hoverCell = next;
+      setUniform('uHoverCell', next);
+      requestRender();
+    }
+    updateStatus();
+  };
+  const hoverAt = async (clientX, clientY) => {
+    if (!three.controls || three.controls.isDragging?.()) return;
+    const point = three.controls.screenToLatLon?.(clientX, clientY) ?? null;
+    const cell = await pickCellAsync(clientX, clientY);
+    if (cell === null || !state.pointerClient) return;   // superseded read or pointer left
+    setHover(cell, point);
+  };
+  // A tap selects a cell; a drag, or any gesture that used two fingers, does not.
+  const activePointers = new Set();
+  let multiTouch = false;
+  bind(canvas, 'pointerdown', (event) => {
+    activePointers.add(event.pointerId);
+    if (activePointers.size > 1) multiTouch = true;
+    downAt = [event.clientX, event.clientY];
+  });
+  bind(canvas, 'pointercancel', (event) => {
+    activePointers.delete(event.pointerId);
+    downAt = null;
+    if (!activePointers.size) multiTouch = false;
+  });
   bind(canvas, 'pointerup', (event) => {
-    if (!downAt) return;
+    activePointers.delete(event.pointerId);
+    const gestureWasMultiTouch = multiTouch;
+    if (!activePointers.size) multiTouch = false;
+    if (!downAt || gestureWasMultiTouch) { downAt = null; return; }
     const dx = event.clientX - downAt[0];
     const dy = event.clientY - downAt[1];
     downAt = null;
@@ -3763,33 +4734,48 @@ function wireMapEvents() {
     if (cell >= 0) openInspector(cell);
   });
   bind(canvas, 'pointermove', (event) => {
-    // Touch drags rotate the globe; a hover readout nobody can see is wasted
+    // Touch drags move the map; a hover readout nobody can see is wasted
     // pick-buffer renders.
     if (event.pointerType === 'touch') return;
+    state.pointerClient = { x: event.clientX, y: event.clientY };
+    if (three.controls?.isDragging?.()) { $('#map-tooltip').hidden = true; return; }
     const now = performance.now();
     if (now - lastMove < 40) return;
     lastMove = now;
-    state.hoverCell = pickCell(event.clientX, event.clientY);
-    updateStatus();
+    void hoverAt(event.clientX, event.clientY);
   });
   bind(canvas, 'pointerleave', () => {
-    state.hoverCell = -1;
-    updateStatus();
+    state.pointerClient = null;
+    setHover(-1, null);
   });
   three.controls.addEventListener('change', () => { state.pickDirty = true; });
+  three.controls.addEventListener('start', () => { $('#map-tooltip').hidden = true; });
+  three.controls.addEventListener('end', () => {
+    updateMapUrl();
+    announceMapView();
+    // The map moved under a still pointer: refresh what it points at.
+    if (state.pointerClient) void hoverAt(state.pointerClient.x, state.pointerClient.y);
+    else updateCoordsReadout();
+  });
 
   bind(window, 'keydown', (event) => {
     // Esc closes overlays even from within an input. The help overlay itself
     // closes through the cache-independent binding in wireWorkbenchEvents().
     if (event.key === 'Escape') {
       if (!$('#inspector').classList.contains('hidden')) { $('#inspector-close').click(); return; }
-      const field = event.target.closest('input, textarea, select');
+      if (state.highlightCode >= 0 && state.activeView === 'map') { setHighlightCode(-1); return; }
+      const field = event.target?.closest?.('input, textarea, select');
       if (field) field.blur();
       return;
     }
-    if (state.activeView !== 'map') return;
-    if (event.target.closest('input, textarea, select')) return;
+    if (state.activeView !== 'map' || !state.singleKeyShortcuts) return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    if (targetWithin(event, 'input, textarea, select, dialog')) return;
     if (!$('#help-overlay').classList.contains('hidden')) return;   // help open: swallow shortcuts
+    if (event.key === ' ' && !targetWithin(event, 'button, a, summary')) {
+      if (stageBarConfig()) { event.preventDefault(); setPlaying(!state.playing); }
+      return;
+    }
     switch (event.key) {
       case ',': stepStage(-1); break;
       case '.': stepStage(1); break;
@@ -3797,6 +4783,9 @@ function wireMapEvents() {
       case '2': setProjection('equirect'); break;
       case '3': setProjection('mollweide'); break;
       case 'w': $('#toggle-wireframe').click(); break;
+      case 'r': $('#toggle-relief').click(); break;
+      case 'c': centreOnSelectedCell(); break;
+      case 'p': $('#toggle-places').click(); break;
       case 'b': $('#toggle-plates').click(); break;
       case 'g': $('#toggle-graticule').click(); break;
       case 'd': setDocsVisible(!state.docsVisible); break;
@@ -3810,16 +4799,22 @@ function wireMapEvents() {
 // Boot
 
 async function main() {
+  applyTheme(currentTheme(), { persist: false });
+  state.pinnedLayers = (storageGet('pinnedLayers', []) || []).filter((id) => typeof id === 'string');
+  state.singleKeyShortcuts = storageGet('singleKeyShortcuts', true) !== false;
+  const shortcut = $('#command-shortcut');
+  if (shortcut) shortcut.textContent = isMacPlatform() ? '⌘ K' : 'Ctrl K';
+  initializeWorkbenchControllers();
   wireWorkbenchEvents();
-  setView(window.location.hash.slice(1) || 'map', { updateHash: false });
+  const initialView = window.location.hash.slice(1) || storageGet('lastView', 'home') || 'home';
+  setView(initialView, { updateHash: false });
 
   // Jobs and a cache created by a job can change while the page is open.
   window.setInterval(() => {
     if (document.hidden) return;
-    // Nothing surfaces job state outside the Operations view, so once no job
-    // is active there is nothing to poll for until the view is opened again
-    // (entering it triggers refreshJobs via setView).
-    if (state.activeView !== 'operations' && !state.jobs.some(jobIsActive)) return;
+    // Continue following background work across views and retry disconnected
+    // requests. refreshJobs coalesces polls while a response is pending.
+    if (state.activeView !== 'operations' && !state.jobs.some(jobIsActive) && !state.jobsOffline && !state.jobDetailFailed) return;
     refreshJobs();
   }, 2500);
   window.setInterval(() => {
